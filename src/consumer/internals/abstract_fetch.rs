@@ -117,6 +117,14 @@ pub(crate) struct AbstractFetch {
     /// not attacker-controlled, so SipHash's DoS resistance buys nothing while
     /// its per-lookup cost shows on the per-fetch path (Phase 25).
     session_handlers: FxHashMap<i32, FetchSessionHandler>,
+
+    /// DIAGNOSTIC (not in Java): per-node instant the in-flight fetch was sent,
+    /// used only to log the fetch round-trip time (send -> response) under the
+    /// `fetch_diag` log target. RTT localizes where end-to-end latency goes:
+    /// a large RTT means the broker held the fetch (fetch.max.wait.ms /
+    /// fetch.min.bytes), not consumer-side processing. Opt-in via
+    /// `RUST_LOG=fetch_diag=info`; zero cost when that target is disabled.
+    fetch_sent_at: FxHashMap<i32, std::time::Instant>,
 }
 
 impl AbstractFetch {
@@ -152,6 +160,7 @@ impl AbstractFetch {
             nodes_with_pending_fetch_requests: FxHashSet::default(),
             closed: false,
             session_handlers: FxHashMap::default(),
+            fetch_sent_at: FxHashMap::default(),
         }
     }
 
@@ -294,6 +303,10 @@ impl AbstractFetch {
         debug!("Sending fetch request to broker {}", fetch_target.id());
         debug!("Adding pending request for node {}", fetch_target.id());
         self.nodes_with_pending_fetch_requests.insert(fetch_target.id());
+        // DIAGNOSTIC: stamp the send time so handle_fetch_success can log RTT.
+        if log::log_enabled!(target: "fetch_diag", log::Level::Info) {
+            self.fetch_sent_at.insert(fetch_target.id(), std::time::Instant::now());
+        }
         builder
     }
 
@@ -336,6 +349,35 @@ impl AbstractFetch {
         // record buffer is never copied between the wire-decoded response and
         // the CompletedFetch.
         let response_data = response.into_response_data(handler.session_topic_names(), request_version);
+
+        // DIAGNOSTIC (fetch_diag target): log the fetch round-trip time and
+        // payload so we can attribute end-to-end latency. A large RTT means the
+        // broker held the fetch open (fetch.max.wait.ms / fetch.min.bytes), i.e.
+        // the latency is broker-side wait, NOT consumer-side processing.
+        if log::log_enabled!(target: "fetch_diag", log::Level::Info) {
+            let rtt_ms = self
+                .fetch_sent_at
+                .remove(&fetch_target.id())
+                .map(|t| t.elapsed().as_millis())
+                .unwrap_or(0);
+            let parts_with_data = response_data
+                .values()
+                .filter(|pd| crate::common::requests::fetch_response::records_size(pd) > 0)
+                .count();
+            let total_bytes: i64 = response_data
+                .values()
+                .map(|pd| crate::common::requests::fetch_response::records_size(pd) as i64)
+                .sum();
+            log::info!(
+                target: "fetch_diag",
+                "fetch response node={} rtt_ms={} parts_with_data={} record_bytes={}",
+                fetch_target.id(),
+                rtt_ms,
+                parts_with_data,
+                total_bytes
+            );
+        }
+
         let mut needs_wakeup = true;
 
         for (partition, partition_data) in response_data {
@@ -513,6 +555,31 @@ impl AbstractFetch {
     ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
         let topic_ids = self.metadata.metadata_arc().topic_ids();
         let cluster = self.metadata.metadata_arc().fetch();
+
+        // Phase 26 (Fix #2): port stock Java's first early-return
+        // `if (unfetchableNodes == nodes.size()) return emptyMap`. In steady
+        // state every broker has an in-flight fetch (1-fetch-in-flight per
+        // broker), so the full computation below (SubscriptionState lock +
+        // fetchable scan + buffered-nodes + per-partition node resolution) runs
+        // only to return an empty map because every partition's node is skipped
+        // (already in `nodes_with_pending_fetch_requests` or unavailable). This
+        // up-front check short-circuits that wasted work.
+        //
+        // STATELESS short-circuit, NOT a cache: it returns empty only when it is
+        // genuinely true right now that no node can be fetched (every node is
+        // pending or unavailable). The moment a fetch response frees a node
+        // (removes it from `nodes_with_pending_fetch_requests`), the next call
+        // passes this check and issues normally — no partition can be stranded.
+        //
+        // Edge: an empty cluster node list (no metadata yet) matches Java's
+        // `0 == 0` -> returns empty (nothing to fetch).
+        let nodes = cluster.nodes();
+        let all_nodes_unfetchable = nodes
+            .iter()
+            .all(|node| self.nodes_with_pending_fetch_requests.contains(&node.id()) || is_unavailable(node));
+        if all_nodes_unfetchable {
+            return Ok(HashMap::new());
+        }
 
         // Snapshot the buffered-partitions and fetchable-partitions sets
         // under the SubscriptionState lock.
@@ -955,6 +1022,156 @@ mod tests {
         assert!(result.unwrap().is_empty());
         // Pending-set untouched.
         assert!(af.pending_fetch_node_ids().contains(&42));
+    }
+
+    // ── Phase 26 (Fix #2): up-front skip when no node is fetchable ──────────
+
+    /// Bootstrap the consumer metadata with `num_nodes` brokers (ids 0..N) and a
+    /// single topic so `cluster.nodes()` is non-empty. Mirrors the
+    /// `bootstrap_metadata_with_topic` helper used by the offsets-manager tests.
+    fn bootstrap_nodes(metadata: &ConsumerMetadata, topic: &str, num_nodes: i32, num_partitions: i32) {
+        metadata.add_transient_topics(HashSet::from([topic.to_string()]));
+        let mut counts = HashMap::new();
+        counts.insert(topic.to_string(), num_partitions);
+        let response = crate::common::requests::request_test_utils::metadata_update_with(num_nodes, &counts);
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+    }
+
+    /// Fix #2 — empty cluster (no metadata yet, zero nodes) returns an empty map.
+    /// Matches stock Java's `0 == 0` -> empty: nothing to fetch.
+    #[test]
+    fn test_prepare_fetch_requests_empty_cluster_returns_empty() {
+        let mut af = make_abstract_fetch();
+        // No metadata bootstrap -> cluster.nodes() is empty.
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(result.unwrap().is_empty(), "empty cluster must yield an empty fetch map");
+    }
+
+    /// Fix #2 — when EVERY cluster node is already in
+    /// `nodes_with_pending_fetch_requests`, the up-front short-circuit returns an
+    /// empty map WITHOUT touching `SubscriptionState`.
+    ///
+    /// We prove SubscriptionState is not touched by POISONING its mutex first: if
+    /// the short-circuit ran before the lock (as intended) the call returns
+    /// `Ok(empty)`; if any code path tried to lock the poisoned SubscriptionState
+    /// the test's `.expect(...)` inside `prepare_fetch_requests` would panic.
+    #[test]
+    fn test_prepare_fetch_requests_all_nodes_pending_skips_subscription_lock() {
+        let subs = make_subscriptions();
+        let metadata = make_consumer_metadata(subs.clone());
+        bootstrap_nodes(&metadata, "topic-a", 1, 1);
+        let mut af = AbstractFetch::new(
+            metadata,
+            subs.clone(),
+            make_fetch_config(),
+            Arc::new(FetchBuffer::new()),
+            Arc::new(BufferSupplier::create()),
+        );
+        // The only node (id 0) has an in-flight fetch.
+        af.nodes_with_pending_fetch_requests.insert(0);
+
+        // Poison the SubscriptionState mutex: any attempt to lock it inside
+        // prepare_fetch_requests would panic via `.expect("...poisoned")`.
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = subs.lock().unwrap();
+            panic!("intentionally poison the SubscriptionState mutex");
+        }));
+        assert!(poison.is_err());
+        assert!(subs.lock().is_err(), "SubscriptionState mutex must be poisoned for this test");
+
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+        // Must NOT panic (no SubscriptionState lock) and must return empty.
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(
+            result.unwrap().is_empty(),
+            "all nodes pending must short-circuit to an empty map without touching SubscriptionState"
+        );
+        // Pending-set untouched.
+        assert!(af.pending_fetch_node_ids().contains(&0));
+    }
+
+    /// Fix #2 — when every cluster node is `is_unavailable`, the short-circuit
+    /// returns empty (no node can be fetched right now). Also a freshness check:
+    /// it is a pure short-circuit, not a cache.
+    #[test]
+    fn test_prepare_fetch_requests_all_nodes_unavailable_returns_empty() {
+        let subs = make_subscriptions();
+        let metadata = make_consumer_metadata(subs.clone());
+        bootstrap_nodes(&metadata, "topic-a", 2, 2);
+        let mut af = AbstractFetch::new(
+            metadata,
+            subs,
+            make_fetch_config(),
+            Arc::new(FetchBuffer::new()),
+            Arc::new(BufferSupplier::create()),
+        );
+        // No node is pending, but every node is unavailable.
+        let all_unavailable = |_: &Node| true;
+        let no_auth_err = |_: &Node| Ok(());
+        let result = af.prepare_fetch_requests(100, all_unavailable, no_auth_err);
+        assert!(
+            result.unwrap().is_empty(),
+            "all nodes unavailable must short-circuit to an empty map"
+        );
+    }
+
+    /// Fix #2 — no partition is stranded: once a node is freed from the pending
+    /// set (a fetch response arrived), the very next `prepare_fetch_requests`
+    /// call passes the up-front short-circuit and issues a fetch for that node's
+    /// partition. Proves the short-circuit is stateless (not a stale cache).
+    #[test]
+    fn test_prepare_fetch_requests_freeing_node_issues_fetch_next_call() {
+        let subs = make_subscriptions();
+        let metadata = make_consumer_metadata(subs.clone());
+        bootstrap_nodes(&metadata, "topic-a", 1, 1);
+        let mut af = AbstractFetch::new(
+            metadata,
+            subs.clone(),
+            make_fetch_config(),
+            Arc::new(FetchBuffer::new()),
+            Arc::new(BufferSupplier::create()),
+        );
+
+        // Assign + seek the partition with a validated position whose leader is
+        // node 0 (the bootstrapped broker), so it resolves to a fetch target.
+        let partition = TopicPartition::new("topic-a", 0);
+        let leader = Node::new(0, "localhost".to_string(), 1969);
+        {
+            let mut guard = subs.lock().expect("lock");
+            let mut set: HashSet<TopicPartition> = HashSet::new();
+            set.insert(partition.clone());
+            guard.assign_from_user(set).unwrap();
+            let position = crate::consumer::internals::subscription_state::FetchPosition::with_leader(
+                0,
+                Some(0),
+                crate::metadata::LeaderAndEpoch::new(Some(leader), Some(0)),
+            );
+            guard.seek_validated(&partition, position).unwrap();
+        }
+
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+
+        // Node 0 has an in-flight fetch -> the up-front short-circuit returns
+        // empty (the only node is pending).
+        af.nodes_with_pending_fetch_requests.insert(0);
+        let pending_result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(
+            pending_result.unwrap().is_empty(),
+            "with node 0 pending, the short-circuit must return empty"
+        );
+
+        // Free node 0 (a fetch response arrived). The next call must NOT be
+        // stranded: it issues a fetch for the partition on node 0.
+        af.nodes_with_pending_fetch_requests.remove(&0);
+        let freed_result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
+        assert!(
+            freed_result.contains_key(&0),
+            "freeing node 0 must let the next call issue a fetch for its partition (no stall)"
+        );
     }
 
     /// `compute_buffered_nodes` returns an empty set when the buffered
