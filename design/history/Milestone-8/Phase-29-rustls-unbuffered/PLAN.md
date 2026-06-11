@@ -1,7 +1,37 @@
-# Phase 29 — rustls `UnbufferedConnection` receive/send path (PLANNED)
+# Phase 29 — rustls `UnbufferedConnection` receive/send path (INVALIDATED)
 
-**Milestone-8 / Phase-29** · Agent number **N = 29** · Status: **planned, not started**
-(awaiting Phase-28 validation + go-ahead).
+**Milestone-8 / Phase-29** · Agent number **N = 29** · Status: **INVALIDATED
+before implementation** (2026-06-11). Kept for the record.
+
+## Why it was dropped
+
+Source inspection of the vendored rustls 0.23.38
+(`src/conn/unbuffered.rs:330-372`): the unbuffered API does **NOT** decrypt
+in place. `ReadTraffic::next_record()` pops an **owned `Vec<u8>` chunk** from
+the same internal `received_plaintext` `ChunkVecBuffer` that the buffered
+`reader().read()` path drains; the `incoming_tls` parameter is held only
+"for forwards compatibility; to support in-place decryption in the future"
+(upstream TODO). The receive-path copy chain is therefore **identical** in
+both APIs:
+
+    kernel → TLS-framing buffer → per-record owned plaintext chunk
+    (alloc + copy, rustls-internal, both modes) → our receive Vec
+
+The intermediate per-record chunk is rustls's current floor in every API it
+offers — that, not buffered-mode bookkeeping, is the structural delta vs
+Java's `SSLEngine.unwrap` (which decrypts directly into the app's buffer).
+The rewrite would buy only discard-policy/outgoing-buffer control (~0–1 pp)
+for a ~1.4k-line state-machine rewrite of the historically fragile TLS
+read/handshake path. Not worth it.
+
+**Re-open only if** upstream rustls ships in-place decryption for the
+unbuffered API (track the TODO in `unbuffered.rs`), at which point the
+original analysis below applies and the win becomes the full intermediate
+copy + per-record alloc (~2-3 pp).
+
+---
+
+*Original plan (premise invalidated) follows:*
 
 ## Why
 
