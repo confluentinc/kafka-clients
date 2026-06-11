@@ -336,6 +336,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // ──── Phase 1: drain application events ────
         self.process_application_events();
 
+        // Acquire the network-client-delegate mutex ONCE for the whole
+        // iteration. The bg task is the delegate's only locker (verified:
+        // the app side signals wakeups via the `WakeupTrigger` token and the
+        // selector `Notify`, never through this mutex), so the guard is
+        // uncontended and holding it across the iteration's `.await` points
+        // can deadlock nothing. Java's `ConsumerNetworkThread` owns
+        // `networkClientDelegate` as a plain field with no lock at all —
+        // one guard per `runOnce` is the closest Rust emulation, and it
+        // removes the 3-4 lock/unlock cycles per iteration that profiling
+        // showed as pure futex/atomic overhead on the bg hot loop
+        // (Phase 27 Fix #1). Cloning the `Arc` first keeps the guard's
+        // borrow off `self`, so `&mut self` helpers stay callable.
+        let delegate_arc = Arc::clone(&self.network_client_delegate);
+        let mut delegate_guard = delegate_arc.lock().await;
+
         let current_time_ms = self.time.milliseconds();
         if self.last_poll_time_ms != 0 {
             log::trace!(
@@ -454,21 +469,18 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             before.extend(entries_results); // heartbeat (if any)
             (before, tail)
         };
-        {
-            let mut delegate_guard = self.network_client_delegate.lock().await;
-            for mut poll_result in collected_before {
-                // Drain the try_connect slot BEFORE add_all_from_poll_result,
-                // mirroring Java's tryConnect-then-addAll order inside the
-                // manager body. `std::mem::take` swaps in an empty Vec
-                // so `add_all_from_poll_result` later drops only an
-                // empty `try_connect`.
-                let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
-                for node in try_connect_nodes {
-                    delegate_guard.try_connect(&node, current_time_ms).await;
-                }
-                let timeout_ms = delegate_guard.add_all_from_poll_result(poll_result, current_time_ms);
-                poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
+        for mut poll_result in collected_before {
+            // Drain the try_connect slot BEFORE add_all_from_poll_result,
+            // mirroring Java's tryConnect-then-addAll order inside the
+            // manager body. `std::mem::take` swaps in an empty Vec
+            // so `add_all_from_poll_result` later drops only an
+            // empty `try_connect`.
+            let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
+            for node in try_connect_nodes {
+                delegate_guard.try_connect(&node, current_time_ms).await;
             }
+            let timeout_ms = delegate_guard.add_all_from_poll_result(poll_result, current_time_ms);
+            poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
         }
 
         // ──── Phase 2.4: drive pending fenced/fatal transitions ────
@@ -540,16 +552,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
         // topic_metadata, fetch, dyn) ────
-        {
-            let mut delegate_guard = self.network_client_delegate.lock().await;
-            for mut poll_result in collected_after {
-                let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
-                for node in try_connect_nodes {
-                    delegate_guard.try_connect(&node, current_time_ms).await;
-                }
-                let timeout_ms = delegate_guard.add_all_from_poll_result(poll_result, current_time_ms);
-                poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
+        for mut poll_result in collected_after {
+            let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
+            for node in try_connect_nodes {
+                delegate_guard.try_connect(&node, current_time_ms).await;
             }
+            let timeout_ms = delegate_guard.add_all_from_poll_result(poll_result, current_time_ms);
+            poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
         }
 
         // ──── Phase 4: poll the network client ────
@@ -570,7 +579,6 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // body and loop without ever dropping it.
         let token = self.wakeup_rx.borrow().clone();
         {
-            let mut delegate_guard = self.network_client_delegate.lock().await;
             // Lock-free handle to the selector's wakeup `Notify`, grabbed under
             // the lock we already hold. `poll_fut` borrows the guard for its
             // whole duration, so we cannot call `delegate.wakeup()` while it
@@ -644,7 +652,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // we track notifiable+completable events in `notifiable_handles`
         // during `process_application_events` and iterate that list
         // here. Done handles are pruned in-place. See module docstring.
-        self.maybe_fail_on_metadata_error_uncompleted();
+        self.maybe_fail_on_metadata_error_uncompleted(&mut delegate_guard);
     }
 
     /// Mirrors Java's `maybeFailOnMetadataError(List<?> events)` invoked
@@ -664,8 +672,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     ///     four variants resolves to `handle.completeExceptionally(...)`
     ///     — exactly what `fail_with_timeout` does.
     ///
-    /// Called by `run_once` after the reap step.
-    fn maybe_fail_on_metadata_error_uncompleted(&mut self) {
+    /// Called by `run_once` after the reap step, passing the iteration's
+    /// delegate guard (Phase 27 Fix #1: `run_once` holds a single guard
+    /// for the whole iteration instead of re-locking per phase).
+    fn maybe_fail_on_metadata_error_uncompleted(&mut self, delegate: &mut NetworkClientDelegate<K>) {
         // Step 1: drop any handle that completed since the last call.
         self.notifiable_handles.retain(|h| !h.is_done());
         if self.notifiable_handles.is_empty() {
@@ -675,16 +685,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         }
 
-        // Step 2: query the delegate for a pending metadata error. The
-        // bg task is the sole holder of the delegate mutex; `try_lock`
-        // is safe (no contention).
-        let err_opt = {
-            let mut delegate_guard = self
-                .network_client_delegate
-                .try_lock()
-                .expect("delegate not contended on bg task");
-            delegate_guard.get_and_clear_metadata_error()
-        };
+        // Step 2: query the delegate for a pending metadata error.
+        let err_opt = delegate.get_and_clear_metadata_error();
 
         let Some(err) = err_opt else {
             return;
