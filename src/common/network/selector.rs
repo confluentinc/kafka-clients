@@ -1069,10 +1069,27 @@ impl Selectable for Selector {
             ready_ids.clear();
             process_all = false;
 
-            let made_progress = !self.completed_sends.is_empty()
-                || !self.completed_receives.is_empty()
-                || !self.connected.is_empty()
-                || !self.disconnected.is_empty();
+            // Phase 26 (Fix #1): match stock Java `NetworkClient.poll`, which
+            // loops `do { selector.poll(t) } while (completedReceives().isEmpty()
+            // && disconnected().isEmpty())` — it does NOT return on completed
+            // *sends*. A send-only round (fetch / heartbeat / commit request
+            // written, response not yet arrived) keeps waiting in the `select!`
+            // below for the actual response, rather than returning and forcing
+            // `run_once` to spin a full extra iteration (drain events + poll
+            // every manager) before re-entering to await the response. Every
+            // consumer request expects a response, so there is no
+            // fire-and-forget send that would block forever; `completed_sends`
+            // still accumulate and are returned to the caller when the poll next
+            // breaks (on receive / connect / disconnect / deadline), just one
+            // cycle later.
+            //
+            // CRITICAL (§10): `connected` MUST stay in the break.
+            // `poll_channel_reads` pushes onto `self.connected` on the
+            // post-handshake (TLS/SASL) ready transition specifically so `poll()`
+            // exits and `handle_initiate_api_version_requests` fires (the join
+            // path). Removing `connected` would re-introduce the join stall.
+            let made_progress =
+                !self.completed_receives.is_empty() || !self.connected.is_empty() || !self.disconnected.is_empty();
 
             if made_progress {
                 break;
@@ -2731,6 +2748,191 @@ mod tests {
         // Cleanup.
         selector.close_channel("0").await;
         selector.close_channel("1").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    // ---- Phase 26 (Fix #1): send-only poll does not return early -------------
+
+    /// A loopback server that accepts a connection and silently drains all
+    /// inbound bytes WITHOUT echoing anything back. Used to construct a
+    /// send-only poll round: the selector writes a request (completing a
+    /// `NetworkSend`) but no response ever arrives, so a poll that returned on a
+    /// completed *send* would return early. After Phase 26 Fix #1 the poll must
+    /// keep parking on read-readiness until the deadline (or a wakeup / connect /
+    /// disconnect), matching stock Java `NetworkClient.poll`.
+    struct SinkServer {
+        addr: SocketAddr,
+        closing: Arc<AtomicBool>,
+        _task: tokio::task::JoinHandle<()>,
+    }
+
+    impl SinkServer {
+        async fn new() -> io::Result<Self> {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            let closing = Arc::new(AtomicBool::new(false));
+            let closing_clone = closing.clone();
+            let task = tokio::spawn(async move {
+                while !closing_clone.load(Ordering::Relaxed) {
+                    let accept_result = tokio::select! {
+                        result = listener.accept() => result,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => continue,
+                    };
+                    if let Ok((mut stream, _)) = accept_result {
+                        let closing_inner = closing_clone.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            // Drain and discard everything; never write back.
+                            while !closing_inner.load(Ordering::Relaxed) {
+                                match stream.read(&mut buf).await {
+                                    Ok(0) => break,
+                                    Ok(_) => {},
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+            Ok(Self { addr, closing, _task: task })
+        }
+
+        fn port(&self) -> u16 {
+            self.addr.port()
+        }
+    }
+
+    impl Drop for SinkServer {
+        fn drop(&mut self) {
+            self.closing.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Phase 26 (Fix #1) — a poll that only completes a send (no receive) must
+    /// NOT return until a receive arrives or the deadline, but must still return
+    /// promptly on a wakeup. Mirrors stock Java `NetworkClient.poll`, which loops
+    /// while `completedReceives().isEmpty() && disconnected().isEmpty()` and does
+    /// NOT return on completed sends.
+    ///
+    /// Each sub-assertion is bounded by a hard `tokio::time::timeout` so a
+    /// regression (returning early on the completed send, or hanging) fails the
+    /// test instead of blocking the suite.
+    #[tokio::test]
+    async fn test_send_only_poll_does_not_return_early() {
+        use std::time::{Duration, Instant};
+
+        let server = SinkServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+
+        // Settle: drain the immediately-connected / made-read-progress
+        // bookkeeping from the connect so the next poll genuinely parks on the
+        // socket-readiness `select!` (eff_timeout > 0, deadline = Some) rather
+        // than taking the timeout-0 process-all path. Mirrors the Phase-24
+        // selector tests' settle loop.
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // Queue the request to the sink server (which never echoes). Drive the
+        // poll until the send is written (`completed_sends` non-empty). This may
+        // take a couple of iterations (the writable-readiness must fire). Bounded
+        // by a hard timeout so a regression hangs the test instead of the suite.
+        selector.send(create_send("0", "send-only")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                selector.poll(200).await.unwrap();
+                if !selector.completed_sends().is_empty() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the send was never written within 5s");
+        // No echo ever arrives from the sink server.
+        assert!(
+            selector.completed_receives().is_empty(),
+            "the sink server never echoes, so there must be no completed receive"
+        );
+
+        // (a) Now the send is done and there is no pending write and no incoming
+        // data. A poll must PARK on read readiness until its deadline rather than
+        // returning early on the (now-cleared / never-again) send. We use a short
+        // 200ms deadline and assert the poll took close to the full deadline. A
+        // regression that returned on a completed send would only matter while a
+        // send is outstanding, so we additionally re-send below to cover the
+        // outstanding-send case directly.
+        let timeout_ms = 200;
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), selector.poll(timeout_ms))
+            .await
+            .expect("(a) idle poll hung well past its deadline")
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis((timeout_ms as u64 * 8) / 10),
+            "(a) an idle poll with no incoming data must wait to the deadline \
+             (elapsed {elapsed:?}, expected >= ~{}ms)",
+            (timeout_ms * 8) / 10
+        );
+
+        // (a2) The core Fix #1 assertion: with a send OUTSTANDING (queued but not
+        // yet acked by any receive), the poll that completes the send must NOT
+        // return early on that completed send — it must keep parking to the
+        // deadline because no receive arrived. Send a fresh request and measure a
+        // single poll with a short deadline; the send completes during this poll
+        // but, post-fix, `completed_sends` is no longer in the `made_progress`
+        // break, so the poll parks to the deadline.
+        selector.send(create_send("0", "send-only-2")).unwrap();
+        let timeout_ms = 300;
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), selector.poll(timeout_ms))
+            .await
+            .expect("(a2) send-only poll hung well past its deadline")
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            !selector.completed_sends().is_empty(),
+            "(a2) the request should have been written and completed as a send"
+        );
+        assert!(
+            selector.completed_receives().is_empty(),
+            "(a2) no echo arrives from the sink server, so there must be no completed receive"
+        );
+        assert!(
+            elapsed >= Duration::from_millis((timeout_ms as u64 * 8) / 10),
+            "(a2) a send-only poll must wait to the deadline, not return early on the completed send \
+             (elapsed {elapsed:?}, expected >= ~{}ms)",
+            (timeout_ms * 8) / 10
+        );
+
+        // (b) A wakeup() must still return the parked poll promptly even when the
+        // only outstanding state is an unanswered send. Fire wakeup() after a
+        // short delay while the poll parks on a long (10s) deadline.
+        let notify = selector.wakeup_notify();
+        let waker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            notify.notify_one();
+        });
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), selector.poll(10_000))
+            .await
+            .expect("(b) wakeup() did not return the parked send-only poll within 2s")
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "(b) wakeup() should return the parked poll promptly, not on the deadline"
+        );
+        waker.await.unwrap();
+
+        // Note: the connect-break and disconnect-break paths are unchanged by
+        // Fix #1 (`connected` and `disconnected` stay in the `made_progress`
+        // break) and are covered by `test_readiness_wait_path`,
+        // `blocking_connect`/`wait_for_channel_ready`, and the `test_close*`
+        // family. Only `completed_sends` was removed from the break here.
+
+        // Cleanup.
+        selector.close_channel("0").await;
         selector.poll(0).await.unwrap();
     }
 }
