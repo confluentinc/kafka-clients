@@ -55,11 +55,112 @@ use crate::{kafka_debug, kafka_error, kafka_trace};
 use std::collections::{HashMap, LinkedList};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Instant;
 
 /// Value indicating no idle timeout.
 pub const NO_IDLE_TIMEOUT_MS: i64 = -1;
+
+/// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
+///
+/// This is the data structure that gives the selector Java NIO
+/// `selector.select()` → `selectedKeys()` semantics on top of tokio. tokio's
+/// readiness API registers ONE task waker per socket registration and, on
+/// wake, cannot tell us *which* socket fired. By handing every interested
+/// `(channel, direction)` its OWN cached waker (a [`ChannelWaker`] that pushes
+/// `(token, is_write)` here when fired), the WAIT future learns exactly which
+/// channels became ready — O(ready), not O(registered) — mirroring
+/// `selectedKeys()`.
+struct ReadyQueue {
+    /// Channels whose registered interest fired since the last drain, recorded
+    /// as `(token, is_write)`. Pushed from [`ChannelWaker::wake`] (in practice
+    /// the same thread — the current-thread reactor fires wakers during park —
+    /// but `Waker` is `Send`, so this is a `std::sync::Mutex`; it is
+    /// uncontended).
+    fired: StdMutex<Vec<(u32, bool)>>,
+    /// Root waker of the WAIT future, registered on each poll. `Mutex<Option>`
+    /// rather than an `AtomicWaker` to avoid adding a dependency; the waker is
+    /// taken out under the lock and woken *outside* it.
+    root: StdMutex<Option<Waker>>,
+}
+
+impl ReadyQueue {
+    fn new() -> Self {
+        Self { fired: StdMutex::new(Vec::new()), root: StdMutex::new(None) }
+    }
+
+    /// Register (or refresh) the WAIT future's root waker. Cheap: only clones
+    /// when the stored waker would not wake the same task.
+    fn set_root(&self, waker: &Waker) {
+        let mut guard = self.root.lock().expect("ReadyQueue.root poisoned");
+        match guard.as_ref() {
+            Some(existing) if existing.will_wake(waker) => {},
+            _ => *guard = Some(waker.clone()),
+        }
+    }
+
+    /// Wake the WAIT future's root waker, if any. Taken-and-woken outside the
+    /// `fired` lock (and we drop the `root` lock before waking) to avoid waking
+    /// while holding a lock.
+    fn wake_root(&self) {
+        let waker = self.root.lock().expect("ReadyQueue.root poisoned").take();
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }
+}
+
+/// One waker per channel per interest direction, created at registration time
+/// and cached on the channel's [`ChannelArming`] side-struct (so arming is a
+/// cheap `Waker::clone`, with no per-poll allocation). When the tokio reactor
+/// fires it, it records which `(token, direction)` became ready in the shared
+/// [`ReadyQueue`] and wakes the WAIT future's root waker — the equivalent of a
+/// NIO `SelectionKey` landing in `selectedKeys()`.
+struct ChannelWaker {
+    token: u32,
+    is_write: bool,
+    queue: Arc<ReadyQueue>,
+}
+
+impl Wake for ChannelWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.queue
+            .fired
+            .lock()
+            .expect("ReadyQueue.fired poisoned")
+            .push((self.token, self.is_write));
+        self.queue.wake_root();
+    }
+}
+
+/// Per-channel arming bookkeeping owned by the [`Selector`] (kept out of
+/// [`KafkaChannel`] so the channel type stays transport-focused).
+///
+/// A `(channel, direction)` is **armed** when [`KafkaChannel::poll_transport_readable`]
+/// / [`KafkaChannel::poll_transport_writable`] was last called with the cached
+/// waker below and returned `Pending`. tokio then holds that waker until the
+/// readiness event fires it (consuming the waker) — at which point the
+/// [`ChannelWaker`] records the fire in the [`ReadyQueue`] and the arming flag
+/// is cleared by the WAIT future when it drains the queue.
+struct ChannelArming {
+    /// Stable token identifying this channel in the [`ReadyQueue`] fired list
+    /// (monotonic, assigned at registration). Maps back to the id via
+    /// [`Selector::token_to_id`].
+    token: u32,
+    /// Cached read-readiness waker (clone is a refcount bump, no allocation).
+    read_waker: Waker,
+    /// Cached write-readiness waker.
+    write_waker: Waker,
+    /// True while a read-readiness arm is outstanding (Pending, not yet fired).
+    armed_read: bool,
+    /// True while a write-readiness arm is outstanding (Pending, not yet fired).
+    armed_write: bool,
+}
 
 /// Close mode for channel closing operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +250,35 @@ pub struct Selector {
     /// issuing a `recv` syscall on each. Hoisted to a field (like
     /// [`Self::poll_id_scratch`]) so no per-poll `FxHashSet` allocation occurs.
     ready_scratch: FxHashSet<Arc<str>>,
+    /// Shared fired-queue + root-waker cell for the per-channel wakers (Phase
+    /// 30). The [`ChannelWaker`]s cached in [`Self::arming`] push into this when
+    /// the tokio reactor fires them; the WAIT future drains it. This is what
+    /// gives the selector Java NIO `selectedKeys()` (O(ready)) dispatch instead
+    /// of the Phase-24 per-WAIT sweep over every registered channel.
+    ready_queue: Arc<ReadyQueue>,
+    /// Per-channel arming bookkeeping: cached wakers + armed flags + token, one
+    /// entry per active channel. Created at registration ([`Selectable::connect`])
+    /// and removed when the channel is removed. Not put inside [`KafkaChannel`]
+    /// to keep the channel type transport-focused.
+    arming: FxHashMap<Arc<str>, ChannelArming>,
+    /// Maps a [`ChannelArming::token`] back to the channel id, so the WAIT
+    /// future can translate the `(token, is_write)` pairs drained from the
+    /// fired-queue into channel ids to process. Closed tokens (channel removed
+    /// since arming) are simply absent and dropped.
+    token_to_id: FxHashMap<u32, Arc<str>>,
+    /// Monotonic token allocator for new channel registrations.
+    next_token: u32,
+    /// Channels whose `channel_interest` may have flipped ON since they were
+    /// last armed — they must be (re-)armed at the next WAIT regardless of
+    /// whether they were processed in pass-1. Populated by the "dirty sites"
+    /// (see [`Self::mark_interest_dirty`]). Mirrors the Phase-24 risk-#1
+    /// guarantee: a missed arm is a data-stall bug, so when in doubt, mark
+    /// dirty (a spurious arm costs one `poll_ready`).
+    interest_dirty: FxHashSet<Arc<str>>,
+    /// O(1) count of channels with at least one outstanding armed flag. Used by
+    /// [`Self::has_interested_channel`] to choose the `select!` form without
+    /// sweeping all channels each WAIT.
+    armed_count: usize,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `Selector`.
@@ -207,6 +337,12 @@ impl Selector {
             made_read_progress_last_poll: true,
             poll_id_scratch: Vec::new(),
             ready_scratch: FxHashSet::default(),
+            ready_queue: Arc::new(ReadyQueue::new()),
+            arming: FxHashMap::default(),
+            token_to_id: FxHashMap::default(),
+            next_token: 0,
+            interest_dirty: FxHashSet::default(),
+            armed_count: 0,
             log_context,
         }
     }
@@ -240,6 +376,55 @@ impl Selector {
             .get_key_value(id)
             .map(|(k, _)| Arc::clone(k))
             .unwrap_or_else(|| Arc::from(id))
+    }
+
+    /// Register per-channel arming bookkeeping for a freshly-connected channel
+    /// (Phase 30): allocate a token, build the two cached wakers, and seed the
+    /// arming entry with both flags clear. The channel is also marked dirty so
+    /// the next WAIT arms whatever interest it currently has (connect /
+    /// immediately-connected handling — dirty site #4).
+    fn register_arming(&mut self, key: &Arc<str>) {
+        let token = self.next_token;
+        self.next_token = self.next_token.wrapping_add(1);
+        let read_waker = Waker::from(Arc::new(ChannelWaker {
+            token,
+            is_write: false,
+            queue: Arc::clone(&self.ready_queue),
+        }));
+        let write_waker = Waker::from(Arc::new(ChannelWaker {
+            token,
+            is_write: true,
+            queue: Arc::clone(&self.ready_queue),
+        }));
+        self.arming.insert(
+            Arc::clone(key),
+            ChannelArming { token, read_waker, write_waker, armed_read: false, armed_write: false },
+        );
+        self.token_to_id.insert(token, Arc::clone(key));
+        self.interest_dirty.insert(Arc::clone(key));
+    }
+
+    /// Drop per-channel arming bookkeeping when a channel is removed. Decrements
+    /// `armed_count` for any outstanding arm so the O(1) counter stays exact.
+    fn unregister_arming(&mut self, id: &str) {
+        if let Some(arming) = self.arming.remove(id) {
+            if arming.armed_read {
+                self.armed_count -= 1;
+            }
+            if arming.armed_write {
+                self.armed_count -= 1;
+            }
+            self.token_to_id.remove(&arming.token);
+        }
+        self.interest_dirty.remove(id);
+    }
+
+    /// Mark a channel's interest as possibly having flipped ON since it was last
+    /// armed — it must be (re-)armed at the next WAIT (Phase 30 "dirty site").
+    /// Cheap: an `Arc` refcount bump into a set. See the dirty-sites list on
+    /// [`Self::poll`] for the exhaustive enumeration of callers.
+    fn mark_interest_dirty(&mut self, key: &Arc<str>) {
+        self.interest_dirty.insert(Arc::clone(key));
     }
 
     fn ensure_not_registered(&self, id: &str) -> Result<(), String> {
@@ -298,6 +483,21 @@ impl Selector {
     /// Clear all results from the previous poll.
     async fn clear(&mut self) {
         self.completed_sends.clear();
+        // Phase 30 (dirty site #3): clearing the completed receives flips
+        // `want_read` back ON for every channel that had one (the
+        // `!has_completed_receive(id)` term in `channel_interest`). Mark those
+        // ids dirty so the next WAIT re-arms them. Cheapest correct form: mark
+        // each source whose completed receive is being cleared.
+        if !self.completed_receives.is_empty() {
+            let dirtied: Vec<Arc<str>> = self
+                .completed_receives
+                .iter()
+                .filter_map(|r| self.channels.get_key_value(r.source()).map(|(k, _)| Arc::clone(k)))
+                .collect();
+            for key in dirtied {
+                self.mark_interest_dirty(&key);
+            }
+        }
         self.completed_receives.clear();
         self.connected.clear();
         self.disconnected.clear();
@@ -597,6 +797,12 @@ impl Selector {
             None => return,
         };
 
+        // Phase 30: drop the channel's arming bookkeeping (and its armed-count
+        // contribution). The closing-channels path below does not re-arm — the
+        // graceful-close drain uses `maybe_read_from_closing_channel`, not the
+        // WAIT arming path.
+        self.unregister_arming(id);
+
         channel.disconnect();
 
         // Ensure that `connected` does not have closed channels
@@ -671,6 +877,21 @@ impl Selector {
 
     /// Clear completed receives.
     pub fn clear_completed_receives(&mut self) {
+        // Phase 30 (dirty site #3): same reasoning as `clear()` — removing a
+        // channel's completed receive turns `want_read` back ON, so re-arm it
+        // at the next WAIT. (This is the explicit-clear entry point; `clear()`
+        // covers the poll-top path. The next poll's `clear()` finds the list
+        // already empty, so this must mark dirty itself.)
+        if !self.completed_receives.is_empty() {
+            let dirtied: Vec<Arc<str>> = self
+                .completed_receives
+                .iter()
+                .filter_map(|r| self.channels.get_key_value(r.source()).map(|(k, _)| Arc::clone(k)))
+                .collect();
+            for key in dirtied {
+                self.mark_interest_dirty(&key);
+            }
+        }
         self.completed_receives.clear();
     }
 
@@ -706,9 +927,17 @@ impl Selector {
     /// [`Self::poll_channel_readiness`]. Mirrors Java NIO having at least one
     /// registered `SelectionKey` with a non-zero interest set.
     fn has_interested_channel(&self) -> bool {
-        self.channels
-            .iter()
-            .any(|(id, channel)| self.channel_interest(id, channel) != (false, false))
+        // Phase 30: O(1) form. A channel is "interested" for the purpose of
+        // choosing the `select!` form iff it has an outstanding arm OR it is in
+        // the re-arm set (`interest_dirty`) and will be armed by the WAIT's
+        // first poll. This matches the old per-WAIT predicate sweep exactly:
+        //   - any channel with interest that was armed-and-not-yet-fired
+        //     contributes to `armed_count`;
+        //   - any channel whose interest just turned ON is in `interest_dirty`
+        //     and will be armed (becoming `Ready` or `armed`) by the WAIT.
+        // A channel with no interest is neither armed nor dirty, so it does not
+        // count — same as `channel_interest(..) == (false, false)`.
+        self.armed_count > 0 || !self.interest_dirty.is_empty()
     }
 
     /// Computes the read/write interest for a single channel.
@@ -737,67 +966,133 @@ impl Selector {
         (want_read || in_handshake, want_write)
     }
 
-    /// Single non-allocating readiness sweep over all channels, replacing the
-    /// former `Vec<Pin<Box<dyn Future>>>` + `select_all` (Phase 23). Mirrors
-    /// Java NIO's persistent `Selector.select()`: one `poll` registers the
-    /// waker for every interested channel and returns `Ready` as soon as any
-    /// becomes ready.
+    /// Arm a single channel's current interest with its cached per-channel
+    /// wakers (Phase 30), the per-direction core of the `selectedKeys()` model.
     ///
-    /// Side-effect-free (CLAUDE rules `consumer-threading.md` §10): the only
-    /// effect is waker registration via the `poll_transport_*` calls. No bytes
-    /// are consumed and no connection state is mutated, so dropping this future
-    /// on a wakeup / deadline loses nothing.
+    /// Computes [`Self::channel_interest`] (the EXACT Phase-23 predicate) and,
+    /// for each interested direction that is not already armed, polls the
+    /// transport with that direction's cached waker:
+    ///   - `Ready` → the channel is immediately ready; it is added to
+    ///     `ready_out` for processing this iteration (the direction is NOT
+    ///     marked armed — there is nothing to wait for).
+    ///   - `Pending` → the direction is marked armed; tokio now holds the
+    ///     cached waker and the [`ChannelWaker`] will record the fire in the
+    ///     `ready_queue` when readiness arrives.
     ///
-    /// The interest predicate is computed by [`Self::channel_interest`] and is
-    /// identical to the old `collect_readiness_futures`.
+    /// Buffered decrypted plaintext short-circuits to `ready_out` without a
+    /// transport poll, exactly as the former sweep did (preserves the
+    /// `data_in_buffers` fast path inside the loop).
     ///
-    /// Phase 24: in addition to returning `Ready`/`Pending`, this records the
-    /// ids of the channels it found ready into `ready_out` (cleared first), so
-    /// the poll loop can process only those — mirroring Java NIO's
-    /// `selector.select()` → `selectedKeys()` (process only the ready keys)
-    /// instead of sweeping every registered channel and issuing a `recv`
-    /// syscall on each. The recording is a pure read of selector state plus
-    /// `Arc` refcount bumps into a reusable scratch set — no I/O side effect, so
-    /// it remains cancel-safe to drop (§10).
-    fn poll_channel_readiness(
-        &self,
-        cx: &mut std::task::Context<'_>,
-        ready_out: &mut FxHashSet<Arc<str>>,
-    ) -> std::task::Poll<()> {
-        ready_out.clear();
-        for (id, channel) in &self.channels {
-            let (want_read, want_write) = self.channel_interest(id, channel);
+    /// Side-effect-free with respect to connection state (§10): the only effect
+    /// is waker registration and updating the selector's own arming
+    /// bookkeeping. No bytes are consumed.
+    fn arm_channel(&mut self, id: &Arc<str>, ready_out: &mut FxHashSet<Arc<str>>) {
+        let channel = match self.channels.get(&**id) {
+            Some(c) => c,
+            None => return,
+        };
+        let (want_read, want_write) = self.channel_interest(id, channel);
 
-            // Decrypted plaintext already buffered: do not wait on the socket
-            // (the existing code sets effective_timeout = 0 when
-            // `data_in_buffers`; this guards the in-loop case — preserve it).
-            if want_read && channel.has_bytes_buffered() {
-                ready_out.insert(Arc::clone(id));
-                continue;
-            }
+        // Decrypted plaintext already buffered: do not wait on the socket
+        // (mirrors the former sweep + the `effective_timeout = 0` data_in_buffers
+        // fast path; preserve it).
+        if want_read && channel.has_bytes_buffered() {
+            ready_out.insert(Arc::clone(id));
+            return;
+        }
 
-            // Poll every interested channel (even after one is ready) so the
-            // waker is registered for ALL Pending channels — the task is then
-            // woken when ANY of them becomes ready. Returning `Ready` once any
-            // channel is ready is fine; the next poll re-sweeps. We still poll
-            // BOTH interests for every channel (not short-circuiting) to keep
-            // the Phase-23 waker-registration invariant: a channel left
-            // un-polled would never re-wake the parked task.
-            let mut channel_ready = false;
-            if want_read && channel.poll_transport_readable(cx).is_ready() {
-                channel_ready = true;
-            }
-            if want_write && channel.poll_transport_writable(cx).is_ready() {
-                channel_ready = true;
-            }
-            if channel_ready {
-                ready_out.insert(Arc::clone(id));
+        // Read direction.
+        if want_read {
+            let arming = self.arming.get(&**id).expect("arming entry for active channel");
+            if !arming.armed_read {
+                let waker = arming.read_waker.clone();
+                let mut cx = Context::from_waker(&waker);
+                let channel = self.channels.get(&**id).unwrap();
+                if channel.poll_transport_readable(&mut cx).is_ready() {
+                    ready_out.insert(Arc::clone(id));
+                } else {
+                    let arming = self.arming.get_mut(&**id).unwrap();
+                    arming.armed_read = true;
+                    self.armed_count += 1;
+                }
             }
         }
-        if ready_out.is_empty() {
-            std::task::Poll::Pending
-        } else {
-            std::task::Poll::Ready(())
+
+        // Write direction.
+        if want_write {
+            let arming = self.arming.get(&**id).expect("arming entry for active channel");
+            if !arming.armed_write {
+                let waker = arming.write_waker.clone();
+                let mut cx = Context::from_waker(&waker);
+                let channel = self.channels.get(&**id).unwrap();
+                if channel.poll_transport_writable(&mut cx).is_ready() {
+                    ready_out.insert(Arc::clone(id));
+                } else {
+                    let arming = self.arming.get_mut(&**id).unwrap();
+                    arming.armed_write = true;
+                    self.armed_count += 1;
+                }
+            }
+        }
+    }
+
+    /// Arm every channel in this iteration's re-arm set (Phase 30): channels
+    /// processed in pass-1 (their readiness was consumed, so they must be
+    /// re-armed) ∪ the drained `interest_dirty` set (interest just flipped ON)
+    /// ∪ immediately-connected channels. Channels armed-and-not-fired are left
+    /// alone — zero per-iteration cost, which is the whole O(ready) win.
+    ///
+    /// `processed` is the pass-1 channel-id snapshot (`poll_id_scratch`).
+    /// Immediately-ready channels are recorded in `ready_out`.
+    fn arm_rearm_set(&mut self, processed: &[Arc<str>], ready_out: &mut FxHashSet<Arc<str>>) {
+        // Drain the dirty set into the local scratch first so we don't borrow it
+        // across the arming mutations.
+        let dirty: Vec<Arc<str>> = self.interest_dirty.drain().collect();
+        for id in &dirty {
+            self.arm_channel(id, ready_out);
+        }
+        for id in processed {
+            // Avoid re-arming a channel twice in one iteration.
+            if !self.interest_dirty.contains(&**id) {
+                self.arm_channel(id, ready_out);
+            }
+        }
+    }
+
+    /// Drain the fired-queue into `ready_out` (Phase 30), translating each
+    /// `(token, is_write)` to the channel id via [`Self::token_to_id`] and
+    /// clearing the corresponding armed flag. Tokens for channels removed since
+    /// arming are simply absent and dropped. This is the `selectedKeys()`
+    /// read-out: O(fired), not O(registered).
+    ///
+    /// Draining into the selector-owned `ready_out` (the persistent
+    /// `ready_scratch`) — never a future-local — is what keeps the WAIT future
+    /// cancel-safe: a wakeup / deadline that cancels the WAIT after a drain
+    /// leaves the drained ids in `ready_scratch` to be processed next iteration.
+    fn drain_fired_queue(&mut self, ready_out: &mut FxHashSet<Arc<str>>) {
+        let fired: Vec<(u32, bool)> = {
+            let mut guard = self.ready_queue.fired.lock().expect("ReadyQueue.fired poisoned");
+            std::mem::take(&mut *guard)
+        };
+        for (token, is_write) in fired {
+            // The arming entry may have been replaced or removed; only clear the
+            // flag if the token still maps to a live, matching arming entry.
+            if let Some(id) = self.token_to_id.get(&token).cloned() {
+                if let Some(arming) = self.arming.get_mut(&*id)
+                    && arming.token == token
+                {
+                    let flag = if is_write {
+                        &mut arming.armed_write
+                    } else {
+                        &mut arming.armed_read
+                    };
+                    if *flag {
+                        *flag = false;
+                        self.armed_count -= 1;
+                    }
+                }
+                ready_out.insert(id);
+            }
         }
     }
 }
@@ -859,6 +1154,10 @@ impl Selectable for Selector {
         // channels map and the tracking sets (CLAUDE.md §11).
         let key: Arc<str> = Arc::from(id);
         self.immediately_connected_keys.insert(Arc::clone(&key));
+        // Phase 30 (dirty site #4): register per-channel wakers/arming so the
+        // next WAIT can arm this channel's interest directly instead of
+        // sweeping. Also marks it dirty.
+        self.register_arming(&key);
         self.channels.insert(key, channel);
 
         if let Some(ref mut mgr) = self.idle_expiry_manager {
@@ -912,7 +1211,14 @@ impl Selectable for Selector {
         } else {
             let channel = self.channels.get_mut(connection_id.as_str()).unwrap();
             match channel.set_send(send) {
-                Ok(()) => {},
+                Ok(()) => {
+                    // Phase 30 (dirty site #1): a queued send can turn
+                    // `want_write` ON for this channel, which the WAIT must arm.
+                    if let Some((key, _)) = self.channels.get_key_value(connection_id.as_str()) {
+                        let key = Arc::clone(key);
+                        self.mark_interest_dirty(&key);
+                    }
+                },
                 Err(e) => {
                     // Update the state for consistency
                     channel.set_state(channel_state::FAILED_SEND.clone());
@@ -922,6 +1228,7 @@ impl Selectable for Selector {
 
                     // Remove and close the channel
                     if let Some(mut ch) = self.channels.remove(connection_id.as_str()) {
+                        self.unregister_arming(connection_id.as_str());
                         ch.disconnect();
                         self.connected.retain(|c| c != &connection_id);
                         self.do_close(ch, false);
@@ -1056,18 +1363,26 @@ impl Selectable for Selector {
             // Pass 2: Write the same set of channels concurrently.
             self.poll_channels_write_concurrent(&channel_ids, start_select).await;
 
+            // Consumed this iteration's ready set; its readiness events have been
+            // drained (try_read → WouldBlock / write completed), so the prior
+            // ready ids are stale. Clear so `ready_ids` only holds channels that
+            // are ready *this* iteration (re-armed below or drained by the WAIT).
+            ready_ids.clear();
+            process_all = false;
+
+            // Phase 30: (re-)arm the re-arm set = pass-1 processed set
+            // (`channel_ids`, immediately-connected already folded in) ∪ drained
+            // `interest_dirty`. Arming registers each interested direction's
+            // cached waker with the tokio reactor (the `selectedKeys()` model);
+            // any direction already ready is added straight to `ready_ids`
+            // (processed next iteration, no WAIT). Channels armed-and-not-fired
+            // are left untouched — the O(ready) win. Done before the scratch
+            // restore so the processed set (`channel_ids`) is still live.
+            self.arm_rearm_set(&channel_ids, &mut ready_ids);
+
             // Restore the scratch buffer (retains its capacity for next time).
             channel_ids.clear();
             self.poll_id_scratch = channel_ids;
-
-            // Consumed this iteration's ready set / process-all fallback; clear
-            // it so the next iteration starts narrow again and only widens if
-            // the WAIT repopulates `ready_ids` (the WAIT's `poll_fn` also clears
-            // first, but the no-interest `select!` branch never runs it, so a
-            // stale set would otherwise be reprocessed) or a deferred wakeup
-            // forces a re-sweep.
-            ready_ids.clear();
-            process_all = false;
 
             // Phase 26 (Fix #1): match stock Java `NetworkClient.poll`, which
             // loops `do { selector.poll(t) } while (completedReceives().isEmpty()
@@ -1103,6 +1418,15 @@ impl Selectable for Selector {
                 break;
             }
 
+            // Phase 30: arming above found channels already ready (buffered
+            // plaintext, or a readiness the reactor had already set). Loop now to
+            // process them rather than parking — mirrors the old
+            // `poll_channel_readiness` returning `Ready` immediately when any
+            // channel was ready.
+            if !ready_ids.is_empty() {
+                continue;
+            }
+
             // No progress — wait for I/O readiness on any channel, wakeup,
             // or deadline. This replaces the former 1ms busy-poll with
             // proper event-driven readiness, matching Java NIO's
@@ -1115,14 +1439,6 @@ impl Selectable for Selector {
                     // branch).
                     let any_interested = self.has_interested_channel();
 
-                    // Single non-allocating readiness future over all channels
-                    // (Phase 23), replacing the former per-channel
-                    // `Vec<Box<dyn Future>>` + `select_all`. It only registers
-                    // wakers (side-effect-free, §10 cancel-safe), so dropping it
-                    // on a wakeup / deadline loses nothing — the non-cancel-safe
-                    // network poll stays in pass-1, outside this `select!`.
-                    let readiness_wait = std::future::poll_fn(|cx| self.poll_channel_readiness(cx, &mut ready_ids));
-
                     // An explicit wakeup (`Selector::wakeup()`) makes the poll
                     // return at this safe boundary, mirroring Java NIO where
                     // `Selector.wakeup()` causes the in-progress `select()` to
@@ -1131,7 +1447,34 @@ impl Selectable for Selector {
                     // the deadline — which defeats the network-thread wakeup and
                     // is part of the consumer join-stall root cause
                     // (`design/current/consumer-join-stall-rootcause.md`).
+                    // Cloned before the mutable reborrow below.
                     let notify = self.notify.clone();
+
+                    // Phase 30: the WAIT future. The per-channel wakers were
+                    // armed above (the `selectedKeys()` model). This future does
+                    // only two things, both cancel-safe (§10): (1) register the
+                    // WAIT task's root waker in the `ready_queue` so a
+                    // `ChannelWaker` fire un-parks us, and (2) drain the
+                    // fired-queue into `ready_ids` (selector-owned scratch, never
+                    // a future-local — so a wakeup / deadline that cancels this
+                    // future after a drain leaves the ids in `ready_ids` to be
+                    // processed next iteration). It returns `Ready` as soon as any
+                    // armed channel has fired; otherwise `Pending`. No bytes are
+                    // consumed and no connection state is mutated, so dropping it
+                    // loses nothing — the non-cancel-safe network poll stays in
+                    // pass-1, outside this `select!`.
+                    let selector = &mut *self;
+                    let ready_ids_ref = &mut ready_ids;
+                    let readiness_wait = std::future::poll_fn(move |cx| {
+                        selector.ready_queue.set_root(cx.waker());
+                        selector.drain_fired_queue(ready_ids_ref);
+                        if ready_ids_ref.is_empty() {
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(())
+                        }
+                    });
+
                     // `notify.notified() => true` returns the poll on wakeup. A
                     // `wakeup()` issued just *before* this poll parked stores a
                     // permit, so the next poll returns immediately with no I/O —
@@ -1192,6 +1535,29 @@ impl Selectable for Selector {
             }
         }
 
+        // Phase 30 cancel-safety: the WAIT may have drained `(token, dir)`
+        // fires into `ready_ids` and cleared their armed flags, then been
+        // cancelled by a wakeup / deadline before pass-1 could process them
+        // (the break paths above). Those channels are now neither armed nor
+        // processed. Re-mark them dirty so the NEXT poll re-arms them — tokio
+        // readiness is level-triggered, so re-arming a channel whose socket is
+        // still readable returns `Ready` again and the data is not stranded.
+        // Without this, a wakeup landing exactly after a fire-drain could strand
+        // a ready channel (the subtle data-stall the PLAN flags). Cheap: bounded
+        // by the number of fires this poll, and a no-op on the steady-state path
+        // (`ready_ids` is consumed at the top of the loop, so it is only
+        // non-empty here after a cancelled WAIT).
+        if !ready_ids.is_empty() {
+            let leftover: Vec<Arc<str>> = ready_ids
+                .iter()
+                .filter(|id| self.channels.contains_key(&***id))
+                .cloned()
+                .collect();
+            for id in leftover {
+                self.mark_interest_dirty(&id);
+            }
+        }
+
         // Restore the ready-set scratch buffer (retains its capacity for next
         // time), mirroring the `poll_id_scratch` handling above.
         ready_ids.clear();
@@ -1225,10 +1591,17 @@ impl Selectable for Selector {
         // Move every NetworkReceive out of the list and take its payload Vec by
         // move (no copy — §27 Phase 20 Fix #3). std::mem::take leaves the list
         // empty so the next poll's clear() is a no-op.
-        std::mem::take(&mut self.completed_receives)
-            .into_iter()
-            .map(NetworkReceive::into_source_and_payload)
-            .collect()
+        let drained = std::mem::take(&mut self.completed_receives);
+        // Phase 30 (dirty site #3): draining a channel's completed receive turns
+        // `want_read` back ON, so mark each source dirty for re-arming. The next
+        // poll's `clear()` sees an empty list, so this entry point must do it.
+        for r in &drained {
+            if let Some((key, _)) = self.channels.get_key_value(r.source()) {
+                let key = Arc::clone(key);
+                self.mark_interest_dirty(&key);
+            }
+        }
+        drained.into_iter().map(NetworkReceive::into_source_and_payload).collect()
     }
 
     fn disconnected(&self) -> &HashMap<String, ChannelState> {
@@ -1265,6 +1638,15 @@ impl Selectable for Selector {
 
         if unmuted {
             self.explicitly_muted_channels.remove(id);
+            // Phase 30 (dirty site #2): unmuting turns `want_read` back ON for
+            // this channel, so the next WAIT must (re-)arm it. A readiness event
+            // that fired while the channel was muted may have already been
+            // consumed (stale), so re-arming is required even when no bytes are
+            // currently buffered — otherwise data sent while muted would stall.
+            if let Some((key, _)) = self.channels.get_key_value(id) {
+                let key = Arc::clone(key);
+                self.mark_interest_dirty(&key);
+            }
             if let Some((key, channel)) = self.channels.get_key_value(id)
                 && channel.has_bytes_buffered()
             {
