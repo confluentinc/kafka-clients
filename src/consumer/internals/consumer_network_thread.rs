@@ -229,6 +229,16 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// passes to `maybeFailOnMetadataError(uncompletedEvents)` — see
     /// the module docstring.
     notifiable_handles: Vec<Arc<dyn super::events::completable_event::CompletableEventErasedHandle>>,
+    /// Scratch buffers reused across `run_once` iterations (Phase 28):
+    /// the PollResult before/after batches and the application-event
+    /// drain buffer. Java's `entries` is a final List built once in the
+    /// constructor and `processApplicationEvents` drains into a
+    /// GC-nursery LinkedList — per-iteration heap allocation here was a
+    /// translation artifact (~7k iterations/s on the bg hot loop).
+    /// Always left empty between iterations; capacity is retained.
+    poll_results_before_scratch: Vec<super::network_client_delegate::PollResult>,
+    poll_results_after_scratch: Vec<super::network_client_delegate::PollResult>,
+    app_event_drain_scratch: Vec<ApplicationEventEnvelope>,
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
@@ -273,6 +283,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             time,
             membership,
             notifiable_handles: Vec::new(),
+            poll_results_before_scratch: Vec::new(),
+            poll_results_after_scratch: Vec::new(),
+            app_event_drain_scratch: Vec::new(),
         }
     }
 
@@ -397,10 +410,17 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // `request_managers` from being held across any `.await`
         // (`consumer-threading.md` §16).
         let mut poll_wait_time_ms: i64 = MAX_POLL_TIMEOUT_MS;
-        let (collected_before, collected_after): (
-            Vec<super::network_client_delegate::PollResult>,
-            Vec<super::network_client_delegate::PollResult>,
-        ) = {
+        // Phase 28: the two PollResult batches are accumulated in scratch
+        // buffers reused across iterations (taken here, restored cleared at
+        // the end of `run_once`) — the previous shape allocated three Vecs
+        // per iteration (`collect`, `split_off`, `before`) at ~7k
+        // iterations/s. Java's `entries` is a final List field built once in
+        // the constructor, so per-iteration allocation here was a pure
+        // translation artifact.
+        let mut collected_before = std::mem::take(&mut self.poll_results_before_scratch);
+        let mut collected_after = std::mem::take(&mut self.poll_results_after_scratch);
+        debug_assert!(collected_before.is_empty() && collected_after.is_empty());
+        {
             // Java's `entries()` walks
             // `coordinator → commit → heartbeat → membership → offsets …`.
             // The Rust container skips the three `Arc`-shared slots
@@ -424,38 +444,24 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             //     (Phase-12 Critic Issue 1).
             //   * `membership.reconcile(now, false)` — driven in
             //     Phase 2.5 below.
-            let (coord_handle, commit_handle, mut entries_results) = {
-                let mut rm_guard = match self.request_managers.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                let coord = rm_guard.coordinator_handle();
-                let commit = rm_guard.commit_handle();
-                let entries: Vec<super::network_client_delegate::PollResult> =
-                    rm_guard.entries().into_iter().map(|rm| rm.poll(current_time_ms)).collect();
-                (coord, commit, entries)
+            //
+            // One `request_managers` lock for the whole phase (Phase 28 —
+            // was two: one for `entries()`, one for `membership_boundary()`).
+            // Poll-call order now matches Java's `entries()` walk:
+            // coordinator → commit → heartbeat → offsets → … (the previous
+            // shape polled the heartbeat/offsets/fetch managers BEFORE
+            // coordinator/commit and only reordered the processing; the
+            // managers interact through state set by network *responses*,
+            // not by `poll(...)` itself, so this is order-faithfulness, not
+            // a behavior change).
+            let mut rm_guard = match self.request_managers.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
             };
-            // `entries()` ordering with the three Arc-shared slots
-            // skipped is `heartbeat → offsets → topic_metadata → fetch
-            // → dyn`. `membership_boundary()` returns the heartbeat
-            // count (0 or 1); `split_off(boundary)` keeps the
-            // heartbeat (if any) in the leading slice and moves
-            // offsets/topic_metadata/fetch/dyn to the tail.
-            let boundary = {
-                let rm_guard = match self.request_managers.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                rm_guard.membership_boundary()
-            };
-            let safe_boundary = boundary.min(entries_results.len());
-            let tail = entries_results.split_off(safe_boundary);
-            let mut before: Vec<super::network_client_delegate::PollResult> = Vec::new();
-            // Java order: coordinator → commit → heartbeat. Coordinator
-            // goes first; its `poll` may discover the coordinator node,
-            // which `commit.poll_with_coordinator` then consumes.
+            let coord_handle = rm_guard.coordinator_handle();
+            let commit_handle = rm_guard.commit_handle();
             if let Some(coord_arc) = coord_handle.as_ref() {
-                before.push(coord_arc.poll_shared(current_time_ms));
+                collected_before.push(coord_arc.poll_shared(current_time_ms));
             }
             // Java: `CommitRequestManager.poll(currentTimeMs)`
             // (`CommitRequestManager.java:181-209`). Must run between
@@ -464,12 +470,27 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // and `CommitRequestManager` use interior mutability
             // (`Arc<...Inner>`), so `&self` is sufficient on both.
             if let (Some(coord_arc), Some(commit_arc)) = (coord_handle.as_ref(), commit_handle.as_ref()) {
-                before.push(commit_arc.poll_with_coordinator(coord_arc.as_ref(), current_time_ms));
+                collected_before.push(commit_arc.poll_with_coordinator(coord_arc.as_ref(), current_time_ms));
             }
-            before.extend(entries_results); // heartbeat (if any)
-            (before, tail)
-        };
-        for mut poll_result in collected_before {
+            // `entries()` ordering with the three Arc-shared slots skipped
+            // is `heartbeat → offsets → topic_metadata → fetch → dyn`.
+            // `membership_boundary()` returns the heartbeat count (0 or 1):
+            // the leading `boundary` results join the before-batch (they are
+            // processed before `membership.reconcile`); the rest join the
+            // after-batch (processed in Phase 2.6, observing post-reconcile
+            // subscription-state updates within the SAME iteration — Java's
+            // invariant).
+            let boundary = rm_guard.membership_boundary();
+            for (i, rm) in rm_guard.entries().into_iter().enumerate() {
+                let result = rm.poll(current_time_ms);
+                if i < boundary {
+                    collected_before.push(result);
+                } else {
+                    collected_after.push(result);
+                }
+            }
+        }
+        for mut poll_result in collected_before.drain(..) {
             // Drain the try_connect slot BEFORE add_all_from_poll_result,
             // mirroring Java's tryConnect-then-addAll order inside the
             // manager body. `std::mem::take` swaps in an empty Vec
@@ -504,7 +525,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // swallowed — mirrors Java's `whenComplete` lambda which logs
         // errors thrown by transitionToFenced / transitionToFatal but
         // does not rethrow.
-        if let Some(membership) = self.membership.clone() {
+        if let Some(membership) = self.membership.as_ref() {
             let pending = {
                 let mut rm_guard = match self.request_managers.lock() {
                     Ok(g) => g,
@@ -544,7 +565,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         //
         // Failures are logged and swallowed, matching Java's
         // surrounding-runOnce `try { ... } catch (Throwable e) { log }`.
-        if let Some(membership) = self.membership.clone()
+        if let Some(membership) = self.membership.as_ref()
             && let Err(e) = membership.reconcile(current_time_ms, false).await
         {
             log::warn!("Membership reconcile failed: {}", e);
@@ -552,7 +573,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
         // topic_metadata, fetch, dyn) ────
-        for mut poll_result in collected_after {
+        for mut poll_result in collected_after.drain(..) {
             let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
             for node in try_connect_nodes {
                 delegate_guard.try_connect(&node, current_time_ms).await;
@@ -560,6 +581,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             let timeout_ms = delegate_guard.add_all_from_poll_result(poll_result, current_time_ms);
             poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
         }
+        // Restore the (now empty) scratch buffers for the next iteration —
+        // they retain their capacity, so steady state allocates nothing.
+        self.poll_results_before_scratch = collected_before;
+        self.poll_results_after_scratch = collected_after;
 
         // ──── Phase 4: poll the network client ────
         //
@@ -724,15 +749,24 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// We use `try_recv` in a `while let` loop instead of `recv().await`
     /// to mirror Java's `drainTo` (`consumer-threading.md` §10).
     fn process_application_events(&mut self) {
-        let mut envelopes: Vec<ApplicationEventEnvelope> = Vec::new();
+        // Phase 28: drain into a scratch buffer reused across iterations
+        // (taken/restored so `&mut self` stays available to the dispatch
+        // body). Java drains into a fresh LinkedList the GC nursery
+        // absorbs; a heap Vec per iteration was the Rust translation
+        // artifact. Buffering before dispatch (rather than dispatching
+        // straight out of `try_recv`) is behavior Java relies on: events
+        // enqueued DURING dispatch wait for the next iteration.
+        let mut envelopes = std::mem::take(&mut self.app_event_drain_scratch);
+        debug_assert!(envelopes.is_empty());
         while let Ok(env) = self.application_event_rx.try_recv() {
             envelopes.push(env);
         }
         if envelopes.is_empty() {
+            self.app_event_drain_scratch = envelopes;
             return;
         }
 
-        for env in envelopes {
+        for env in envelopes.drain(..) {
             // 1. Register with the reaper if completable. The Java
             // `CompletableEvent` interface check is replaced by the
             // `erased_handle()` accessor on [`ApplicationEvent`].
@@ -788,6 +822,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // surrounding tokio::spawn entry point owns the catch.
             self.application_event_processor.process(env.event);
         }
+        // Restore the (drained) scratch buffer; capacity retained.
+        self.app_event_drain_scratch = envelopes;
     }
 
     /// Test-only helper that pushes an erased handle directly onto
