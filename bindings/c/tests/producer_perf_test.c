@@ -598,6 +598,15 @@ static void metrics_rollover(Metrics* m) {
     m->last_cpu = cpu_max;
     m->last_rss = rss_max;
 
+    // Accumulate CPU/RSS into the run summary over the MEASURED interval only
+    // (measurement started and not yet ended); warmup/cooldown windows are
+    // excluded. Under the mutex so the measurement markers are read race-free.
+    if (m->measurement_start_ms != LONG_MIN && m->measurement_end_ms == LONG_MIN) {
+        m->total_external_metrics++;
+        m->total_cpu += cpu;
+        m->total_rss += (double)rss;
+    }
+
     // Per-window latency percentiles, then reset the window histogram.
     long lat_p50 = percentile_from_hist(m->latency_pct_hist, MAX_LATENCY_MS + 2, 0.50);
     long lat_p90 = percentile_from_hist(m->latency_pct_hist, MAX_LATENCY_MS + 2, 0.90);
@@ -724,10 +733,9 @@ static void* metrics_thread_func(void* arg) {
     while (m->running) {
         sleep(1);
         if (m->running) {
+            // Cumulative CPU/RSS for the summary are accumulated inside
+            // metrics_rollover, scoped to the measured interval only.
             metrics_rollover(m);
-            m->total_external_metrics++;
-            m->total_cpu += m->last_cpu;
-            m->total_rss += m->last_rss;
         }
     }
     return NULL;

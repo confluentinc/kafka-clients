@@ -65,7 +65,8 @@ TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java>}"
 REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 
 echo "== apt: base packages =="
-sudo apt update && sudo apt install -y wget curl git unzip build-essential cmake pkg-config \
+# zip is required by the sdkman installer (java path); unzip by the repo extract.
+sudo apt update && sudo apt install -y wget curl git unzip zip build-essential cmake pkg-config \
   tmux gnupg ca-certificates
 
 if [ "$TEST" = "java" ]; then
