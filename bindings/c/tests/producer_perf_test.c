@@ -1422,9 +1422,6 @@ int main(int argc, char** argv) {
                 buffer_memory_bytes = 1000000;
             }
         }
-        if (max_request_size_bytes > 8 * 1024 * 1024) {
-            max_request_size_bytes = 8 * 1024 * 1024;
-        }
     } else {
         long max_bytes = BUFFER_MEMORY_MB > 0 ? BUFFER_MEMORY_MB * 1024L * 1024L : BUFFER_MEMORY_MB;
         buffer_memory_bytes = max_bytes > INT_MAX ? INT_MAX : max_bytes;
@@ -1432,8 +1429,11 @@ int main(int argc, char** argv) {
         if (MAX_REQUEST_SIZE_KB > 0) {
             max_request_size_bytes = MAX_REQUEST_SIZE_KB * 1024L;
         } else {
-            max_request_size_bytes = batch_size_bytes * 2;
+            max_request_size_bytes = batch_size_bytes * 64L;
         }
+    }
+    if (max_request_size_bytes > 8 * 1024 * 1024) {
+        max_request_size_bytes = 8 * 1024 * 1024;
     }
 
     printf("Key size: %ld bytes\n", KEY_SIZE);

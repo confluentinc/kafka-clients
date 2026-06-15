@@ -8,3 +8,4 @@ venv
 COMMENTS\.[0-9]*\.md
 COMMENTS\.TBR\.[0-9]*\.md
 /coverage
+*.env
