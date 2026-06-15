@@ -20,7 +20,10 @@ def read_metrics(jsonl_file):
     latency_max_values = []
     throughput_values = []  # MB/s
     msg_rate_values = []  # messages/s
-    
+    # Per-window flag: True only for windows inside the measured interval, i.e.
+    # measurement_start_ms is set (not "-inf") and measurement_end_ms is "-inf".
+    measured_flags = []
+
     # Store raw data for rolling window calculation
     raw_data = []
     
@@ -96,7 +99,10 @@ def read_metrics(jsonl_file):
         latency_max_values.append(latency_max)
         throughput_values.append(throughput_mbs)
         msg_rate_values.append(msg_rate)
-    
+        measured_flags.append(
+            measurement_start_data_ms != '-inf' and measurement_end_data_ms == '-inf'
+        )
+
     # Calculate efficiency metrics
     cpu_efficiency_values = []
     memory_efficiency_values = []
@@ -117,7 +123,7 @@ def read_metrics(jsonl_file):
             mem_eff = 0
         memory_efficiency_values.append(mem_eff)
     
-    return timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values
+    return timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags
 
 def plot_rss_metrics(timestamps, rss_max_values):
     """Create a matplotlib plot of RSS max values over time."""
@@ -313,8 +319,24 @@ def plot_memory_efficiency_metrics(timestamps, memory_efficiency_values):
     
     return image_base64
 
-def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values):
+def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags):
     """Create a markdown report with embedded base64 image."""
+    # Restrict the overall statistics and data-point counts to the measured
+    # interval only: windows where measurement_start_ms is set (not "-inf") and
+    # measurement_end_ms is still "-inf". Warmup/pre-measurement windows and the
+    # closing marker (plus any trailing windows) are excluded. The plotted time
+    # series above still show every window.
+    def _measured(values):
+        return [v for v, keep in zip(values, measured_flags) if keep]
+    rss_max_values = _measured(rss_max_values)
+    cpu_max_values = _measured(cpu_max_values)
+    latency_avg_values = _measured(latency_avg_values)
+    latency_max_values = _measured(latency_max_values)
+    throughput_values = _measured(throughput_values)
+    msg_rate_values = _measured(msg_rate_values)
+    cpu_efficiency_values = _measured(cpu_efficiency_values)
+    memory_efficiency_values = _measured(memory_efficiency_values)
+
     # Calculate some statistics
     # Calculate RSS statistics
     if rss_max_values:
@@ -492,7 +514,7 @@ def main():
         output_file = sys.argv[2]
     
     print(f"Reading metrics from {jsonl_file}...")
-    timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values = read_metrics(jsonl_file)
+    timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags = read_metrics(jsonl_file)
     
     print(f"Found {len(timestamps)} data points")
     print("Creating RSS plot...")
@@ -517,7 +539,7 @@ def main():
     memory_efficiency_image_base64 = plot_memory_efficiency_metrics(timestamps, memory_efficiency_values)
     
     print("Generating markdown report...")
-    markdown_content = create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values)
+    markdown_content = create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags)
     
     with open(output_file, 'w') as f:
         f.write(markdown_content)

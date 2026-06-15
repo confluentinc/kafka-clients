@@ -93,6 +93,12 @@ const GENERATED_MESSAGES: usize = 10_000;
 /// test's own memory footprint flat so it doesn't pollute the RSS measurement.
 const MAX_LATENCY_MS: usize = 10_000;
 
+/// Seconds to keep sampling metrics after the last message's response, so the
+/// JSONL captures post-measurement (cooldown) windows. Mirrors the C test's
+/// trailing wait. These windows carry `measurement_end_ms`, so they appear in
+/// the plot but are excluded from the measured-interval statistics.
+const POST_TEST_AWAIT_SECONDS: u64 = 10;
+
 /// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
 /// utime/stime into CPU seconds. Effectively always 100 on Linux.
 const USER_HZ: f64 = 100.0;
@@ -465,7 +471,7 @@ fn rollover_line(
     msg_size: u64,
     window_start_ms: u128,
     window_end_ms: u128,
-    measurement_start_ms: u128,
+    measurement_start_ms: Option<u128>,
     measurement_end_ms: Option<u128>,
 ) -> String {
     // Single CPU/RSS sample per window ⇒ average == max == the sample.
@@ -484,7 +490,7 @@ fn rollover_line(
         "messages": bucket_json(if n > 0 { 1.0 } else { 0.0 }, if n > 0 { 1.0 } else { 0.0 }, n as f64, n),
         "window_start_ms": window_start_ms.to_string(),
         "window_end_ms": window_end_ms.to_string(),
-        "measurement_start_ms": measurement_start_ms.to_string(),
+        "measurement_start_ms": measurement_start_ms.map(|v| v.to_string()).unwrap_or_else(|| "-inf".to_string()),
         "measurement_end_ms": measurement_end_ms.map(|v| v.to_string()).unwrap_or_else(|| "-inf".to_string()),
     });
     line.to_string()
@@ -620,8 +626,68 @@ async fn producer_perf_test() {
     let verified = Arc::new(AtomicU64::new(0));
     let latency_hist: Arc<Vec<AtomicU64>> = Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
 
+    // === METRICS COLLECTOR ===
+    // Spawned BEFORE warmup so the rollover JSONL also captures warmup windows
+    // (measurement_start_ms = -inf) and the post-test cooldown windows
+    // (measurement_end_ms set). The measured interval is delimited by the
+    // `meas_start` / `meas_end` atomics (0 = unset → "-inf" in the JSONL); a
+    // window counts as measured only while start is set and end is not.
+    let meas_start = Arc::new(AtomicU64::new(0));
+    let meas_end = Arc::new(AtomicU64::new(0));
+    let metrics_for_collector = Arc::clone(&metrics);
+    let metrics_cumul = Arc::clone(&cumulative);
+    let metrics_stop = Arc::clone(&should_stop);
+    let meas_start_collector = Arc::clone(&meas_start);
+    let meas_end_collector = Arc::clone(&meas_end);
+    let metrics_file = config.metrics_file.clone();
+    let metrics_task = tokio::spawn(async move {
+        let mut file = std::fs::File::create(&metrics_file).expect("Failed to create metrics file");
+        let mut sampler = ProcSampler::new();
+        let mut window_start_ms = now_ms();
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let stopping = metrics_stop.load(Ordering::Relaxed);
+
+            let snap = metrics_for_collector.snapshot_and_reset();
+            let (cpu, rss) = sampler.sample();
+            let window_end_ms = now_ms();
+
+            let start = meas_start_collector.load(Ordering::Relaxed);
+            let end = meas_end_collector.load(Ordering::Relaxed);
+            // The JSONL line below is written for every window (warmup, measured,
+            // cooldown), but the run SUMMARY must reflect only the measured
+            // interval: accumulate CPU/RSS only while measurement_start is set
+            // and measurement_end is not (between meas_start and the last
+            // response). Warmup and cooldown windows are excluded.
+            if start != 0 && end == 0 {
+                metrics_cumul.accumulate(cpu, rss);
+            }
+
+            let line = rollover_line(
+                &snap,
+                cpu,
+                rss,
+                message_size,
+                window_start_ms,
+                window_end_ms,
+                if start == 0 { None } else { Some(start as u128) },
+                if end == 0 { None } else { Some(end as u128) },
+            );
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+            window_start_ms = window_end_ms;
+
+            if stopping {
+                break;
+            }
+        }
+    });
+
     // === WARMUP ===
-    // Send one record, await + verify it, sleep 100 ms between.
+    // Send one record, await + verify it, sleep 100 ms between. The collector is
+    // already running, so warmup windows appear in the JSONL with
+    // measurement_start_ms = -inf (excluded from the measured statistics).
     if config.warmup_seconds > 0 {
         println!("Warming up for {} seconds ...", config.warmup_seconds);
         let warmup_end = Instant::now() + Duration::from_secs(config.warmup_seconds);
@@ -648,68 +714,10 @@ async fn producer_perf_test() {
 
     // === MEASURED INTERVAL ===
     let test_start = Instant::now();
-    let measurement_start_ms = now_ms();
+    // Mark the measured interval start; the collector picks this up on its next
+    // window. `meas_end` is set when the last message's response is received.
+    meas_start.store(now_ms() as u64, Ordering::Relaxed);
     let test_duration = Duration::from_secs(config.test_duration_seconds);
-
-    // -- metrics collector task: snapshot every 1 s, write rollover JSONL.
-    // It is silent and only writes the metrics file.
-    let metrics_for_collector = Arc::clone(&metrics);
-    let metrics_cumul = Arc::clone(&cumulative);
-    let metrics_stop = Arc::clone(&should_stop);
-    let metrics_file = config.metrics_file.clone();
-    let metrics_task = tokio::spawn(async move {
-        let mut file = std::fs::File::create(&metrics_file).expect("Failed to create metrics file");
-        let mut sampler = ProcSampler::new();
-        let mut window_start_ms = measurement_start_ms;
-
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let stopping = metrics_stop.load(Ordering::Relaxed);
-
-            let snap = metrics_for_collector.snapshot_and_reset();
-            let (cpu, rss) = sampler.sample();
-            let window_end_ms = now_ms();
-
-            metrics_cumul.accumulate(cpu, rss);
-
-            // Emit the data window with measurement_end = -inf so the plotter
-            // counts its bytes/messages in the throughput calculation.
-            let line = rollover_line(
-                &snap,
-                cpu,
-                rss,
-                message_size,
-                window_start_ms,
-                window_end_ms,
-                measurement_start_ms,
-                None,
-            );
-            let _ = writeln!(file, "{line}");
-            window_start_ms = window_end_ms;
-
-            if stopping {
-                // Closing marker: a dataless window carrying measurement_end_ms.
-                // The plotter reads the end from here and stops accumulating,
-                // so no measured data is lost.
-                let marker_end_ms = now_ms();
-                let empty = MetricsSnapshot { messages: 0, bytes: 0, total_latency_us: 0, max_latency_us: 0 };
-                let marker = rollover_line(
-                    &empty,
-                    cpu,
-                    rss,
-                    message_size,
-                    window_start_ms,
-                    marker_end_ms,
-                    measurement_start_ms,
-                    Some(marker_end_ms),
-                );
-                let _ = writeln!(file, "{marker}");
-                let _ = file.flush();
-                break;
-            }
-            let _ = file.flush();
-        }
-    });
 
     // -- send loop --
     // Rate limiting: every `limit_rps` messages, sleep until the
@@ -730,6 +738,7 @@ async fn producer_perf_test() {
     let latency_hist_for_completion = Arc::clone(&latency_hist);
     let topic_for_completion = topic.clone();
     let do_verify = config.do_verify;
+    let meas_end_completion = Arc::clone(&meas_end);
     let record_completed_calls_loop = tokio::spawn(async move {
         let record_completed_calls = |result: Result<RecordMetadata, _>, start_time: Instant| {
             match result {
@@ -749,15 +758,8 @@ async fn producer_perf_test() {
                     eprintln!("Produce call resulted in exception: {e:?}");
                 },
             }
-            let n = completed_messages_for_completion.fetch_add(1, Ordering::Relaxed) + 1;
+            completed_messages_for_completion.fetch_add(1, Ordering::Relaxed);
             in_flight_for_completion.fetch_sub(1, Ordering::Relaxed);
-            // Periodic progress line.
-            if n % 10000 == 0 {
-                let secs = test_start.elapsed().as_secs_f64();
-                let rate = if secs > 0.0 { n as f64 / secs } else { 0.0 };
-                print!("\rCompleted messages: {n}. Rate so far: {rate:.2} msg/s");
-                let _ = std::io::stdout().flush();
-            }
         };
 
         // Process completions in send order, one future at a time — mirrors the
@@ -771,6 +773,9 @@ async fn producer_perf_test() {
             let result = produce_call.get_timeout(Duration::from_secs(60)).await;
             record_completed_calls(result, start_time);
         }
+        // The channel is closed and drained: the response for the last message
+        // sent has just been received, so mark the end of the measured interval.
+        meas_end_completion.store(now_ms() as u64, Ordering::Relaxed);
     });
 
     loop {
@@ -819,11 +824,15 @@ async fn producer_perf_test() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let _ = record_completed_calls_loop.await;
-    // Measured time spans the send loop + drain, captured before producer
-    // close / metrics teardown.
+    // Measured time spans the send loop + drain, captured before the cooldown.
+    // (`meas_end` was set inside the completion task on the last response.)
     let measured_secs = test_start.elapsed().as_secs_f64();
 
-    // Final snapshot folded into a closing metrics window.
+    // Post-test await: keep the collector sampling for a short cooldown so the
+    // JSONL captures post-measurement windows. They carry measurement_end_ms and
+    // are excluded from the measured statistics but appear in the plot.
+    println!("Waiting for final metrics collection...");
+    tokio::time::sleep(Duration::from_secs(POST_TEST_AWAIT_SECONDS)).await;
     should_stop.store(true, Ordering::Relaxed);
     let _ = metrics_task.await;
 
