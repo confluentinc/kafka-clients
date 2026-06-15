@@ -11,6 +11,17 @@ from datetime import datetime
 import base64
 from io import BytesIO
 
+# Optional per-window latency percentiles, plotted/reported when present in the
+# JSONL "latency" object, e.g. {"p50": "...", "p90": "...", "p99": "...", "p999": "..."}.
+LATENCY_PERCENTILES = ["p50", "p90", "p99", "p999"]
+
+
+def _to_float(v):
+    """Parse a metrics string value; treat missing / '-inf' / 0 as 0.0."""
+    if v is None or v == '-inf' or v == 0 or v == '0':
+        return 0.0
+    return float(v)
+
 def read_metrics(jsonl_file):
     """Read JSONL file and extract RSS max, CPU max, latency, throughput, and timestamp data."""
     timestamps = []
@@ -23,6 +34,10 @@ def read_metrics(jsonl_file):
     # Per-window flag: True only for windows inside the measured interval, i.e.
     # measurement_start_ms is set (not "-inf") and measurement_end_ms is "-inf".
     measured_flags = []
+    # Optional latency percentiles, collected per window for those present in the
+    # data; pruned after the loop to only the percentiles that actually appeared.
+    latency_pcts = {k: [] for k in LATENCY_PERCENTILES}
+    latency_pct_present = {k: False for k in LATENCY_PERCENTILES}
 
     # Store raw data for rolling window calculation
     raw_data = []
@@ -102,6 +117,15 @@ def read_metrics(jsonl_file):
         measured_flags.append(
             measurement_start_data_ms != '-inf' and measurement_end_data_ms == '-inf'
         )
+        # Optional latency percentiles, one entry per window (0.0 if absent).
+        lat_obj = data.get('latency', {})
+        for _k in LATENCY_PERCENTILES:
+            if _k in lat_obj:
+                latency_pct_present[_k] = True
+            latency_pcts[_k].append(_to_float(lat_obj.get(_k)))
+
+    # Keep only the percentiles that appeared in at least one window.
+    latency_pcts = {k: v for k, v in latency_pcts.items() if latency_pct_present[k]}
 
     # Calculate efficiency metrics
     cpu_efficiency_values = []
@@ -123,7 +147,7 @@ def read_metrics(jsonl_file):
             mem_eff = 0
         memory_efficiency_values.append(mem_eff)
     
-    return timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags
+    return timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts
 
 def plot_rss_metrics(timestamps, rss_max_values):
     """Create a matplotlib plot of RSS max values over time."""
@@ -182,19 +206,25 @@ def plot_cpu_metrics(timestamps, cpu_max_values):
     
     return image_base64
 
-def plot_latency_metrics(timestamps, latency_avg_values, latency_max_values):
-    """Create a matplotlib plot of latency average and max values over time."""
+def plot_latency_metrics(timestamps, latency_avg_values, latency_max_values, latency_pcts=None):
+    """Create a matplotlib plot of latency average/max (and percentiles if present) over time."""
     # Convert timestamps to relative seconds for better readability
     if timestamps:
         start_time = timestamps[0]
         relative_times = [(ts - start_time) / 1000.0 for ts in timestamps]
     else:
         relative_times = []
-    
+
     # Create the plot
     plt.figure(figsize=(12, 6))
     plt.plot(relative_times, latency_avg_values, marker='o', linestyle='-', linewidth=1, markersize=3, color='green', label='Average Latency')
     plt.plot(relative_times, latency_max_values, marker='s', linestyle='-', linewidth=1, markersize=3, color='red', label='Max Latency')
+    # Optional per-window percentiles, drawn only for those present in the data.
+    pct_colors = {"p50": "tab:blue", "p90": "tab:orange", "p99": "tab:purple", "p999": "tab:brown"}
+    for k in LATENCY_PERCENTILES:
+        if latency_pcts and k in latency_pcts:
+            plt.plot(relative_times, latency_pcts[k], marker='.', linestyle='--', linewidth=1,
+                     markersize=2, color=pct_colors.get(k), label=k)
     plt.xlabel('Time (seconds)', fontsize=12)
     plt.ylabel('Latency (ms)', fontsize=12)
     plt.title('Latency Over Time', fontsize=14, fontweight='bold')
@@ -319,7 +349,7 @@ def plot_memory_efficiency_metrics(timestamps, memory_efficiency_values):
     
     return image_base64
 
-def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags):
+def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts=None):
     """Create a markdown report with embedded base64 image."""
     # Restrict the overall statistics and data-point counts to the measured
     # interval only: windows where measurement_start_ms is set (not "-inf") and
@@ -368,7 +398,27 @@ def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_bas
         avg_latency_max = sum(latency_max_values) / len(latency_max_values)
     else:
         max_latency_max = min_latency_max = avg_latency_max = 0
-    
+
+    # Latency percentile statistics (measured windows only), for whichever
+    # percentiles are present in the data. Rendered into the Latency section.
+    latency_pct_block = ""
+    for k in LATENCY_PERCENTILES:
+        if not latency_pcts or k not in latency_pcts:
+            continue
+        vals = _measured(latency_pcts[k])
+        if not vals:
+            continue
+        nz = [v for v in vals if v > 0]
+        pmax = max(vals)
+        pmin = min(nz) if nz else 0
+        pavg = sum(vals) / len(vals)
+        latency_pct_block += (
+            f"\n#### {k}\n"
+            f"- **Maximum**: {pmax:.2f} ms\n"
+            f"- **Minimum**: {pmin:.2f} ms\n"
+            f"- **Average**: {pavg:.2f} ms\n"
+        )
+
     # Calculate throughput statistics
     if throughput_values:
         max_throughput = max(throughput_values)
@@ -444,7 +494,7 @@ Performance test metrics over time.
 - **Maximum**: {max_latency_max:.2f} ms
 - **Minimum**: {min_latency_max:.2f} ms
 - **Average**: {avg_latency_max:.2f} ms
-
+{latency_pct_block}
 - **Total Data Points**: {len(latency_avg_values)}
 
 ## Throughput
@@ -514,7 +564,7 @@ def main():
         output_file = sys.argv[2]
     
     print(f"Reading metrics from {jsonl_file}...")
-    timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags = read_metrics(jsonl_file)
+    timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts = read_metrics(jsonl_file)
     
     print(f"Found {len(timestamps)} data points")
     print("Creating RSS plot...")
@@ -524,7 +574,7 @@ def main():
     cpu_image_base64 = plot_cpu_metrics(timestamps, cpu_max_values)
     
     print("Creating Latency plot...")
-    latency_image_base64 = plot_latency_metrics(timestamps, latency_avg_values, latency_max_values)
+    latency_image_base64 = plot_latency_metrics(timestamps, latency_avg_values, latency_max_values, latency_pcts)
     
     print("Creating Throughput plot...")
     throughput_image_base64 = plot_throughput_metrics(timestamps, throughput_values)
@@ -539,7 +589,7 @@ def main():
     memory_efficiency_image_base64 = plot_memory_efficiency_metrics(timestamps, memory_efficiency_values)
     
     print("Generating markdown report...")
-    markdown_content = create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags)
+    markdown_content = create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts)
     
     with open(output_file, 'w') as f:
         f.write(markdown_content)

@@ -264,6 +264,9 @@ struct Metrics {
     bytes_sent: AtomicU64,
     total_latency_us: AtomicU64,
     max_latency_us: AtomicU64,
+    // Per-window latency histogram (ms resolution) for the p50/p90/p99/p999
+    // percentiles emitted each window; read-and-reset on every rollover.
+    latency_hist: Vec<AtomicU64>,
 }
 
 impl Metrics {
@@ -273,6 +276,7 @@ impl Metrics {
             bytes_sent: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
             max_latency_us: AtomicU64::new(0),
+            latency_hist: (0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
@@ -281,14 +285,23 @@ impl Metrics {
         self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
         self.total_latency_us.fetch_add(latency_us, Ordering::Relaxed);
         self.max_latency_us.fetch_max(latency_us, Ordering::Relaxed);
+        let ms = (latency_us / 1000) as usize;
+        self.latency_hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
     }
 
     fn snapshot_and_reset(&self) -> MetricsSnapshot {
+        // Read-and-reset the per-window latency histogram, then derive percentiles.
+        let counts: Vec<u64> =
+            self.latency_hist.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
         MetricsSnapshot {
             messages: self.messages_sent.swap(0, Ordering::Relaxed),
             bytes: self.bytes_sent.swap(0, Ordering::Relaxed),
             total_latency_us: self.total_latency_us.swap(0, Ordering::Relaxed),
             max_latency_us: self.max_latency_us.swap(0, Ordering::Relaxed),
+            p50_ms: percentile_from_counts(&counts, 0.50),
+            p90_ms: percentile_from_counts(&counts, 0.90),
+            p99_ms: percentile_from_counts(&counts, 0.99),
+            p999_ms: percentile_from_counts(&counts, 0.999),
         }
     }
 }
@@ -298,6 +311,10 @@ struct MetricsSnapshot {
     bytes: u64,
     total_latency_us: u64,
     max_latency_us: u64,
+    p50_ms: u64,
+    p90_ms: u64,
+    p99_ms: u64,
+    p999_ms: u64,
 }
 
 impl MetricsSnapshot {
@@ -480,7 +497,16 @@ fn rollover_line(
     let line = serde_json::json!({
         "rss": bucket_json(rss_f, rss_f, rss_f, 1),
         "cpu": bucket_json(cpu, cpu, cpu, 1),
-        "latency": bucket_json(snap.avg_latency_ms(), snap.max_latency_ms(), snap.total_latency_ms(), n),
+        "latency": {
+            "average": snap.avg_latency_ms().to_string(),
+            "max": snap.max_latency_ms().to_string(),
+            "total": snap.total_latency_ms().to_string(),
+            "count": n.to_string(),
+            "p50": snap.p50_ms.to_string(),
+            "p90": snap.p90_ms.to_string(),
+            "p99": snap.p99_ms.to_string(),
+            "p999": snap.p999_ms.to_string(),
+        },
         "bytes": bucket_json(
             if n > 0 { msg_size as f64 } else { 0.0 },
             if n > 0 { msg_size as f64 } else { 0.0 },
@@ -514,6 +540,23 @@ fn percentile_from_hist(hist: &[AtomicU64], p: f64) -> u64 {
         }
     }
     (hist.len() - 1) as u64
+}
+
+/// Percentile (0.0..=1.0) in ms from a plain per-window count histogram.
+fn percentile_from_counts(counts: &[u64], p: f64) -> u64 {
+    let total: u64 = counts.iter().sum();
+    if total == 0 {
+        return 0;
+    }
+    let target = (total as f64 * p).ceil() as u64;
+    let mut cum = 0u64;
+    for (ms, &c) in counts.iter().enumerate() {
+        cum += c;
+        if cum >= target {
+            return ms as u64;
+        }
+    }
+    (counts.len() - 1) as u64
 }
 
 // ---------------------------------------------------------------------------

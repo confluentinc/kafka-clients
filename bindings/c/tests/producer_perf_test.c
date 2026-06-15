@@ -148,6 +148,9 @@ typedef struct {
 typedef struct {
     FILE* file;
     Bucket latency;
+    // Per-window latency histogram (ms resolution) for the p50/p90/p99/p999
+    // percentiles emitted each window; reset on every rollover.
+    long latency_pct_hist[MAX_LATENCY_MS + 2];
     Bucket bytes;
     Bucket messages;
     Bucket rss;
@@ -545,6 +548,8 @@ static char *metrics_print_long(long f) {
     return str;
 }
 
+static long percentile_from_hist(const long* hist, size_t len, double p);
+
 static void metrics_rollover(Metrics* m) {
     pthread_mutex_lock(&m->mutex);
 
@@ -593,6 +598,13 @@ static void metrics_rollover(Metrics* m) {
     m->last_cpu = cpu_max;
     m->last_rss = rss_max;
 
+    // Per-window latency percentiles, then reset the window histogram.
+    long lat_p50 = percentile_from_hist(m->latency_pct_hist, MAX_LATENCY_MS + 2, 0.50);
+    long lat_p90 = percentile_from_hist(m->latency_pct_hist, MAX_LATENCY_MS + 2, 0.90);
+    long lat_p99 = percentile_from_hist(m->latency_pct_hist, MAX_LATENCY_MS + 2, 0.99);
+    long lat_p999 = percentile_from_hist(m->latency_pct_hist, MAX_LATENCY_MS + 2, 0.999);
+    memset(m->latency_pct_hist, 0, sizeof(m->latency_pct_hist));
+
     // Reset buckets
     bucket_init(&m->latency);
     bucket_init(&m->bytes);
@@ -617,6 +629,10 @@ static void metrics_rollover(Metrics* m) {
     char *lat_max_str = metrics_print_double(lat_max);
     char *lat_total_str = metrics_print_double(lat_total);
     char *lat_count_str = metrics_print_long(lat_count);
+    char *lat_p50_str = metrics_print_long(lat_p50);
+    char *lat_p90_str = metrics_print_long(lat_p90);
+    char *lat_p99_str = metrics_print_long(lat_p99);
+    char *lat_p999_str = metrics_print_long(lat_p999);
 
     char *bytes_avg_str = metrics_print_double(bytes_avg);
     char *bytes_max_str = metrics_print_double(bytes_max);
@@ -637,7 +653,8 @@ static void metrics_rollover(Metrics* m) {
     fprintf(m->file,
         "{\"rss\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\"},"
         "\"cpu\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\"},"
-        "\"latency\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\"},"
+        "\"latency\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\","
+        "\"p50\":\"%s\",\"p90\":\"%s\",\"p99\":\"%s\",\"p999\":\"%s\"},"
         "\"bytes\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\"},"
         "\"messages\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\"},"
         "\"window_start_ms\":\"%s\",\"window_end_ms\":\"%s\","
@@ -645,6 +662,7 @@ static void metrics_rollover(Metrics* m) {
         rss_avg_str, rss_max_str, rss_total_str, rss_count_str,
         cpu_avg_str, cpu_max_str, cpu_total_str, cpu_count_str,
         lat_avg_str, lat_max_str, lat_total_str, lat_count_str,
+        lat_p50_str, lat_p90_str, lat_p99_str, lat_p999_str,
         bytes_avg_str, bytes_max_str, bytes_total_str, bytes_count_str,
         msgs_avg_str, msgs_max_str, msgs_total_str, msgs_count_str,
         current_window_start_str, window_start_ms_str,
@@ -666,6 +684,10 @@ static void metrics_rollover(Metrics* m) {
     free(lat_max_str);
     free(lat_total_str);
     free(lat_count_str);
+    free(lat_p50_str);
+    free(lat_p90_str);
+    free(lat_p99_str);
+    free(lat_p999_str);
 
     free(bytes_avg_str);
     free(bytes_max_str);
@@ -728,6 +750,10 @@ static void metrics_stop_collecting(Metrics* m) {
 static void metrics_add_latency(Metrics* m, double latency_ms) {
     pthread_mutex_lock(&m->mutex);
     bucket_add(&m->latency, latency_ms);
+    long idx = (long)latency_ms;
+    if (idx < 0) idx = 0;
+    if (idx > MAX_LATENCY_MS + 1) idx = MAX_LATENCY_MS + 1;
+    m->latency_pct_hist[idx]++;
     pthread_mutex_unlock(&m->mutex);
 }
 

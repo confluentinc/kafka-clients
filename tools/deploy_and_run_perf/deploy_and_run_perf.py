@@ -61,10 +61,41 @@ DEFAULT_PLOT = os.path.join(REPO_ROOT, "tools", "performance_metrics_plot", "plo
 BOOTSTRAP_SH = r"""#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java>}"
+REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 
 echo "== apt: base packages =="
-sudo apt update && sudo apt install -y wget git unzip build-essential cmake pkg-config rustup tmux \
-  python3.13 python3-venv python3-dev gnupg ca-certificates
+sudo apt update && sudo apt install -y wget curl git unzip build-essential cmake pkg-config \
+  tmux gnupg ca-certificates
+
+if [ "$TEST" = "java" ]; then
+  # Java toolchain via sdkman: Corretto JDK + Gradle, then build the perf jar.
+  export SDKMAN_DIR="$HOME/.sdkman"
+  if [ ! -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]; then
+    curl -s "https://get.sdkman.io?rcupdate=false" | bash
+  fi
+  mkdir -p "$SDKMAN_DIR/etc"
+  grep -q sdkman_auto_answer "$SDKMAN_DIR/etc/config" 2>/dev/null \
+    || echo "sdkman_auto_answer=true" >> "$SDKMAN_DIR/etc/config"
+  set +u
+  source "$SDKMAN_DIR/bin/sdkman-init.sh"
+  # Newest Corretto 21 sdkman offers (Gradle 8.x runs on <= 21; the perf jar
+  # targets Java 17). Fall back to a known version if listing fails.
+  JAVA_ID=$(sdk list java 2>/dev/null | tr -d '\r' | grep -oE '21\.[0-9]+\.[0-9]+-amzn' | head -n1)
+  [ -z "${JAVA_ID:-}" ] && JAVA_ID="21.0.5-amzn"
+  echo "Installing Corretto $JAVA_ID + Gradle 8.4 via sdkman ..."
+  sdk install java "$JAVA_ID"
+  sdk use java "$JAVA_ID"
+  sdk install gradle 8.4
+  set -u
+  echo "== Building Java perf jar in $REPO/tools/java-perf-test =="
+  ( cd "$REPO/tools/java-perf-test" && gradle shadowJar --console=plain )
+  echo "== Bootstrap complete (java) =="
+  exit 0
+fi
+
+# Rust / C backends: rustup + librdkafka (Confluent) + build the Rust lib & C test.
+sudo apt install -y rustup
 rustup default stable
 
 echo "== Confluent clients apt repo + librdkafka-dev =="
@@ -86,7 +117,6 @@ printf 'Package: librdkafka*\nPin: origin packages.confluent.io\nPin-Priority: 1
 sudo apt update && sudo apt install -y librdkafka-dev
 apt-cache policy librdkafka-dev
 
-REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 echo "== Building Rust (FFI, release) + C producer_perf_test in $REPO =="
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -132,8 +162,17 @@ case "$TEST" in
     mkdir -p "$RESULTS/c-v2"
     ( cd "$RESULTS/c-v2" && CLIENT_VERSION=2 "$REPO/bindings/c/build/producer_perf_test" )
     ;;
+  java)
+    echo "######## Java producer perf test (Apache Kafka client) ########"
+    export SDKMAN_DIR="$HOME/.sdkman"
+    set +u
+    [ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ] && source "$SDKMAN_DIR/bin/sdkman-init.sh"
+    set -u
+    mkdir -p "$RESULTS/java"
+    ( cd "$RESULTS/java" && java -jar "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar" )
+    ;;
   *)
-    echo "unknown test: $TEST (expected rust-native|c-v2|c-v3)" >&2
+    echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java)" >&2
     exit 2
     ;;
 esac
@@ -209,11 +248,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("host", help="SSH target, e.g. user@host")
-    p.add_argument("--test", required=True, choices=["rust-native", "c-v2", "c-v3"],
+    p.add_argument("--test", required=True, choices=["rust-native", "c-v2", "c-v3", "java"],
                    help="which single test to run. Only one runs per invocation, since the "
                         "env vars (in --env-file) can differ per test: "
                         "rust-native = Rust client in-process; "
-                        "c-v2 = librdkafka; c-v3 = Rust client via C FFI.")
+                        "c-v2 = librdkafka; c-v3 = Rust client via C FFI; "
+                        "java = Apache Kafka Java client (tools/java-perf-test, built with "
+                        "Corretto + Gradle via sdkman).")
     p.add_argument("--env-file", default=os.path.join(WORKSPACE, ".env"),
                    help="parameters file sourced for the run (default: <repo-parent>/.env)")
     p.add_argument("--repo-dir", default=REPO_ROOT,
@@ -292,7 +333,7 @@ def main():
     ssh(host, f"cat > {shlex.quote(base)}/bootstrap.sh", ssh_opts, stdin=BOOTSTRAP_SH)
     ssh(host, f"cat > {shlex.quote(base)}/run-perf.sh", ssh_opts, stdin=RUN_PERF_SH)
     ssh(host, f"chmod +x {shlex.quote(base)}/bootstrap.sh {shlex.quote(base)}/run-perf.sh", ssh_opts)
-    ssh(host, f"bash {shlex.quote(base)}/bootstrap.sh", ssh_opts, tty=True)
+    ssh(host, f"bash {shlex.quote(base)}/bootstrap.sh {shlex.quote(args.test)}", ssh_opts, tty=True)
 
     # 5. Launch the selected test in a detached tmux session.
     print(f"==> [5/5] Launching '{args.test}' in detached tmux session 'perftest'")
