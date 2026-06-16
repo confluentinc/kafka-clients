@@ -30,6 +30,7 @@ use super::KafkaSend;
 use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
+use super::authentication_error::is_authentication_error;
 use super::channel_state::State;
 use super::{ChannelState, channel_state};
 use super::{InterestOps, TransportLayer};
@@ -192,10 +193,23 @@ impl KafkaChannel {
         .await;
 
         if let Err(e) = result {
-            let remote_desc = self.remote_address.map(|a| a.to_string());
-            self.state = ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
-            if authenticating {
-                self.delay_close_on_authentication_failure();
+            // Mirror Java's `catch (AuthenticationException)` in
+            // KafkaChannel.prepare(): only genuine authentication failures
+            // (typed `AuthenticationError`) move the channel to
+            // AUTHENTICATION_FAILED — "Clients are notified of authentication
+            // exceptions to enable operations to be terminated without retries".
+            // Any other error (e.g. a TCP connection-reset during the TLS
+            // handshake) is "handled as a network exception in Selector": the
+            // channel state is left as-is (Authenticate) and the error is
+            // returned unchanged, so the selector/network client treat it as a
+            // retriable network disconnect and reconnect with backoff.
+            if is_authentication_error(&e) {
+                let remote_desc = self.remote_address.map(|a| a.to_string());
+                self.state =
+                    ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
+                if authenticating {
+                    self.delay_close_on_authentication_failure();
+                }
             }
             return Err(e);
         }
@@ -778,6 +792,7 @@ mod tests {
     use crate::common::network::ByteBufferSend;
     use crate::common::network::DefaultChannelMetadataRegistry;
     use crate::common::network::InterestOps;
+    use crate::common::network::authentication_error::auth_io_error;
 
     use std::future::Future;
     use std::io;
@@ -795,6 +810,10 @@ mod tests {
         read_pos: usize,
         write_results: Vec<io::Result<usize>>,
         interest_ops: InterestOps,
+        /// When set, `handshake()` returns this error and `ready()` stays false,
+        /// simulating a failed TLS handshake. The kind/payload of the error
+        /// controls auth-vs-disconnect classification in `prepare()`.
+        handshake_error: Option<Box<dyn Fn() -> io::Error + Send + Sync>>,
     }
 
     impl MockTransportLayer {
@@ -807,6 +826,7 @@ mod tests {
                 read_pos: 0,
                 write_results: Vec::new(),
                 interest_ops: InterestOps::OP_READ,
+                handshake_error: None,
             }
         }
 
@@ -817,6 +837,15 @@ mod tests {
 
         fn with_write_results(mut self, results: Vec<io::Result<usize>>) -> Self {
             self.write_results = results;
+            self
+        }
+
+        /// Configures the mock to fail `handshake()` with the error produced by
+        /// `make_err`, leaving the transport not-ready (mirrors a failed TLS
+        /// handshake before the data path opens).
+        fn with_handshake_error(mut self, make_err: impl Fn() -> io::Error + Send + Sync + 'static) -> Self {
+            self.ready = false;
+            self.handshake_error = Some(Box::new(make_err));
             self
         }
     }
@@ -843,6 +872,10 @@ mod tests {
         }
 
         fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            if let Some(make_err) = &self.handshake_error {
+                let err = make_err();
+                return Box::pin(async move { Err(err) });
+            }
             Box::pin(async { Ok(()) })
         }
 
@@ -927,11 +960,21 @@ mod tests {
     /// Mock authenticator for testing.
     struct MockAuthenticator {
         complete: bool,
+        /// When set (and not yet complete), `authenticate()` fails with this
+        /// error, simulating a SASL authentication failure.
+        auth_error: Option<Box<dyn Fn() -> io::Error + Send + Sync>>,
     }
 
     impl MockAuthenticator {
         fn new(complete: bool) -> Self {
-            Self { complete }
+            Self { complete, auth_error: None }
+        }
+
+        /// Configures the authenticator to fail `authenticate()` with the error
+        /// produced by `make_err` (the transport handshake is assumed ready).
+        fn with_auth_error(mut self, make_err: impl Fn() -> io::Error + Send + Sync + 'static) -> Self {
+            self.auth_error = Some(Box::new(make_err));
+            self
         }
     }
 
@@ -940,6 +983,10 @@ mod tests {
             &'a mut self,
             _transport: &'a mut (dyn TransportLayer + Send),
         ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+            if let Some(make_err) = &self.auth_error {
+                let err = make_err();
+                return Box::pin(async move { Err(err) });
+            }
             Box::pin(async { Ok(()) })
         }
 
@@ -1050,5 +1097,94 @@ mod tests {
 
         assert!(channel.maybe_unmute());
         assert_eq!(ChannelMuteState::NotMuted, channel.mute_state());
+    }
+
+    /// Regression: a transient transport-level I/O error during the TLS
+    /// handshake (e.g. "Connection reset by peer", os error 104) must NOT move
+    /// the channel to AUTHENTICATION_FAILED. Java's KafkaChannel.prepare() only
+    /// catches `AuthenticationException`; a plain `IOException` is "handled as a
+    /// network exception in Selector" — a retriable disconnect. The channel
+    /// state is left as-is (Authenticate) so the network client reconnects.
+    #[tokio::test]
+    async fn test_prepare_handshake_reset_is_not_authentication_failed() {
+        let transport = MockTransportLayer::new().with_handshake_error(|| {
+            io::Error::new(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 104)")
+        });
+        // Authenticator never reached because the handshake fails first.
+        let authenticator = MockAuthenticator::new(false);
+        let metadata = DefaultChannelMetadataRegistry::new();
+        let mut channel =
+            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
+
+        let err = channel.prepare().await.expect_err("handshake reset must surface an error");
+        // The error is a transport disconnect, not an auth failure.
+        assert!(!is_authentication_error(&err));
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        // The channel state must NOT be AuthenticationFailed (it remains in the
+        // pre-prepare state, NotConnected here, since finish_connect was not
+        // called in this unit test).
+        assert_ne!(channel.state().state(), State::AuthenticationFailed);
+    }
+
+    /// Regression: a transient EOF during the TLS handshake (peer closed mid-
+    /// handshake) is likewise a retriable disconnect, not an auth failure.
+    #[tokio::test]
+    async fn test_prepare_handshake_eof_is_not_authentication_failed() {
+        let transport = MockTransportLayer::new()
+            .with_handshake_error(|| io::Error::new(io::ErrorKind::UnexpectedEof, "TLS handshake EOF"));
+        let authenticator = MockAuthenticator::new(false);
+        let metadata = DefaultChannelMetadataRegistry::new();
+        let mut channel =
+            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
+
+        let err = channel.prepare().await.expect_err("handshake EOF must surface an error");
+        assert!(!is_authentication_error(&err));
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_ne!(channel.state().state(), State::AuthenticationFailed);
+    }
+
+    /// Regression: a genuine TLS negotiation/certificate failure (the rustls
+    /// analogue of Java's `SSLException`, surfaced as a typed authentication
+    /// error) MUST move the channel to AUTHENTICATION_FAILED (fatal), mirroring
+    /// Java's `maybeProcessHandshakeFailure` -> `SslAuthenticationException`.
+    #[tokio::test]
+    async fn test_prepare_tls_negotiation_failure_is_authentication_failed() {
+        let transport = MockTransportLayer::new()
+            .with_handshake_error(|| auth_io_error("TLS handshake failed: invalid peer certificate"));
+        let authenticator = MockAuthenticator::new(false);
+        let metadata = DefaultChannelMetadataRegistry::new();
+        let mut channel =
+            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
+
+        let err = channel
+            .prepare()
+            .await
+            .expect_err("TLS negotiation failure must surface an error");
+        assert!(is_authentication_error(&err));
+        assert_eq!(err.to_string(), "TLS handshake failed: invalid peer certificate");
+        assert_eq!(channel.state().state(), State::AuthenticationFailed);
+        // The failure message is preserved on the channel state.
+        assert_eq!(channel.state().error(), Some("TLS handshake failed: invalid peer certificate"));
+    }
+
+    /// Regression: a genuine SASL credential rejection (the broker returns an
+    /// error during authentication; Java throws `SaslAuthenticationException`,
+    /// an `AuthenticationException`) MUST move the channel to
+    /// AUTHENTICATION_FAILED (fatal), not be silently treated as a disconnect.
+    #[tokio::test]
+    async fn test_prepare_sasl_auth_failure_is_authentication_failed() {
+        // Handshake succeeds (transport ready), authenticator fails with a typed
+        // auth error.
+        let transport = MockTransportLayer::new();
+        let authenticator = MockAuthenticator::new(false)
+            .with_auth_error(|| auth_io_error("Authentication failed: Invalid username or password"));
+        let metadata = DefaultChannelMetadataRegistry::new();
+        let mut channel =
+            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
+
+        let err = channel.prepare().await.expect_err("SASL auth failure must surface an error");
+        assert!(is_authentication_error(&err));
+        assert_eq!(err.to_string(), "Authentication failed: Invalid username or password");
+        assert_eq!(channel.state().state(), State::AuthenticationFailed);
     }
 }

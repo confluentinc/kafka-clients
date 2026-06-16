@@ -47,6 +47,7 @@
 //! Closed
 //! ```
 
+use super::authentication_error::auth_io_error;
 use super::{InterestOps, TransportLayer};
 
 use std::future::Future;
@@ -243,7 +244,13 @@ impl TransportLayer for SslTransportLayer {
                             Ok(0) => break,
                             Ok(_) => continue,
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(e) => return Err(io::Error::other(format!("TLS handshake failed: {e}"))),
+                            // Transport-level write failure (connection reset,
+                            // broken pipe, etc.) — this is a network disconnect,
+                            // NOT an authentication failure. Preserve the original
+                            // error kind so the selector / network client treat it
+                            // as a retriable disconnect (Java re-throws the
+                            // original `IOException` at SslTransportLayer.java:324).
+                            Err(e) => return Err(e),
                         }
                     }
                     continue;
@@ -272,10 +279,22 @@ impl TransportLayer for SslTransportLayer {
                     Ok(_) => {},
                     // Spurious wake-ups can return WouldBlock — loop and re-await readable.
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                    Err(e) => return Err(io::Error::other(format!("TLS handshake failed: {e}"))),
+                    // Transport-level read failure (connection reset by peer,
+                    // unexpected EOF, etc.) — a network disconnect, NOT an
+                    // authentication failure. Preserve the original error kind so
+                    // it is treated as a retriable disconnect downstream (Java
+                    // re-throws the original `IOException` at
+                    // SslTransportLayer.java:324).
+                    Err(e) => return Err(e),
                 }
+                // A failure from `process_new_packets` is a genuine TLS
+                // negotiation/certificate/protocol rejection (the rustls
+                // analogue of Java's `SSLException`). Surface it as a typed
+                // authentication error so `prepare()` stamps the channel
+                // AUTHENTICATION_FAILED (fatal), mirroring Java's
+                // `maybeProcessHandshakeFailure` -> `SslAuthenticationException`.
                 if let Err(e) = boxed.conn.process_new_packets() {
-                    return Err(io::Error::other(format!("TLS handshake failed: {e}")));
+                    return Err(auth_io_error(format!("TLS handshake failed: {e}")));
                 }
             }
         })
@@ -787,6 +806,7 @@ impl io::Read for TryReadAdapter<'_> {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
+    use crate::common::network::authentication_error::is_authentication_error;
     use crate::common::security::SslFactory;
     use std::sync::Arc;
 
@@ -1298,6 +1318,84 @@ mod tests {
         // Server should have observed an orderly TLS close (not an error).
         let observed = server_task.await.expect("server task failed");
         assert!(observed, "server should observe clean close-notify from client");
+    }
+
+    /// Regression: a genuine TLS negotiation failure (here, the server presents
+    /// a self-signed cert the client does NOT trust) surfaces from
+    /// `process_new_packets` and must be reported as a typed authentication
+    /// error (`is_authentication_error` true) — the rustls analogue of Java's
+    /// `SSLException` -> `SslAuthenticationException`. This is what lets
+    /// `KafkaChannel::prepare()` stamp the channel AUTHENTICATION_FAILED.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_handshake_cert_failure_is_authentication_error() {
+        // Server uses a self-signed cert; client uses a DIFFERENT truststore
+        // (the default factory, which trusts only the webpki roots), so the
+        // client must reject the server certificate.
+        let (_factory_unused, server_config) = build_paired_factory_and_server_config();
+        let client_factory = create_test_factory();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&client_factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        let server_task = tokio::spawn(async move { drive_server(server_stream, server_config).await });
+
+        let err = transport
+            .handshake()
+            .await
+            .expect_err("handshake should fail on untrusted cert");
+        assert!(
+            is_authentication_error(&err),
+            "TLS cert validation failure must be a typed authentication error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("TLS handshake failed"),
+            "error message should carry the TLS handshake prefix, got: {err}"
+        );
+
+        let _ = transport.close().await;
+        let _ = server_task.await;
+    }
+
+    /// Regression: a transport-level connection reset mid-handshake (peer closes
+    /// the TCP connection before any TLS records are exchanged) must surface as
+    /// a plain transport error — NOT a typed authentication error. The original
+    /// I/O error kind is preserved so downstream treats it as a retriable
+    /// disconnect (mirrors Java re-throwing the original `IOException`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_handshake_reset_is_not_authentication_error() {
+        let factory = create_test_factory();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        // Server abruptly drops the TCP connection instead of speaking TLS:
+        // the client sees an EOF / connection-reset mid-handshake, which must be
+        // classified as a transport disconnect, not an auth failure.
+        drop(server_stream);
+
+        let err = transport.handshake().await.expect_err("handshake should fail on a reset/EOF");
+        assert!(
+            !is_authentication_error(&err),
+            "a transport reset/EOF must NOT be a typed authentication error, got: {err:?}"
+        );
+        // The original transport error kind is preserved (a disconnect-class kind),
+        // never rewrapped into an opaque auth error.
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::NotConnected
+            ),
+            "expected a transport disconnect-class error kind, got: {:?}",
+            err.kind()
+        );
+
+        let _ = transport.close().await;
     }
 
     // ---- Test helpers ---------------------------------------------------------

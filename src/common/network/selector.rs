@@ -41,6 +41,7 @@ use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
 use super::Selectable;
+use super::authentication_error::is_authentication_error;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
 
@@ -652,7 +653,12 @@ impl Selector {
                 format!("unknown (channelId={channel_id})")
             };
 
-            if e.kind() == io::ErrorKind::Other || e.kind() == io::ErrorKind::InvalidInput {
+            // Route by typed error, not by an opaque ErrorKind heuristic
+            // (mirrors Java's `e instanceof AuthenticationException` in
+            // Selector): only genuine authentication failures log "Failed
+            // authentication"; everything else (connection reset, broken pipe,
+            // EOF) is a retriable network disconnect.
+            if is_authentication_error(&e) {
                 kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, e);
             } else {
                 kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, e);
@@ -710,7 +716,12 @@ impl Selector {
                     format!("unknown (channelId={id})")
                 };
 
-                if error.kind() == io::ErrorKind::Other || error.kind() == io::ErrorKind::InvalidInput {
+                // Route by typed error, not by an opaque ErrorKind heuristic
+                // (mirrors Java's `e instanceof AuthenticationException`): only
+                // genuine authentication failures log "Failed authentication";
+                // a transient handshake/write I/O error is a retriable
+                // disconnect.
+                if is_authentication_error(&error) {
                     kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, error);
                 } else {
                     kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, error);
