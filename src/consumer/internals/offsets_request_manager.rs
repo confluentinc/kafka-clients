@@ -2637,6 +2637,87 @@ mod tests {
         ListOffsetsResponse::new(data)
     }
 
+    /// Bootstrap `metadata` with a single topic spread across `num_nodes`
+    /// brokers. `metadata_update_with` assigns each partition's leader as
+    /// `nodes[partition_index % num_nodes]`, so with `num_nodes == 2`
+    /// partition 1 → node 1 and partition 2 → node 0 — distinct leaders,
+    /// mirroring the Java fixture's `LEADER_1` / `LEADER_2` two-broker
+    /// layout used by the multi-partition / partial-failure tests.
+    fn bootstrap_metadata_with_nodes(
+        metadata: &ConsumerMetadata,
+        topic: &str,
+        num_partitions: i32,
+        num_nodes: i32,
+    ) -> MetadataResponse {
+        metadata.add_transient_topics(HashSet::from([topic.to_string()]));
+        let mut counts = HashMap::new();
+        counts.insert(topic.to_string(), num_partitions);
+        let response = request_test_utils::metadata_update_with(num_nodes, &counts);
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+        response
+    }
+
+    /// Drain EVERY unsent `ListOffsets` request from one `poll()` and
+    /// complete each with a response built from `per_partition`
+    /// (`partition_index -> (error, timestamp, offset, leader_epoch)`),
+    /// restricted to the partitions that request actually carried.
+    ///
+    /// The fetch-path response handler
+    /// (`PendingCompletion::ListOffsetsForFetchOffsets`) routes on the
+    /// request's `node_partitions`, not on response keys, so each per-node
+    /// request can be answered with only its own partitions. Returns the
+    /// number of requests drained — mirrors the Java multi-broker pattern
+    /// of completing `res.unsentRequests.get(0)`, `get(1)`, ... in turn.
+    async fn complete_all_unsent_with_per_partition_response(
+        mgr: &mut OffsetsRequestManager,
+        topic: &str,
+        per_partition: &HashMap<i32, (Errors, i64, i64, i32)>,
+        now_ms: i64,
+    ) -> usize {
+        let poll_result = RequestManager::poll(mgr, now_ms);
+        let mut count = 0;
+        for unsent in poll_result.unsent_requests {
+            // Determine which partitions this request carried by building
+            // it and reading back its target topics. Match Java's
+            // per-broker response assembly.
+            let built = {
+                let mut unsent = unsent;
+                let request = unsent.request_builder_mut().expect("builder present").build().expect("build");
+                let crate::common::requests::ConcreteRequest::ListOffsets(r) = request else {
+                    panic!("expected ListOffsetsRequest");
+                };
+                // Re-take the handler from the original unsent: rebuild is
+                // destructive, so capture the partition indices then drive
+                // completion through the handler we still hold.
+                let indices: Vec<i32> = r
+                    .topics()
+                    .iter()
+                    .flat_map(|t| t.partitions.iter().map(|p| p.partition_index))
+                    .collect();
+                (unsent, indices)
+            };
+            let (unsent, indices) = built;
+            let mut parts: Vec<(i32, Errors, i64, i64, i32)> = Vec::new();
+            for idx in indices {
+                let (error, ts, offset, epoch) = per_partition.get(&idx).copied().unwrap_or((
+                    Errors::None,
+                    UNKNOWN_TIMESTAMP,
+                    UNKNOWN_OFFSET,
+                    UNKNOWN_EPOCH,
+                ));
+                parts.push((idx, error, ts, offset, epoch));
+            }
+            let response = build_list_offsets_response(topic, parts);
+            unsent.handler().on_complete(build_list_offsets_client_response(response));
+            count += 1;
+        }
+        // Let the spawned forwarder tasks enqueue their `PendingCompletion`s.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        count
+    }
+
     /// Drive the first request on the manager's `requests_to_send` to
     /// completion with the given `ListOffsetsResponse`. Returns whether
     /// a request was actually drained — mirrors the Java pattern of
@@ -2892,6 +2973,20 @@ mod tests {
         Errors::UnknownTopicOrPartition,
     ];
 
+    /// Mirrors the response-handler classification in
+    /// [`OffsetFetcherUtilsState::handle_list_offset_response`]: a
+    /// `ListOffsets` partition error is retriable (lands in
+    /// `partitions_to_retry`) unless it is `NONE`,
+    /// `UNSUPPORTED_FOR_MESSAGE_FORMAT` (dropped, null offset), or
+    /// `TOPIC_AUTHORIZATION_FAILED` (fatal). Used by the mixed-error
+    /// matrix test to decide whether a retry round is expected.
+    fn is_retriable_list_offsets_error(error: Errors) -> bool {
+        !matches!(
+            error,
+            Errors::None | Errors::UnsupportedForMessageFormat | Errors::TopicAuthorizationFailed
+        )
+    }
+
     /// Java parity: `testRequestFailsWithRetriableError_RetrySucceeds`
     /// (`@ParameterizedTest @MethodSource("retriableErrors")`). Translated
     /// as a loop over EVERY one of the 10 retriable error codes (DoD §3 —
@@ -2959,6 +3054,662 @@ mod tests {
             let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
             assert_eq!(oat.offset(), 5, "{error:?}: retried offset");
         }
+    }
+
+    // =================================================================
+    //   Phase 32: ORM fetch-path multi-partition / multi-node tests.
+    //   Translated from `OffsetsRequestManagerTest` (fetch group) and
+    //   `OffsetFetcherTest` (offsetsForTimes / beginning / end — KIP-848
+    //   logic now lives in `OffsetsRequestManager::fetch_offsets`). See
+    //   `design/history/Milestone-8/Phase-32-test-parity-offset-queries/PLAN.md`.
+    // =================================================================
+
+    /// Java parity: `testListOffsetsRequestMultiplePartitions`. Two
+    /// partitions sharing one leader → a single `ListOffsets` request,
+    /// both offsets returned.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_multiple_partitions_same_leader() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        // One node → both partitions share leader node 0.
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 1);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let tp2 = TopicPartition::new("t1".to_string(), 2);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp2.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1, "two partitions on one leader → one request");
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        let response = build_list_offsets_response(
+            "t1",
+            vec![
+                (1, Errors::None, 100, 5, UNKNOWN_EPOCH),
+                (2, Errors::None, 100, 5, UNKNOWN_EPOCH),
+            ],
+        );
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert_eq!(result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(), 5);
+        assert_eq!(result.get(&tp2).expect("tp2").as_ref().expect("non-null").offset(), 5);
+    }
+
+    /// Java parity: `testRequestPartiallyFailsWithRetriableError_RetrySucceeds`.
+    /// Two partitions on two distinct leaders → two requests. One node
+    /// succeeds, the other returns a retriable `UNKNOWN_LEADER_EPOCH`.
+    /// The partial result merges (`apply_partial_result`): the failed
+    /// partition is re-parked, `metadata.requestUpdate(false)` is
+    /// requested, and the retry (after a metadata update) succeeds. The
+    /// global result carries BOTH offsets.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_partial_retriable_error_merges_after_retry() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        // Two nodes → partition 1 → node 1, partition 2 → node 0 (distinct
+        // leaders, mirroring Java's LEADER_1 / LEADER_2).
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let tp2 = TopicPartition::new("t1".to_string(), 2);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp2.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 2, "two leaders → two requests");
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+        assert!(
+            !mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+            "no full-update requested before the partial error response"
+        );
+
+        // Complete both per-node requests: partition 1 succeeds (offset 5),
+        // partition 2 returns a retriable error.
+        let mut per_partition: HashMap<i32, (Errors, i64, i64, i32)> = HashMap::new();
+        per_partition.insert(1, (Errors::None, 100, 5, UNKNOWN_EPOCH));
+        per_partition.insert(2, (Errors::UnknownLeaderEpoch, -1, -1, UNKNOWN_EPOCH));
+        let drained = complete_all_unsent_with_per_partition_response(&mut mgr, "t1", &per_partition, 0).await;
+        assert_eq!(drained, 2, "both per-node requests completed");
+
+        // After both partial results merge, the failed partition is
+        // re-parked and a metadata update is requested.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            let _ = RequestManager::poll(&mut mgr, 0);
+            if mgr.requests_to_retry_count() == 1 {
+                break;
+            }
+        }
+        assert_eq!(mgr.requests_to_retry_count(), 1, "failed partition re-parked");
+        assert_eq!(mgr.requests_to_send_count(), 0);
+        assert!(
+            mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+            "partial retriable error must trigger metadata.requestUpdate(false)"
+        );
+
+        // Metadata update → replay the failed partition's request.
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
+        assert_eq!(mgr.requests_to_send_count(), 1, "replayed request for the failed partition");
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        // The replayed request now succeeds for partition 2 (offset 5).
+        let response = build_list_offsets_response("t1", vec![(2, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        // The global result carries BOTH offsets.
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert_eq!(result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(), 5);
+        assert_eq!(result.get(&tp2).expect("tp2").as_ref().expect("non-null").offset(), 5);
+    }
+
+    /// Java parity: `testRequestFailedResponse_NonRetriableErrorTimeout`.
+    /// The response carries an error keyed on a partition that was NOT in
+    /// the request (`TEST_PARTITION_2` while only `TEST_PARTITION_1` was
+    /// requested).
+    ///
+    /// **Documented divergence from Java's observable behavior.** Java's
+    /// `MultiNodeRequest.onComplete` callback calls
+    /// `listOffsetsRequestState.addPartitionsToRetry(multiNodeResult.partitionsToRetry)`,
+    /// which does `partitionsToRetry.stream().collect(toMap(tp -> tp,
+    /// timestampsToSearch::get))`. For an *unrequested* partition,
+    /// `timestampsToSearch.get(tp2)` is `null`, so `Collectors.toMap`
+    /// throws a `NullPointerException` inside the `whenComplete`
+    /// callback — *before* `globalResult.complete(...)` is reached. The
+    /// NPE is swallowed by the `CompletableFuture` machinery, leaving
+    /// `globalResult` un-completed, so Java's `future.get(5ms)` throws
+    /// `TimeoutException` (the test's assertion).
+    ///
+    /// The Rust `add_partitions_to_retry`
+    /// (offsets_request_manager.rs:172-178) faithfully mirrors the *intent*
+    /// — re-add only originally-requested partitions — by filtering on
+    /// `timestamps_to_search.get(tp)` instead of replicating the NPE. So
+    /// the unrequested partition is silently skipped, `remaining_to_search`
+    /// stays empty, and the global result completes with `{tp1: None}`
+    /// (requested partition present, no offset). This is the faithful
+    /// translation of the documented intent (DoD §7 / §28 — a deviation
+    /// from an accidental Java NPE artifact, with rationale). The
+    /// behavioral contract that matters — "nothing pending to send or
+    /// retry; the requested partition surfaces no offset" — is asserted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_non_retriable_error_for_unrequested_partition() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 3);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        // Respond with an error keyed on partition 2 — which was never
+        // requested (only partition 1 was). The handler matches responses
+        // by the request's `node_partitions`, so partition 2's retry entry
+        // is filtered out (not in `timestamps_to_search`).
+        let response = build_list_offsets_response("t1", vec![(2, Errors::BrokerNotAvailable, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("global result resolves");
+
+        // Java: nothing pending to send or retry (the unrequested-partition
+        // retry entry is filtered out).
+        assert_eq!(
+            mgr.requests_to_retry_count(),
+            0,
+            "no retry for an unrequested-partition response"
+        );
+        assert_eq!(mgr.requests_to_send_count(), 0);
+        // The requested partition surfaces no offset (Java: would hang on
+        // the NPE; Rust resolves it cleanly with a null entry).
+        assert!(result.contains_key(&tp1), "requested partition present in result");
+        assert!(
+            result.get(&tp1).expect("tp1 entry").is_none(),
+            "requested partition has no offset"
+        );
+    }
+
+    /// Java parity: `OffsetFetcherTest.testGetOffsetsUnknownLeaderEpoch`
+    /// at the fetch path. A `ListOffsets` response carrying
+    /// `UNKNOWN_LEADER_EPOCH` is retriable: the partition is re-parked and
+    /// `metadata.requestUpdate(false)` is requested. (The Java test drives
+    /// the reset path and asserts SubscriptionState reset flags; that
+    /// path is covered by Phase 31's `reset_*` tests. Here we pin the
+    /// fetch-path classification.)
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_unknown_leader_epoch_is_retriable() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        let response = build_list_offsets_response("t1", vec![(1, Errors::UnknownLeaderEpoch, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            let _ = RequestManager::poll(&mut mgr, 0);
+            if mgr.requests_to_retry_count() == 1 {
+                break;
+            }
+        }
+        assert_eq!(mgr.requests_to_retry_count(), 1, "UNKNOWN_LEADER_EPOCH is retriable");
+        assert!(
+            mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+            "retriable error must trigger metadata.requestUpdate(false)"
+        );
+        drop(rx);
+    }
+
+    /// Java parity: `OffsetFetcherTest.testBatchedListOffsetsMetadataErrors`.
+    /// Two partitions on one leader → one batched request. The response
+    /// carries `NOT_LEADER_OR_FOLLOWER` for one and
+    /// `UNKNOWN_TOPIC_OR_PARTITION` for the other — both retriable. The
+    /// state re-parks and the future never resolves (Java's
+    /// `TimeoutException` with `time.timer(1)`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn batched_list_offsets_metadata_errors_future_pending() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        // One node → both partitions batched into one request.
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 1);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let tp2 = TopicPartition::new("t1".to_string(), 2);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp2.clone(), EARLIEST_TIMESTAMP);
+
+        let mut rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1, "batched into one request");
+
+        let response = build_list_offsets_response(
+            "t1",
+            vec![
+                (1, Errors::NotLeaderOrFollower, UNKNOWN_TIMESTAMP, UNKNOWN_OFFSET, UNKNOWN_EPOCH),
+                (
+                    2,
+                    Errors::UnknownTopicOrPartition,
+                    UNKNOWN_TIMESTAMP,
+                    UNKNOWN_OFFSET,
+                    UNKNOWN_EPOCH,
+                ),
+            ],
+        );
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            let _ = RequestManager::poll(&mut mgr, 0);
+            if mgr.requests_to_retry_count() == 1 {
+                break;
+            }
+        }
+        // Both partitions retriable → re-parked, future stays pending.
+        assert_eq!(
+            mgr.requests_to_retry_count(),
+            1,
+            "both retriable errors re-park the batched state"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "future must stay pending (Java TimeoutException)"
+        );
+    }
+
+    /// Java parity: `OffsetFetcherTest.testGetOffsetsForTimes`. Drives the
+    /// multi-partition mixed-error matrix from the Java test as a loop:
+    /// for each `(error_p0, error_p1, offset_p0, expected_p0)` row, two
+    /// partitions are searched, retriable errors are retried after a
+    /// metadata update, and the final offsets/timestamps match.
+    ///
+    /// `offsetsForTimes` uses `require_timestamps = true`; a `None` result
+    /// for a partition (UNSUPPORTED_FOR_MESSAGE_FORMAT, or NONE + unknown
+    /// offset) maps to a missing/null entry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offsets_for_times_multi_partition_mixed_errors() {
+        // (error_p0, error_p1, offset_p0, expected_p0_present)
+        // Mirrors the Java rows. Both partitions are searched with a real
+        // timestamp; on the FIRST attempt one or both may carry a
+        // retriable error, after which a metadata update + retry resolves
+        // them to NONE.
+        struct Row {
+            error_p0: Errors,
+            error_p1: Errors,
+            offset_p0: i64,
+            expected_p0: Option<i64>,
+        }
+        let rows = [
+            // Error code NONE with unknown offset → null p0.
+            Row { error_p0: Errors::None, error_p1: Errors::None, offset_p0: -1, expected_p0: None },
+            // Error code NONE with known offset.
+            Row {
+                error_p0: Errors::None,
+                error_p1: Errors::None,
+                offset_p0: 10,
+                expected_p0: Some(10),
+            },
+            // Both partitions have a (retriable) error → retried.
+            Row {
+                error_p0: Errors::NotLeaderOrFollower,
+                error_p1: Errors::InvalidRequest,
+                offset_p0: 10,
+                expected_p0: Some(10),
+            },
+            // Second partition has error.
+            Row {
+                error_p0: Errors::None,
+                error_p1: Errors::NotLeaderOrFollower,
+                offset_p0: 10,
+                expected_p0: Some(10),
+            },
+            // First partition has error.
+            Row {
+                error_p0: Errors::NotLeaderOrFollower,
+                error_p1: Errors::None,
+                offset_p0: 10,
+                expected_p0: Some(10),
+            },
+            Row {
+                error_p0: Errors::UnknownTopicOrPartition,
+                error_p1: Errors::None,
+                offset_p0: 10,
+                expected_p0: Some(10),
+            },
+            // UNSUPPORTED_FOR_MESSAGE_FORMAT → null p0 (non-retriable, dropped).
+            Row {
+                error_p0: Errors::UnsupportedForMessageFormat,
+                error_p1: Errors::None,
+                offset_p0: 10,
+                expected_p0: None,
+            },
+            Row {
+                error_p0: Errors::BrokerNotAvailable,
+                error_p1: Errors::None,
+                offset_p0: 10,
+                expected_p0: Some(10),
+            },
+        ];
+        const OFFSET_P1: i64 = 100;
+
+        for (i, row) in rows.iter().enumerate() {
+            let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+            // Two partitions on one leader so both batch into one request.
+            bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 1);
+            let tp1 = TopicPartition::new("t1".to_string(), 1);
+            let tp2 = TopicPartition::new("t1".to_string(), 2);
+            let mut timestamps = HashMap::new();
+            timestamps.insert(tp1.clone(), 0);
+            timestamps.insert(tp2.clone(), 0);
+
+            // require_timestamps = true matches offsetsForTimes.
+            let rx = mgr.fetch_offsets(timestamps, true);
+            assert_eq!(mgr.requests_to_send_count(), 1, "row {i}: one batched request");
+
+            // First response: apply the row's errors. A retriable error
+            // re-parks the partition; a non-retriable error (UNSUPPORTED)
+            // or NONE finalises it.
+            let response = build_list_offsets_response(
+                "t1",
+                vec![
+                    (1, row.error_p0, row.offset_p0, row.offset_p0, UNKNOWN_EPOCH),
+                    (2, row.error_p1, OFFSET_P1, OFFSET_P1, UNKNOWN_EPOCH),
+                ],
+            );
+            assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+            // Determine whether a retry is needed (any retriable error).
+            let p0_retriable = is_retriable_list_offsets_error(row.error_p0);
+            let p1_retriable = is_retriable_list_offsets_error(row.error_p1);
+
+            if p0_retriable || p1_retriable {
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                    let _ = RequestManager::poll(&mut mgr, 0);
+                    if mgr.requests_to_retry_count() == 1 {
+                        break;
+                    }
+                }
+                assert_eq!(mgr.requests_to_retry_count(), 1, "row {i}: retriable error re-parked");
+                // Metadata update → replay; the retried partition(s) now
+                // resolve to NONE with the correct offset.
+                bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 1);
+                assert_eq!(mgr.requests_to_send_count(), 1, "row {i}: replay request");
+
+                let mut parts = Vec::new();
+                if p0_retriable {
+                    parts.push((1, Errors::None, row.offset_p0, row.offset_p0, UNKNOWN_EPOCH));
+                }
+                if p1_retriable {
+                    parts.push((2, Errors::None, OFFSET_P1, OFFSET_P1, UNKNOWN_EPOCH));
+                }
+                let response = build_list_offsets_response("t1", parts);
+                assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+            }
+
+            let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+
+            // p0 expected per the row.
+            match row.expected_p0 {
+                Some(off) => {
+                    let oat = result.get(&tp1).expect("tp1 entry").as_ref().expect("non-null p0");
+                    assert_eq!(oat.offset(), off, "row {i}: p0 offset");
+                    assert_eq!(oat.timestamp(), off, "row {i}: p0 timestamp");
+                },
+                None => {
+                    // UNSUPPORTED / unknown-offset → null entry.
+                    assert!(
+                        result.get(&tp1).map(|o| o.is_none()).unwrap_or(true),
+                        "row {i}: p0 expected null"
+                    );
+                },
+            }
+            // p1 always present with offset 100.
+            let oat1 = result.get(&tp2).expect("tp2 entry").as_ref().expect("non-null p1");
+            assert_eq!(oat1.offset(), OFFSET_P1, "row {i}: p1 offset");
+            assert_eq!(oat1.timestamp(), OFFSET_P1, "row {i}: p1 timestamp");
+        }
+    }
+
+    /// Java parity: `OffsetFetcherTest.testGetOffsetByTimeWithPartitionsRetryCouldTriggerMetadataUpdate`.
+    /// Loop over the 7-error retriable list. Two partitions on distinct
+    /// leaders; tp0 succeeds first try (offset 4), tp1 carries the
+    /// retriable error → metadata update → tp1 succeeds against the new
+    /// leader (offset 5). Both offsets present.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offsets_for_times_retriable_retry_triggers_metadata_update() {
+        // Java's 7-error retriableErrors list for this test.
+        let retriable = [
+            Errors::NotLeaderOrFollower,
+            Errors::ReplicaNotAvailable,
+            Errors::KafkaStorageError,
+            Errors::OffsetNotAvailable,
+            Errors::LeaderNotAvailable,
+            Errors::FencedLeaderEpoch,
+            Errors::UnknownLeaderEpoch,
+        ];
+        const FETCH_TIMESTAMP: i64 = 10;
+
+        for &error in &retriable {
+            let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+            // Two nodes → tp0 (partition 0) → node 0, tp1 (partition 1) → node 1.
+            bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 2, 2);
+            let tp0 = TopicPartition::new("t1".to_string(), 0);
+            let tp1 = TopicPartition::new("t1".to_string(), 1);
+            let mut timestamps = HashMap::new();
+            timestamps.insert(tp0.clone(), FETCH_TIMESTAMP);
+            timestamps.insert(tp1.clone(), FETCH_TIMESTAMP);
+
+            let rx = mgr.fetch_offsets(timestamps, true);
+            assert_eq!(mgr.requests_to_send_count(), 2, "{error:?}: two leaders → two requests");
+
+            // First responses: tp0 succeeds (offset 4), tp1 retriable.
+            let mut per_partition: HashMap<i32, (Errors, i64, i64, i32)> = HashMap::new();
+            per_partition.insert(0, (Errors::None, FETCH_TIMESTAMP, 4, UNKNOWN_EPOCH));
+            per_partition.insert(1, (error, FETCH_TIMESTAMP, -1, UNKNOWN_EPOCH));
+            let drained = complete_all_unsent_with_per_partition_response(&mut mgr, "t1", &per_partition, 0).await;
+            assert_eq!(drained, 2, "{error:?}: both per-node requests completed");
+
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+                let _ = RequestManager::poll(&mut mgr, 0);
+                if mgr.requests_to_retry_count() == 1 {
+                    break;
+                }
+            }
+            assert_eq!(mgr.requests_to_retry_count(), 1, "{error:?}: tp1 re-parked");
+            assert!(
+                mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+                "{error:?}: retriable error must trigger metadata update"
+            );
+
+            // Metadata update → replay tp1's request against the (now
+            // up-to-date) leader.
+            bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 2, 2);
+            assert_eq!(mgr.requests_to_send_count(), 1, "{error:?}: replay for tp1");
+
+            let response =
+                build_list_offsets_response("t1", vec![(1, Errors::None, FETCH_TIMESTAMP, 5, UNKNOWN_EPOCH)]);
+            assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+            let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+            assert_eq!(
+                result.get(&tp0).expect("tp0").as_ref().expect("non-null").offset(),
+                4,
+                "{error:?}"
+            );
+            assert_eq!(
+                result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(),
+                5,
+                "{error:?}"
+            );
+        }
+    }
+
+    /// Java parity: `OffsetFetcherTest.testBeginningOffsetsMultipleTopicPartitions`.
+    /// Three partitions, `EARLIEST_TIMESTAMP` on the wire, distinct
+    /// offsets 2 / 4 / 6.
+    #[tokio::test(flavor = "current_thread")]
+    async fn beginning_offsets_multiple_partitions() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 1);
+        let tp0 = TopicPartition::new("t1".to_string(), 0);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let tp2 = TopicPartition::new("t1".to_string(), 2);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp0.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp2.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1, "three partitions one leader → one request");
+
+        // The request must carry EARLIEST_TIMESTAMP for each partition.
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = poll_result.unsent_requests.into_iter().next().expect("one request");
+        let built = unsent.request_builder_mut().expect("builder").build().expect("build");
+        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+            panic!("expected ListOffsetsRequest");
+        };
+        for topic in req.topics() {
+            for p in &topic.partitions {
+                assert_eq!(p.timestamp, EARLIEST_TIMESTAMP, "beginning_offsets sends EARLIEST_TIMESTAMP");
+            }
+        }
+
+        let response = build_list_offsets_response(
+            "t1",
+            vec![
+                (0, Errors::None, EARLIEST_TIMESTAMP, 2, UNKNOWN_EPOCH),
+                (1, Errors::None, EARLIEST_TIMESTAMP, 4, UNKNOWN_EPOCH),
+                (2, Errors::None, EARLIEST_TIMESTAMP, 6, UNKNOWN_EPOCH),
+            ],
+        );
+        unsent.handler().on_complete(build_list_offsets_client_response(response));
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert_eq!(result.get(&tp0).expect("tp0").as_ref().expect("non-null").offset(), 2);
+        assert_eq!(result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(), 4);
+        assert_eq!(result.get(&tp2).expect("tp2").as_ref().expect("non-null").offset(), 6);
+    }
+
+    /// Java parity: `OffsetFetcherTest.testEndOffsetsMultipleTopicPartitions`.
+    /// Three partitions, `LATEST_TIMESTAMP` on the wire, distinct offsets
+    /// 5 / 7 / 9.
+    #[tokio::test(flavor = "current_thread")]
+    async fn end_offsets_multiple_partitions() {
+        use crate::common::requests::list_offsets_request::LATEST_TIMESTAMP;
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 1);
+        let tp0 = TopicPartition::new("t1".to_string(), 0);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let tp2 = TopicPartition::new("t1".to_string(), 2);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp0.clone(), LATEST_TIMESTAMP);
+        timestamps.insert(tp1.clone(), LATEST_TIMESTAMP);
+        timestamps.insert(tp2.clone(), LATEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = poll_result.unsent_requests.into_iter().next().expect("one request");
+        let built = unsent.request_builder_mut().expect("builder").build().expect("build");
+        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+            panic!("expected ListOffsetsRequest");
+        };
+        for topic in req.topics() {
+            for p in &topic.partitions {
+                assert_eq!(p.timestamp, LATEST_TIMESTAMP, "end_offsets sends LATEST_TIMESTAMP");
+            }
+        }
+
+        let response = build_list_offsets_response(
+            "t1",
+            vec![
+                (0, Errors::None, LATEST_TIMESTAMP, 5, UNKNOWN_EPOCH),
+                (1, Errors::None, LATEST_TIMESTAMP, 7, UNKNOWN_EPOCH),
+                (2, Errors::None, LATEST_TIMESTAMP, 9, UNKNOWN_EPOCH),
+            ],
+        );
+        unsent.handler().on_complete(build_list_offsets_client_response(response));
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert_eq!(result.get(&tp0).expect("tp0").as_ref().expect("non-null").offset(), 5);
+        assert_eq!(result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(), 7);
+        assert_eq!(result.get(&tp2).expect("tp2").as_ref().expect("non-null").offset(), 9);
+    }
+
+    /// The built `ListOffsets` request carries the manager's configured
+    /// isolation level on the wire. Java parity:
+    /// `OffsetFetcherTest.testListOffsetSendsReadUncommitted` /
+    /// `testListOffsetSendsReadCommitted` (beginning/end offsets path).
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_request_carries_isolation_level_read_uncommitted() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+        let _rx = mgr.fetch_offsets(timestamps, false);
+
+        let res = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
+        let built = unsent.request_builder_mut().expect("builder").build().expect("build");
+        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+            panic!("expected ListOffsetsRequest");
+        };
+        assert_eq!(
+            req.isolation_level().expect("isolation level"),
+            IsolationLevel::ReadUncommitted,
+            "default manager sends READ_UNCOMMITTED"
+        );
+    }
+
+    /// READ_COMMITTED variant of the isolation-level-on-wire test.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_request_carries_isolation_level_read_committed() {
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::EARLIEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let mut mgr = OffsetsRequestManager::new(
+            subscription_state,
+            metadata.clone(),
+            IsolationLevel::ReadCommitted,
+            100,
+            30_000,
+            60_000,
+            Arc::new(ApiVersions::new()),
+            None,
+        );
+        bootstrap_metadata_with_topic(&metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+        let _rx = mgr.fetch_offsets(timestamps, false);
+
+        let res = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
+        let built = unsent.request_builder_mut().expect("builder").build().expect("build");
+        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+            panic!("expected ListOffsetsRequest");
+        };
+        assert_eq!(
+            req.isolation_level().expect("isolation level"),
+            IsolationLevel::ReadCommitted,
+            "READ_COMMITTED manager sends READ_COMMITTED"
+        );
     }
 
     /// Java parity: `testRequestWithUnknownOffsetInResponseReturnsNullOffset`.
