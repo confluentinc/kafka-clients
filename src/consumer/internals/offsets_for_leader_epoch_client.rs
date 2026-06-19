@@ -336,4 +336,25 @@ mod tests {
         assert_eq!(result.end_offsets().len(), 1);
         assert!(result.end_offsets().contains_key(&tp));
     }
+
+    /// Java parity: `testUnexpectedEmptyResponse`. A partition that was
+    /// requested but is ABSENT from the response must remain in
+    /// `partitions_to_retry` (distinct code path from "unrequested partition
+    /// ignored": here the requested key is never removed because no response
+    /// entry references it).
+    #[test]
+    fn handle_response_requested_partition_absent_stays_in_retry() {
+        let tp = TopicPartition::new("topic".to_string(), 0);
+        let mut request_data = HashMap::new();
+        request_data.insert(tp.clone(), fetch_position_with_epoch(0, 1, 1));
+
+        // Empty response — the requested partition is not present.
+        let response = OffsetsForLeaderEpochResponse::new(OffsetForLeaderEpochResponseData::new());
+        let result = OffsetsForLeaderEpochClient::handle_response(&request_data, &response).expect("ok");
+        assert!(result.end_offsets().is_empty(), "no end offsets in an empty response");
+        assert!(
+            result.partitions_to_retry().contains(&tp),
+            "requested-but-absent partition must stay in partitions_to_retry"
+        );
+    }
 }

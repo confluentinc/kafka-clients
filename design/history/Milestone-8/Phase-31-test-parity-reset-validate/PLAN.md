@@ -11,8 +11,10 @@ adds tests (and any test-only response builders they need) only.
   orchestration + response handling (primary).
 - `src/consumer/internals/offset_fetcher_utils.rs` —
   `on_successful_response_for_validating_positions` direct payload tests.
-- `src/consumer/internals/offsets_for_leader_epoch_client.rs` — already at
-  parity (5 + 2 extra); one gap reviewed below.
+- `src/consumer/internals/offsets_for_leader_epoch_client.rs` — closes the
+  one real gap (`testUnexpectedEmptyResponse`: requested-but-absent partition
+  stays in `partitions_to_retry`), added as
+  `handle_response_requested_partition_absent_stays_in_retry`.
 
 ## Reuse (no reinvention)
 - `new_manager()`, `new_manager_with_commit()`,
