@@ -48,6 +48,22 @@ use crate::consumer::OffsetAndMetadata;
 pub struct ConsumerRecords<K, V> {
     records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    /// Whether the consumed position advanced for at least one partition
+    /// during the `collect_fetch` that produced this batch, even if no
+    /// records were returned (e.g. all records in a batch were aborted under
+    /// READ_COMMITTED).
+    ///
+    /// This field carries Java's internal `Fetch.positionAdvanced` flag —
+    /// the Rust port collapses Java's internal `Fetch<K, V>` into
+    /// `ConsumerRecords<K, V>` (no separate `Fetch` type). The public
+    /// [`Self::is_empty`] still mirrors Java's *public*
+    /// `ConsumerRecords.isEmpty()` (`records.isEmpty()`), but the poll loop
+    /// needs Java's internal `Fetch.isEmpty()` (`numRecords == 0 &&
+    /// !positionAdvanced`) so it returns promptly when only the position
+    /// advanced — see [`Self::is_fetch_empty`]. It does not affect equality
+    /// in a user-observable way (it is an internal bookkeeping flag, but is
+    /// included in the derived `PartialEq`/`Eq` for completeness).
+    position_advanced: bool,
 }
 
 impl<K, V> ConsumerRecords<K, V> {
@@ -57,7 +73,19 @@ impl<K, V> ConsumerRecords<K, V> {
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Self {
-        Self { records, next_offsets }
+        Self { records, next_offsets, position_advanced: false }
+    }
+
+    /// Like [`Self::new`] but also records whether the consumed position
+    /// advanced (Java's internal `Fetch.positionAdvanced`). Used by
+    /// `FetchCollector::collect_fetch` so the poll loop can mirror Java's
+    /// `Fetch.isEmpty()` semantics.
+    pub(crate) fn new_with_position_advanced(
+        records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
+        next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        position_advanced: bool,
+    ) -> Self {
+        Self { records, next_offsets, position_advanced }
     }
 
     /// Returns an empty `ConsumerRecords`.
@@ -65,7 +93,16 @@ impl<K, V> ConsumerRecords<K, V> {
     /// Corresponds to Java's static `ConsumerRecords.empty()` /
     /// `ConsumerRecords.EMPTY`.
     pub fn empty() -> Self {
-        Self { records: IndexMap::new(), next_offsets: HashMap::new() }
+        Self { records: IndexMap::new(), next_offsets: HashMap::new(), position_advanced: false }
+    }
+
+    /// Java's internal `Fetch.isEmpty()`: `numRecords == 0 &&
+    /// !positionAdvanced`. The poll loop uses this (NOT [`Self::is_empty`])
+    /// to decide whether to return early — so an all-aborted batch that
+    /// advances the position with zero records returns promptly instead of
+    /// blocking until the poll timeout, matching `AsyncKafkaConsumer.poll`.
+    pub(crate) fn is_fetch_empty(&self) -> bool {
+        self.records.is_empty() && !self.position_advanced
     }
 
     /// Get the records for the given partition.

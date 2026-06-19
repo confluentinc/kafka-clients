@@ -2362,7 +2362,13 @@ where
             // Stage 3: collect fetched records (blocks on the FetchBuffer
             // wakeup when none are buffered yet — see `poll_for_fetches`).
             let mut records = self.poll_for_fetches(poll_deadline_ms).await?;
-            if !records.is_empty() {
+            // Java: `if (!fetch.isEmpty())` where `Fetch.isEmpty()` is
+            // `numRecords == 0 && !positionAdvanced` — NOT the public
+            // `ConsumerRecords.isEmpty()` (records-only). Returning here when
+            // only the position advanced (e.g. an all-aborted batch under
+            // READ_COMMITTED) avoids blocking until the poll timeout
+            // (`AsyncKafkaConsumer.java:861`).
+            if !records.is_fetch_empty() {
                 // Java: `sendPrefetches(timer)` — eagerly enqueue the next
                 // batch of fetches so the user's processing overlaps with
                 // the next request. In Rust this maps to a non-blocking
@@ -2544,8 +2550,11 @@ where
         let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
 
         // Java's first `collectFetch()` — return immediately if data is ready.
+        // Java (`pollForFetches`:1879) uses `Fetch.isEmpty()`
+        // (`numRecords == 0 && !positionAdvanced`), so a position-advanced /
+        // zero-record fetch returns here rather than blocking on the buffer.
         let fetch = self.fetch_collector.collect_fetch(&self.fetch_buffer)?;
-        if !fetch.is_empty() {
+        if !fetch.is_fetch_empty() {
             return Ok(fetch);
         }
         if poll_timeout_ms <= 0 {

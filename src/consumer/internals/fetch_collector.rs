@@ -108,6 +108,16 @@ where
     fetch_config: FetchConfig,
     deserializers: Arc<Deserializers<K, V>>,
     time: Arc<dyn FetchCollectorTime>,
+    /// Test-only injection point that forces [`Self::initialize`] to fail,
+    /// translating Java's `FetchCollectorTest.testErrorInInitialize`
+    /// anonymous-subclass override of `initialize()`. Rust `FetchCollector`
+    /// is a concrete struct with no inheritance, so the test installs a
+    /// closure here that returns the error `initialize` should raise. Gated
+    /// behind `#[cfg(test)]` so it is compiled out of release builds — zero
+    /// production code-size / perf impact (mirrors the project's established
+    /// `#[cfg(test)]` injection pattern).
+    #[cfg(test)]
+    force_initialize_error: Option<Box<dyn Fn() -> KafkaError + Send + Sync>>,
 }
 
 impl<K, V> FetchCollector<K, V>
@@ -130,7 +140,24 @@ where
         deserializers: Arc<Deserializers<K, V>>,
         time: Arc<dyn FetchCollectorTime>,
     ) -> Self {
-        Self { metadata, subscriptions, fetch_config, deserializers, time }
+        Self {
+            metadata,
+            subscriptions,
+            fetch_config,
+            deserializers,
+            time,
+            #[cfg(test)]
+            force_initialize_error: None,
+        }
+    }
+
+    /// Test-only: install a closure that forces [`Self::initialize`] to
+    /// fail on its next invocation, reproducing Java's
+    /// `FetchCollectorTest.testErrorInInitialize` anonymous-subclass
+    /// override. See the `force_initialize_error` field doc.
+    #[cfg(test)]
+    fn set_force_initialize_error(&mut self, f: impl Fn() -> KafkaError + Send + Sync + 'static) {
+        self.force_initialize_error = Some(Box::new(f));
     }
 
     /// Return the fetched [`ConsumerRecord`]s, drain the [`FetchBuffer`]
@@ -169,6 +196,9 @@ where
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         let mut paused_completed_fetches: Vec<CompletedFetch> = Vec::new();
         let mut records_remaining: i32 = self.fetch_config.max_poll_records;
+        // Java's `Fetch.positionAdvanced`, accumulated via `Fetch.add` which
+        // ORs the per-partition flag.
+        let mut position_advanced = false;
 
         // Track the first error encountered so the finally-style cleanup
         // runs even when the collect loop exits early. Java's behavior
@@ -264,7 +294,12 @@ where
 
             // Fetch up to `records_remaining` from the cursor.
             match self.fetch_records_from_partition(cf, records_remaining) {
-                Ok(FetchPartitionOutcome { partition_records, next_offset, cf: cf_back }) => {
+                Ok(FetchPartitionOutcome {
+                    partition_records,
+                    next_offset,
+                    position_advanced: part_position_advanced,
+                    cf: cf_back,
+                }) => {
                     let num = partition_records.len() as i32;
                     if num > 0 {
                         records_remaining -= num;
@@ -276,6 +311,8 @@ where
                     if let Some(no) = next_offset {
                         next_offsets.insert(cf_back.partition.clone(), no);
                     }
+                    // Java's `Fetch.add` ORs `positionAdvanced`.
+                    position_advanced |= part_position_advanced;
                     // Put cf back as next-in-line for the next iteration.
                     fetch_buffer.set_next_in_line_fetch(Some(cf_back));
                 },
@@ -315,7 +352,11 @@ where
             }
         }
 
-        Ok(ConsumerRecords::new(records_by_partition, next_offsets))
+        Ok(ConsumerRecords::new_with_position_advanced(
+            records_by_partition,
+            next_offsets,
+            position_advanced,
+        ))
     }
 
     /// Pulls records from `next_in_line` for its partition, consulting
@@ -362,7 +403,12 @@ where
                     tp
                 );
                 cf.drain();
-                Ok(FetchPartitionOutcome { partition_records: Vec::new(), next_offset: None, cf })
+                Ok(FetchPartitionOutcome {
+                    partition_records: Vec::new(),
+                    next_offset: None,
+                    position_advanced: false,
+                    cf,
+                })
             },
             FetchabilityCheck::NotFetchable => {
                 debug!(
@@ -370,7 +416,12 @@ where
                     tp
                 );
                 cf.drain();
-                Ok(FetchPartitionOutcome { partition_records: Vec::new(), next_offset: None, cf })
+                Ok(FetchPartitionOutcome {
+                    partition_records: Vec::new(),
+                    next_offset: None,
+                    position_advanced: false,
+                    cf,
+                })
             },
             FetchabilityCheck::MissingPosition => {
                 // Java throws IllegalStateException here
@@ -400,7 +451,12 @@ where
                     tp
                 );
                 cf.drain();
-                Ok(FetchPartitionOutcome { partition_records: Vec::new(), next_offset: None, cf })
+                Ok(FetchPartitionOutcome {
+                    partition_records: Vec::new(),
+                    next_offset: None,
+                    position_advanced: false,
+                    cf,
+                })
             },
             FetchabilityCheck::Position(position) => {
                 if cf.next_fetch_offset() != position.offset {
@@ -413,7 +469,12 @@ where
                         position
                     );
                     cf.drain();
-                    return Ok(FetchPartitionOutcome { partition_records: Vec::new(), next_offset: None, cf });
+                    return Ok(FetchPartitionOutcome {
+                        partition_records: Vec::new(),
+                        next_offset: None,
+                        position_advanced: false,
+                        cf,
+                    });
                 }
 
                 // Snapshot the partition record-fetch via cf's iteration.
@@ -458,14 +519,18 @@ where
 
                 // Metrics calls are dropped per Phase 7a plan (no metrics
                 // framework). Java records partition lag / lead here.
-                let _ = position_advanced; // silence dead-store warning
 
                 let metadata = match OffsetAndMetadata::with_leader_epoch(cf.next_fetch_offset(), cf.last_epoch(), "") {
                     Ok(m) => m,
                     Err(e) => return Err(Box::new((cf, e))),
                 };
 
-                Ok(FetchPartitionOutcome { partition_records: part_records, next_offset: Some(metadata), cf })
+                Ok(FetchPartitionOutcome {
+                    partition_records: part_records,
+                    next_offset: Some(metadata),
+                    position_advanced,
+                    cf,
+                })
             },
         }
     }
@@ -482,6 +547,14 @@ where
     ///
     /// Translates Java's `CompletedFetch initialize(CompletedFetch)`.
     fn initialize(&self, completed_fetch: CompletedFetch) -> Result<Option<CompletedFetch>, FetchFail> {
+        // Test-only injection: reproduce Java's testErrorInInitialize, where
+        // the anonymous subclass overrides initialize() to throw. Compiled
+        // out of release builds.
+        #[cfg(test)]
+        if let Some(f) = self.force_initialize_error.as_ref() {
+            let e = f();
+            return Err(Box::new((completed_fetch, e)));
+        }
         // DIAGNOSTIC (fetch_diag): age of this fetch when the app first touches
         // it = the bg-receipt -> app-delivery handoff (FetchBuffer drain depth),
         // the component of e2e latency that is NOT broker-side fetch wait.
@@ -760,6 +833,10 @@ where
 struct FetchPartitionOutcome<K, V> {
     partition_records: Vec<ConsumerRecord<K, V>>,
     next_offset: Option<OffsetAndMetadata>,
+    /// Java's `Fetch.positionAdvanced` for this partition: true iff the
+    /// consumed position moved forward (even when zero records are returned,
+    /// e.g. an all-aborted batch under READ_COMMITTED).
+    position_advanced: bool,
     cf: CompletedFetch,
 }
 
@@ -1168,20 +1245,58 @@ mod tests {
     }
 
     /// Translated from `FetchCollectorTest.testFetchWithOtherErrors`
-    /// (parameterized). Errors that aren't in the explicit lists become
-    /// `IllegalStateException`.
+    /// (parameterized). Mirrors Java's `Errors.values()` minus the
+    /// explicitly-handled error set: every remaining error code must reach
+    /// the catch-all arm in `handle_initialize_errors` and surface as an
+    /// `IllegalState` (Java's `IllegalStateException`).
+    ///
+    /// Java builds the source as `Errors.values()` with the handled set
+    /// removed. We mirror that exactly: iterate every `Errors` variant and
+    /// skip the ones with dedicated handling (the `Errors::None` happy path
+    /// plus the metadata-refresh / OOR / auth / leader-epoch / server /
+    /// corrupt arms). This is the full set, not a 3-error sample, so adding
+    /// a new "other" error to the enum is automatically covered.
     #[test]
     fn test_fetch_with_other_errors() {
-        // Sample a few representative "other" errors. Iterating every
-        // variant of `Errors` is unnecessary and would tightly couple to
-        // the enum's evolution; the contract under test is the catchall
-        // arm in `handle_initialize_errors`.
-        let errors = vec![
-            Errors::InvalidFetchSize,
-            Errors::LeaderNotAvailable,
-            Errors::BrokerNotAvailable,
+        // The errors that have dedicated handling and therefore do NOT take
+        // the catch-all arm. Mirrors the `errors.removeAll(...)` list in
+        // Java's `testFetchWithOtherErrorsSource`.
+        let handled = [
+            Errors::None,
+            Errors::NotLeaderOrFollower,
+            Errors::ReplicaNotAvailable,
+            Errors::KafkaStorageError,
+            Errors::FencedLeaderEpoch,
+            Errors::OffsetNotAvailable,
+            Errors::UnknownTopicOrPartition,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+            Errors::OffsetOutOfRange,
+            Errors::TopicAuthorizationFailed,
+            Errors::UnknownLeaderEpoch,
+            Errors::UnknownServerError,
+            Errors::CorruptMessage,
         ];
-        for error in errors {
+
+        // Rust's `Errors` has no `values()` array (adding one would be a
+        // production change, out of scope for a test-parity phase), so we
+        // enumerate the full set by walking every assigned error code via
+        // `Errors::for_code` and de-duplicating. Codes 0..=133 cover the
+        // current enum; unassigned codes fold into `UnknownServerError`
+        // (which is in `handled`, so they are skipped). This mirrors
+        // Java's `Errors.values()` minus the removed set.
+        let all_errors: std::collections::BTreeSet<i16> = (0i16..=133).collect();
+        let mut seen: HashSet<Errors> = HashSet::new();
+        let mut checked = 0usize;
+        for code in all_errors {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            if handled.contains(&error) {
+                continue;
+            }
+            checked += 1;
             let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
             let partition = tp("topic-a", 0);
             assign_and_seek(&h, &partition);
@@ -1193,7 +1308,455 @@ mod tests {
                 matches!(err, KafkaError::IllegalState(_)),
                 "expected IllegalState for {error:?}, got {err:?}"
             );
+            // The catch-all message embeds the offending error code.
+            assert!(
+                err.message().contains(&error.code().to_string()),
+                "expected error code {} in message for {error:?}: {}",
+                error.code(),
+                err.message()
+            );
         }
+        // Guard against `Errors::values()` returning an empty / tiny set:
+        // there must be many "other" errors.
+        assert!(checked > 10, "expected the full Errors set; only checked {checked}");
+    }
+
+    // ── testErrorInInitialize (parameterized ×4) ───────────────────────────
+    //
+    // Translated from `FetchCollectorTest.testErrorInInitialize`. Java
+    // overrides `initialize()` in an anonymous subclass to throw; Rust uses
+    // the `#[cfg(test)]` `set_force_initialize_error` hook (compiled out of
+    // release builds). The contract under test is the `collect_fetch`
+    // queue-state bookkeeping: if the CompletedFetch has 0 records the failed
+    // initialize causes it to be polled off the queue (queue becomes empty);
+    // if it has records the entry is left on the queue. I.e.
+    // `recordCount == 0 == fetchBuffer.isEmpty()`.
+
+    /// Builds a CompletedFetch whose payload has `record_count` records, or
+    /// zero bytes when `record_count == 0` (so `records_size` is 0 and the
+    /// `fetch.isEmpty() && recordsSize == 0` poll path fires, mirroring
+    /// Java's empty `createRecords(0)`).
+    fn build_completed_fetch_for_init_error(
+        h: &Harness,
+        partition: TopicPartition,
+        record_count: i32,
+    ) -> CompletedFetch {
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(partition.partition());
+        partition_data.set_high_watermark(1000);
+        if record_count == 0 {
+            partition_data.set_records(Some(Vec::new()));
+        } else {
+            partition_data.set_records(Some(make_records(0, record_count)));
+        }
+        CompletedFetch::new_full(
+            h.subs.clone(),
+            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            partition,
+            partition_data,
+            0,
+        )
+    }
+
+    /// Drives one `testErrorInInitialize` case: install an initialize-error
+    /// closure returning `make_error()`, add a CompletedFetch with
+    /// `record_count` records, run `collect_fetch`, assert it errors and
+    /// that the queue-empty state matches `record_count == 0`.
+    fn run_error_in_initialize_case(record_count: i32, make_error: impl Fn() -> KafkaError + Send + Sync + 'static) {
+        let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.collector.set_force_initialize_error(make_error);
+
+        let cf = build_completed_fetch_for_init_error(&h, partition.clone(), record_count);
+        h.fetch_buffer.add(cf);
+        assert!(!h.fetch_buffer.is_empty());
+
+        // collect_fetch must surface the injected error (no records decoded).
+        let err = h.collector.collect_fetch(&h.fetch_buffer);
+        assert!(
+            err.is_err(),
+            "expected initialize error to propagate for record_count={record_count}"
+        );
+
+        // recordCount == 0 ⇒ the empty entry is polled off the queue;
+        // recordCount > 0 ⇒ the record-bearing entry is left on the queue.
+        assert_eq!(
+            record_count == 0,
+            h.fetch_buffer.is_empty(),
+            "queue-empty state must match (record_count == 0) for record_count={record_count}"
+        );
+    }
+
+    /// `testErrorInInitialize(10, RuntimeException)` — record-bearing fetch,
+    /// generic (non-Kafka) error: entry remains on the queue.
+    #[test]
+    fn test_error_in_initialize_runtime_with_records() {
+        run_error_in_initialize_case(10, || KafkaError::illegal_argument("simulated runtime error in initialize"));
+    }
+
+    /// `testErrorInInitialize(0, RuntimeException)` — empty fetch, generic
+    /// error: entry is removed from the queue.
+    #[test]
+    fn test_error_in_initialize_runtime_empty() {
+        run_error_in_initialize_case(0, || KafkaError::illegal_argument("simulated runtime error in initialize"));
+    }
+
+    /// `testErrorInInitialize(10, KafkaException)` — record-bearing fetch,
+    /// KafkaException: entry remains on the queue.
+    #[test]
+    fn test_error_in_initialize_kafka_with_records() {
+        run_error_in_initialize_case(10, || {
+            KafkaError::with_message(Errors::UnknownServerError, "simulated kafka error")
+        });
+    }
+
+    /// `testErrorInInitialize(0, KafkaException)` — empty fetch,
+    /// KafkaException: entry is removed from the queue.
+    #[test]
+    fn test_error_in_initialize_kafka_empty() {
+        run_error_in_initialize_case(0, || {
+            KafkaError::with_message(Errors::UnknownServerError, "simulated kafka error")
+        });
+    }
+
+    // ── update_partition_state short-circuit branches ──────────────────────
+    //
+    // Translated from the FetchCollectorTest "OnNotAssignedPartition" family
+    // (`testCollectFetchInitializationWithUpdate{HighWatermark,LogStartOffset,
+    // LastStableOffset,PreferredReplica}OnNotAssignedPartition`). Java mocks
+    // each `tryUpdating*` to return false in isolation. In real Rust
+    // `SubscriptionState`, `try_updating_*` returns false IFF the partition is
+    // not assigned (`assigned_state_or_null_mut → None`). We therefore drive
+    // `update_partition_state` with an UNASSIGNED partition and set ONLY the
+    // target field non-negative (others stay negative ⇒ their branch is
+    // skipped), so the targeted `try_updating_*` is the one that returns
+    // false. Mutation-resistant: deleting the targeted short-circuit branch
+    // makes `update_partition_state` fall through to the remaining
+    // (skipped) branches and return `true`, failing the assertion.
+    //
+    // The full-collector wrapper (`collect_fetch`) reaches
+    // `update_partition_state` only after `initialize` passes the
+    // `has_valid_position` guard; with an unassigned partition that guard is
+    // false, so the collector exits empty (the same observable empty-fetch
+    // behavior the Java tests assert, covered by
+    // `test_collect_fetch_not_assigned_partition_yields_nothing`). The
+    // per-branch assertions below pin the individual short-circuits that the
+    // Java mocks target.
+
+    /// `...UpdateHighWatermarkOnNotAssignedPartition`: only the
+    /// high-watermark branch runs (default `high_watermark = 0 >= 0`; other
+    /// fields default negative), and it returns false for the unassigned
+    /// partition.
+    #[test]
+    fn test_update_partition_state_high_watermark_not_assigned() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic", 0);
+        // Intentionally NOT assigned.
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(1000);
+        // log_start_offset / last_stable_offset / preferred default negative.
+        assert!(
+            !h.collector.update_partition_state(&partition_data, &partition),
+            "high-watermark update must fail for an unassigned partition"
+        );
+    }
+
+    /// `...UpdateLogStartOffsetOnNotAssignedPartition`: high-watermark branch
+    /// skipped (`-1`), only the log-start-offset branch runs and fails.
+    #[test]
+    fn test_update_partition_state_log_start_offset_not_assigned() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic", 0);
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(-1);
+        partition_data.set_log_start_offset(10);
+        // last_stable_offset / preferred default negative.
+        assert!(
+            !h.collector.update_partition_state(&partition_data, &partition),
+            "log-start-offset update must fail for an unassigned partition"
+        );
+    }
+
+    /// `...UpdateLastStableOffsetOnNotAssignedPartition`: high-watermark and
+    /// log-start-offset branches skipped, only the last-stable-offset branch
+    /// runs and fails.
+    #[test]
+    fn test_update_partition_state_last_stable_offset_not_assigned() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic", 0);
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(-1);
+        partition_data.set_log_start_offset(-1);
+        partition_data.set_last_stable_offset(900);
+        assert!(
+            !h.collector.update_partition_state(&partition_data, &partition),
+            "last-stable-offset update must fail for an unassigned partition"
+        );
+    }
+
+    /// `...UpdatePreferredReplicaOnNotAssignedPartition`: all watermark
+    /// branches skipped, only the preferred-read-replica branch runs and
+    /// fails.
+    #[test]
+    fn test_update_partition_state_preferred_replica_not_assigned() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic", 0);
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(-1);
+        partition_data.set_log_start_offset(-1);
+        partition_data.set_last_stable_offset(-1);
+        partition_data.set_preferred_read_replica(21);
+        assert!(
+            !h.collector.update_partition_state(&partition_data, &partition),
+            "preferred-replica update must fail for an unassigned partition"
+        );
+    }
+
+    /// Collector-level companion to the OnNotAssignedPartition family and
+    /// `testCollectFetchInitializationWithNullPosition`: a CompletedFetch for
+    /// an unassigned (or unseeked) partition yields an empty fetch and clears
+    /// the next-in-line slot. Java forces `hasValidPosition→true` via a mock
+    /// to push execution into `updatePartitionState`; in real state the
+    /// `has_valid_position` guard short-circuits `initialize` to the same
+    /// observable result (empty fetch, next-in-line cleared).
+    #[test]
+    fn test_collect_fetch_not_assigned_partition_yields_nothing() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic", 0);
+        // Assign WITHOUT seek: partition initialized, no valid position
+        // (equivalent to Java's `positionOrNull → null` after the
+        // has-valid-position guard).
+        {
+            let mut guard = h.subs.lock().expect("lock");
+            let mut set: HashSet<TopicPartition> = HashSet::new();
+            set.insert(partition.clone());
+            guard.assign_from_user(set).unwrap();
+        }
+
+        let cf = build_completed_fetch(&h, partition.clone(), 0, DEFAULT_RECORD_COUNT, None);
+        h.fetch_buffer.add(cf);
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+
+        assert!(fetch.is_empty());
+        assert_eq!(0, fetch.next_offsets().len());
+        // The CompletedFetch was consumed off the queue and not re-installed
+        // as next-in-line (Java: verify(fetchBuffer).setNextInLineFetch(null)).
+        assert!(!h.fetch_buffer.has_next_in_line_fetch());
+    }
+
+    /// Translated from
+    /// `FetchCollectorTest.testCollectFetchInitializationOffsetOutOfRangeErrorWithNullPosition`.
+    ///
+    /// Java mocks `hasValidPosition→true, positionOrNull→null` to reach the
+    /// OFFSET_OUT_OF_RANGE handler with a null position, which discards the
+    /// fetch as stale WITHOUT requesting a reset. In real Rust state the null
+    /// position is only reachable inside `handle_offset_out_of_range` (the
+    /// `position_or_null → None` arm), so we drive that arm directly: an
+    /// unassigned partition has no position, and the OOR handler must return
+    /// the fetch back (discarded) without requesting a reset.
+    #[test]
+    fn test_collect_fetch_oor_null_position_yields_nothing() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic", 0);
+        // NOT assigned ⇒ position_or_null returns None inside the handler.
+        let cf = build_completed_fetch(&h, partition.clone(), 0, 0, Some(Errors::OffsetOutOfRange));
+
+        // The null-position arm discards the fetch (returns it unchanged) and
+        // does NOT request a reset.
+        let result = h.collector.handle_offset_out_of_range(cf, 0);
+        assert!(result.is_ok(), "null-position OOR must discard (not error)");
+        // No reset was requested: the partition isn't even assigned.
+        let guard = h.subs.lock().expect("lock");
+        assert!(
+            guard.is_offset_reset_needed(&partition).is_err(),
+            "unassigned partition cannot have a reset requested"
+        );
+    }
+
+    /// Translated from
+    /// `FetchCollectorTest.testCollectFetchInitializationOffsetOutOfRangeErrorWithOffsetReset`.
+    ///
+    /// Asserts that an OFFSET_OUT_OF_RANGE error with a matching position and
+    /// a default reset policy causes `request_offset_reset_if_assigned` to be
+    /// invoked (Java: `verify(subscriptions).requestOffsetResetIfPartitionAssigned`).
+    /// Driven end-to-end through `collect_fetch`.
+    #[test]
+    fn test_collect_fetch_oor_offset_reset_requests_reset() {
+        // build_harness uses AutoOffsetResetStrategy::LATEST ⇒ default reset
+        // policy is set (has_default_offset_reset_policy == true).
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        // Assign + seek so the position matches the fetch offset and the OOR
+        // handler reaches the reset arm.
+        assign_and_seek(&h, &partition);
+        {
+            // No reset requested yet.
+            let guard = h.subs.lock().expect("lock");
+            assert!(!guard.is_offset_reset_needed(&partition).unwrap());
+        }
+
+        // fetch_offset 0 matches the seeked position 0.
+        let cf = build_completed_fetch(&h, partition.clone(), 0, 0, Some(Errors::OffsetOutOfRange));
+        h.fetch_buffer.add(cf);
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+
+        assert!(fetch.is_empty());
+        assert_eq!(0, fetch.next_offsets().len());
+        // The reset was requested for the partition.
+        let guard = h.subs.lock().expect("lock");
+        assert!(
+            guard.is_offset_reset_needed(&partition).unwrap(),
+            "expected an offset reset to be requested after OOR with default reset policy"
+        );
+    }
+
+    // ── testReadCommittedWithAbortedTransaction ────────────────────────────
+
+    /// Builds a transactional v2 data batch at `base_offset` holding `count`
+    /// records, with producer id `producer_id` and `partition_leader_epoch`
+    /// (`plep`) set so `last_epoch()` reports it.
+    fn txn_data_batch(base_offset: i64, count: i32, producer_id: i64, plep: i32) -> Vec<u8> {
+        use crate::common::compress::Compression;
+        use crate::common::record::{MemoryRecords, RecordBatch, TimestampType};
+        let mut builder = MemoryRecords::builder_full(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+            -1,          // log_append_time
+            producer_id, // producer_id
+            0,           // producer_epoch
+            0,           // base_sequence
+            true,        // is_transactional
+            false,       // is_control_batch
+            plep,        // partition_leader_epoch
+            512,
+        );
+        for i in 0..count {
+            let offset = base_offset + i as i64;
+            let value = format!("value-{offset}");
+            builder.append_with_offset_bytes(offset, 0, Some(b"key"), Some(value.as_bytes()));
+        }
+        builder.build().buffer().to_vec()
+    }
+
+    /// Builds a CompletedFetch declaring an aborted transaction for
+    /// `producer_id` at `first_offset`, carrying `records_bytes`.
+    fn build_completed_fetch_with_aborted_txn(
+        h: &Harness,
+        partition: TopicPartition,
+        fetch_offset: i64,
+        records_bytes: Vec<u8>,
+        producer_id: i64,
+        first_offset: i64,
+    ) -> CompletedFetch {
+        use crate::fetch_response_data::AbortedTransaction;
+        let mut txn = AbortedTransaction::new();
+        txn.set_producer_id(producer_id);
+        txn.set_first_offset(first_offset);
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(partition.partition());
+        partition_data.set_high_watermark(1000);
+        partition_data.set_records(Some(records_bytes));
+        partition_data.set_aborted_transactions(Some(vec![txn]));
+        CompletedFetch::new_full(
+            h.subs.clone(),
+            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            partition,
+            partition_data,
+            fetch_offset,
+        )
+    }
+
+    /// Translated from `FetchCollectorTest.testReadCommittedWithAbortedTransaction`.
+    ///
+    /// Under READ_COMMITTED a fully-aborted transactional batch yields ZERO
+    /// records but the fetch is non-empty: `next_offsets` advances past the
+    /// aborted batch (offset-advance-with-zero-records). A subsequent
+    /// committed (non-aborted) batch returns all its records and advances the
+    /// offset further. The leader epoch on the advanced offset is `Some(0)`
+    /// (the batch's partition leader epoch).
+    ///
+    /// # Deviation from Java's control-marker layout (documented)
+    ///
+    /// Java's fixture appends an `EndTransactionMarker` control batch after the
+    /// aborted data batch, so its `nextOffset` is `recordCount + 1` and Java's
+    /// `containsAbortMarker` logic removes the producer from the aborted set on
+    /// observing the marker. The Rust `CompletedFetch` does NOT yet translate
+    /// `containsAbortMarker` / `ControlRecordType` (see `completed_fetch.rs`
+    /// module docstring) — it returns `UnsupportedVersion` if it encounters a
+    /// control batch from a previously-aborted producer. We therefore use
+    /// PLAIN data batches (no control markers): the aborted batch spans exactly
+    /// `recordCount` offsets (so `nextOffset = recordCount`), and the second
+    /// (committed) batch uses a DIFFERENT producer id so the
+    /// `containsAbortMarker`-gap does not apply. The collector contract under
+    /// test — zero records but offset advances past an all-aborted batch, then
+    /// records returned + offset advanced for a committed batch — is identical;
+    /// only the literal offset values differ because no control marker occupies
+    /// an offset slot.
+    #[test]
+    fn test_read_committed_with_aborted_transaction() {
+        const ABORTED_PRODUCER_ID: i64 = 100;
+        const COMMITTED_PRODUCER_ID: i64 = 200;
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadCommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+
+        let record_count = 20;
+        // First CompletedFetch: a fully-aborted transactional data batch,
+        // offsets 0..=19 (nextOffset = 20).
+        let buf = txn_data_batch(0, record_count, ABORTED_PRODUCER_ID, 0);
+        let cf1 = build_completed_fetch_with_aborted_txn(&h, partition.clone(), 0, buf, ABORTED_PRODUCER_ID, 0);
+        h.fetch_buffer.add(cf1);
+
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+        // No data records, but the offset moved forward past the aborted batch.
+        // The public `is_empty()` (records-only) IS true here (Java's public
+        // ConsumerRecords.isEmpty), but the internal `Fetch.isEmpty()`
+        // (`is_fetch_empty`, which drives the poll loop) must be FALSE because
+        // the position advanced — otherwise poll() would block until timeout.
+        assert!(fetch.is_empty(), "no data records ⇒ public is_empty() true");
+        assert!(
+            !fetch.is_fetch_empty(),
+            "Fetch.isEmpty() must be false when the position advanced with zero records"
+        );
+        assert_eq!(0, fetch.count(), "all records aborted ⇒ zero records");
+        assert_eq!(1, fetch.next_offsets().len());
+        let expected = OffsetAndMetadata::with_leader_epoch(record_count as i64, Some(0), "").unwrap();
+        assert_eq!(&expected, fetch.next_offsets().get(&partition).unwrap());
+
+        // Second CompletedFetch: a committed (non-aborted) transactional data
+        // batch from a different producer, offsets 20..=39 (nextOffset = 40).
+        // The records ARE returned and the offset advances.
+        let start_offset = record_count; // 20 — matches the position after fetch 1
+        let buf2 = txn_data_batch(start_offset as i64, record_count, COMMITTED_PRODUCER_ID, 0);
+        // No aborted transaction declared for COMMITTED_PRODUCER_ID, so its
+        // records are returned. (We still pass an aborted-txn entry for the
+        // unrelated ABORTED_PRODUCER_ID, mirroring the response carrying a
+        // stale aborted-txn list; it does not match this batch's producer.)
+        let cf2 = build_completed_fetch_with_aborted_txn(
+            &h,
+            partition.clone(),
+            start_offset as i64,
+            buf2,
+            ABORTED_PRODUCER_ID,
+            0,
+        );
+        h.fetch_buffer.add(cf2);
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+
+        assert!(!fetch.is_empty());
+        assert_eq!(record_count as usize, fetch.count(), "committed data records returned");
+        assert_eq!(1, fetch.next_offsets().len());
+        let expected2 =
+            OffsetAndMetadata::with_leader_epoch((start_offset + record_count) as i64, Some(0), "").unwrap();
+        assert_eq!(&expected2, fetch.next_offsets().get(&partition).unwrap());
     }
 
     /// Translated from `FetchCollectorTest.testFetchWithReadReplica`.
