@@ -613,6 +613,31 @@ impl Metadata {
         inner.need_full_update
     }
 
+    /// Test-only accessor exposing the `equivalent_response_count` backoff
+    /// counter. This is the ONLY state that differs between
+    /// `request_update(true)` and `request_update(false)`:
+    /// `request_update(true)` resets it to `0` (line in [`Self::request_update`]),
+    /// while `request_update(false)` leaves it untouched. Both set
+    /// `need_full_update = true` identically, so [`Self::need_full_update_for_test`]
+    /// alone cannot distinguish the two arguments. Tests snapshot this counter
+    /// before/after a code path to pin the exact `verify(metadata).requestUpdate(true)`
+    /// vs `verify(metadata).requestUpdate(false)` contract from the Java mocks.
+    #[cfg(test)]
+    pub(crate) fn equivalent_response_count_for_test(&self) -> i64 {
+        let inner = self.inner.lock().unwrap();
+        inner.equivalent_response_count
+    }
+
+    /// Test-only setter to seed `equivalent_response_count` to a known
+    /// non-zero value, so a subsequent `request_update(true)` reset (vs a
+    /// `request_update(false)` non-reset) is observable via
+    /// [`Self::equivalent_response_count_for_test`].
+    #[cfg(test)]
+    pub(crate) fn set_equivalent_response_count_for_test(&self, count: i64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.equivalent_response_count = count;
+    }
+
     /// Adds a cluster update listener.
     pub fn add_cluster_update_listener(&self, listener: Box<dyn crate::common::ClusterResourceListener>) {
         let mut inner = self.inner.lock().unwrap();

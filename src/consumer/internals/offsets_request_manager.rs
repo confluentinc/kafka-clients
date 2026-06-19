@@ -2616,6 +2616,16 @@ mod tests {
         )
     }
 
+    /// Build a synthesised pure-disconnect `ClientResponse` (no auth /
+    /// version-mismatch annotation), so the handler maps it to a
+    /// `NetworkException` (Java's transport-level disconnect) rather than
+    /// the SASL-authentication failure path.
+    fn build_network_disconnect_client_response() -> ClientResponse {
+        let header =
+            RequestHeader::new(&ApiKeys::LIST_OFFSETS, ApiKeys::LIST_OFFSETS.latest_version(), "", 1).expect("header");
+        ClientResponse::with_timeout(header, None, "0", 0, 0, true, false, None, None, None)
+    }
+
     /// Build a single-topic, multi-partition `ListOffsetsResponse` from a
     /// map of `partition -> (error, timestamp, offset, leader_epoch)`.
     fn build_list_offsets_response(topic: &str, partitions: Vec<(i32, Errors, i64, i64, i32)>) -> ListOffsetsResponse {
@@ -2652,6 +2662,29 @@ mod tests {
         metadata.add_transient_topics(HashSet::from([topic.to_string()]));
         let mut counts = HashMap::new();
         counts.insert(topic.to_string(), num_partitions);
+        let response = request_test_utils::metadata_update_with(num_nodes, &counts);
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+        response
+    }
+
+    /// Bootstrap `metadata` with several topics in one update, each with its
+    /// own partition count, spread across `num_nodes` brokers. Used by the
+    /// build-time-partial-park test (`testGetOffsetsForTimesWhenSomeTopic`
+    /// `PartitionLeadersNotKnownInitially`) where the first refresh knows
+    /// only a subset of the requested topics and a later refresh adds the
+    /// rest. Every named topic is registered as transient so the consumer's
+    /// `retain_topic_fn` keeps it in the cluster snapshot.
+    fn bootstrap_metadata_multi_topic(
+        metadata: &ConsumerMetadata,
+        topic_partition_counts: &[(&str, i32)],
+        num_nodes: i32,
+    ) -> MetadataResponse {
+        let topics: HashSet<String> = topic_partition_counts.iter().map(|(t, _)| (*t).to_string()).collect();
+        metadata.add_transient_topics(topics);
+        let mut counts = HashMap::new();
+        for (topic, num_partitions) in topic_partition_counts {
+            counts.insert((*topic).to_string(), *num_partitions);
+        }
         let response = request_test_utils::metadata_update_with(num_nodes, &counts);
         metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
         response
@@ -2886,6 +2919,10 @@ mod tests {
     async fn fetch_offsets_unknown_leader_parks_on_retry() {
         let mut mgr = new_manager();
         // No metadata bootstrap: leader is unknown.
+        // Seed the backoff counter to a non-zero value so the
+        // `request_update(true)` reset is observable and distinguishable
+        // from a `request_update(false)` (which leaves it untouched).
+        mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
         let tp = TopicPartition::new("t1".to_string(), 1);
         let mut timestamps = HashMap::new();
         timestamps.insert(tp, EARLIEST_TIMESTAMP);
@@ -2896,10 +2933,18 @@ mod tests {
         // Java: `verify(metadata).requestUpdate(true)`. The unknown-leader
         // build path calls `request_update(true)`, which sets the
         // `need_full_update` flag (distinct from the transient-topic
-        // partial-update set by `fetch_offsets` itself).
+        // partial-update set by `fetch_offsets` itself) AND resets the
+        // `equivalent_response_count` backoff counter to 0 — the latter is
+        // the side effect that pins the `true` argument specifically (a
+        // `request_update(false)` would have left it at 3).
         assert!(
             mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
             "unknown leader must trigger metadata.requestUpdate(true)"
+        );
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+            0,
+            "requestUpdate(true) must reset the equivalent-response backoff counter (distinguishes true from false)"
         );
 
         // Subsequent poll yields no unsent requests.
@@ -2922,6 +2967,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_offsets_metadata_update_retries_successfully() {
         let mut mgr = new_manager();
+        // Seed the backoff counter so the `request_update(true)` reset is
+        // observable (distinguishes the `true` argument from `false`).
+        mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
         let tp = TopicPartition::new("t1".to_string(), 1);
         let mut timestamps = HashMap::new();
         timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
@@ -2930,10 +2978,16 @@ mod tests {
         assert_eq!(mgr.requests_to_send_count(), 0);
         assert_eq!(mgr.requests_to_retry_count(), 1);
         // Java: `verify(metadata).requestUpdate(true)` — same unknown-leader
-        // path as the timeout test.
+        // path as the timeout test. The `true` argument is pinned by the
+        // backoff-counter reset to 0 (a `false` would leave it at 3).
         assert!(
             mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
             "unknown leader must trigger metadata.requestUpdate(true)"
+        );
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+            0,
+            "requestUpdate(true) must reset the equivalent-response backoff counter"
         );
 
         // Trigger metadata update — fires the cluster listener which
@@ -3004,6 +3058,10 @@ mod tests {
             // `update_with_current_request_version`) is a clean baseline.
             let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
             bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+            // Seed the backoff counter so the `request_update(false)` on the
+            // retriable branch (which must NOT reset it) is distinguishable
+            // from a `request_update(true)`.
+            mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
             let tp = TopicPartition::new("t1".to_string(), 1);
             let mut timestamps = HashMap::new();
             timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
@@ -3036,10 +3094,16 @@ mod tests {
             );
             // Java: `verify(metadata).requestUpdate(false)`. The retriable
             // branch in `apply_partial_result` calls `request_update(false)`,
-            // setting `need_full_update`.
+            // setting `need_full_update` and (crucially) NOT resetting the
+            // backoff counter — the latter pins the `false` argument.
             assert!(
                 mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
                 "{error:?}: retriable error must trigger metadata.requestUpdate(false)"
+            );
+            assert_eq!(
+                mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+                3,
+                "{error:?}: requestUpdate(false) must NOT reset the backoff counter (distinguishes false from true)"
             );
 
             // Metadata update fires the listener → replay.
@@ -3109,6 +3173,10 @@ mod tests {
         // Two nodes → partition 1 → node 1, partition 2 → node 0 (distinct
         // leaders, mirroring Java's LEADER_1 / LEADER_2).
         bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
+        // Seed the backoff counter to a known non-zero value so that the
+        // subsequent `request_update(false)` (which must NOT reset it) is
+        // distinguishable from a `request_update(true)` (which would).
+        mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
         let tp1 = TopicPartition::new("t1".to_string(), 1);
         let tp2 = TopicPartition::new("t1".to_string(), 2);
         let mut timestamps = HashMap::new();
@@ -3146,6 +3214,14 @@ mod tests {
             mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
             "partial retriable error must trigger metadata.requestUpdate(false)"
         );
+        // Java: `verify(metadata).requestUpdate(false)`. The `false` argument
+        // is pinned by the backoff counter NOT being reset (it stays at the
+        // seeded 3); a `request_update(true)` would have reset it to 0.
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+            3,
+            "requestUpdate(false) must NOT reset the equivalent-response backoff counter (distinguishes false from true)"
+        );
 
         // Metadata update → replay the failed partition's request.
         bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
@@ -3160,6 +3236,141 @@ mod tests {
         let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
         assert_eq!(result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(), 5);
         assert_eq!(result.get(&tp2).expect("tp2").as_ref().expect("non-null").offset(), 5);
+    }
+
+    /// Java parity: `OffsetFetcherTest.testGetOffsetsForTimesWhenSomeTopicPartitionLeadersNotKnownInitially`.
+    ///
+    /// Exercises the **build-time partial park** branch of
+    /// `build_list_offsets_requests`: some requested partitions have known
+    /// leaders at build time (their request is built and `expected_responses`
+    /// counts only those nodes), while another requested partition's topic is
+    /// NOT yet in the metadata cache, so it goes to `remaining_to_search` via
+    /// `group_list_offset_requests` and triggers `request_update(true)`.
+    ///
+    /// `build_list_offsets_requests` returns `Ok(unsent_requests)` for the
+    /// resolvable subset (Java `OffsetsRequestManager.java:575-583`), so the
+    /// known partitions' requests fly immediately. When their responses
+    /// arrive, `apply_partial_result` sees `remaining_to_search` non-empty,
+    /// re-parks the state, and requests a metadata update (`requestUpdate(false)`).
+    /// A second metadata refresh brings in the missing topic; the parked
+    /// request replays, the now-resolvable partition completes, and the global
+    /// result MERGES the build-time-resolved partitions with the
+    /// build-time-parked-then-resolved partition into one map.
+    ///
+    /// This is the only test that drives the `Ok`-with-non-empty-
+    /// `remaining_to_search` branch: the all-leaderless park tests hit
+    /// `Err(StaleMetadata)` (no request built), and the partial-response-error
+    /// tests build every partition successfully on round 1. Distinct path,
+    /// distinct coverage.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_build_time_partial_park_merges_after_metadata_update() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        // Initial metadata knows ONLY t1 (3 nodes). The second topic t2 is
+        // unknown, so t2-p0's leader is unresolvable at build time. Mirrors
+        // Java's "metadata initially has one topic".
+        bootstrap_metadata_multi_topic(&mgr.shared.metadata, &[("t1", 2)], 3);
+        // Seed the backoff counter so the unknown-leader `request_update(true)`
+        // reset is observable.
+        mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
+
+        // tp0 (t1, p0) → node 0, tp1 (t1, p1) → node 1 — both known leaders.
+        let tp0 = TopicPartition::new("t1".to_string(), 0);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        // t2p0 (t2, p0) — leader unknown until the second metadata refresh.
+        let t2p0 = TopicPartition::new("t2".to_string(), 0);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp0.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(t2p0.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+
+        // Build-time partial park: the two known partitions build into
+        // requests (two distinct leaders → two requests); t2p0 parks in
+        // `remaining_to_search`. The state is NOT on `requests_to_retry`
+        // yet (a request WAS built), unlike the all-leaderless case.
+        assert_eq!(
+            mgr.requests_to_send_count(),
+            2,
+            "two known-leader partitions build into requests while the unknown-leader partition parks at build time"
+        );
+        assert_eq!(
+            mgr.requests_to_retry_count(),
+            0,
+            "build-time partial park does NOT park the whole state on requests_to_retry (a request was built)"
+        );
+        // The unknown leader triggered `request_update(true)` inside
+        // `group_list_offset_requests` (reset the backoff counter to 0).
+        assert!(
+            mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+            "unknown leader at build time must trigger metadata.requestUpdate(true)"
+        );
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+            0,
+            "build-time requestUpdate(true) must reset the backoff counter"
+        );
+
+        // Round 1: complete the two known-leader requests (tp0 → 11, tp1 → 32).
+        let mut per_partition: HashMap<i32, (Errors, i64, i64, i32)> = HashMap::new();
+        per_partition.insert(0, (Errors::None, 1000, 11, UNKNOWN_EPOCH));
+        per_partition.insert(1, (Errors::None, 1000, 32, UNKNOWN_EPOCH));
+        let drained = complete_all_unsent_with_per_partition_response(&mut mgr, "t1", &per_partition, 0).await;
+        assert_eq!(drained, 2, "both known-leader requests completed");
+
+        // After both responses merge, `remaining_to_search` (still holding
+        // t2p0) is non-empty, so the state is re-parked and
+        // `requestUpdate(false)` is issued. Seed the counter again so the
+        // (false) non-reset is observable across the re-park.
+        mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(7);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            let _ = RequestManager::poll(&mut mgr, 0);
+            if mgr.requests_to_retry_count() == 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            mgr.requests_to_retry_count(),
+            1,
+            "state re-parked because t2p0 remains in remaining_to_search"
+        );
+        assert_eq!(mgr.requests_to_send_count(), 0);
+
+        // Second metadata refresh adds t2 (3 nodes → t2-p0 → node 0). This
+        // fires the cluster listener → replays the parked request, now
+        // resolving t2p0's leader.
+        bootstrap_metadata_multi_topic(&mgr.shared.metadata, &[("t1", 2), ("t2", 1)], 3);
+        assert_eq!(
+            mgr.requests_to_send_count(),
+            1,
+            "metadata refresh resolves t2's leader → parked request replays"
+        );
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        // The replayed request now resolves t2p0 (offset 54).
+        let response = build_list_offsets_response("t2", vec![(0, Errors::None, 1000, 54, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        // The merged global result carries ALL THREE offsets: the two
+        // build-time-resolved partitions PLUS the build-time-parked-then-
+        // resolved partition.
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert_eq!(
+            result.get(&tp0).expect("tp0").as_ref().expect("non-null").offset(),
+            11,
+            "build-time-resolved tp0"
+        );
+        assert_eq!(
+            result.get(&tp1).expect("tp1").as_ref().expect("non-null").offset(),
+            32,
+            "build-time-resolved tp1"
+        );
+        assert_eq!(
+            result.get(&t2p0).expect("t2p0").as_ref().expect("non-null").offset(),
+            54,
+            "build-time-parked-then-resolved t2p0 merged into the same result"
+        );
     }
 
     /// Java parity: `testRequestFailedResponse_NonRetriableErrorTimeout`.
@@ -3239,6 +3450,9 @@ mod tests {
     async fn fetch_offsets_unknown_leader_epoch_is_retriable() {
         let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
         bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        // Seed the backoff counter so the `request_update(false)` on the
+        // retriable branch (which must NOT reset it) is distinguishable.
+        mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
         let tp = TopicPartition::new("t1".to_string(), 1);
         let mut timestamps = HashMap::new();
         timestamps.insert(tp, EARLIEST_TIMESTAMP);
@@ -3260,6 +3474,12 @@ mod tests {
         assert!(
             mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
             "retriable error must trigger metadata.requestUpdate(false)"
+        );
+        // `false` argument pinned by the backoff counter NOT being reset.
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+            3,
+            "requestUpdate(false) must NOT reset the backoff counter"
         );
         drop(rx);
     }
@@ -3495,6 +3715,9 @@ mod tests {
             let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
             // Two nodes → tp0 (partition 0) → node 0, tp1 (partition 1) → node 1.
             bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 2, 2);
+            // Seed the backoff counter so the retriable `request_update(false)`
+            // (which must NOT reset it) is distinguishable from `(true)`.
+            mgr.shared.metadata.metadata_arc().set_equivalent_response_count_for_test(3);
             let tp0 = TopicPartition::new("t1".to_string(), 0);
             let tp1 = TopicPartition::new("t1".to_string(), 1);
             let mut timestamps = HashMap::new();
@@ -3522,6 +3745,13 @@ mod tests {
             assert!(
                 mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
                 "{error:?}: retriable error must trigger metadata update"
+            );
+            // Java: `requestUpdate(false)` on the retriable branch — `false`
+            // pinned by the backoff counter NOT being reset.
+            assert_eq!(
+                mgr.shared.metadata.metadata_arc().equivalent_response_count_for_test(),
+                3,
+                "{error:?}: requestUpdate(false) must NOT reset the backoff counter"
             );
 
             // Metadata update → replay tp1's request against the (now
@@ -3833,6 +4063,74 @@ mod tests {
             "expected authentication-related error, got {msg}"
         );
         assert_eq!(mgr.requests_to_retry_count(), 0);
+    }
+
+    /// Fetch-path behavior referenced by Java's
+    /// `OffsetFetcherTest.testGetOffsetsForTimesWhenSomeTopicPartitionLeadersDisconnectException`.
+    ///
+    /// **Why this is the faithful ORM translation (not the Java test's
+    /// observable retry-and-succeed).** The Java `OffsetFetcher` test asserts
+    /// that a disconnect on one node is silently retried and the offset is
+    /// eventually returned — but that retry-on-disconnect is a property of the
+    /// *classic* `OffsetFetcher`'s `ConsumerNetworkClient` layer, which is
+    /// out of scope (consumer-threading.md §20). The KIP-848
+    /// `OffsetsRequestManager` fetch path does NOT re-park on a transport
+    /// disconnect: `handle_fetch_offsets_response` routes a network error to
+    /// `fail_request_state`, completing the global result exceptionally for
+    /// ALL waiters (Java `OffsetsRequestManager.java:586`/`:600`
+    /// `globalResult.completeExceptionally(error)`). So the in-scope ORM
+    /// behavior is: a per-node disconnect FAILS the whole `fetch_offsets`
+    /// future with `NetworkException`, leaving nothing parked for retry. This
+    /// is the branch that, prior to this test, was only covered for the reset
+    /// path (Phase 31), never the fetch path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_disconnect_fails_global_result_without_reparking() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        // Two nodes → two requests (tp1 → node 1, tp2 → node 0), so we can
+        // disconnect one node while the other could still be outstanding —
+        // Java's `DisconnectException` on one leader of a multi-leader fetch.
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        let tp2 = TopicPartition::new("t1".to_string(), 2);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp1.clone(), EARLIEST_TIMESTAMP);
+        timestamps.insert(tp2.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = poll_result.unsent_requests.into_iter();
+        let first = unsent.next().expect("first per-node request");
+
+        // Disconnect the FIRST per-node request. The fetch path fails the
+        // entire global result immediately (it does NOT wait for the second
+        // node, and does NOT re-park).
+        first.handler().on_complete(build_network_disconnect_client_response());
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        let outcome = await_fetch_result(&mut mgr, rx, 0).await;
+        let err = outcome.expect_err("disconnect must fail the global fetch_offsets future");
+        // Assert error type AND message content (DoD §3). The disconnect
+        // maps to `NetworkException` in `FutureCompletionHandler::on_complete`.
+        assert_eq!(
+            err.error(),
+            crate::common::protocol::Errors::NetworkException,
+            "per-node disconnect must surface as a NetworkException"
+        );
+        let msg = err.error().to_string();
+        assert!(
+            msg.contains("disconnect") || msg.contains("network") || msg.contains("Network"),
+            "expected a network/disconnect-related message, got {msg}"
+        );
+
+        // Java `OffsetsRequestManager` fail path: NOTHING is parked for retry
+        // on a disconnect (unlike a retriable ListOffsets error code).
+        assert_eq!(
+            mgr.requests_to_retry_count(),
+            0,
+            "fetch path must NOT re-park on a disconnect — it fails the global result"
+        );
     }
 
     /// Java parity: `testRemoteListOffsetsRequestTimeoutMs`. The built
