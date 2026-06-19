@@ -1397,7 +1397,11 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `markPendingOnAssignedCallback` (package-private).
-    fn mark_pending_on_assigned_callback(&mut self, tps: &[TopicPartition], pending: bool) -> Result<(), KafkaError> {
+    pub(crate) fn mark_pending_on_assigned_callback(
+        &mut self,
+        tps: &[TopicPartition],
+        pending: bool,
+    ) -> Result<(), KafkaError> {
         for tp in tps {
             self.assigned_state_mut(tp)?.mark_pending_on_assigned_callback(pending);
         }

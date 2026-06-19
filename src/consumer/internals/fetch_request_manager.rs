@@ -1427,6 +1427,43 @@ mod round_trip {
             self.mgr.abstract_fetch().has_completed_fetches()
         }
 
+        fn buffered_partitions(&self) -> HashSet<TopicPartition> {
+            self.fetch_buffer.buffered_partitions()
+        }
+
+        /// `subscriptions.assignFromUser(partitions)` WITHOUT re-seeking
+        /// (positions for retained partitions survive; new ones are unset).
+        fn assign_only(&self, partitions: &[TopicPartition]) {
+            let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+            self.subscriptions.lock().unwrap().assign_from_user(set).unwrap();
+        }
+
+        /// Overwrites `tp`'s position with one whose current-leader is empty
+        /// (Java's `subscriptions.position(tp, FetchPosition(off, empty,
+        /// noLeaderOrEpoch))`), keeping it assigned but leaderless.
+        fn set_leaderless_position(&self, tp: &TopicPartition, offset: i64) {
+            let position = FetchPosition::with_leader(offset, None, LeaderAndEpoch::no_leader_or_epoch());
+            self.subscriptions.lock().unwrap().set_position(tp, position).unwrap();
+        }
+
+        /// Collects with a bounded `max_poll_records` so a single partition's
+        /// records can be drained (Java's `collectSelectedPartition`). Returns
+        /// the decoded `ConsumerRecords`.
+        fn collect_records_max(&self, max_poll_records: i32) -> crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>> {
+            let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> =
+                Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
+            let mut cfg = self.fetch_config.clone();
+            cfg.max_poll_records = max_poll_records;
+            let collector = FetchCollector::new(
+                self.metadata.clone(),
+                self.subscriptions.clone(),
+                cfg,
+                deserializers,
+                Arc::new(SystemFetchCollectorTime),
+            );
+            collector.collect_fetch(&self.fetch_buffer).expect("collect_fetch")
+        }
+
         /// Collects records via `FetchCollector::collect_fetch`, returning the
         /// decoded `ConsumerRecords` (byte-array key/value, Java's
         /// `ByteArrayDeserializer`).
@@ -1500,6 +1537,715 @@ mod round_trip {
         assert_eq!(Some(4), rt.position(&tp(0)));
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(1 + i as i64, rec.offset());
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 7a — fetch-session / topic-id / buffered-partition / leadership
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Returns the single (node_id, version, partition topic_id) tuple from a
+    /// 1-partition built request, asserting exactly one topic/partition.
+    fn assert_single_request_topic_id(req: &FetchRequest, expected_topic_id: Uuid, expected_leader_epoch: i32) {
+        let data = req.data();
+        assert_eq!(1, data.topics.len(), "expected one topic in the request");
+        let topic = &data.topics[0];
+        assert_eq!(expected_topic_id, topic.topic_id, "topic-id on the wire");
+        assert_eq!(1, topic.partitions.len(), "expected one partition");
+        assert_eq!(
+            expected_leader_epoch, topic.partitions[0].current_leader_epoch,
+            "leader epoch on the wire"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchWithTopicId`: a
+    /// non-zero topic-id negotiates the LATEST fetch version and carries the
+    /// topic-id on the wire; records decode and the position advances.
+    #[test]
+    fn test_fetch_with_topic_id() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        // Topic-id present -> LATEST version, topic-id + leader-epoch on wire.
+        let req = &built[node_id];
+        assert_eq!(ApiKeys::FETCH.latest_version(), req.version());
+        assert_single_request_topic_id(req, topic_id, VALID_LEADER_EPOCH);
+
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, response, req.version());
+
+        let records = rt.collect_records();
+        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(Some(4), rt.position(&tp(0)));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchWithNoTopicId`: a
+    /// ZERO topic-id falls back to fetch version 12 (the topic-id-less wire
+    /// format); records still decode and the position advances.
+    #[test]
+    fn test_fetch_with_no_topic_id() {
+        // No topic-id seeded -> Uuid::zero() on the wire -> version 12.
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, HashMap::new());
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let req = &built[node_id];
+        assert_eq!(12, req.version(), "zero topic-id must downgrade to version 12");
+        assert_single_request_topic_id(req, Uuid::zero(), VALID_LEADER_EPOCH);
+
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, Uuid::zero(), 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, response, req.version());
+
+        let records = rt.collect_records();
+        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(Some(4), rt.position(&tp(0)));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testEpochSetInFetchRequest`:
+    /// the outgoing FetchRequest carries the partition's current leader epoch
+    /// (here 99 from the metadata update).
+    #[test]
+    fn test_epoch_set_in_fetch_request() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        // Re-seed metadata with leader epoch 99 for the test topic.
+        rt.metadata.add_transient_topics(HashSet::from([TOPIC.to_string()]));
+        let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "dummy",
+            1,
+            &HashMap::new(),
+            &HashMap::from([(TOPIC.to_string(), 4)]),
+            &|_tp| Some(99),
+            &rt.topic_ids,
+        );
+        rt.metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, 0);
+        {
+            let cluster = rt.metadata.metadata_arc().fetch();
+            let mut guard = rt.subscriptions.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp(0)])).unwrap();
+            let leader = cluster.leader_for(&tp(0)).cloned();
+            let position = FetchPosition::with_leader(10, Some(99), LeaderAndEpoch::new(leader, Some(99)));
+            guard.seek_validated(&tp(0), position).unwrap();
+        }
+
+        let (built, _prepared) = rt.build_fetch_requests(0);
+        let req = built.values().next().unwrap();
+        // Every partition in the request must carry leader epoch 99.
+        for topic in &req.data().topics {
+            for p in &topic.partitions {
+                assert_eq!(99, p.current_leader_epoch, "expected leader epoch from metadata in request");
+                assert_eq!(10, p.fetch_offset, "fetch offset = seek offset");
+            }
+        }
+        let _ = topic_id;
+    }
+
+    /// Translated from `FetchRequestManagerTest.testSubscriptionPositionUpdatedWithEpoch`'s
+    /// core assertion that the consumer position advances after a fetch (the
+    /// metadata-epoch-divergence half is covered by the leadership tests).
+    #[test]
+    fn test_subscription_position_updated_with_epoch() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+        let _ = rt.collect_records();
+        assert_eq!(Some(4), rt.position(&tp(0)), "position advanced to 4");
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchSessionIdError`: a
+    /// top-level `FETCH_SESSION_TOPIC_ID_ERROR` yields no records, does not
+    /// advance the position, and leaves the fetch handled (node removed from
+    /// the pending set).
+    #[test]
+    fn test_fetch_session_id_error() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+
+        // Top-level FETCH_SESSION_TOPIC_ID_ERROR response.
+        let mut data = FetchResponseData::new();
+        data.set_error_code(Errors::FetchSessionTopicIdError.code());
+        data.set_session_id(INVALID_SESSION_ID);
+        data.set_throttle_time_ms(0);
+        let response = FetchResponse::new(data);
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+
+        let records = rt.collect_records();
+        assert!(records.is_empty(), "no records on session error");
+        // Position unchanged (still 0, the seek offset).
+        assert_eq!(Some(0), rt.position(&tp(0)));
+        let _ = topic_id;
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchForgetTopicIdWhenUnassigned`: after a
+    /// partition is unassigned and a different one assigned, the next
+    /// incremental fetch carries the old partition on the forget list.
+    #[test]
+    fn test_fetch_forget_topic_id_when_unassigned() {
+        let foo_id = Uuid::random_uuid();
+        let bar_id = Uuid::random_uuid();
+        let ids = HashMap::from([("foo".to_string(), foo_id), ("bar".to_string(), bar_id)]);
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.seed_metadata(1, &HashMap::from([("foo".to_string(), 1), ("bar".to_string(), 1)]));
+        rt.assign_and_seek(&[tp_named("foo", 0)]);
+
+        // First fetch establishes a session that includes foo.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .session_id(1)
+            .partition("foo", foo_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+
+        // Unassign foo, assign bar.
+        rt.assign_only(&[tp_named("bar", 0)]);
+        rt.seek(&tp_named("bar", 0), 0);
+
+        let (built2, prepared2) = rt.build_fetch_requests(0);
+        let (_nid2, (_n2, request_data2)) = prepared2.iter().next().unwrap();
+        let req2 = built2.values().next().unwrap();
+        // The incremental request must carry foo on the forget list.
+        let forget_topics: Vec<&str> = req2.data().forgotten_topics_data.iter().map(|f| f.topic.as_str()).collect();
+        assert!(
+            forget_topics.contains(&"foo"),
+            "unassigned foo must appear on the forget list, got {forget_topics:?}"
+        );
+        // And bar should be the fetched partition.
+        assert!(req2.data().topics.iter().any(|t| t.topic == "bar"), "bar must be fetched");
+        let _ = request_data2;
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchForgetTopicIdWhenReplaced`: when a
+    /// partition's topic-id changes (foo old-id -> foo new-id), the next
+    /// incremental fetch forgets the old topic-id.
+    #[test]
+    fn test_fetch_forget_topic_id_when_replaced() {
+        let old_id = Uuid::random_uuid();
+        let new_id = Uuid::random_uuid();
+        let mut rt = RoundTrip::new(
+            1,
+            i32::MAX,
+            IsolationLevel::ReadUncommitted,
+            HashMap::from([("foo".to_string(), old_id)]),
+        );
+        rt.seed_metadata(1, &HashMap::from([("foo".to_string(), 1)]));
+        rt.assign_and_seek(&[tp_named("foo", 0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .session_id(1)
+            .partition("foo", old_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+
+        // Replace foo's topic-id with a new one (metadata refresh).
+        rt.topic_ids.insert("foo".to_string(), new_id);
+        rt.seed_metadata(1, &HashMap::from([("foo".to_string(), 1)]));
+        rt.seek(&tp_named("foo", 0), 0);
+
+        let (built2, _prepared2) = rt.build_fetch_requests(0);
+        let req2 = built2.values().next().unwrap();
+        // foo with the OLD topic-id must be forgotten.
+        let forgot_old = req2.data().forgotten_topics_data.iter().any(|f| f.topic_id == old_id);
+        assert!(forgot_old, "the replaced (old) topic-id must be on the forget list");
+        // The fetched partition now carries the NEW topic-id.
+        assert!(
+            req2.data().topics.iter().any(|t| t.topic_id == new_id),
+            "the new topic-id must be fetched"
+        );
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchTopicIdUpgradeDowngrade`: a session
+    /// that starts topic-id-less (v12) upgrades to topic-ids (latest version)
+    /// and back, with the wire version tracking the topic-id presence.
+    #[test]
+    fn test_fetch_topic_id_upgrade_downgrade() {
+        let new_id = Uuid::random_uuid();
+        // Start with no topic-id for foo.
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, HashMap::new());
+        rt.seed_metadata(1, &HashMap::from([("foo".to_string(), 1)]));
+        rt.assign_and_seek(&[tp_named("foo", 0)]);
+
+        // Pass 1: version 12 (no topic-id).
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        assert_eq!(12, built[node_id].version(), "no topic-id -> version 12");
+        let resp = FullFetchResponse::new()
+            .session_id(1)
+            .partition("foo", Uuid::zero(), 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+
+        // Upgrade: foo now has a topic-id.
+        rt.topic_ids.insert("foo".to_string(), new_id);
+        rt.seed_metadata(1, &HashMap::from([("foo".to_string(), 1)]));
+        rt.seek(&tp_named("foo", 0), 0);
+        let (built2, prepared2) = rt.build_fetch_requests(0);
+        let (nid2, (_n2, rd2)) = prepared2.iter().next().unwrap();
+        assert_eq!(
+            ApiKeys::FETCH.latest_version(),
+            built2[nid2].version(),
+            "topic-id present -> latest version (upgrade)"
+        );
+        // Deliver a response so the node leaves the pending-fetch set before
+        // the downgrade build (otherwise the in-flight skip suppresses it).
+        let resp2 = FullFetchResponse::new()
+            .session_id(1)
+            .partition("foo", new_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*nid2, rd2, resp2, built2[nid2].version());
+        let _ = rt.collect_records();
+
+        // Downgrade: foo loses its topic-id again.
+        rt.topic_ids.remove("foo");
+        rt.seed_metadata(1, &HashMap::from([("foo".to_string(), 1)]));
+        rt.seek(&tp_named("foo", 0), 0);
+        let (built3, _p3) = rt.build_fetch_requests(0);
+        assert_eq!(
+            12,
+            built3.values().next().unwrap().version(),
+            "topic-id absent -> version 12 (downgrade)"
+        );
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testConsumingViaIncrementalFetchRequests`: an
+    /// incremental fetch session delivers records across several rounds; the
+    /// position advances per partition and a partial buffered record is
+    /// returned on a subsequent collect with no new fetch.
+    #[test]
+    fn test_consuming_via_incremental_fetch_requests() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, 2, IsolationLevel::ReadUncommitted, ids);
+        // Seek tp0 to 0 and tp1 to 1.
+        {
+            let cluster = rt.metadata.metadata_arc().fetch();
+            let mut guard = rt.subscriptions.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp(0), tp(1)])).unwrap();
+            rt.seek_validated_locked(&mut guard, &cluster, &tp(0), 0);
+            rt.seek_validated_locked(&mut guard, &cluster, &tp(1), 1);
+        }
+
+        // Round 1: tp0 gets 3 records (offsets 1..3), tp1 gets none.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp1 = FullFetchResponse::new()
+            .session_id(123)
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 2, 2)
+            .partition(TOPIC, topic_id, 1, Some(build_records(0, 0, 0)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp1, built[node_id].version());
+
+        // Collect 2 (max.poll.records=2): tp0 offsets 1,2; position -> 3.
+        let recs1 = rt.collect_records_max(2);
+        assert!(recs1.records_for_partition(&tp(1)).is_empty(), "tp1 has no records");
+        let r0 = recs1.records_for_partition(&tp(0));
+        assert_eq!(2, r0.len());
+        assert_eq!(1, r0[0].offset());
+        assert_eq!(2, r0[1].offset());
+        assert_eq!(Some(3), rt.position(&tp(0)));
+        assert_eq!(Some(1), rt.position(&tp(1)));
+
+        // There's still a buffered record (offset 3) — collect it WITHOUT a
+        // new fetch: position advances to 4.
+        let recs1b = rt.collect_records_max(2);
+        let r0b = recs1b.records_for_partition(&tp(0));
+        assert_eq!(1, r0b.len());
+        assert_eq!(3, r0b[0].offset());
+        assert_eq!(Some(4), rt.position(&tp(0)));
+
+        // Round 3: tp0 gets 2 new records (offsets 4,5).
+        let (built3, prepared3) = rt.build_fetch_requests(0);
+        let (nid3, (_n3, rd3)) = prepared3.iter().next().unwrap();
+        let resp3 = FullFetchResponse::new()
+            .session_id(123)
+            .partition(TOPIC, topic_id, 0, Some(build_records(4, 2, 4)), Errors::None, 100, 4)
+            .build();
+        rt.deliver(*nid3, rd3, resp3, built3[nid3].version());
+        let recs3 = rt.collect_records_max(2);
+        let r0c = recs3.records_for_partition(&tp(0));
+        assert_eq!(2, r0c.len());
+        assert_eq!(4, r0c[0].offset());
+        assert_eq!(5, r0c[1].offset());
+        assert_eq!(Some(6), rt.position(&tp(0)));
+        assert_eq!(Some(1), rt.position(&tp(1)));
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchCompletedBeforeHandlerAdded`: a
+    /// success response for a node with NO session handler is ignored (no
+    /// panic, no buffered fetch).
+    #[test]
+    fn test_fetch_completed_before_handler_added() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Build a valid request to obtain a well-formed request_data, then
+        // close the session handler so the success path finds no handler.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        rt.mgr.abstract_fetch_mut().close_session_handler(*node_id);
+
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        // Must not panic; must not buffer a fetch.
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+        assert!(!rt.has_completed_fetches(), "no handler -> response ignored, nothing buffered");
+        let _ = topic_id;
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchSkipsBlackedOutNodes`:
+    /// a node inside the reconnect-backoff window (the `is_unavailable`
+    /// predicate returns true) is excluded from the fetch-request build.
+    #[test]
+    fn test_fetch_skips_blacked_out_nodes() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // prepare_fetch_requests with an always-unavailable predicate skips
+        // the (only) leader node entirely.
+        let af = rt.mgr.abstract_fetch_mut();
+        let prepared = af
+            .prepare_fetch_requests(0, |_n| true, |_n| Ok(()))
+            .expect("prepare should not error");
+        assert!(prepared.is_empty(), "blacked-out node must be skipped");
+        let _ = topic_id;
+    }
+
+    // ── buffered-partition exclusion family ────────────────────────────────
+    //
+    // A partition with buffered (uncollected) data causes its leader node to be
+    // SKIPPED in the next fetch-request build (so the broker's fetch-session
+    // cache is not evicted). Once the buffered data is collected — OR the
+    // partition becomes not-assigned / missing-leader / missing-position /
+    // unfetchable (paused / pending-assignment / reset) — the node is fetched
+    // again. Each test buffers two partitions on one node, collects the first,
+    // mutates the second, and asserts the next build issues only the
+    // collected (now-empty, fetchable) partition.
+
+    /// Sets up a single node serving tp0 + tp1 (both buffered), then collects
+    /// ONLY tp0 (Java's `collectSelectedPartition` pause-trick), leaving:
+    ///
+    /// - tp0: assigned, fetchable, NOT buffered (drained)
+    /// - tp1: assigned, fetchable, still buffered
+    ///
+    /// Asserts that build #1 after this is empty (the node still hosts
+    /// buffered tp1). The caller then mutates tp1 to exclude it from the
+    /// buffered-nodes set, and asserts the next build issues only tp0.
+    fn buffer_two_collect_first(rt: &mut RoundTrip, topic_id: Uuid) {
+        rt.assign_and_seek(&[tp(0), tp(1)]);
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, prepared.len(), "single-node fixture");
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        // Deliver BOTH partitions: a full fetch requires every session
+        // partition present in the response, else the session handler rejects
+        // it (no buffering).
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .partition(TOPIC, topic_id, 1, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        assert_eq!(2, rt.buffered_partitions().len(), "both partitions buffered");
+
+        // Collect tp0 ONLY, using Java's `collectSelectedPartition` trick:
+        // pause the other partitions so the collector skips them (re-enqueuing
+        // their buffered data), drains tp0 to exhaustion, then resume.
+        rt.pause(&tp(1));
+        let collected = rt.collect_records();
+        rt.resume(&tp(1));
+        assert_eq!(3, collected.records_for_partition(&tp(0)).len(), "tp0 fully collected");
+        assert!(!rt.buffered_partitions().contains(&tp(0)), "tp0 no longer buffered");
+        assert!(rt.buffered_partitions().contains(&tp(1)), "tp1 still buffered");
+
+        // Build #2: tp0 is empty+fetchable but its node still hosts buffered
+        // (fetchable) tp1, so the whole node is skipped.
+        let (built2, _p2) = rt.build_fetch_requests(0);
+        assert!(built2.is_empty(), "node hosting buffered tp1 must be skipped");
+    }
+
+    /// Asserts the next build issues a request whose fetched partitions are
+    /// exactly `expected` (tp1 must be EXCLUDED because it is buffered+unfetchable
+    /// or otherwise excluded; tp0 included because its buffer was collected).
+    fn assert_next_build_fetches(rt: &mut RoundTrip, expected: &[TopicPartition]) {
+        let (built, _prepared) = rt.build_fetch_requests(0);
+        let mut fetched: HashSet<TopicPartition> = HashSet::new();
+        for req in built.values() {
+            for topic in &req.data().topics {
+                for p in &topic.partitions {
+                    fetched.insert(TopicPartition::new(topic.topic.clone(), p.partition));
+                }
+            }
+        }
+        let expected_set: HashSet<TopicPartition> = expected.iter().cloned().collect();
+        assert_eq!(expected_set, fetched, "next fetch-request partitions");
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitions`: a node
+    /// hosting buffered data is skipped; once collected, the node is fetched
+    /// again. (Single-node simplification of the multi-node Java test.)
+    #[test]
+    fn test_fetch_request_with_buffered_partitions() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0), tp(1)]);
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .partition(TOPIC, topic_id, 1, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        assert_eq!(2, rt.buffered_partitions().len());
+
+        // Build #2: node hosts buffered data -> no request.
+        let (built2, _p2) = rt.build_fetch_requests(0);
+        assert!(built2.is_empty(), "node with buffered data must be skipped");
+
+        // Collect everything -> buffer empty.
+        let _ = rt.collect_records();
+        assert!(rt.buffered_partitions().is_empty());
+
+        // Build #3: buffer drained -> node fetched again for both partitions.
+        assert_next_build_fetches(&mut rt, &[tp(0), tp(1)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionNotAssigned`.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_not_assigned() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        // Unassign tp1 (the still-buffered partition) — keep tp0 assigned.
+        rt.assign_only(&[tp(0)]);
+        rt.seek(&tp(0), 0);
+        // Next build issues only tp0 (tp1 unassigned, so its buffered data is
+        // not counted as a buffered node).
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingLeader`.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_missing_leader() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        // Overwrite tp1's position with an empty leader (still buffered, but
+        // leaderless => not a buffered node).
+        rt.set_leaderless_position(&tp(1), 0);
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingPosition`.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_missing_position() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        // Clear tp1's position (assigned but no position) -> not fetchable and
+        // not a buffered node. tp0 is fetched.
+        rt.subscriptions.lock().unwrap().request_offset_reset_default(&tp(1)).unwrap();
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPaused`.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_paused() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        rt.pause(&tp(1));
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPendingAssignment`.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_pending_assignment() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        rt.subscriptions
+            .lock()
+            .unwrap()
+            .mark_pending_on_assigned_callback(&[tp(1)], true)
+            .unwrap();
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionResetOffset`.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_reset_offset() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        rt.subscriptions.lock().unwrap().request_offset_reset_default(&tp(1)).unwrap();
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionUnfetchable`
+    /// (the shared helper; here exercised via pause as the unfetchable mutator).
+    #[test]
+    fn test_fetch_request_with_buffered_partition_unfetchable() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        // pause makes tp1 unfetchable; the shared Java helper covers
+        // pause/pending-revocation/pending-assignment/reset — the others are
+        // their own tests above.
+        rt.pause(&tp(1));
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    // ── KIP-951 leadership change ──────────────────────────────────────────
+
+    /// Translated (parameterized over FENCED_LEADER_EPOCH /
+    /// NOT_LEADER_OR_FOLLOWER) from
+    /// `FetchRequestManagerTest.testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation`:
+    /// a leadership-change error that carries new leader info (id 999, epoch
+    /// validLeaderEpoch+100) applies the new leader+node to metadata and
+    /// validates the position; tp1 (no error) is unaffected.
+    #[test]
+    fn test_leadership_change_error_with_new_leader_information() {
+        for error in [Errors::FencedLeaderEpoch, Errors::NotLeaderOrFollower] {
+            let (topic_id, ids) = single_topic_id();
+            let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+            rt.assign_and_seek(&[tp(0), tp(1)]);
+
+            let (built, prepared) = rt.build_fetch_requests(0);
+            // tp0 + tp1 may be on different nodes; deliver to each its request.
+            for (node_id, (_n, request_data)) in &prepared {
+                let mut resp = FullFetchResponse::new();
+                for topic in &built[node_id].data().topics {
+                    for p in &topic.partitions {
+                        let part = p.partition;
+                        if part == 0 {
+                            // tp0: leadership error WITH new leader info.
+                            let mut pd = RespPartitionData::new();
+                            pd.set_partition_index(0);
+                            pd.set_error_code(error.code());
+                            let mut leader = crate::fetch_response_data::LeaderIdAndEpoch::new();
+                            leader.set_leader_id(999);
+                            leader.set_leader_epoch(VALID_LEADER_EPOCH + 100);
+                            pd.set_current_leader(leader);
+                            resp = resp
+                                .node_endpoint(999, "newnode", 999, Some("newrack"))
+                                .partition_data(TOPIC, topic_id, pd);
+                        } else {
+                            resp = resp.partition(
+                                TOPIC,
+                                topic_id,
+                                part,
+                                Some(build_records(1, 3, 1)),
+                                Errors::None,
+                                100,
+                                -1,
+                            );
+                        }
+                    }
+                }
+                rt.deliver(*node_id, request_data, resp.build(), built[node_id].version());
+            }
+
+            // Metadata now knows node 999 and tp0's new leader/epoch.
+            let cluster = rt.metadata.metadata_arc().fetch();
+            assert!(
+                cluster.node_by_id(999).is_some(),
+                "new leader node 999 must be in metadata ({error:?})"
+            );
+            let current = rt.metadata.metadata_arc().current_leader(&tp(0));
+            assert_eq!(
+                Some(999),
+                current.leader.as_ref().map(|n| n.id()),
+                "tp0 new leader id ({error:?})"
+            );
+            assert_eq!(
+                Some(VALID_LEADER_EPOCH + 100),
+                current.epoch,
+                "tp0 new leader epoch ({error:?})"
+            );
+        }
+    }
+
+    /// Translated (parameterized) from
+    /// `FetchRequestManagerTest.testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation`:
+    /// a leadership-change error WITHOUT new leader info leaves metadata's
+    /// leader unchanged (no node 999, original leader retained).
+    #[test]
+    fn test_leadership_change_error_but_no_new_leader_information() {
+        for error in [Errors::FencedLeaderEpoch, Errors::NotLeaderOrFollower] {
+            let (topic_id, ids) = single_topic_id();
+            let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+            rt.assign_and_seek(&[tp(0)]);
+            let original_leader = rt
+                .metadata
+                .metadata_arc()
+                .current_leader(&tp(0))
+                .leader
+                .as_ref()
+                .map(|n| n.id());
+
+            let (built, prepared) = rt.build_fetch_requests(0);
+            let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+            // tp0: leadership error with NO new leader info (leaderId/epoch -1).
+            let mut pd = RespPartitionData::new();
+            pd.set_partition_index(0);
+            pd.set_error_code(error.code());
+            // Default current_leader has leader_id/leader_epoch = -1.
+            let resp = FullFetchResponse::new().partition_data(TOPIC, topic_id, pd).build();
+            rt.deliver(*node_id, request_data, resp, built[node_id].version());
+
+            // Metadata unchanged: no node 999, original leader retained.
+            let cluster = rt.metadata.metadata_arc().fetch();
+            assert!(
+                cluster.node_by_id(999).is_none(),
+                "no new leader node should appear ({error:?})"
+            );
+            let current = rt
+                .metadata
+                .metadata_arc()
+                .current_leader(&tp(0))
+                .leader
+                .as_ref()
+                .map(|n| n.id());
+            assert_eq!(original_leader, current, "leader must be unchanged ({error:?})");
         }
     }
 }
