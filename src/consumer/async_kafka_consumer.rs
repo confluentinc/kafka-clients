@@ -7707,6 +7707,82 @@ mod tests {
         drainer.await.expect("task ok");
     }
 
+    /// Java: `OffsetFetcherTest.testBeginningOffsetsDuplicateTopicPartition`
+    /// (`beginningOffsets(asList(tp0, tp0))`). The duplicate partition in
+    /// the input slice collapses to a single entry: the
+    /// `timestamps_to_search` map built in `beginning_or_end_offsets`
+    /// (slice → `HashMap`) de-duplicates, producing exactly ONE wire
+    /// request / ONE result entry.
+    #[tokio::test]
+    async fn beginning_offsets_duplicate_topic_partition_collapses() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 0);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, timestamps_to_search, .. } = env.event {
+                    // The duplicate tp must have collapsed to one entry.
+                    assert_eq!(
+                        timestamps_to_search.len(),
+                        1,
+                        "duplicate topic-partition must collapse to a single search entry"
+                    );
+                    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> = HashMap::new();
+                    result.insert(
+                        TopicPartition::new("t0".to_string(), 0),
+                        Some(OffsetAndTimestampInternal::new(2, -1, None)),
+                    );
+                    handle.complete(result);
+                    return;
+                }
+            }
+        });
+
+        let offsets = consumer
+            .beginning_offsets_timeout(&[tp.clone(), tp.clone()], Duration::from_millis(100))
+            .await
+            .expect("ok");
+        assert_eq!(offsets.len(), 1, "duplicate partition collapses to one result entry");
+        assert_eq!(offsets.get(&tp), Some(&2));
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `OffsetFetcherTest.testEndOffsetsDuplicateTopicPartition`
+    /// (`endOffsets(asList(tp0, tp0))`). Same slice→map collapse as the
+    /// beginning-offsets variant.
+    #[tokio::test]
+    async fn end_offsets_duplicate_topic_partition_collapses() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 0);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, timestamps_to_search, .. } = env.event {
+                    assert_eq!(
+                        timestamps_to_search.len(),
+                        1,
+                        "duplicate topic-partition must collapse to a single search entry"
+                    );
+                    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> = HashMap::new();
+                    result.insert(
+                        TopicPartition::new("t0".to_string(), 0),
+                        Some(OffsetAndTimestampInternal::new(5, -1, None)),
+                    );
+                    handle.complete(result);
+                    return;
+                }
+            }
+        });
+
+        let offsets = consumer
+            .end_offsets_timeout(&[tp.clone(), tp.clone()], Duration::from_millis(100))
+            .await
+            .expect("ok");
+        assert_eq!(offsets.len(), 1, "duplicate partition collapses to one result entry");
+        assert_eq!(offsets.get(&tp), Some(&5));
+        drainer.await.expect("task ok");
+    }
+
     /// Java: `testBeginningOffsetsThrowsKafkaExceptionForUnderlyingExecutionFailure`
     /// (Java line 884-897). The `ListOffsetsEvent` completes
     /// exceptionally and the error propagates.

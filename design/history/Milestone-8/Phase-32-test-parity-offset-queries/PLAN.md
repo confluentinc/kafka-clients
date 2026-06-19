@@ -45,7 +45,7 @@ Phase 31's tests.
 | testListOffsetsWaitingForMetadataUpdate_RetrySucceeds | `fetch_offsets_metadata_update_retries_successfully` **(extended)** | add `requestUpdate(true)` assert at park time |
 | testRequestFailsWithRetriableError_RetrySucceeds (×10) | `fetch_offsets_retriable_error_retries_after_metadata_update` **(rewritten as loop)** | loop over all 10 retriable errors + assert `requestUpdate(false)` after the error response |
 | testRequestPartiallyFailsWithRetriableError_RetrySucceeds | `fetch_offsets_partial_retriable_error_merges_after_retry` | 2 brokers, partial success + retriable → `apply_partial_result` merge → retry succeeds; `requestUpdate(false)` |
-| testRequestFailedResponse_NonRetriableErrorTimeout | `fetch_offsets_non_retriable_error_for_unrequested_partition_stays_pending` | error keyed on a partition NOT in the request → future stays pending, no retry/send |
+| testRequestFailedResponse_NonRetriableErrorTimeout | `fetch_offsets_non_retriable_error_for_unrequested_partition` | error keyed on a partition NOT in the request. **Documented divergence:** Java's `addPartitionsToRetry` does `toMap(tp, timestampsToSearch::get)` → NPE for the unrequested tp (null value) → callback throws before `globalResult.complete`, leaving the future pending → Java asserts `TimeoutException`. Rust's `add_partitions_to_retry` faithfully filters to originally-requested partitions (no NPE), so the global result resolves with `{tp1: None}`. Assert: nothing pending to send/retry, requested partition surfaces no offset. Rationale in test rustdoc + DoD §7/§28. |
 
 ### OffsetFetcherTest (offsetsForTimes / beginning / end — KIP-848 logic in ORM)
 | Java test | Rust test | Notes |
