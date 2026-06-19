@@ -1126,7 +1126,7 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 /// - `leave_group_epoch_on_close` — Java: `testLeaveGroupEpochOnClose`
 /// - `reconcile_propagates_assigned_listener_error` (new — regression for fix #2)
 ///
-/// Not translated (~67 / 93) — rationale categories:
+/// Not translated (~32 / 84) — rationale categories:
 ///
 /// 1. **Mockito-spy verification on internal methods** (~28 cases).
 ///    Java tests use `verify(membershipManager, never()).markReconciliationInProgress()`,
