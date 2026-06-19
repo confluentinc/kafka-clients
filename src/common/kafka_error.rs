@@ -496,6 +496,29 @@ impl KafkaError {
             Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_) | Self::Wakeup(_)
         )
     }
+
+    /// Whether this error corresponds to a Java `KafkaException` (or a
+    /// subclass of it).
+    ///
+    /// This mirrors Java's `t instanceof KafkaException` test, used by
+    /// `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
+    /// (`ConsumerUtils.java:256`): a `KafkaException` passes through
+    /// unchanged, while a non-`KafkaException` `Throwable` gets wrapped in
+    /// a new `KafkaException(message, t)`.
+    ///
+    /// In Java the only error variants modelled here that are NOT
+    /// `KafkaException` are the `RuntimeException` subclasses
+    /// `IllegalArgumentException` and `IllegalStateException`. Everything
+    /// else — `ApiException` subtypes, `SerializationException`,
+    /// `WakeupException`, the bare `KafkaException` — extends
+    /// `KafkaException`.
+    ///
+    /// (`WakeupException` IS a `KafkaException`, hence it differs from
+    /// [`is_api_exception`](Self::is_api_exception), which excludes it
+    /// because `WakeupException` is not an `ApiException`.)
+    pub fn is_kafka_exception(&self) -> bool {
+        !matches!(self, Self::IllegalArgument(_) | Self::IllegalState(_))
+    }
 }
 
 impl fmt::Display for KafkaError {

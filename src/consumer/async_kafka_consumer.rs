@@ -2075,6 +2075,24 @@ where
                         None => Ok(()),
                     };
 
+                    // Java `invokeRebalanceCallbacks` (AsyncKafkaConsumer.java:2334)
+                    // passes the listener's error through
+                    // `maybeWrapAsKafkaException(e, "User rebalance callback
+                    // throws an error")` before building the completed event.
+                    // The conditional wrap REPLACES the message only when the
+                    // listener error is NOT already a KafkaException (Java's
+                    // `IllegalArgumentException`/`IllegalStateException`); a
+                    // KafkaException passes through unchanged. Wakeup is itself
+                    // a KafkaException and is propagated verbatim. Both the ack
+                    // (bg-side future) and the app-side surfacing carry the
+                    // wrapped error, matching Java's single event payload.
+                    let result = result.map_err(|err| {
+                        crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
+                            err,
+                            "User rebalance callback throws an error",
+                        )
+                    });
+
                     // Send the result on the embedded oneshot ack so the
                     // bg task can advance the rebalance state machine.
                     let send_result = result.clone();

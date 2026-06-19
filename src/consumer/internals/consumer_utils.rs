@@ -55,6 +55,7 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 
+use crate::common::protocol::Errors;
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
@@ -172,19 +173,36 @@ pub(crate) fn maybe_wrap_as_kafka_error(err: KafkaError) -> KafkaError {
     err
 }
 
-/// Java: `maybeWrapAsKafkaException(Throwable, String)`.
+/// Java: `maybeWrapAsKafkaException(Throwable, String)`
+/// (`ConsumerUtils.java:256`).
 ///
-/// Prepends `message` to the error's payload when the underlying variant
-/// supports a message field. For variants that do not accept additional
-/// context (e.g. typed authorization errors), the message is logged at
-/// debug and the original error is returned unchanged.
+/// ```java
+/// public static KafkaException maybeWrapAsKafkaException(Throwable t, String message) {
+///     if (t instanceof KafkaException)
+///         return (KafkaException) t;
+///     else
+///         return new KafkaException(message, t);
+/// }
+/// ```
+///
+/// CONDITIONAL behavior: if `err` is already a `KafkaException`
+/// ([`KafkaError::is_kafka_exception`] is `true`) it is returned
+/// unchanged — message and all. Only a non-`KafkaException` `Throwable`
+/// (Java's `IllegalArgumentException` / `IllegalStateException`, i.e. the
+/// Rust [`KafkaError::IllegalArgument`] / [`KafkaError::IllegalState`]
+/// variants) is wrapped in a new `KafkaException` whose message is exactly
+/// `message` (the original error is preserved as the logged cause). This
+/// matches Java, where `new KafkaException(message, t).getMessage()`
+/// returns `message` verbatim.
 pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: KafkaError, message: &str) -> KafkaError {
-    match err {
-        KafkaError::IllegalArgument(inner) => KafkaError::illegal_argument(format!("{message}: {inner}")),
-        KafkaError::IllegalState(inner) => KafkaError::illegal_state(format!("{message}: {inner}")),
-        KafkaError::Timeout(inner) => KafkaError::timeout(format!("{message}: {inner}")),
-        KafkaError::Wakeup(inner) => KafkaError::wakeup(format!("{message}: {inner}")),
-        other => other,
+    if err.is_kafka_exception() {
+        // `t instanceof KafkaException` → return unchanged.
+        err
+    } else {
+        // `new KafkaException(message, t)`. The wrapped error's message is
+        // exactly `message`; the cause is preserved for diagnostics.
+        log::debug!("Wrapping non-Kafka error as KafkaException: cause={err}");
+        KafkaError::with_message(Errors::UnknownServerError, message.to_string())
     }
 }
 
@@ -344,24 +362,51 @@ mod tests {
         assert_eq!(format!("{err}"), format!("{wrapped}"));
     }
 
+    /// Java `maybeWrapAsKafkaException(t, message)` (`ConsumerUtils.java:256`):
+    /// a non-`KafkaException` (`IllegalStateException` /
+    /// `IllegalArgumentException`) is wrapped in a new `KafkaException`
+    /// whose `getMessage()` is exactly `message` (the cause is preserved
+    /// separately, not folded into the message).
     #[test]
-    fn maybe_wrap_as_kafka_error_with_msg_prepends_message_for_known_variants() {
-        let err = KafkaError::illegal_state("inner");
-        let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "outer");
-        match wrapped {
-            KafkaError::IllegalState(msg) => assert_eq!(msg, "outer: inner"),
-            other => panic!("expected IllegalState, got {other:?}"),
-        }
+    fn maybe_wrap_as_kafka_error_with_msg_replaces_message_for_non_kafka_exception() {
+        // IllegalState → not a KafkaException → wrapped with exact message.
+        let err = KafkaError::illegal_state("always failed");
+        let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
+        assert!(!matches!(wrapped, KafkaError::IllegalState(_)));
+        assert_eq!(format!("{wrapped}"), "User rebalance callback throws an error");
+
+        // IllegalArgument → not a KafkaException → wrapped with exact message.
+        let err = KafkaError::illegal_argument("bad arg");
+        let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
+        assert!(!matches!(wrapped, KafkaError::IllegalArgument(_)));
+        assert_eq!(format!("{wrapped}"), "User rebalance callback throws an error");
     }
 
+    /// Java: a `KafkaException` (here a `TimeoutException`, which extends
+    /// `ApiException extends KafkaException`) passes through
+    /// `maybeWrapAsKafkaException(t, message)` UNCHANGED — message and all.
     #[test]
-    fn maybe_wrap_as_kafka_error_with_msg_prepends_for_timeout() {
+    fn maybe_wrap_as_kafka_error_with_msg_passes_kafka_exception_through() {
+        // Timeout IS a KafkaException → returned unchanged.
         let err = KafkaError::timeout("deadline");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "in commit");
         match wrapped {
-            KafkaError::Timeout(msg) => assert_eq!(msg, "in commit: deadline"),
-            other => panic!("expected Timeout, got {other:?}"),
+            KafkaError::Timeout(msg) => assert_eq!(msg, "deadline"),
+            other => panic!("expected Timeout unchanged, got {other:?}"),
         }
+
+        // Serialization IS a KafkaException → returned unchanged.
+        let err = KafkaError::Serialization("bad bytes".to_string());
+        let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "should be ignored");
+        match wrapped {
+            KafkaError::Serialization(msg) => assert_eq!(msg, "bad bytes"),
+            other => panic!("expected Serialization unchanged, got {other:?}"),
+        }
+
+        // Wakeup IS a KafkaException → returned unchanged.
+        let err = KafkaError::wakeup("woken");
+        let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "should be ignored");
+        assert!(matches!(wrapped, KafkaError::Wakeup(ref m) if m == "woken"));
     }
 
     #[test]

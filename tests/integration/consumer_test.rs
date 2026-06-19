@@ -544,17 +544,18 @@ async fn test_fetch_partitions_after_failed_listener() {
 /// marked fetchable because the callback never completes successfully) OR
 /// throws a `KafkaException("User rebalance callback throws an error")`.
 ///
-/// Rust deviation: `ConsumerRebalanceListenerInvoker` surfaces the
-/// listener's RAW error (here `IllegalState("always failed")`), not Java's
-/// wrapped `KafkaException("User rebalance callback throws an error", e)`
-/// (`AsyncKafkaConsumer.java:2334`). Wrapping the error text is a
-/// behavioral change to already-translated production code and is out of
-/// scope for this test-parity phase. The test therefore asserts the
-/// invariant that survives the deviation: **no successful poll ever
-/// returns a record** (the always-failing callback keeps every assigned
-/// partition un-fetchable). Errors surfaced by the failed callback are
-/// tolerated, exactly as Java's optional `catch (KafkaException)` arm
-/// tolerates them.
+/// The listener throws a non-`KafkaException` (`IllegalState("always
+/// failed")`, the analog of Java's `IllegalArgumentException("always
+/// failed")`). Java's `invokeRebalanceCallbacks` runs that through
+/// `maybeWrapAsKafkaException(e, "User rebalance callback throws an
+/// error")` (`AsyncKafkaConsumer.java:2334`), so `poll()` surfaces a
+/// `KafkaException` whose `getMessage()` is exactly `"User rebalance
+/// callback throws an error"`. The Rust production code now mirrors this
+/// wrap (Phase 39 fixup), so this test asserts BOTH:
+///   1. **no successful poll ever returns a record** (the always-failing
+///      callback keeps every assigned partition un-fetchable);
+///   2. when an error IS surfaced, its message is exactly Java's
+///      `"User rebalance callback throws an error"`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fetch_partitions_with_always_failed_listener() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
@@ -589,10 +590,18 @@ async fn test_fetch_partitions_with_always_failed_listener() {
                      poll should never return records"
                 );
             },
-            Err(_err) => {
-                // Java tolerates a surfaced rebalance-callback error here
-                // (its optional `catch (KafkaException)` arm). The Rust raw
-                // error is tolerated identically — see the deviation note.
+            Err(err) => {
+                // Java's optional `catch (KafkaException ex)` arm asserts
+                // `assertEquals("User rebalance callback throws an error",
+                // ex.getMessage())` (ConsumerIntegrationTest.java:185). The
+                // Rust production wrap surfaces the same message, so pin it
+                // exactly — a regression that masked the callback path with
+                // an unrelated error (timeout, connection) would now fail.
+                assert_eq!(
+                    err.to_string(),
+                    "User rebalance callback throws an error",
+                    "a surfaced poll error must be the wrapped rebalance-callback error, got: {err}"
+                );
             },
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
