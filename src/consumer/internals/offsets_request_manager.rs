@@ -817,19 +817,34 @@ impl OffsetsRequestManager {
     ) {
         let now_ms = current_time_ms;
         // Build per-partition `ListOffsetsPartition` carrying the strategy's
-        // wire timestamp.
+        // wire timestamp and the current leader epoch. Mirrors Java's
+        // `groupListOffsetRequests` (OffsetsRequestManager.java:892-914):
+        // for each partition look up the current leader — if it is unknown,
+        // request a metadata update and skip the partition; otherwise stamp
+        // the request with the partition's `currentLeaderEpoch`.
+        let metadata_arc = self.shared.metadata.metadata_arc();
         let mut timestamps_to_search: HashMap<TopicPartition, ListOffsetsPartition> = HashMap::new();
         for (tp, strategy) in &partition_strategies {
             if let Some(ts) = strategy.timestamp() {
+                let leader_and_epoch = metadata_arc.current_leader(tp);
+                if leader_and_epoch.leader.is_none() {
+                    log::debug!("Leader for partition {tp} is unknown for fetching offset {ts}");
+                    metadata_arc.request_update(true);
+                    continue;
+                }
+                let current_leader_epoch = leader_and_epoch
+                    .epoch
+                    .unwrap_or(crate::common::requests::list_offsets_response::UNKNOWN_EPOCH);
                 let mut part = ListOffsetsPartition::new();
                 part.set_partition_index(tp.partition());
                 part.set_timestamp(ts);
+                part.set_current_leader_epoch(current_leader_epoch);
                 timestamps_to_search.insert(tp.clone(), part);
             }
         }
 
-        // Group by current leader, dropping entries without one — those
-        // will be retried on the next metadata update.
+        // Group by current leader (the `leader.is_none()` entries were
+        // already dropped above with a metadata-update request).
         let by_node = regroup_partition_map_by_node(&self.shared.metadata, &timestamps_to_search);
 
         for (node, reset_timestamps) in by_node {
@@ -3058,5 +3073,257 @@ mod tests {
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         assert_eq!(request.timeout_ms(), TEST_REQUEST_TIMEOUT_MS as i32);
+    }
+
+    // =================================================================
+    //   Phase 31: reset-positions / validate-positions / LogTruncation
+    //   response-path tests.
+    //
+    //   Translated from `OffsetsRequestManagerTest` (reset/validate group)
+    //   and `OffsetFetcherTest` (KIP-848 reset/validate logic, now living
+    //   in `OffsetsRequestManager`). See
+    //   `design/history/Milestone-8/Phase-31-test-parity-reset-validate/PLAN.md`
+    //   for the full Java→Rust mapping and documented skips.
+    // =================================================================
+
+    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::offset_for_leader_epoch_response_data::{
+        EpochEndOffset, OffsetForLeaderEpochResponseData, OffsetForLeaderTopicResult,
+    };
+
+    /// Bootstrap `metadata` with a single topic / one-partition-per-index
+    /// layout, assigning the given `leader_epoch` to every partition via the
+    /// epoch supplier. Mirrors Java's
+    /// `RequestTestUtils.metadataUpdateWithIds(..., tp -> epoch, ...)` used
+    /// by the validate/reset tests that care about leader-epoch progression.
+    fn bootstrap_metadata_with_epoch(
+        metadata: &ConsumerMetadata,
+        topic: &str,
+        num_partitions: i32,
+        leader_epoch: i32,
+    ) {
+        metadata.add_transient_topics(HashSet::from([topic.to_string()]));
+        let mut counts = HashMap::new();
+        counts.insert(topic.to_string(), num_partitions);
+        let response = request_test_utils::metadata_update_with_cluster_id(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &counts,
+            &|_tp: &TopicPartition| Some(leader_epoch),
+        );
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+    }
+
+    /// Build a single-topic `OffsetForLeaderEpochResponse` from a map of
+    /// `partition -> (error, leader_epoch, end_offset)`. Mirrors Java's
+    /// `buildOffsetsForLeaderEpochResponse` /
+    /// `buildOffsetsForLeaderEpochResponseWithErrors` helpers.
+    ///
+    /// Only added because the Phase-31 validate tests call it (clippy runs
+    /// with `-D warnings`).
+    fn build_offsets_for_leader_epoch_response(
+        topic: &str,
+        partitions: Vec<(i32, Errors, i32, i64)>,
+    ) -> OffsetsForLeaderEpochResponse {
+        let mut topic_result = OffsetForLeaderTopicResult::new();
+        topic_result.set_topic(topic.to_string());
+        let mut parts = Vec::new();
+        for (partition_index, error, leader_epoch, end_offset) in partitions {
+            let mut eeo = EpochEndOffset::new();
+            eeo.set_partition(partition_index);
+            eeo.set_error_code(error.code());
+            eeo.set_leader_epoch(leader_epoch);
+            eeo.set_end_offset(end_offset);
+            parts.push(eeo);
+        }
+        topic_result.set_partitions(parts);
+        let mut data = OffsetForLeaderEpochResponseData::new();
+        data.set_topics(vec![topic_result]);
+        OffsetsForLeaderEpochResponse::new(data)
+    }
+
+    /// Wrap an `OffsetsForLeaderEpochResponse` in a `ClientResponse` so the
+    /// test can drive `unsent.handler().on_complete(...)`. Mirrors the
+    /// ListOffsets helper `build_list_offsets_client_response`.
+    fn build_oitle_client_response(response: OffsetsForLeaderEpochResponse) -> ClientResponse {
+        let header = RequestHeader::new(
+            &ApiKeys::OFFSET_FOR_LEADER_EPOCH,
+            ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version(),
+            "",
+            1,
+        )
+        .expect("header");
+        ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::OffsetsForLeaderEpoch(response)),
+        )
+    }
+
+    /// Drive the first pending `OffsetsForLeaderEpoch` request on the
+    /// manager to completion with the given response, then yield so the
+    /// spawned forwarder enqueues the `PendingCompletion`. Mirrors
+    /// `complete_first_unsent_with_response` (the ListOffsets analogue).
+    async fn complete_first_oitle_with_response(
+        mgr: &mut OffsetsRequestManager,
+        response: OffsetsForLeaderEpochResponse,
+        now_ms: i64,
+    ) -> bool {
+        let poll_result = RequestManager::poll(mgr, now_ms);
+        let Some(unsent) = poll_result.unsent_requests.into_iter().next() else {
+            return false;
+        };
+        unsent.handler().on_complete(build_oitle_client_response(response));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        true
+    }
+
+    /// Assign `tp` to the manager's subscription state and request a reset
+    /// with the given strategy (Java: `assignFromUser` +
+    /// `subscriptions.requestOffsetReset(tp, strategy)`).
+    fn assign_and_request_reset(
+        subscription_state: &Arc<Mutex<SubscriptionState>>,
+        tp: &TopicPartition,
+        strategy: AutoOffsetResetStrategy,
+    ) {
+        let mut subs = subscription_state.lock().expect("subs");
+        subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+        subs.request_offset_reset(tp, strategy).expect("request reset");
+    }
+
+    // -----------------------------------------------------------------
+    //   reset-positions: missing-leader / success / auth-failure
+    //   (OffsetsRequestManagerTest)
+    // -----------------------------------------------------------------
+
+    /// Java parity: `testResetPositionsMissingLeader`. A partition needs
+    /// reset but its leader is unknown — the manager requests a metadata
+    /// update (`metadata.requestUpdate(true)`) and enqueues no request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_positions_missing_leader() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        // No metadata bootstrap: leader is unknown.
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+
+        let before = mgr.shared.metadata.metadata_arc().update_requested();
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 0, "no request when leader unknown");
+        assert!(
+            !before && mgr.shared.metadata.metadata_arc().update_requested(),
+            "missing leader must trigger metadata.requestUpdate(true)"
+        );
+    }
+
+    /// Java parity: `testResetPositionsSuccess_NoLeaderEpochInResponse` and
+    /// `testUpdateFetchPositionResetToEarliestOffset` /
+    /// `testListOffsetNoUpdateMissingEpoch`. Reset to EARLIEST with a
+    /// response that carries no leader epoch (`UNKNOWN_EPOCH`) — the
+    /// position is set, reset is no longer needed, the partition becomes
+    /// fetchable, and `updateLastSeenEpochIfNewer` is NOT called (the
+    /// metadata last-seen epoch stays absent).
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_positions_success_no_leader_epoch_in_response() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1, "one ListOffsets request expected");
+
+        // Response with offset 5 and no leader epoch.
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        // Drain the completion.
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"), "reset no longer needed");
+        assert!(subs.has_valid_position(&tp), "position must be valid after reset");
+        assert!(subs.is_fetchable(&tp), "partition must be fetchable after reset");
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
+        drop(subs);
+
+        // No leader epoch in the response ⇒ metadata last-seen epoch absent.
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().last_seen_leader_epoch(&tp),
+            None,
+            "updateLastSeenEpochIfNewer must NOT have been called",
+        );
+    }
+
+    /// Java parity: `testResetPositionsSuccess_LeaderEpochInResponse` and
+    /// `testListOffsetUpdateEpoch`. Reset response carries a higher leader
+    /// epoch — `updateLastSeenEpochIfNewer(tp, epoch)` is called, bumping
+    /// the metadata last-seen epoch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_positions_success_leader_epoch_in_response() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        // Bootstrap with leader epoch 1 so the response's epoch 5 is newer.
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 1);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        // Response with offset 5 and leader epoch 5.
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, 5)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"));
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
+        drop(subs);
+
+        assert_eq!(
+            mgr.shared.metadata.metadata_arc().last_seen_leader_epoch(&tp),
+            Some(5),
+            "updateLastSeenEpochIfNewer(tp, 5) must have bumped the metadata epoch",
+        );
+    }
+
+    /// Java parity: `testResetOffsetsAuthorizationFailure`. A reset response
+    /// carrying `TOPIC_AUTHORIZATION_FAILED` is cached (non-retriable) and
+    /// re-raised on the next `reset_positions_if_needed` call without
+    /// issuing any request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_offsets_authorization_failure() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::TopicAuthorizationFailed, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        // Following resetPositions should re-raise the cached exception
+        // and issue no request.
+        let err = mgr.reset_positions_if_needed(0).expect_err("cached auth error re-raised");
+        assert_eq!(mgr.requests_to_send_count(), 0, "no request issued on cached-error path");
+        // The cached error is the topic-authorization failure (DoD §3:
+        // assert message content, not just is_err()).
+        assert!(
+            matches!(err, KafkaError::TopicAuthorization(_)),
+            "expected TopicAuthorization, got {err:?}",
+        );
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
     }
 }
