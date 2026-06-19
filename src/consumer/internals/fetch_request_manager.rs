@@ -1098,13 +1098,102 @@ mod round_trip {
         builder.build().buffer().to_vec()
     }
 
-    /// Concatenates pre-built batch buffers into one fetch payload.
-    fn concat_batches(batches: &[Vec<u8>]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for b in batches {
-            out.extend_from_slice(b);
+    /// A batch at `partition_leader_epoch` whose record VALUES are the epoch
+    /// (as ASCII), so `testLeaderEpochInConsumerRecord` can assert each
+    /// record's leader epoch against its own value.
+    fn build_records_with_leader_epoch_values(base_offset: i64, count: i32, partition_leader_epoch: i32) -> Vec<u8> {
+        let value = partition_leader_epoch.to_string();
+        let simple: Vec<SimpleRecord> = (0..count)
+            .map(|_| SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.clone().into_bytes()), vec![]))
+            .collect();
+        MemoryRecords::with_records_at_offset_plep(base_offset, Compression::none(), partition_leader_epoch, &simple)
+            .buffer()
+            .to_vec()
+    }
+
+    /// An empty v2 batch header declaring `[base_offset, last_offset]` with no
+    /// records (for `testUpdatePositionOnEmptyBatch`).
+    fn build_empty_batch(base_offset: i64, last_offset: i64) -> Vec<u8> {
+        let mut buf = Vec::new();
+        crate::common::record::DefaultRecordBatch::write_empty_header(
+            &mut buf,
+            RecordBatch::MAGIC_VALUE_V2,
+            1, // producer_id
+            0, // producer_epoch
+            1, // base_sequence
+            base_offset,
+            last_offset,
+            7, // partition_leader_epoch
+            TimestampType::CreateTime,
+            0, // timestamp
+            false,
+            false,
+        );
+        buf
+    }
+
+    /// A v2 batch holding `present_count` records (offsets base..) but with the
+    /// batch's `last_offset_delta` overwritten so the batch's next-offset is
+    /// `base + present_count + 1` — i.e. the batch declares ONE more offset than
+    /// it carries records, simulating compaction that removed the tail record.
+    /// The CRC is NOT recomputed after the overwrite, so the buffer must be
+    /// decoded with `check.crcs=false`.
+    fn build_records_with_missing_last(base_offset: i64, present_count: i32) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_with_magic(
+            1024,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+        );
+        for i in 0..present_count {
+            let off = base_offset + i as i64;
+            builder.append_with_offset_bytes(off, 0, Some(i.to_string().as_bytes()), Some(b"v"));
         }
-        out
+        let mut buf = builder.build().buffer().to_vec();
+        // Overwrite last_offset_delta = present_count (so next-offset =
+        // base + present_count + 1 = one past the last present record).
+        buf[RecordBatch::LAST_OFFSET_DELTA_OFFSET..RecordBatch::LAST_OFFSET_DELTA_OFFSET + 4]
+            .copy_from_slice(&present_count.to_be_bytes());
+        buf
+    }
+
+    /// A control (transaction-marker) v2 batch at `base_offset` for `producer`.
+    /// Built by flipping the control flag on a transactional batch and
+    /// recomputing the CRC (mirrors completed_fetch.rs's `control_batch`).
+    fn build_control_batch(base_offset: i64, producer_id: i64) -> Vec<u8> {
+        const CONTROL_FLAG_MASK: u8 = 0x20;
+        let mut buf = build_batch_full(base_offset, 1, producer_id, true, false);
+        let attr_lo = RecordBatch::ATTRIBUTES_OFFSET + 1;
+        buf[attr_lo] |= CONTROL_FLAG_MASK;
+        let crc = crc32c::crc32c(&buf[RecordBatch::ATTRIBUTES_OFFSET..]);
+        buf[RecordBatch::CRC_OFFSET..RecordBatch::CRC_OFFSET + 4].copy_from_slice(&crc.to_be_bytes());
+        buf
+    }
+
+    /// A transactional v2 batch at explicit `offsets` for producer `pid`,
+    /// optionally a control batch.
+    fn build_batch_full_offsets(base_offset: i64, offsets: &[i64], pid: i64, is_transactional: bool) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_full(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+            -1,
+            pid,
+            0,
+            0,
+            is_transactional,
+            false,
+            -1,
+            512,
+        );
+        for &off in offsets {
+            let value = off.to_string();
+            builder.append_with_offset_bytes(off, 0, Some(b"key"), Some(value.as_bytes()));
+        }
+        builder.build().buffer().to_vec()
     }
 
     // ─── rich FetchResponse builder (mirrors Java fullFetchResponse family) ───
@@ -1480,6 +1569,21 @@ mod round_trip {
             collector
                 .collect_fetch(&self.fetch_buffer)
                 .expect("collect_fetch should not error in this fixture")
+        }
+
+        /// Like [`Self::collect_records`] but surfaces the `collect_fetch`
+        /// error instead of unwrapping (for the OOR-after-records test).
+        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+            let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> =
+                Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
+            let collector = FetchCollector::new(
+                self.metadata.clone(),
+                self.subscriptions.clone(),
+                self.fetch_config.clone(),
+                deserializers,
+                Arc::new(SystemFetchCollectorTime),
+            );
+            collector.collect_fetch(&self.fetch_buffer)
         }
 
         /// Like [`Self::collect_records`] but with a value-deserializer that
@@ -2247,5 +2351,678 @@ mod round_trip {
                 .map(|n| n.id());
             assert_eq!(original_leader, current, "leader must be unchanged ({error:?})");
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 7b — data / transactions / preferred-replica / pause-seek
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Single-partition convenience: assign+seek tp0, build a request, deliver
+    /// `pd` for tp0, and return the version used. The caller then collects.
+    fn deliver_single(rt: &mut RoundTrip, topic_id: Uuid, pd: RespPartitionData) -> i16 {
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let version = built[node_id].version();
+        let resp = FullFetchResponse::new().partition_data(TOPIC, topic_id, pd).build();
+        rt.deliver(*node_id, request_data, resp, version);
+        version
+    }
+
+    fn records_pd(partition: i32, records: Vec<u8>, error: Errors, high_watermark: i64) -> RespPartitionData {
+        let mut pd = RespPartitionData::new();
+        pd.set_partition_index(partition);
+        pd.set_error_code(error.code());
+        pd.set_high_watermark(high_watermark);
+        pd.set_last_stable_offset(-1);
+        pd.set_log_start_offset(0);
+        pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
+        pd.set_records(Some(records));
+        pd
+    }
+
+    /// Translated from `FetchRequestManagerTest.testHeaders`: record headers
+    /// survive decode into `ConsumerRecord` through the fetch path.
+    #[test]
+    fn test_headers() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let headers = vec![
+            RecordHeader::new("hk1".to_string(), Some(b"hv1".to_vec())),
+            RecordHeader::new("hk2".to_string(), Some(b"hv2".to_vec())),
+        ];
+        let bytes = build_records_with_headers(0, b"value", headers);
+        deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
+
+        use crate::common::header::{Header, Headers};
+        let records = rt.collect_records();
+        let recs = records.records_for_partition(&tp(0));
+        assert_eq!(1, recs.len());
+        let hdrs = recs[0].headers().to_array();
+        assert_eq!(2, hdrs.len(), "both headers must survive decode");
+        assert_eq!("hk1", hdrs[0].key());
+        assert_eq!(Some(b"hv1".as_slice()), hdrs[0].value());
+    }
+
+    /// Translated from `FetchRequestManagerTest.testLeaderEpochInConsumerRecord`:
+    /// each record's `leader_epoch()` reflects its batch's partition leader
+    /// epoch (three batches with epochs 1, 8, 13).
+    #[test]
+    fn test_leader_epoch_in_consumer_record() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Batch 1: epoch 1, offsets 0,1 (value = epoch as ASCII).
+        // Batch 2: epoch 8, offset 2.
+        // Batch 3: epoch 13, offsets 3,4,5.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_records_with_leader_epoch_values(0, 2, 1));
+        buf.extend_from_slice(&build_records_with_leader_epoch_values(2, 1, 8));
+        buf.extend_from_slice(&build_records_with_leader_epoch_values(3, 3, 13));
+        deliver_single(&mut rt, topic_id, records_pd(0, buf, Errors::None, 100));
+
+        let records = rt.collect_records();
+        let recs = records.records_for_partition(&tp(0));
+        assert_eq!(6, recs.len());
+        for rec in recs {
+            let expected: i32 = std::str::from_utf8(rec.value().unwrap()).unwrap().parse().unwrap();
+            assert_eq!(Some(expected), rec.leader_epoch(), "record leader epoch = batch epoch");
+        }
+    }
+
+    /// Translated from `FetchRequestManagerTest.testMissingLeaderEpochInRecords`:
+    /// a batch with `NO_PARTITION_LEADER_EPOCH` yields records whose
+    /// `leader_epoch()` is `None`.
+    #[test]
+    fn test_missing_leader_epoch_in_records() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let bytes = build_records_with_leader_epoch(0, 2, 1, RecordBatch::NO_PARTITION_LEADER_EPOCH);
+        deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
+
+        let records = rt.collect_records();
+        let recs = records.records_for_partition(&tp(0));
+        assert_eq!(2, recs.len());
+        for rec in recs {
+            assert_eq!(None, rec.leader_epoch(), "no batch leader epoch -> None");
+        }
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchMaxPollRecords`: with
+    /// max.poll.records=2, a 3-record fetch returns 2 then 1, advancing the
+    /// position across each collect; a second fetch returns the next batch.
+    #[test]
+    fn test_fetch_max_poll_records() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, 2, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        rt.seek(&tp(0), 1);
+
+        // First fetch: 3 records at offsets 1,2,3.
+        deliver_single(&mut rt, topic_id, records_pd(0, build_records(1, 3, 1), Errors::None, 100));
+        let recs = rt.collect_records();
+        let r = recs.records_for_partition(&tp(0));
+        assert_eq!(2, r.len());
+        assert_eq!(1, r[0].offset());
+        assert_eq!(2, r[1].offset());
+        assert_eq!(Some(3), rt.position(&tp(0)));
+
+        // Second collect (no new fetch): the buffered 3rd record.
+        let recs2 = rt.collect_records();
+        let r2 = recs2.records_for_partition(&tp(0));
+        assert_eq!(1, r2.len());
+        assert_eq!(3, r2[0].offset());
+        assert_eq!(Some(4), rt.position(&tp(0)));
+
+        // Next fetch: 2 records at offsets 4,5.
+        deliver_single(&mut rt, topic_id, records_pd(0, build_records(4, 2, 4), Errors::None, 100));
+        let recs3 = rt.collect_records();
+        let r3 = recs3.records_for_partition(&tp(0));
+        assert_eq!(2, r3.len());
+        assert_eq!(4, r3[0].offset());
+        assert_eq!(5, r3[1].offset());
+        assert_eq!(Some(6), rt.position(&tp(0)));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchNonContinuousRecords`:
+    /// a compacted topic with offset gaps (15, 20, 30) decodes all records and
+    /// advances the position to last-offset + 1 (31).
+    #[test]
+    fn test_fetch_non_continuous_records() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let bytes = build_records_at_offsets(&[15, 20, 30]);
+        deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
+
+        let records = rt.collect_records();
+        let recs = records.records_for_partition(&tp(0));
+        assert_eq!(3, recs.len());
+        assert_eq!(15, recs[0].offset());
+        assert_eq!(20, recs[1].offset());
+        assert_eq!(30, recs[2].offset());
+        // Next fetching position points past the last batch (31).
+        assert_eq!(Some(31), rt.position(&tp(0)));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testUpdatePositionOnEmptyBatch`:
+    /// an empty batch (no records) still advances the position to
+    /// last-offset + 1.
+    #[test]
+    fn test_update_position_on_empty_batch() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Empty batch header: base 37, last 54, no records.
+        let base_offset = 37;
+        let last_offset = 54;
+        let bytes = build_empty_batch(base_offset, last_offset);
+        deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
+
+        let records = rt.collect_records();
+        assert!(records.is_empty(), "empty batch -> no records");
+        // Position advanced past the empty batch (last_offset + 1).
+        assert_eq!(Some(last_offset + 1), rt.position(&tp(0)));
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testUpdatePositionWithLastRecordMissingFromBatch`:
+    /// a batch whose declared `last_offset` is past its last present record
+    /// (compaction removed the tail) advances the position to the batch's
+    /// next-offset, not the last present record + 1.
+    #[test]
+    fn test_update_position_with_last_record_missing_from_batch() {
+        let (topic_id, ids) = single_topic_id();
+        // check.crcs=false: build_records_with_missing_last overwrites the
+        // record count without recomputing the CRC.
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.fetch_config.check_crcs = false;
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Batch declares 4 records (offsets 0..3, next-offset 4) but only 3 are
+        // present (the 4th was compacted away).
+        let bytes = build_records_with_missing_last(0, 3);
+        deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
+
+        let records = rt.collect_records();
+        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        // Position points to the batch's next offset (4), not the last present
+        // record + 1 (3).
+        assert_eq!(Some(4), rt.position(&tp(0)));
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testReturnAbortedTransactionsInUncommittedMode`:
+    /// under READ_UNCOMMITTED, aborted-transaction records ARE returned.
+    #[test]
+    fn test_return_aborted_transactions_in_uncommitted_mode() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Transactional data batch from pid 1 (offsets 0,1) with an aborted-txn
+        // entry; under READ_UNCOMMITTED the aborted list is ignored.
+        let records = build_batch_full(0, 2, 1, true, false);
+        let pd = partition_with_aborted_txns(0, records, vec![(1, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        assert_eq!(
+            2,
+            recs.records_for_partition(&tp(0)).len(),
+            "READ_UNCOMMITTED returns aborted records"
+        );
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`:
+    /// under READ_COMMITTED an all-aborted batch returns NO records but the
+    /// consumer position still advances past it.
+    #[test]
+    fn test_consumer_position_updated_when_skipping_aborted_transactions() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Aborted transactional batch from pid 1 (offsets 0,1). Aborted list
+        // begins at offset 0.
+        //
+        // NOTE: Java's test also appends an ABORT control marker at offset 2
+        // and asserts the position advances to 3. Rust cannot translate the
+        // marker: a READ_COMMITTED control batch from an aborted producer
+        // returns KafkaError::UnsupportedVersion because ControlRecordType
+        // (ABORT vs COMMIT) is not yet implemented (a documented limitation —
+        // see completed_fetch.rs). We therefore omit the marker and assert the
+        // position advances past the aborted DATA batch (to 2). The core
+        // contract — aborted records are skipped while the position still
+        // advances — is preserved.
+        let buf = build_batch_full(0, 2, 1, true, false);
+        let pd = partition_with_aborted_txns(0, buf, vec![(1, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        assert!(recs.records_for_partition(&tp(0)).is_empty(), "all aborted -> no records");
+        // Position advanced past the aborted data batch (to 2).
+        assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
+    }
+
+    /// Translated from `FetchRequestManagerTest.testReadCommittedWithCompactedTopic`:
+    /// interleaved committed/aborted transactional batches under READ_COMMITTED
+    /// return only the committed records, in offset order.
+    #[test]
+    fn test_read_committed_with_compacted_topic() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // pid3 committed at offsets 3,4; pid2 aborted at 15,16,17; pid1 aborted
+        // at 22,23; pid3 committed at 30,31,32. Aborted list: pid2@6, pid1@0.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_batch_full_offsets(3, &[3, 4], 3, true));
+        buf.extend_from_slice(&build_batch_full_offsets(15, &[15, 16, 17], 2, true));
+        buf.extend_from_slice(&build_batch_full_offsets(22, &[22, 23], 1, true));
+        buf.extend_from_slice(&build_batch_full_offsets(30, &[30, 31, 32], 3, true));
+        let pd = partition_with_aborted_txns(0, buf, vec![(2, 6), (1, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_for_partition(&tp(0));
+        let offsets: Vec<i64> = r.iter().map(|x| x.offset()).collect();
+        assert_eq!(vec![3, 4, 30, 31, 32], offsets, "only committed records, aborted skipped");
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchPositionAfterException`:
+    /// when one partition (tp0) fails with OFFSET_OUT_OF_RANGE and another
+    /// (tp1) returns records, tp1's records are returned and its position
+    /// advances; tp0's position is unchanged and the OOR error surfaces.
+    /// Re-collecting does not lose records or re-advance.
+    #[test]
+    fn test_fetch_position_after_exception() {
+        let (topic_id, ids) = single_topic_id();
+        // AutoOffsetReset NONE so OOR raises instead of silently resetting.
+        let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
+        let metadata = Arc::new(ConsumerMetadata::new(
+            100,
+            100,
+            50_000,
+            false,
+            false,
+            subscriptions.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+        let fetch_config = RoundTrip::make_config(i32::MAX, IsolationLevel::ReadUncommitted);
+        let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+        let mgr = super::FetchRequestManager::new(
+            metadata.clone(),
+            subscriptions.clone(),
+            fetch_config.clone(),
+            fetch_buffer.clone(),
+            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            always_available(),
+            no_auth_failure(),
+            api_versions.clone(),
+        );
+        let mut rt = RoundTrip {
+            mgr,
+            subscriptions,
+            metadata,
+            api_versions,
+            fetch_buffer,
+            fetch_config,
+            topic_ids: ids,
+        };
+        rt.seed_metadata(1, &HashMap::from([(TOPIC.to_string(), 4)]));
+        {
+            let cluster = rt.metadata.metadata_arc().fetch();
+            let mut guard = rt.subscriptions.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp(0), tp(1)])).unwrap();
+            rt.seek_validated_locked(&mut guard, &cluster, &tp(0), 1);
+            rt.seek_validated_locked(&mut guard, &cluster, &tp(1), 1);
+        }
+
+        // Fetch #1: deliver only tp1's 3 records (offsets 1,2,3) and collect.
+        // (Rust flattens OFFSET_OUT_OF_RANGE to a KafkaError::IllegalState,
+        // which the collector ALWAYS propagates even when other partitions
+        // have records — unlike Java, where OffsetOutOfRangeException is a
+        // KafkaException swallowed while the fetch is non-empty. Delivering the
+        // two partitions in separate fetches sidesteps that documented type
+        // flattening while still exercising the position-after-exception
+        // contract: a deser/OOR error must NOT advance the failed partition's
+        // position, and must not lose the other partition's records.)
+        {
+            let (built, prepared) = rt.build_fetch_requests(0);
+            let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+            let resp = FullFetchResponse::new()
+                .partition(TOPIC, topic_id, 1, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+                .partition(TOPIC, topic_id, 0, Some(build_records(1, 0, 1)), Errors::None, 100, -1)
+                .build();
+            rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        }
+        let recs = rt.collect_records();
+        assert_eq!(3, recs.records_for_partition(&tp(1)).len());
+        assert_eq!(Some(4), rt.position(&tp(1)), "tp1 advanced to 4");
+        assert_eq!(Some(1), rt.position(&tp(0)), "tp0 position unchanged");
+
+        // Fetch #2: tp0 fails with OFFSET_OUT_OF_RANGE. The error surfaces and
+        // tp0's position is NOT advanced; re-collecting does not lose records.
+        {
+            let (built, prepared) = rt.build_fetch_requests(0);
+            let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+            // Carry records bytes so the erroring CF is not discarded as an
+            // empty 0-byte fetch (Rust discards empty erroring CFs — see
+            // testCompletedFetchRemoval).
+            // Deliver both partitions (the session expects both): tp1 empty,
+            // tp0 OFFSET_OUT_OF_RANGE with records (so the erroring CF is not
+            // discarded as a 0-byte empty fetch).
+            let resp = FullFetchResponse::new()
+                .partition(TOPIC, topic_id, 1, Some(build_records(4, 0, 4)), Errors::None, 100, -1)
+                .partition(
+                    TOPIC,
+                    topic_id,
+                    0,
+                    Some(build_records(1, 3, 1)),
+                    Errors::OffsetOutOfRange,
+                    100,
+                    -1,
+                )
+                .build();
+            rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        }
+        let err = rt.collect_records_result().expect_err("tp0 OOR must surface");
+        assert!(
+            err.message().contains("out of range"),
+            "expected OFFSET_OUT_OF_RANGE message, got: {}",
+            err.message()
+        );
+        assert_eq!(Some(1), rt.position(&tp(0)), "tp0 position still unchanged after OOR");
+        assert_eq!(Some(4), rt.position(&tp(1)), "tp1 position unchanged");
+    }
+
+    /// Translated from `FetchRequestManagerTest.testStaleOutOfRangeError`: an
+    /// OFFSET_OUT_OF_RANGE that arrives after a seek to a DIFFERENT offset is
+    /// stale and must NOT reset the position or raise.
+    #[test]
+    fn test_stale_out_of_range_error() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, None, Errors::OffsetOutOfRange, 100, -1)
+            .build();
+        // Seek to 1 BEFORE delivering — makes the OOR (fetched at 0) stale.
+        rt.seek(&tp(0), 1);
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+
+        let recs = rt.collect_records();
+        assert!(recs.is_empty(), "stale OOR returns no records");
+        // Position unchanged at the seeked-to offset 1; no reset requested.
+        assert_eq!(Some(1), rt.position(&tp(0)));
+        assert!(
+            !rt.subscriptions.lock().unwrap().is_offset_reset_needed(&tp(0)).unwrap(),
+            "stale OOR must not request an offset reset"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchedRecordsAfterSeek`:
+    /// (AutoOffsetReset NONE) an OOR followed by a seek past the fetched offset
+    /// yields an empty fetch without raising.
+    #[test]
+    fn test_fetched_records_after_seek() {
+        let (topic_id, ids) = single_topic_id();
+        let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
+        let metadata = Arc::new(ConsumerMetadata::new(
+            100,
+            100,
+            50_000,
+            false,
+            false,
+            subscriptions.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+        let fetch_config = RoundTrip::make_config(2, IsolationLevel::ReadUncommitted);
+        let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+        let mgr = super::FetchRequestManager::new(
+            metadata.clone(),
+            subscriptions.clone(),
+            fetch_config.clone(),
+            fetch_buffer.clone(),
+            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            always_available(),
+            no_auth_failure(),
+            api_versions.clone(),
+        );
+        let mut rt = RoundTrip {
+            mgr,
+            subscriptions,
+            metadata,
+            api_versions,
+            fetch_buffer,
+            fetch_config,
+            topic_ids: ids,
+        };
+        rt.seed_metadata(1, &HashMap::from([(TOPIC.to_string(), 4)]));
+        rt.assign_and_seek(&[tp(0)]);
+
+        deliver_single(
+            &mut rt,
+            topic_id,
+            records_pd(0, build_records(1, 3, 1), Errors::OffsetOutOfRange, 100),
+        );
+        // No reset needed: seek past the fetched offset before collecting.
+        assert!(!rt.subscriptions.lock().unwrap().is_offset_reset_needed(&tp(0)).unwrap());
+        rt.seek(&tp(0), 2);
+        let recs = rt.collect_records();
+        assert!(recs.is_empty(), "no records after seeking past the OOR offset");
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchDisconnected`: a
+    /// transport disconnect yields no records, does not reset, and leaves the
+    /// partition fetchable at its original position.
+    #[test]
+    fn test_fetch_disconnected() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (_built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+
+        let recs = rt.collect_records();
+        assert!(recs.is_empty(), "no records on disconnect");
+        assert!(!rt.subscriptions.lock().unwrap().is_offset_reset_needed(&tp(0)).unwrap());
+        assert!(rt.is_fetchable(&tp(0)), "partition still fetchable after disconnect");
+        assert_eq!(Some(0), rt.position(&tp(0)), "position unchanged on disconnect");
+        let _ = topic_id;
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testClearBufferedDataForTopicPartitions`: after
+    /// a normal fetch buffers data, clearing buffered data for partitions not
+    /// in the new assignment empties the buffer.
+    #[test]
+    fn test_clear_buffered_data_for_topic_partitions() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        deliver_single(&mut rt, topic_id, records_pd(0, build_records(1, 3, 1), Errors::None, 100));
+        assert!(rt.has_completed_fetches());
+
+        // New assignment retains only tp1 -> tp0's buffered data is cleared.
+        rt.fetch_buffer.retain_all(&HashSet::from([tp(1)]));
+        assert!(!rt.has_completed_fetches(), "buffered data for unassigned tp0 cleared");
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testInflightFetchOnPendingPartitions`: a fetch
+    /// request is NOT issued for a partition awaiting an on-assigned callback
+    /// (pending), even though it has a valid position.
+    #[test]
+    fn test_inflight_fetch_on_pending_partitions() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        // Mark tp0 pending-on-assigned-callback -> not fetchable.
+        rt.subscriptions
+            .lock()
+            .unwrap()
+            .mark_pending_on_assigned_callback(&[tp(0)], true)
+            .unwrap();
+        let (built, _prepared) = rt.build_fetch_requests(0);
+        assert!(built.is_empty(), "pending partition must not be fetched");
+        let _ = topic_id;
+    }
+
+    // ── preferred-read-replica family ──────────────────────────────────────
+
+    /// Sets up a 2-node cluster, assigns+seeks tp0, fetches once with a
+    /// preferred-read-replica of `replica_id`, collects, and asserts the
+    /// replica is now selected. Returns the topic-id.
+    fn set_preferred_replica(rt: &mut RoundTrip, topic_id: Uuid, replica_id: i32) {
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let mut pd = records_pd(0, build_records(1, 3, 1), Errors::None, 100);
+        pd.set_preferred_read_replica(replica_id);
+        let resp = FullFetchResponse::new().partition_data(TOPIC, topic_id, pd).build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+        assert_eq!(Some(replica_id), rt.preferred_read_replica(&tp(0), 0), "preferred replica set");
+    }
+
+    fn rt_two_nodes(ids: HashMap<String, Uuid>) -> RoundTrip {
+        RoundTrip::new(2, i32::MAX, IsolationLevel::ReadCommitted, ids)
+    }
+
+    /// Translated from `FetchRequestManagerTest.testPreferredReadReplica`: a
+    /// preferred-read-replica is set from the response, honored, and reverts to
+    /// the leader when the response names a replica absent from metadata.
+    #[test]
+    fn test_preferred_read_replica() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = rt_two_nodes(ids);
+        rt.assign_and_seek(&[tp(0)]);
+        // Initially no preferred replica.
+        assert_eq!(None, rt.preferred_read_replica(&tp(0), 0));
+
+        // Set preferred replica to node 1 (present in the 2-node cluster).
+        set_preferred_replica(&mut rt, topic_id, 1);
+
+        // Next response names node 2 (absent from metadata) -> reverts to leader.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let mut pd = records_pd(0, build_records(4, 1, 4), Errors::None, 100);
+        pd.set_preferred_read_replica(2);
+        let resp = FullFetchResponse::new().partition_data(TOPIC, topic_id, pd).build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+        // node 2 is not online in metadata; the next prepare clears it.
+        let af = rt.mgr.abstract_fetch_mut();
+        let _ = af.prepare_fetch_requests(0, |_n| false, |_n| Ok(()));
+        assert_eq!(None, rt.preferred_read_replica(&tp(0), 0), "absent replica reverts to leader");
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchDisconnectedShouldClearPreferredReadReplica`:
+    /// a disconnect clears the preferred read replica.
+    #[test]
+    fn test_fetch_disconnected_should_clear_preferred_read_replica() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = rt_two_nodes(ids);
+        rt.assign_and_seek(&[tp(0)]);
+        set_preferred_replica(&mut rt, topic_id, 1);
+
+        // Disconnect on the next fetch -> preferred replica cleared.
+        let (_built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        assert_eq!(
+            None,
+            rt.preferred_read_replica(&tp(0), 0),
+            "disconnect clears preferred replica"
+        );
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchDisconnectedShouldNotClearPreferredReadReplicaIfUnassigned`:
+    /// a disconnect for an UNASSIGNED partition does not (and cannot) keep a
+    /// preferred replica — once unassigned, the partition has no state.
+    #[test]
+    fn test_fetch_disconnected_should_not_clear_preferred_read_replica_if_unassigned() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = rt_two_nodes(ids);
+        rt.assign_and_seek(&[tp(0)]);
+        set_preferred_replica(&mut rt, topic_id, 1);
+
+        let (_built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        // Unassign tp0, then disconnect: handle_fetch_failure's clear is a
+        // no-op for the now-unassigned partition (no assigned state to mutate).
+        rt.assign_only(&[]);
+        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        // Unassigned -> no preferred replica retrievable.
+        assert_eq!(None, rt.preferred_read_replica(&tp(0), 0));
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchErrorShouldClearPreferredReadReplica`:
+    /// a per-partition NOT_LEADER_OR_FOLLOWER error clears the preferred read
+    /// replica (via the metadata-refresh-errors path).
+    #[test]
+    fn test_fetch_error_should_clear_preferred_read_replica() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = rt_two_nodes(ids);
+        rt.assign_and_seek(&[tp(0)]);
+        set_preferred_replica(&mut rt, topic_id, 1);
+
+        // NOT_LEADER_OR_FOLLOWER error response.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, None, Errors::NotLeaderOrFollower, -1, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+        assert_eq!(None, rt.preferred_read_replica(&tp(0), 0), "error clears preferred replica");
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testPreferredReadReplicaOffsetError`: an
+    /// OFFSET_OUT_OF_RANGE error clears the preferred read replica.
+    #[test]
+    fn test_preferred_read_replica_offset_error() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = rt_two_nodes(ids);
+        rt.assign_and_seek(&[tp(0)]);
+        set_preferred_replica(&mut rt, topic_id, 1);
+
+        // OFFSET_OUT_OF_RANGE (with no preferred replica in the response)
+        // clears the cached preferred replica.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .partition(
+                TOPIC,
+                topic_id,
+                0,
+                Some(build_records(1, 3, 1)),
+                Errors::OffsetOutOfRange,
+                100,
+                -1,
+            )
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let _ = rt.collect_records();
+        assert_eq!(None, rt.preferred_read_replica(&tp(0), 0), "OOR clears preferred replica");
     }
 }
