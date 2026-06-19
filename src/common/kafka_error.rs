@@ -202,6 +202,19 @@ impl GroupAuthorizationError {
         }
     }
 
+    /// Create a group authorization error carrying a custom message.
+    ///
+    /// Mirrors Java's `GroupAuthorizationException(String message)` /
+    /// `forGroupId(...)`, where the exception message is caller-supplied
+    /// rather than the default error text. Used when the coordinator manager
+    /// surfaces a fatal `GroupAuthorizationException("...")`.
+    pub fn with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kafka_error: KafkaGenericError::with_message(Errors::GroupAuthorizationFailed, message),
+            group_id: group_id.into(),
+        }
+    }
+
     /// Access the base error.
     pub fn kafka_error(&self) -> &KafkaGenericError {
         &self.kafka_error
@@ -298,6 +311,12 @@ impl KafkaError {
     /// Create a group authorization error.
     pub fn group_authorization(group_id: impl Into<String>) -> Self {
         Self::GroupAuthorization(GroupAuthorizationError::new(group_id))
+    }
+
+    /// Create a group authorization error carrying a custom message
+    /// (Java: `new GroupAuthorizationException(message)`).
+    pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::GroupAuthorization(GroupAuthorizationError::with_message(group_id, message))
     }
 
     /// Create an invalid group ID error.

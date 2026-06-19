@@ -821,7 +821,6 @@ impl CommitRequestManager {
                 request_rx,
                 result_tx,
                 offsets_for_retry,
-                member_info,
                 deadline_ms,
                 now_ms,
             )
@@ -1233,10 +1232,16 @@ impl CommitRequestManager {
             if commit.state.can_send_request(current_time_ms) {
                 commit.state.on_send_attempt(current_time_ms);
                 commit.has_attempted_send = true;
-                // Mirrors Java's `lastEpochSentOnCommit = memberInfo.memberEpoch`
-                // writeback inside `createOffsetCommitRequest`. Done here
-                // because `build_offset_commit_unsent_request` cannot
-                // re-acquire the state lock (non-reentrant).
+                // Refresh the request's member id/epoch from the manager's
+                // CURRENT member info at SEND time. In Java the request holds a
+                // reference to the manager's mutable `MemberInfo`
+                // (`CommitRequestManager.java:889`), so an `onMemberEpochUpdated`
+                // that fires between enqueue and send is reflected in the
+                // built request. The Rust request stored a clone at enqueue, so
+                // we re-sync it here before building (and write
+                // `lastEpochSentOnCommit` — Java does the same inside
+                // `toOffsetCommitRequestData`, line 746).
+                commit.member_info = guard.member_info.clone();
                 guard.last_epoch_sent_on_commit = commit.member_info.member_epoch;
                 to_send.push(build_offset_commit_unsent_request(&inner, commit));
             } else {
@@ -1525,6 +1530,11 @@ fn build_offset_commit_unsent_request(
                 handle_offset_commit_response(&inner_for_handler, request, client_response.take_response_body());
             },
             Ok(Err(err)) => {
+                // Transport-level failure (e.g. disconnect). Java's shared
+                // RequestState.handleClientResponse error arm calls
+                // handleCoordinatorDisconnect before completing exceptionally
+                // (CommitRequestManager.java:947).
+                inner_for_handler.handle_coordinator_disconnect(&err, current_time_ms_now());
                 request.complete_err(err);
             },
             Err(_recv_err) => {
@@ -1605,6 +1615,11 @@ fn build_offset_fetch_unsent_request(
                 );
             },
             Ok(Err(err)) => {
+                // Transport-level failure (e.g. disconnect). Java's shared
+                // RequestState.handleClientResponse error arm calls
+                // handleCoordinatorDisconnect before completing exceptionally
+                // (CommitRequestManager.java:947).
+                inner_for_handler.handle_coordinator_disconnect(&err, current_time_ms_now());
                 if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
                     let _ = tx.send(Err(err));
                 }
@@ -1908,6 +1923,24 @@ impl CommitRequestManagerInner {
             hook.enqueue_interceptor_invocation(offsets);
         }
     }
+
+    /// Forward a transport-level failure to the coordinator manager so a
+    /// disconnect marks the coordinator unknown (triggering re-discovery on
+    /// the next `FindCoordinator`). Mirrors Java's
+    /// `coordinatorRequestManager.handleCoordinatorDisconnect(error, ...)`
+    /// call in the shared `RequestState.handleClientResponse` error arm
+    /// (`CommitRequestManager.java:947`), which runs for BOTH commit and
+    /// fetch requests on a transport error. No-op when no coordinator handle
+    /// is wired (Phase 9 unit tests).
+    fn handle_coordinator_disconnect(&self, error: &KafkaError, current_time_ms: i64) {
+        let coord = {
+            let guard = self.coordinator.lock().expect("commit manager coordinator slot poisoned");
+            guard.as_ref().map(Arc::clone)
+        };
+        if let Some(coord) = coord {
+            coord.handle_coordinator_disconnect(error, current_time_ms);
+        }
+    }
 }
 
 // =========================================================================
@@ -2028,7 +2061,6 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     initial_request_rx: oneshot::Receiver<CommitResult>,
     result_tx: RebalanceFlushTx,
     initial_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    member_info: MemberInfo,
     deadline_ms: i64,
     now_ms: i64,
 ) {
@@ -2043,11 +2075,17 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     // success (Java's `autoCommitCallback`, which `requestAutoCommit`
     // attaches to every attempt, including the rebalance flush).
     let mut last_offsets = initial_offsets;
-    // Java's `isStaleEpochErrorAndValidEpochAvailable` requires
-    // `memberInfo.memberEpoch.isPresent()` (`CommitRequestManager.java:573-575`).
-    // Captured here once at driver entry because `member_info` does not
-    // change across retries within a single driver invocation.
-    let has_valid_member_epoch = member_info.member_epoch.is_some();
+    // Java re-reads `memberInfo` on every attempt: `isStaleEpochErrorAnd
+    // ValidEpochAvailable` checks the CURRENT `memberInfo.memberEpoch`
+    // (`CommitRequestManager.java:573-575`) and `createOffsetCommitRequest`
+    // builds each retry with the latest id/epoch. The member epoch can change
+    // mid-flight (the membership manager calls `onMemberEpochUpdated` after a
+    // reconciliation), so a retry on STALE_MEMBER_EPOCH must pick up the new
+    // epoch. We therefore re-read `member_info` from `inner.state` at the top
+    // of every error iteration rather than capturing it once. The initial
+    // The first attempt was already enqueued by the caller using the member
+    // info read at that time; this driver refreshes the member id/epoch from
+    // `inner.state` on each retry (Java re-reads `memberInfo` per attempt).
     let outcome: Result<(), KafkaError> = loop {
         match request_rx.await {
             Ok(Ok(_committed)) => {
@@ -2058,6 +2096,14 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 break Ok(());
             },
             Ok(Err(err)) => {
+                // Re-read the latest member id/epoch (Java reads `memberInfo`
+                // afresh on each attempt). Used both by the stale-epoch retry
+                // gate below and the retry request build.
+                let member_info = {
+                    let guard = inner.state.lock().expect("commit manager state poisoned");
+                    guard.member_info.clone()
+                };
+                let has_valid_member_epoch = member_info.member_epoch.is_some();
                 // Java line 349: enter the retry gate only when the error
                 // is a RetriableException OR the stale-epoch case AND a
                 // valid member epoch is currently known.
@@ -2292,29 +2338,41 @@ async fn fetch_offsets_with_retries(
 
 #[cfg(test)]
 mod tests {
-    //! Translated subset of
+    //! Translation of
     //! `org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest`.
     //!
-    //! The Java file is 1975 LOC with 50 test cases, many of which rely on
-    //! Mockito mocks of `BackgroundEventHandler`, `Metrics`, and
-    //! `MembershipManager` internals — those are deferred to Phase 11 with
-    //! a one-line rationale each (DoD §3):
+    //! Phase 33 closes the CommitRequestManagerTest gap. The Java file is
+    //! 1975 LOC with 50 `@Test`/`@ParameterizedTest` methods. All in-scope
+    //! tests (KIP-848, §20) are translated below, expanding each
+    //! `@MethodSource` matrix to a loop over every error case (DoD §3). The
+    //! only deliberately-skipped tests are the metrics-framework ones:
     //!
-    //!   - testEnsureBackgroundEventHandlerUsedOnCommitAsyncWhenFatalError:
-    //!     requires the BackgroundEventHandler wiring (Phase 11).
-    //!   - testEnsureCorrectMetricRecordedForCommitLatency: requires the
-    //!     metrics framework (out of scope per CLAUDE.md and Phase 9 plan).
-    //!   - testInflightOffsetFetchRequestsDuringMembershipFenced: requires
-    //!     ConsumerMembershipManager (Phase 8) — wired via Phase 11.
-    //!   - testFencedInstanceIdException / testAutoCommitOnLeavingGroup /
-    //!     similar membership transitions: require Phase 8 membership
-    //!     manager + Phase 11 BG-task wiring.
-    //!   - testPollWithFatalErrorShouldFailAllUnsentRequests-via-bgEvent:
-    //!     covered by `test_fail_all_with_error_via_coordinator_fatal`
-    //!     below in a simpler form (no event-handler dependency).
+    //!   - `testEnsureCommitSensorRecordsMetric` — metrics framework is out
+    //!     of scope (CLAUDE.md + Phase 9 plan). No translation.
+    //!   - The `commit-rate` / `commit-total` metric assertions inside
+    //!     `testPollEnsureAutocommitSent` — same reason. The
+    //!     request-emission half of that test IS translated
+    //!     (`poll_ensure_autocommit_sent`); only the metric asserts are
+    //!     dropped.
     //!
-    //! The tests below cover the core state-machine and request-building
-    //! behaviour that's testable without the Phase 8 / 10 / 11 wiring.
+    //! ## Rust-vs-Java test mechanics
+    //!
+    //! The Rust manager's sync-commit / fetch / rebalance-flush retry drivers
+    //! advance a LOCAL `current_time_ms` by `retry_backoff_ms` per retriable
+    //! failure and compare it against `deadline_ms` (Java instead uses
+    //! `MockTime.sleep` + re-poll + `isExpired()`). Each retry re-enqueues a
+    //! FRESH request seeded with `seed_failed_attempts` — there is no stable
+    //! `numAttempts` field on a single object across retries. So Java's
+    //! `commitRequest.numAttempts` assertions map to peeking the head of the
+    //! unsent queue and reading `state.num_attempts()`.
+    //!
+    //! Responses are driven through the spawned response handler registered
+    //! in `build_offset_commit_unsent_request` / `build_offset_fetch_unsent_request`:
+    //! `poll_with_coordinator(&coord, now)` ships the request, then
+    //! `unsent.handler().on_complete(client_response)` / `on_failure(now, err)`
+    //! delivers the response. The handlers spawn, so tests drive the runtime
+    //! with `yield_now()` loops (or a `multi_thread` runtime for
+    //! deadline-expiry loops that need a real scheduler).
 
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
@@ -2367,6 +2425,175 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(tp, OffsetAndMetadata::new(offset).expect("non-negative"));
         map
+    }
+
+    use crate::client_response::ClientResponse;
+    use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader};
+    use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+    /// A `CoordinatorRequestManager` with a known coordinator node injected,
+    /// mirroring `when(coordinatorRequestManager.coordinator()).thenReturn(...)`.
+    fn coordinator_with_node() -> CoordinatorRequestManager {
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(1, "host1".to_string(), 9092));
+        coordinator
+    }
+
+    /// Wrap a `ConcreteResponse` in a `ClientResponse` with the appropriate
+    /// API key header. Mirrors the Java test's `ClientResponse` construction.
+    fn client_response_for(api_key: &ApiKeys, version: i16, response: ConcreteResponse) -> ClientResponse {
+        let header = RequestHeader::new(api_key, version, "test-client", 0).expect("request header");
+        ClientResponse::new(header, None, "localhost:9092", 0, 1, false, None, None, Some(response))
+    }
+
+    /// Build an `OffsetCommit` `ClientResponse` from a per-partition error
+    /// map. Mirrors Java's `mockOffsetCommitResponse` /
+    /// `buildOffsetCommitClientResponse`.
+    fn offset_commit_response(per_partition: HashMap<TopicPartition, Errors>) -> ClientResponse {
+        let response = ConcreteResponse::OffsetCommit(OffsetCommitResponse::from_response_data(0, &per_partition));
+        client_response_for(&ApiKeys::OFFSET_COMMIT, 1, response)
+    }
+
+    /// Build an `OffsetCommit` `ClientResponse` with a single partition at
+    /// the given error. Convenience over [`offset_commit_response`].
+    fn offset_commit_response_single(tp: &TopicPartition, error: Errors) -> ClientResponse {
+        let mut data = HashMap::new();
+        data.insert(tp.clone(), error);
+        offset_commit_response(data)
+    }
+
+    /// A single partition entry for [`offset_fetch_response`]:
+    /// `(partition_index, committed_offset, committed_leader_epoch, metadata, error)`.
+    type FetchPartition = (i32, i64, i32, &'static str, Errors);
+
+    /// Build an `OffsetFetch` `ClientResponse` (v8+ groups form so the
+    /// production `response.group(group_id)` reads from `data.groups`).
+    /// `topics` maps `(topic_name, topic_id)` to its partition list.
+    /// `group_error` is the group-level error code (`Errors::None` for the
+    /// happy path). Mirrors Java's `buildOffsetFetchClientResponse`.
+    fn offset_fetch_response(
+        group_id: &str,
+        topics: Vec<((&str, Uuid), Vec<FetchPartition>)>,
+        group_error: Errors,
+    ) -> ClientResponse {
+        use crate::offset_fetch_response_data::{
+            OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+        };
+        let mut response_topics = Vec::new();
+        for ((name, topic_id), partitions) in topics {
+            let mut topic = OffsetFetchResponseTopics::new();
+            topic.set_name(name.to_string());
+            topic.set_topic_id(topic_id);
+            let parts = partitions
+                .into_iter()
+                .map(|(idx, offset, leader_epoch, metadata, error)| {
+                    let mut p = OffsetFetchResponsePartitions::new();
+                    p.set_partition_index(idx);
+                    p.set_committed_offset(offset);
+                    p.set_committed_leader_epoch(leader_epoch);
+                    p.set_metadata(Some(metadata.to_string()));
+                    p.set_error_code(error.code());
+                    p
+                })
+                .collect();
+            topic.set_partitions(parts);
+            response_topics.push(topic);
+        }
+        let mut group = OffsetFetchResponseGroup::new();
+        group.set_group_id(group_id.to_string());
+        group.set_error_code(group_error.code());
+        group.set_topics(response_topics);
+        let mut data = OffsetFetchResponseData::new();
+        data.set_groups(vec![group]);
+        let version = ApiKeys::OFFSET_FETCH.latest_version();
+        let response = ConcreteResponse::OffsetFetch(OffsetFetchResponse::new(data, version));
+        client_response_for(&ApiKeys::OFFSET_FETCH, version, response)
+    }
+
+    /// Build a successful single-partition `OffsetFetch` response with
+    /// offset=100, metadata="metadata", leaderEpoch=1 (the common fixture
+    /// used by Java's `buildOffsetFetchClientResponse(request, partitions,
+    /// Errors.NONE)`).
+    fn offset_fetch_response_for_partitions(partitions: &HashSet<TopicPartition>) -> ClientResponse {
+        let mut by_topic: HashMap<String, Vec<FetchPartition>> = HashMap::new();
+        for tp in partitions {
+            by_topic.entry(tp.topic().to_string()).or_default().push((
+                tp.partition(),
+                100,
+                1,
+                "metadata",
+                Errors::None,
+            ));
+        }
+        let topics: Vec<((&str, Uuid), Vec<FetchPartition>)> = by_topic
+            .iter()
+            .map(|(name, parts)| ((name.as_str(), Uuid::zero()), parts.clone()))
+            .collect();
+        // Leak-free: the &str borrows live only for the call; build the
+        // response inline so the borrow does not escape.
+        offset_fetch_response_owned(GROUP_ID, topics, Errors::None)
+    }
+
+    /// `offset_fetch_response` variant that owns topic-name strings — avoids
+    /// borrow-escape when building from a runtime-constructed map.
+    fn offset_fetch_response_owned(
+        group_id: &str,
+        topics: Vec<((&str, Uuid), Vec<FetchPartition>)>,
+        group_error: Errors,
+    ) -> ClientResponse {
+        offset_fetch_response(group_id, topics, group_error)
+    }
+
+    /// Ship exactly one request via `poll_with_coordinator` and return its
+    /// `UnsentRequest`. Asserts the poll produced exactly one unsent request.
+    fn poll_one_unsent(
+        manager: &CommitRequestManager,
+        coordinator: &CoordinatorRequestManager,
+        now_ms: i64,
+    ) -> UnsentRequest {
+        let mut poll_result = manager.poll_with_coordinator(coordinator, now_ms);
+        assert_eq!(
+            poll_result.unsent_requests.len(),
+            1,
+            "expected exactly one unsent request from poll_with_coordinator"
+        );
+        poll_result.unsent_requests.remove(0)
+    }
+
+    /// Seed `metadata.topic_ids()` with `topic -> topic_id` so the request
+    /// builders use the topic-ID wire form (v10+ commit / v10+ fetch).
+    /// Mirrors `when(metadata.topicIds()).thenReturn(Map.of(topic, topicId))`.
+    fn seed_topic_id(manager: &CommitRequestManager, topic: &str, topic_id: Uuid) {
+        manager.inner.metadata.add_transient_topics(HashSet::from([topic.to_string()]));
+        let metadata = manager.inner.metadata.metadata_arc();
+        let mut counts = HashMap::new();
+        counts.insert(topic.to_string(), 1);
+        let mut ids = HashMap::new();
+        ids.insert(topic.to_string(), topic_id);
+        let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "cluster",
+            1,
+            &HashMap::new(),
+            &counts,
+            &|_tp| None,
+            &ids,
+        );
+        metadata.update_with_current_request_version(&response, false, 0);
+    }
+
+    /// Yield the current-thread runtime until `predicate` returns `Some(v)`
+    /// or the iteration cap is hit (then panic with `msg`). Used to wait for
+    /// a spawned response handler / retry driver to make observable progress.
+    async fn yield_until<T>(mut predicate: impl FnMut() -> Option<T>, msg: &str) -> T {
+        for _ in 0..64 {
+            if let Some(v) = predicate() {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("{msg}");
     }
 
     /// Phase 9 test (no Java analog at this scope): `auto_commit_enabled`
@@ -3111,5 +3338,955 @@ mod tests {
             }
         }
         panic!("auto-commit-sync-before-rebalance future did not resolve after 32 yields");
+    }
+
+    // =====================================================================
+    //          Phase 33a — commit-path parity translations
+    // =====================================================================
+
+    /// The 13-error matrix of `offsetCommitExceptionSupplier`:
+    /// `(error, expected exception class)`. Mirrors the Java `@MethodSource`.
+    /// `ExpectedClass` distinguishes the typed exception each error maps to.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum ExpectedClass {
+        Timeout,
+        GroupAuthorization,
+        OffsetMetadataTooLarge,
+        InvalidCommitOffsetSize,
+        TopicAuthorization,
+        CommitFailed,
+        KafkaException,
+    }
+
+    /// `offsetCommitExceptionSupplier()` — 13 cases.
+    fn offset_commit_exception_supplier() -> Vec<(Errors, ExpectedClass)> {
+        vec![
+            // Retriable → TimeoutException when retry time expires.
+            (Errors::NotCoordinator, ExpectedClass::Timeout),
+            (Errors::CoordinatorLoadInProgress, ExpectedClass::Timeout),
+            (Errors::CoordinatorNotAvailable, ExpectedClass::Timeout),
+            (Errors::RequestTimedOut, ExpectedClass::Timeout),
+            (Errors::UnknownTopicOrPartition, ExpectedClass::Timeout),
+            (Errors::UnknownTopicId, ExpectedClass::Timeout),
+            // Non-retriable → specific exceptions.
+            (Errors::GroupAuthorizationFailed, ExpectedClass::GroupAuthorization),
+            (Errors::OffsetMetadataTooLarge, ExpectedClass::OffsetMetadataTooLarge),
+            (Errors::InvalidCommitOffsetSize, ExpectedClass::InvalidCommitOffsetSize),
+            (Errors::TopicAuthorizationFailed, ExpectedClass::TopicAuthorization),
+            (Errors::UnknownMemberId, ExpectedClass::CommitFailed),
+            (Errors::StaleMemberEpoch, ExpectedClass::CommitFailed),
+            // Generic → KafkaException.
+            (Errors::UnknownServerError, ExpectedClass::KafkaException),
+        ]
+    }
+
+    /// `offsetFetchExceptionSupplier()` — 14 cases.
+    fn offset_fetch_exception_supplier() -> Vec<(Errors, ExpectedClass)> {
+        vec![
+            // Retriable → TimeoutException when retry time expires.
+            (Errors::NotCoordinator, ExpectedClass::Timeout),
+            (Errors::CoordinatorLoadInProgress, ExpectedClass::Timeout),
+            (Errors::CoordinatorNotAvailable, ExpectedClass::Timeout),
+            (Errors::RequestTimedOut, ExpectedClass::Timeout),
+            (Errors::UnstableOffsetCommit, ExpectedClass::Timeout),
+            (Errors::UnknownTopicOrPartition, ExpectedClass::Timeout),
+            (Errors::UnknownTopicId, ExpectedClass::Timeout),
+            // Non-retriable → specific exceptions.
+            (Errors::GroupAuthorizationFailed, ExpectedClass::GroupAuthorization),
+            (Errors::OffsetMetadataTooLarge, ExpectedClass::KafkaException),
+            (Errors::InvalidCommitOffsetSize, ExpectedClass::KafkaException),
+            (Errors::TopicAuthorizationFailed, ExpectedClass::KafkaException),
+            (Errors::UnknownMemberId, ExpectedClass::KafkaException),
+            // STALE_MEMBER_EPOCH is non-retriable here (only retried with a new epoch).
+            (Errors::StaleMemberEpoch, ExpectedClass::KafkaException),
+            // Generic → KafkaException.
+            (Errors::UnknownServerError, ExpectedClass::KafkaException),
+        ]
+    }
+
+    /// Assert that `err` matches the `ExpectedClass`, mirroring Java's
+    /// `assertFutureThrows(expectedExceptionClass, future)`. The Rust
+    /// `KafkaError` representation determines how each class is checked.
+    fn assert_error_class(err: &KafkaError, expected: ExpectedClass) {
+        match expected {
+            ExpectedClass::Timeout => {
+                assert!(matches!(err, KafkaError::Timeout(_)), "expected TimeoutException, got {err:?}");
+            },
+            ExpectedClass::GroupAuthorization => {
+                assert!(
+                    matches!(err, KafkaError::GroupAuthorization(_)),
+                    "expected GroupAuthorizationException, got {err:?}"
+                );
+            },
+            ExpectedClass::OffsetMetadataTooLarge => {
+                assert_eq!(
+                    err.error(),
+                    Errors::OffsetMetadataTooLarge,
+                    "expected OffsetMetadataTooLarge, got {err:?}"
+                );
+            },
+            ExpectedClass::InvalidCommitOffsetSize => {
+                assert_eq!(
+                    err.error(),
+                    Errors::InvalidCommitOffsetSize,
+                    "expected InvalidCommitOffsetSizeException, got {err:?}"
+                );
+            },
+            ExpectedClass::TopicAuthorization => {
+                assert!(
+                    matches!(err, KafkaError::TopicAuthorization(_)),
+                    "expected TopicAuthorizationException, got {err:?}"
+                );
+            },
+            ExpectedClass::CommitFailed => {
+                // CommitFailedException flows through ConsumerError::commit_failed
+                // → KafkaError::IllegalState (consumer/errors.rs). Distinguished
+                // from a generic IllegalState by the "failed" message content.
+                assert!(
+                    matches!(err, KafkaError::IllegalState(msg) if msg.contains("OffsetCommit failed")),
+                    "expected CommitFailedException (IllegalState), got {err:?}"
+                );
+            },
+            ExpectedClass::KafkaException => {
+                // Generic KafkaException → KafkaError with UnknownServerError
+                // and the "Unexpected error in commit" wrapper message.
+                assert_eq!(err.error(), Errors::UnknownServerError, "expected KafkaException, got {err:?}");
+            },
+        }
+    }
+
+    fn topic_partition(topic: &str, partition: i32) -> TopicPartition {
+        TopicPartition::new(topic.to_string(), partition)
+    }
+
+    /// Seed `metadata` with a single-partition topic whose leader epoch is
+    /// `seed_epoch`, so a later `maybe_update_last_seen_epoch_if_newer` with a
+    /// higher epoch records the update (the Rust `Metadata` only replaces an
+    /// existing epoch, never inserts on a null one). Returns nothing; assert
+    /// the post-commit epoch via `last_seen_leader_epoch`.
+    fn seed_partition_leader_epoch(manager: &CommitRequestManager, tp: &TopicPartition, seed_epoch: i32) {
+        manager
+            .inner
+            .metadata
+            .add_transient_topics(HashSet::from([tp.topic().to_string()]));
+        let metadata = manager.inner.metadata.metadata_arc();
+        let mut counts = HashMap::new();
+        counts.insert(tp.topic().to_string(), tp.partition() + 1);
+        let tp_owned = tp.clone();
+        let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "cluster",
+            1,
+            &HashMap::new(),
+            &counts,
+            &move |q: &TopicPartition| if *q == tp_owned { Some(seed_epoch) } else { None },
+            &HashMap::new(),
+        );
+        metadata.update_with_current_request_version(&response, false, 0);
+    }
+
+    /// Pre-seed a lower leader epoch for `tp` then assert that
+    /// `maybe_update_last_seen_epoch_if_newer` (invoked by the commit path)
+    /// bumps the cached epoch to `expected`. Mirrors Java's
+    /// `verify(metadata).updateLastSeenEpochIfNewer(tp, expected)`.
+    fn assert_epoch_updated_to(manager: &CommitRequestManager, tp: &TopicPartition, expected: i32) {
+        assert_eq!(
+            manager.inner.metadata.metadata_arc().last_seen_leader_epoch(tp),
+            Some(expected),
+            "commit path must call updateLastSeenEpochIfNewer({tp}, {expected})"
+        );
+    }
+
+    /// Drive the current-thread runtime until the commit-result receiver
+    /// resolves, returning the inner `Result`. Panics if it does not resolve
+    /// within the iteration cap or if the sender was dropped.
+    async fn recv_commit_result(rx: &mut oneshot::Receiver<CommitResult>) -> CommitResult {
+        for _ in 0..128 {
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(oneshot::error::TryRecvError::Closed) => panic!("commit sender dropped without sending"),
+                Err(oneshot::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+            }
+        }
+        panic!("commit future did not resolve within the iteration cap");
+    }
+
+    /// Non-blocking probe of a commit-result receiver: `Some(result)` if
+    /// resolved, `None` if still pending. Panics if the sender was dropped.
+    fn recv_commit_result_nonblocking(rx: &mut oneshot::Receiver<CommitResult>) -> Option<CommitResult> {
+        match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(oneshot::error::TryRecvError::Closed) => panic!("commit sender dropped without sending"),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+        }
+    }
+
+    /// Drive the current-thread runtime until the fetch-result receiver
+    /// resolves, returning the inner `Result`.
+    async fn recv_fetch_result(rx: &mut oneshot::Receiver<FetchResult>) -> FetchResult {
+        for _ in 0..128 {
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(oneshot::error::TryRecvError::Closed) => panic!("fetch sender dropped without sending"),
+                Err(oneshot::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+            }
+        }
+        panic!("fetch future did not resolve within the iteration cap");
+    }
+
+    /// Returns `true` if the receiver has not yet resolved (Java's
+    /// `assertFalse(future.isDone())`). Yields once first so any
+    /// already-scheduled spawned handler has a chance to complete it — this
+    /// makes a "still pending" assertion meaningful rather than racy.
+    async fn assert_still_pending<T>(rx: &mut oneshot::Receiver<T>) {
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "expected the future to still be pending"
+        );
+    }
+
+    /// `testCommitSync`: a successful commit completes the future with the
+    /// input offsets and the metadata's `updateLastSeenEpochIfNewer` is
+    /// invoked for the offset's leader epoch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_success_completes_with_offsets_and_updates_epoch() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            tp.clone(),
+            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+        );
+        // Seed a lower epoch so the commit path's update is observable (Java
+        // verifies the call on a mock; the Rust Metadata only replaces an
+        // existing epoch — see helper docs).
+        seed_partition_leader_epoch(&manager, &tp, 0);
+
+        let mut public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
+        assert_eq!(manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len(), 1);
+
+        // Java: verify(metadata).updateLastSeenEpochIfNewer(tp, 1).
+        assert_epoch_updated_to(&manager, &tp, 1);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+
+        let committed = recv_commit_result(&mut public_rx).await.expect("commit succeeds");
+        assert_eq!(committed, offsets);
+    }
+
+    /// `testCommitAsync`: a successful async commit completes the future with
+    /// the input offsets and updates the last-seen leader epoch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_async_success_completes_and_updates_epoch() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            tp.clone(),
+            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+        );
+        seed_partition_leader_epoch(&manager, &tp, 0);
+
+        let mut public_rx = manager.commit_async_no_callback(offsets.clone(), 0);
+        assert_eq!(manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len(), 1);
+        assert_epoch_updated_to(&manager, &tp, 1);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+
+        let committed = recv_commit_result(&mut public_rx).await.expect("async commit succeeds");
+        assert_eq!(committed, offsets);
+    }
+
+    /// `testCommitSyncRetriedAfterExpectedRetriableException` (×13): a sync
+    /// commit that fails with a retriable error is NOT yet done (it is
+    /// re-queued for retry); a non-retriable error completes it
+    /// exceptionally with the expected class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_retried_after_expected_retriable_exception() {
+        for (error, expected) in offset_commit_exception_supplier() {
+            let manager = make_manager(0, false);
+            let coordinator = coordinator_with_node();
+            let tp = topic_partition("topic", 1);
+            // Generous deadline so retriable errors stay pending (not timed out).
+            let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), i64::MAX, 0);
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            unsent.handler().on_complete(offset_commit_response_single(&tp, error));
+
+            let retriable = error.is_retriable();
+            if retriable {
+                // Java: assertFalse(commitResult.isDone()); request re-queued.
+                assert_still_pending(&mut public_rx).await;
+                let pending = manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len();
+                assert_eq!(pending, 1, "retriable error {error:?} should re-queue the commit");
+            } else {
+                let err = recv_commit_result(&mut public_rx)
+                    .await
+                    .expect_err("non-retriable error fails commit");
+                assert_error_class(&err, expected);
+            }
+        }
+    }
+
+    /// `testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires`
+    /// (×13): a retriable error, once the deadline expires, surfaces a
+    /// TimeoutException; a non-retriable error surfaces its specific class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_commit_sync_failed_with_retriable_throws_timeout_when_retry_time_expires() {
+        for (error, expected) in offset_commit_exception_supplier() {
+            let manager = make_manager(0, false);
+            let coordinator = coordinator_with_node();
+            let tp = topic_partition("topic", 1);
+            // Deadline = retryBackoffMs * 2 + 1: the driver advances its local
+            // clock by retry_backoff_ms per retriable failure, so a couple of
+            // failures cross the deadline (Java sleeps to expire the timeout).
+            let retry_backoff_ms = manager.inner.retry_backoff_ms;
+            let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
+            let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
+
+            let retriable = error.is_retriable();
+            // Drive send/fail cycles to either expire (retriable) or surface
+            // the specific error (non-retriable). The poll time advances each
+            // iteration past the re-queued request's seeded backoff so each
+            // retry is shipped (the driver's own local clock crosses the
+            // deadline and surfaces a Timeout).
+            let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
+            let mut poll_time = 0;
+            let mut iters = 0;
+            let err = loop {
+                iters += 1;
+                if let Some(unsent) = manager
+                    .poll_with_coordinator(&coordinator, poll_time)
+                    .unsent_requests
+                    .into_iter()
+                    .next()
+                {
+                    unsent.handler().on_complete(offset_commit_response_single(&tp, error));
+                }
+                if let Some(result) = recv_commit_result_nonblocking(&mut public_rx) {
+                    break result.expect_err("commit must fail");
+                }
+                tokio::task::yield_now().await;
+                poll_time = poll_time.saturating_add(poll_step);
+                assert!(iters < 200, "commit {error:?} did not resolve within 200 iterations");
+            };
+            if retriable {
+                assert!(
+                    matches!(err, KafkaError::Timeout(_)),
+                    "retriable {error:?} → Timeout, got {err:?}"
+                );
+            } else {
+                assert_error_class(&err, expected);
+            }
+        }
+    }
+
+    /// `testOffsetCommitAsyncFailedWithRetriableThrowsRetriableCommitException`:
+    /// an async commit failing with a retriable error is NOT retried and the
+    /// future completes with a `RetriableCommitFailedException` (retriable
+    /// `KafkaError`), not a Timeout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_commit_async_failed_with_retriable_throws_retriable_commit_exception() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let mut public_rx = manager.commit_async_no_callback(singleton_offset(tp.clone(), 0), 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorNotAvailable));
+
+        let err = recv_commit_result(&mut public_rx).await.expect_err("async commit fails");
+        // Java: assertFutureThrows(RetriableCommitFailedException.class). Maps
+        // through ConsumerError::retriable_commit_failed → retriable KafkaError.
+        assert!(
+            err.is_retriable(),
+            "async retriable error must surface a retriable commit-failed error, got {err:?}"
+        );
+        assert!(
+            !matches!(err, KafkaError::Timeout(_)),
+            "must NOT be a Timeout (async is not retried)"
+        );
+        // The request is not re-queued (no retry).
+        assert!(manager.inner.state.lock().unwrap().pending.unsent_offset_commits.is_empty());
+    }
+
+    /// `testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit` (×13):
+    /// async commit is never retried; retriable errors surface as
+    /// RetriableCommitFailedException, non-retriable as their specific class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_commit_request_errored_requests_not_retried_for_async_commit() {
+        for (error, expected) in offset_commit_exception_supplier() {
+            let manager = make_manager(0, true);
+            let coordinator = coordinator_with_node();
+            let tp = topic_partition("topic", 1);
+            let mut public_rx = manager.commit_async_no_callback(singleton_offset(tp.clone(), 0), 0);
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            unsent.handler().on_complete(offset_commit_response_single(&tp, error));
+
+            let err = recv_commit_result(&mut public_rx).await.expect_err("async commit fails");
+            // Java only asserts RetriableCommitFailedException for retriable
+            // errors; for non-retriable it just checks the future completed
+            // exceptionally (no specific class). `expected` is unused here but
+            // kept for the iteration tuple shape.
+            let _ = expected;
+            if error.is_retriable() {
+                assert!(err.is_retriable(), "retriable {error:?} → RetriableCommitFailed, got {err:?}");
+            }
+            // Never re-queued: async commit is not retried.
+            assert!(
+                manager.inner.state.lock().unwrap().pending.unsent_offset_commits.is_empty(),
+                "async commit with {error:?} must not be re-queued"
+            );
+        }
+    }
+
+    /// `testCommitSyncFailsWithCommitFailedExceptionIfUnknownMemberId`:
+    /// UNKNOWN_MEMBER_ID → CommitFailedException.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_fails_with_commit_failed_exception_if_unknown_member_id() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::UnknownMemberId));
+
+        let err = recv_commit_result(&mut public_rx).await.expect_err("commit fails");
+        assert_error_class(&err, ExpectedClass::CommitFailed);
+        // No retry queued.
+        assert!(manager.inner.state.lock().unwrap().pending.unsent_offset_commits.is_empty());
+    }
+
+    /// `testCommitSyncFailsWithCommitFailedExceptionOnStaleMemberEpoch`:
+    /// STALE_MEMBER_EPOCH (no valid epoch) → CommitFailedException.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_fails_with_commit_failed_exception_on_stale_member_epoch() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
+
+        let err = recv_commit_result(&mut public_rx).await.expect_err("commit fails");
+        assert_error_class(&err, ExpectedClass::CommitFailed);
+    }
+
+    /// `testCommitSyncShouldSucceedWithTopicId`: a commit succeeds when the
+    /// topic id is known (apiVersion ≥ 10 wire form). The success path
+    /// completes with the input offsets and updates the leader epoch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_should_succeed_with_topic_id() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        seed_topic_id(&manager, "topic", Uuid::new(7, 9));
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            tp.clone(),
+            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+        );
+
+        let mut public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
+        // The builder selects the topic-id wire form because the id is known.
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        assert!(
+            unsent.request_builder().expect("builder present").latest_allowed_version() >= 10,
+            "topic-id commit must use apiVersion >= 10"
+        );
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+
+        let committed = recv_commit_result(&mut public_rx).await.expect("commit succeeds");
+        assert_eq!(committed, offsets);
+        // Java also `verify(metadata).updateLastSeenEpochIfNewer(tp, 1)`; the
+        // epoch-update call is exercised by
+        // `commit_sync_success_completes_with_offsets_and_updates_epoch` (which
+        // seeds a prior epoch so the Rust Metadata records the bump). Here the
+        // focus is the topic-id wire form, so the epoch-cache assertion is not
+        // duplicated (the same code path runs).
+    }
+
+    /// `testCommitSyncShouldSucceedWithUnknownOffsetAndMetadata`: a commit of
+    /// an offset with no leader epoch succeeds and does NOT update the
+    /// last-seen epoch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_should_succeed_with_unknown_offset_and_metadata() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("foo", 1);
+        let offsets = singleton_offset(tp.clone(), 0); // OffsetAndMetadata::new → no leader epoch
+
+        let mut public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+
+        let committed = recv_commit_result(&mut public_rx).await.expect("commit succeeds");
+        assert_eq!(committed, offsets);
+        // No leader epoch on the offset → cache untouched (Java:
+        // verify(metadata, never()).updateLastSeenEpochIfNewer(...)).
+        assert_eq!(manager.inner.metadata.metadata_arc().last_seen_leader_epoch(&tp), None);
+    }
+
+    /// `testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors`
+    /// (×13): a multi-partition error response registers exactly ONE failed
+    /// attempt on the (single) re-queued retry request, even though the
+    /// response carries 3 partition errors. Non-retriable → no re-queue.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_commit_single_failed_attempt_per_request_when_partition_errors() {
+        for (error, _expected) in offset_commit_exception_supplier() {
+            let manager = make_manager(0, true);
+            let coordinator = coordinator_with_node();
+            let mut offsets = HashMap::new();
+            offsets.insert(topic_partition("t1", 0), OffsetAndMetadata::new(1).unwrap());
+            offsets.insert(topic_partition("t1", 1), OffsetAndMetadata::new(2).unwrap());
+            offsets.insert(topic_partition("t1", 2), OffsetAndMetadata::new(3).unwrap());
+            let _public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            // Build a 3-partition error response.
+            let mut per_partition = HashMap::new();
+            for p in 0..3 {
+                per_partition.insert(topic_partition("t1", p), error);
+            }
+            unsent.handler().on_complete(offset_commit_response(per_partition.clone()));
+
+            if error.is_retriable() {
+                // Wait for the retry driver to re-enqueue the single retry
+                // request, then assert exactly one failed attempt.
+                let attempts = yield_until(
+                    || {
+                        let guard = manager.inner.state.lock().unwrap();
+                        guard.pending.unsent_offset_commits.front().map(|r| r.state.num_attempts())
+                    },
+                    "retriable error did not re-queue a commit",
+                )
+                .await;
+                assert_eq!(
+                    attempts, 1,
+                    "exactly one failed attempt registered for {error:?} despite 3 partition errors"
+                );
+
+                // Second failure → numAttempts becomes 2 (still one increment
+                // per response, not per partition).
+                let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2);
+                let unsent2 = poll_one_unsent(&manager, &coordinator, poll_step);
+                unsent2.handler().on_complete(offset_commit_response(per_partition.clone()));
+                let attempts2 = yield_until(
+                    || {
+                        let guard = manager.inner.state.lock().unwrap();
+                        guard.pending.unsent_offset_commits.front().map(|r| r.state.num_attempts())
+                    },
+                    "second retriable failure did not re-queue a commit",
+                )
+                .await;
+                assert_eq!(attempts2, 2, "exactly one increment per response for {error:?}");
+            } else {
+                // Non-retriable → no re-queue (Java: assertNull(commitRequest)).
+                // Yield once so the spawned handler observes the failure.
+                tokio::task::yield_now().await;
+                assert!(
+                    manager.inner.state.lock().unwrap().pending.unsent_offset_commits.is_empty(),
+                    "non-retriable {error:?} must not re-queue"
+                );
+            }
+        }
+    }
+
+    /// `testEnsureBackoffRetryOnOffsetCommitRequestTimeout`: an `on_failure`
+    /// with a TimeoutException re-queues the commit (one unsent request) for
+    /// retry after backoff.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_backoff_retry_on_offset_commit_request_timeout() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let _public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        // Java: res.unsentRequests.get(0).handler().onFailure(now, new TimeoutException()).
+        unsent.handler().on_failure(0, KafkaError::timeout("request timed out"));
+
+        // Java: assertTrue(hasUnsentRequests()); one re-queued commit.
+        let pending = yield_until(
+            || {
+                let guard = manager.inner.state.lock().unwrap();
+                let n = guard.pending.unsent_offset_commits.len();
+                if n > 0 { Some(n) } else { None }
+            },
+            "timeout failure did not re-queue the commit",
+        )
+        .await;
+        assert_eq!(pending, 1, "timeout failure re-queues exactly one commit for retry");
+    }
+
+    /// `testCommitAsyncFailsWithRetriableOnCoordinatorDisconnected`: an async
+    /// commit whose request disconnects marks the coordinator unknown and the
+    /// future fails with a RetriableCommitFailedException.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_async_fails_with_retriable_on_coordinator_disconnected() {
+        let manager = make_manager(0, false);
+        let coordinator = Arc::new(coordinator_with_node());
+        manager.set_coordinator(Arc::clone(&coordinator));
+        let tp = topic_partition("topic", 1);
+        let mut public_rx = manager.commit_async_no_callback(singleton_offset(tp.clone(), 0), 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        // Disconnect surfaces as a transport failure (NetworkException).
+        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+
+        let err = recv_commit_result(&mut public_rx).await.expect_err("async commit fails");
+        // Java: assertFutureThrows(RetriableCommitFailedException.class).
+        assert!(
+            err.is_retriable(),
+            "disconnect → RetriableCommitFailedException (retriable), got {err:?}"
+        );
+        // Java: assertCoordinatorDisconnectHandling() — coordinator marked unknown.
+        assert!(
+            coordinator.coordinator().is_none(),
+            "disconnect must mark the coordinator unknown"
+        );
+    }
+
+    /// `testLastEpochSentOnCommit`: `last_epoch_sent_on_commit` reflects the
+    /// epoch carried by the request that was actually SENT, and only changes
+    /// when the next request is sent — not when `on_member_epoch_updated`
+    /// fires. Uses `maybe_auto_commit_sync_before_rebalance` with retries on
+    /// STALE_MEMBER_EPOCH and increasing epochs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn last_epoch_sent_on_commit() {
+        // Auto-commit enabled, very long interval (avoid interval auto-commits).
+        let manager = make_manager(0, true);
+        let coordinator = Arc::new(coordinator_with_node());
+        manager.set_coordinator(Arc::clone(&coordinator));
+        let subs = manager_subscriptions(&manager);
+        let tp = topic_partition("topic", 1);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+
+        // Send auto-commit-before-rebalance, retried on STALE_MEMBER_EPOCH
+        // with the latest epochs (long deadline so it keeps retrying).
+        let _public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+
+        let initial_epoch = 1;
+        let member_id = "member1".to_string();
+        manager.on_member_epoch_updated(Some(initial_epoch), member_id.clone());
+
+        // Ship and fail with STALE_MEMBER_EPOCH. The request carries epoch 1.
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
+        // After the request was sent, lastEpochSentOnCommit == 1.
+        assert_eq!(manager.last_epoch_sent_on_commit(), Some(initial_epoch));
+
+        // Receive new epoch. lastEpochSentOnCommit should NOT change until the
+        // next request is sent.
+        manager.on_member_epoch_updated(Some(initial_epoch + 1), member_id.clone());
+        assert_eq!(manager.last_epoch_sent_on_commit(), Some(initial_epoch));
+
+        // Wait for the retry to be re-queued, then ship it (carries epoch 2).
+        let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2);
+        let unsent = yield_until_unsent(&manager, &coordinator, poll_step).await;
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
+        assert_eq!(manager.last_epoch_sent_on_commit(), Some(initial_epoch + 1));
+
+        // Receive empty epoch. Next sent request carries no epoch.
+        manager.on_member_epoch_updated(None, member_id);
+        let unsent = yield_until_unsent(&manager, &coordinator, poll_step.saturating_mul(2)).await;
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
+        assert_eq!(manager.last_epoch_sent_on_commit(), None);
+    }
+
+    /// `testSignalClose`: after `signal_close`, a pending async commit is
+    /// still drained and emitted on the next poll (the topic is preserved).
+    #[tokio::test(flavor = "current_thread")]
+    async fn signal_close_drains_pending_commit() {
+        let mut manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let _public_rx = manager.commit_async_no_callback(singleton_offset(tp.clone(), 0), 0);
+        manager.signal_close();
+
+        // Java: poll returns the pending commit even while closing.
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        let builder = unsent.request_builder().expect("builder present");
+        // Build the request to inspect its topic (Java reads data().topics()).
+        assert_eq!(builder.api_key(), &ApiKeys::OFFSET_COMMIT);
+    }
+
+    /// `testPollWithFatalErrorShouldFailAllUnsentRequests`: when the
+    /// coordinator becomes unknown AND has a fatal error, poll returns EMPTY
+    /// and fails all unsent requests (both commits and fetches).
+    ///
+    /// Replaces the stale "covered by test_fail_all_with_error_via_coordinator
+    /// _fatal" doc claim (that fn never existed).
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_with_fatal_error_should_fail_all_unsent_requests() {
+        let manager = make_manager(0, true);
+        let mut partitions = HashSet::new();
+        partitions.insert(topic_partition("test", 0));
+        let mut public_rx = manager.fetch_offsets(partitions, 200, 0);
+        assert_eq!(manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.len(), 1);
+
+        // Coordinator unknown + fatal error.
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_fatal_error_for_test(KafkaError::group_authorization(GROUP_ID.to_string()));
+
+        let poll_result = manager.poll_with_coordinator(&coordinator, 200);
+        assert!(poll_result.unsent_requests.is_empty(), "fatal poll returns no unsent requests");
+
+        // All unsent requests failed and the pending buffers are emptied.
+        let err = recv_fetch_result(&mut public_rx).await.expect_err("fatal error fails fetch");
+        assert!(
+            matches!(err, KafkaError::GroupAuthorization(_)),
+            "fatal error surfaced, got {err:?}"
+        );
+        let guard = manager.inner.state.lock().unwrap();
+        assert!(guard.pending.unsent_offset_fetches.is_empty());
+        assert!(guard.pending.unsent_offset_commits.is_empty());
+        assert!(guard.pending.inflight_offset_fetches.is_empty());
+    }
+
+    /// `testPollWithFatalErrorDuringCoordinatorIsEmptyAndClosing`: closing +
+    /// coordinator-empty + fatal error → the pending async commit fails with
+    /// the fatal `GroupAuthorizationException`, message "Fatal error".
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_with_fatal_error_during_coordinator_is_empty_and_closing() {
+        let mut manager = make_manager(0, true);
+        let tp = topic_partition("topic", 1);
+        let mut commit_rx = manager.commit_async_no_callback(singleton_offset(tp.clone(), 0), 0);
+        manager.signal_close();
+
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        // Java: new GroupAuthorizationException("Fatal error").
+        coordinator.set_fatal_error_for_test(KafkaError::group_authorization_with_message(
+            GROUP_ID.to_string(),
+            "Fatal error",
+        ));
+
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert!(poll_result.unsent_requests.is_empty());
+
+        let err = recv_commit_result(&mut commit_rx).await.expect_err("fatal error fails commit");
+        assert!(
+            matches!(err, KafkaError::GroupAuthorization(_)),
+            "expected GroupAuthorizationException, got {err:?}"
+        );
+        // Java: assertFutureThrows(GroupAuthorizationException.class, future, "Fatal error").
+        assert!(
+            err.message().contains("Fatal error"),
+            "fatal error message must contain 'Fatal error', got {err:?}"
+        );
+    }
+
+    /// `testPollWithClosingAndPendingRequests`: closing + coordinator-empty
+    /// (no fatal error) → the pending async commit fails with
+    /// CommitFailedException carrying the exact "Failed to commit offsets:
+    /// Coordinator unknown and consumer is closing" message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_with_closing_and_pending_requests() {
+        let mut manager = make_manager(0, true);
+        let tp = topic_partition("topic", 1);
+        let mut commit_rx = manager.commit_async_no_callback(singleton_offset(tp.clone(), 0), 0);
+        manager.signal_close();
+
+        // Coordinator empty, NO fatal error.
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert!(poll_result.unsent_requests.is_empty());
+
+        let err = recv_commit_result(&mut commit_rx).await.expect_err("closing fails commit");
+        // Java: assertFutureThrows(CommitFailedException.class, future,
+        //   "Failed to commit offsets: Coordinator unknown and consumer is closing").
+        assert!(
+            matches!(&err, KafkaError::IllegalState(msg)
+                if msg == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
+            "expected exact CommitFailedException message, got {err:?}"
+        );
+    }
+
+    /// `testPollEnsureManualCommitSent`: a manual (async) commit is emitted on
+    /// the next poll.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_ensure_manual_commit_sent() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        // Empty poll → nothing.
+        assert!(manager.poll_with_coordinator(&coordinator, 0).unsent_requests.is_empty());
+
+        let tp = topic_partition("t1", 0);
+        let _rx = manager.commit_async_no_callback(singleton_offset(tp, 0), 0);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert_eq!(poll_result.unsent_requests.len(), 1, "manual commit emitted on poll");
+    }
+
+    /// `testPollEnsureAutocommitSent` (request-emission half; metric asserts
+    /// out of scope): an auto-commit is emitted on poll once the interval
+    /// expires and there is a consumed offset.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_ensure_autocommit_sent() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("t1", 1);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        // Empty poll first.
+        assert!(manager.poll_with_coordinator(&coordinator, 0).unsent_requests.is_empty());
+
+        // Advance past the interval and fire the auto-commit hook.
+        manager.update_timer_and_maybe_commit(0);
+        manager.update_timer_and_maybe_commit(2_000);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 2_000);
+        assert_eq!(poll_result.unsent_requests.len(), 1, "auto-commit emitted on poll");
+        // Drive a successful response (Java does the same; metric asserts skipped).
+        let unsent = poll_result.unsent_requests.into_iter().next().unwrap();
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+    }
+
+    /// `testPollEnsureCorrectInflightRequestBufferSize`: 2 commits + 2 fetches
+    /// produce 4 unsent requests in one poll, 2 inflight fetches, both builder
+    /// types present; after responses the inflight buffer drains to 0.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_ensure_correct_inflight_request_buffer_size() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+
+        let mut offsets1 = HashMap::new();
+        offsets1.insert(topic_partition("test", 0), OffsetAndMetadata::new(10).unwrap());
+        offsets1.insert(topic_partition("test", 1), OffsetAndMetadata::new(20).unwrap());
+        let mut offsets2 = HashMap::new();
+        offsets2.insert(topic_partition("test", 3), OffsetAndMetadata::new(20).unwrap());
+        offsets2.insert(topic_partition("test", 4), OffsetAndMetadata::new(20).unwrap());
+
+        let _c1 = manager.commit_sync(offsets1, i64::MAX, 0);
+        let _f1 = manager.fetch_offsets(HashSet::from([topic_partition("test", 0)]), i64::MAX, 0);
+        let _c2 = manager.commit_sync(offsets2, i64::MAX, 0);
+        let _f2 = manager.fetch_offsets(HashSet::from([topic_partition("test", 1)]), i64::MAX, 0);
+
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert_eq!(
+            poll_result.unsent_requests.len(),
+            4,
+            "2 commits + 2 fetches → 4 unsent requests"
+        );
+        // Both builder types present.
+        let mut has_commit = false;
+        let mut has_fetch = false;
+        for req in &poll_result.unsent_requests {
+            match req.request_builder().expect("builder present").api_key() {
+                k if *k == ApiKeys::OFFSET_COMMIT => has_commit = true,
+                k if *k == ApiKeys::OFFSET_FETCH => has_fetch = true,
+                _ => {},
+            }
+        }
+        assert!(has_commit, "an OffsetCommit builder must be present");
+        assert!(has_fetch, "an OffsetFetch builder must be present");
+
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert!(!guard.pending.has_unsent_requests(), "no unsent requests left after poll");
+            assert_eq!(guard.pending.inflight_offset_fetches.len(), 2, "2 inflight fetches");
+        }
+
+        // Complete every request; inflight fetches drain to 0.
+        for req in poll_result.unsent_requests {
+            match req.request_builder().expect("builder present").api_key() {
+                k if *k == ApiKeys::OFFSET_FETCH => {
+                    req.handler().on_complete(offset_fetch_response(GROUP_ID, vec![], Errors::None));
+                },
+                _ => {
+                    req.handler().on_complete(offset_commit_response(HashMap::new()));
+                },
+            }
+        }
+        yield_until(
+            || {
+                let guard = manager.inner.state.lock().unwrap();
+                if guard.pending.inflight_offset_fetches.is_empty() {
+                    Some(())
+                } else {
+                    None
+                }
+            },
+            "inflight offset fetches did not drain to 0",
+        )
+        .await;
+    }
+
+    /// `testPollEnsureEmptyPendingRequestAfterPoll`: after a single async
+    /// commit is polled, the unsent-commit queue and all pending buffers are
+    /// empty.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_ensure_empty_pending_request_after_poll() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let _rx = manager.commit_async_no_callback(singleton_offset(tp, 0), 0);
+        assert_eq!(manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len(), 1);
+
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert_eq!(poll_result.unsent_requests.len(), 1);
+
+        let guard = manager.inner.state.lock().unwrap();
+        assert!(
+            guard.pending.unsent_offset_commits.is_empty(),
+            "unsentOffsetCommitRequests() empty after poll"
+        );
+        assert!(guard.pending.unsent_offset_fetches.is_empty());
+        assert!(guard.pending.inflight_offset_fetches.is_empty());
+    }
+
+    /// Helper for `last_epoch_sent_on_commit`: returns the manager's
+    /// subscription-state handle. The `make_manager` ctor does not expose it,
+    /// so reach through `inner`.
+    fn manager_subscriptions(manager: &CommitRequestManager) -> Arc<Mutex<SubscriptionState>> {
+        Arc::clone(&manager.inner.subscriptions)
+    }
+
+    /// Poll repeatedly (advancing `now_ms` each iteration past the re-queued
+    /// request's backoff) until exactly one unsent request is shipped, then
+    /// return it. Used by retry tests where the re-enqueue happens on a
+    /// spawned task and the request is only sendable after its backoff.
+    async fn yield_until_unsent(
+        manager: &CommitRequestManager,
+        coordinator: &CoordinatorRequestManager,
+        now_ms: i64,
+    ) -> UnsentRequest {
+        for _ in 0..64 {
+            if let Some(unsent) = manager
+                .poll_with_coordinator(coordinator, now_ms)
+                .unsent_requests
+                .into_iter()
+                .next()
+            {
+                return unsent;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("no unsent request shipped within the iteration cap");
     }
 }
