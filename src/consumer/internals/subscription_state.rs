@@ -1016,6 +1016,20 @@ impl SubscriptionState {
         self.assigned_state_mut(tp)?.set_position(position)
     }
 
+    /// Test-only: clears `tp`'s position to `None`, mirroring Java's
+    /// `subscriptions.position(tp, null)` (which sets the assigned-partition
+    /// state's `position` field to `null` without going through
+    /// `set_position`'s valid-position precondition). Used by the
+    /// missing-position fetch test to reproduce Java's
+    /// `testFetchRequestWithBufferedPartitionMissingPosition` scenario
+    /// (a genuinely-null position on a still-buffered, still-assigned
+    /// partition). Returns `Err` when the partition is not assigned.
+    #[cfg(test)]
+    pub(crate) fn clear_position_for_test(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
+        self.assigned_state_mut(tp)?.position = None;
+        Ok(())
+    }
+
     /// Translates Java's `validPosition(TopicPartition)`. The `Result`
     /// covers the not-assigned case (Java's `IllegalStateException`).
     pub(crate) fn valid_position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, KafkaError> {

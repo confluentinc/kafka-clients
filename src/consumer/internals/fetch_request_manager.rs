@@ -1460,6 +1460,51 @@ mod round_trip {
             self.subscriptions.lock().unwrap().is_fetchable(tp)
         }
 
+        fn has_available_fetches(&self) -> bool {
+            self.mgr.abstract_fetch().has_available_fetches()
+        }
+
+        fn mark_pending_on_assigned_callback(&self, tp: &TopicPartition, pending: bool) {
+            self.subscriptions
+                .lock()
+                .unwrap()
+                .mark_pending_on_assigned_callback(std::slice::from_ref(tp), pending)
+                .unwrap();
+        }
+
+        fn enable_partitions_awaiting_callback(&self, tp: &TopicPartition) {
+            self.subscriptions
+                .lock()
+                .unwrap()
+                .enable_partitions_awaiting_callback(std::slice::from_ref(tp))
+                .unwrap();
+        }
+
+        fn mark_pending_revocation(&self, tp: &TopicPartition) {
+            self.subscriptions
+                .lock()
+                .unwrap()
+                .mark_pending_revocation(std::slice::from_ref(tp))
+                .unwrap();
+        }
+
+        /// Clears `tp`'s position to `None` (Java's
+        /// `subscriptions.position(tp, null)`), keeping it assigned.
+        fn clear_position(&self, tp: &TopicPartition) {
+            self.subscriptions.lock().unwrap().clear_position_for_test(tp).unwrap();
+        }
+
+        /// Seeks `tp` to an UNVALIDATED position at `offset` with the leader
+        /// resolved from the seeded metadata (Java's `seekUnvalidated(tp,
+        /// FetchPosition(offset, empty, currentLeader(tp)))`).
+        fn seek_unvalidated(&self, tp: &TopicPartition, offset: i64) {
+            let cluster = self.metadata.metadata_arc().fetch();
+            let leader = cluster.leader_for(tp).cloned();
+            let position =
+                FetchPosition::with_leader(offset, None, LeaderAndEpoch::new(leader, Some(VALID_LEADER_EPOCH)));
+            self.subscriptions.lock().unwrap().seek_unvalidated(tp, position).unwrap();
+        }
+
         /// Runs `prepare_fetch_requests(now)`, returning the per-node built
         /// `FetchRequest`s keyed by node id, alongside the
         /// `(Node, FetchSessionRequestData)` map needed to deliver a response.
@@ -2174,15 +2219,66 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingPosition`.
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingPosition`
+    /// (`FetchRequestManagerTest.java:3697`).
+    ///
+    /// Java's scenario: tp1 is fetched and BUFFERED, then its position is
+    /// overwritten to `null` via `subscriptions.position(tp1, null)` while it
+    /// is still assigned and still buffered. Java's `createFetchRequests`
+    /// future then THROWS `IllegalStateException` (via `positionForPartition`,
+    /// `AbstractFetch.java:508-515`), and the user's `poll()` surfaces it.
+    ///
+    /// **Deliberate divergence from Java (documented, regression-tested).**
+    /// In Rust the per-partition build loop (`abstract_fetch.rs`
+    /// `prepare_fetch_requests`) does NOT raise `IllegalState` on an
+    /// `Ok(None)` position; it `continue`s and skips the partition. This is
+    /// the intentional Phase-13 fix to COMMENTS.DONE.1.md Issue 7: surfacing
+    /// `IllegalState` for a missing position over-propagated a transient
+    /// rebalance-window race (the Rust KIP-848 bg-task interleaves application
+    /// events between the `fetchable_partitions()` snapshot and the
+    /// per-partition `position()` query, a window Java's per-call
+    /// `synchronized` model keeps narrow). That fix is regression-tested by
+    /// `test_async_consumer_re2j_pattern_expand_subscription`; re-raising
+    /// `IllegalState` here would re-break it.
+    ///
+    /// A null position also makes tp1 NOT `is_fetchable` (no valid position),
+    /// so it is excluded from both `fetchable_partitions()` and
+    /// `compute_buffered_nodes` — exactly Java's *outcome* at the FetchRequest
+    /// level for the OTHER partition (only tp0 is requested). We therefore
+    /// reproduce Java's exact mutation (a genuinely-null position on a still-
+    /// buffered, still-assigned partition) and assert the Rust behavior: tp0
+    /// is fetched, tp1 is skipped, and NO error surfaces (the deliberate
+    /// divergence from Java's IllegalState contract).
     #[test]
     fn test_fetch_request_with_buffered_partition_missing_position() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
         buffer_two_collect_first(&mut rt, topic_id);
-        // Clear tp1's position (assigned but no position) -> not fetchable and
-        // not a buffered node. tp0 is fetched.
-        rt.subscriptions.lock().unwrap().request_offset_reset_default(&tp(1)).unwrap();
+        // Confirm tp1 is still buffered and still assigned before the mutation
+        // (Java's "having a buffered partition that is also unfetchable is key
+        // to triggering the test case").
+        assert!(rt.buffered_partitions().contains(&tp(1)), "tp1 buffered before mutation");
+        assert!(rt.is_fetchable(&tp(1)), "tp1 fetchable before mutation");
+
+        // Overwrite tp1's position with null (Java's
+        // `subscriptions.position(tp1, null)`).
+        rt.clear_position(&tp(1));
+
+        // `position()` succeeds but returns a null position (Java asserts
+        // `assertDoesNotThrow` + `assertNull`).
+        assert_eq!(None, rt.position(&tp(1)), "tp1 position is null after clear");
+        // tp1's `fetch_state` is still FETCHING, so `is_fetchable` returns
+        // true (Java's `hasValidPosition()` is also fetch-state-based, not
+        // position-based — this fetchable-but-null-position inconsistency is
+        // exactly the bug scenario the Java test constructs, and is what makes
+        // Java's `positionForPartition` throw IllegalState).
+        assert!(rt.is_fetchable(&tp(1)), "tp1 still fetchable (FETCHING) despite null position");
+
+        // Build #2: tp1 passes the `fetchable_partitions` filter but its
+        // `position()` query returns `Ok(None)`, so the Rust build loop
+        // silently skips it — NOT an IllegalState error (deliberate Rust
+        // divergence, see rustdoc above) — and tp0 (its buffer collected) is
+        // fetched alone.
         assert_next_build_fetches(&mut rt, &[tp(0)]);
     }
 
@@ -2209,6 +2305,23 @@ mod round_trip {
             .unwrap()
             .mark_pending_on_assigned_callback(&[tp(1)], true)
             .unwrap();
+        assert_next_build_fetches(&mut rt, &[tp(0)]);
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPendingRevocation`
+    /// (`FetchRequestManagerTest.java:3760`): a buffered partition that is
+    /// marked pending-revocation is unfetchable, so the next build excludes it
+    /// and fetches only the collected partition.
+    #[test]
+    fn test_fetch_request_with_buffered_partition_pending_revocation() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        buffer_two_collect_first(&mut rt, topic_id);
+        // Mark tp1 pending-revocation: still buffered but unfetchable.
+        rt.mark_pending_revocation(&tp(1));
+        assert!(rt.buffered_partitions().contains(&tp(1)), "tp1 still buffered");
+        assert!(!rt.is_fetchable(&tp(1)), "tp1 unfetchable while pending revocation");
         assert_next_build_fetches(&mut rt, &[tp(0)]);
     }
 
@@ -2308,16 +2421,27 @@ mod round_trip {
         }
     }
 
-    /// Translated (parameterized) from
-    /// `FetchRequestManagerTest.testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation`:
-    /// a leadership-change error WITHOUT new leader info leaves metadata's
-    /// leader unchanged (no node 999, original leader retained).
+    /// Translated (parameterized over FENCED_LEADER_EPOCH /
+    /// NOT_LEADER_OR_FOLLOWER) from
+    /// `FetchRequestManagerTest.testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation`
+    /// (`FetchRequestManagerTest.java:3190`).
+    ///
+    /// Two partitions: tp0 hits a leadership-change error with NO new leader
+    /// info; tp1 is fetched without error. Both partitions first have a
+    /// preferred-read-replica set (node 0) via an initial successful fetch.
+    /// After the error response:
+    ///  - metadata's leader for tp0 is unchanged (pre-KIP-951 behaviour),
+    ///  - a metadata update is requested (leadership error on tp0),
+    ///  - the preferred-read-replica is CLEARED for the errored tp0 only,
+    ///  - tp1's preferred-read-replica is still set, and both stay fetchable.
     #[test]
     fn test_leadership_change_error_but_no_new_leader_information() {
         for error in [Errors::FencedLeaderEpoch, Errors::NotLeaderOrFollower] {
             let (topic_id, ids) = single_topic_id();
             let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
-            rt.assign_and_seek(&[tp(0)]);
+            rt.assign_only(&[tp(0), tp(1)]);
+            rt.seek(&tp(0), 0);
+            rt.seek(&tp(1), 0);
             let original_leader = rt
                 .metadata
                 .metadata_arc()
@@ -2325,31 +2449,110 @@ mod round_trip {
                 .leader
                 .as_ref()
                 .map(|n| n.id());
+            let original_epoch = rt.metadata.metadata_arc().current_leader(&tp(0)).epoch;
 
+            // Setup: fetch BOTH partitions successfully, with a preferred-read-
+            // replica of node 0 in each response. Deliver per node, then
+            // collect to install the preferred replicas.
             let (built, prepared) = rt.build_fetch_requests(0);
-            let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-            // tp0: leadership error with NO new leader info (leaderId/epoch -1).
-            let mut pd = RespPartitionData::new();
-            pd.set_partition_index(0);
-            pd.set_error_code(error.code());
-            // Default current_leader has leader_id/leader_epoch = -1.
-            let resp = FullFetchResponse::new().partition_data(TOPIC, topic_id, pd).build();
-            rt.deliver(*node_id, request_data, resp, built[node_id].version());
+            assert!(!rt.has_completed_fetches());
+            for (node_id, (_n, request_data)) in &prepared {
+                let mut resp = FullFetchResponse::new();
+                for topic in &built[node_id].data().topics {
+                    for p in &topic.partitions {
+                        let mut pd = records_pd(p.partition, build_records(1, 3, 1), Errors::None, 100);
+                        pd.set_preferred_read_replica(0);
+                        resp = resp.partition_data(TOPIC, topic_id, pd);
+                    }
+                }
+                rt.deliver(*node_id, request_data, resp.build(), built[node_id].version());
+            }
+            let initial = rt.collect_records();
+            assert!(!initial.records_for_partition(&tp(0)).is_empty(), "tp0 fetched ({error:?})");
+            assert!(!initial.records_for_partition(&tp(1)).is_empty(), "tp1 fetched ({error:?})");
+            assert_eq!(
+                Some(0),
+                rt.preferred_read_replica(&tp(0), 0),
+                "tp0 preferred replica set ({error:?})"
+            );
+            assert_eq!(
+                Some(0),
+                rt.preferred_read_replica(&tp(1), 0),
+                "tp1 preferred replica set ({error:?})"
+            );
 
-            // Metadata unchanged: no node 999, original leader retained.
+            // Next fetch: tp0 returns a leadership error with NO new leader info
+            // (leaderId/epoch = -1); tp1 returns records again. Both partitions
+            // now have node 0 as preferred replica, so they are fetched from the
+            // same node 0.
+            let (built2, prepared2) = rt.build_fetch_requests(0);
+            for (node_id, (_n, request_data)) in &prepared2 {
+                let mut resp = FullFetchResponse::new();
+                for topic in &built2[node_id].data().topics {
+                    for p in &topic.partitions {
+                        if p.partition == 0 {
+                            // tp0: leadership error, default current_leader (-1/-1).
+                            let mut pd = RespPartitionData::new();
+                            pd.set_partition_index(0);
+                            pd.set_error_code(error.code());
+                            resp = resp.partition_data(TOPIC, topic_id, pd);
+                        } else {
+                            let mut pd = records_pd(p.partition, build_records(4, 3, 4), Errors::None, 100);
+                            pd.set_preferred_read_replica(0);
+                            resp = resp.partition_data(TOPIC, topic_id, pd);
+                        }
+                    }
+                }
+                rt.deliver(*node_id, request_data, resp.build(), built2[node_id].version());
+            }
+            // Collect drives the per-partition error handling that clears the
+            // preferred replica + requests a metadata update for tp0.
+            let after = rt.collect_records();
+            assert!(
+                after.records_for_partition(&tp(0)).is_empty(),
+                "tp0 errored -> no records ({error:?})"
+            );
+            assert!(
+                !after.records_for_partition(&tp(1)).is_empty(),
+                "tp1 still returns records ({error:?})"
+            );
+
+            // Metadata unchanged: no node 999, original leader+epoch retained.
             let cluster = rt.metadata.metadata_arc().fetch();
             assert!(
                 cluster.node_by_id(999).is_none(),
                 "no new leader node should appear ({error:?})"
             );
-            let current = rt
-                .metadata
-                .metadata_arc()
-                .current_leader(&tp(0))
-                .leader
-                .as_ref()
-                .map(|n| n.id());
-            assert_eq!(original_leader, current, "leader must be unchanged ({error:?})");
+            let current = rt.metadata.metadata_arc().current_leader(&tp(0));
+            assert_eq!(
+                original_leader,
+                current.leader.as_ref().map(|n| n.id()),
+                "tp0 leader unchanged ({error:?})"
+            );
+            assert_eq!(original_epoch, current.epoch, "tp0 leader epoch unchanged ({error:?})");
+
+            // Metadata update requested due to the leadership error on tp0.
+            assert!(
+                rt.metadata.metadata_arc().update_requested(),
+                "metadata update requested ({error:?})"
+            );
+
+            // Preferred-read-replica CLEARED for the errored tp0 only; tp1's is
+            // still set.
+            assert_eq!(
+                None,
+                rt.preferred_read_replica(&tp(0), 0),
+                "tp0 preferred replica cleared ({error:?})"
+            );
+            assert_eq!(
+                Some(0),
+                rt.preferred_read_replica(&tp(1), 0),
+                "tp1 preferred replica retained ({error:?})"
+            );
+
+            // Both partitions remain fetchable.
+            assert!(rt.is_fetchable(&tp(0)), "tp0 still fetchable ({error:?})");
+            assert!(rt.is_fetchable(&tp(1)), "tp1 still fetchable ({error:?})");
         }
     }
 
@@ -2611,6 +2814,30 @@ mod round_trip {
         // Position advanced past the aborted data batch (to 2).
         assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
     }
+
+    // ── abort-marker transaction tests — DOCUMENTED SKIP ────────────────────
+    //
+    // `testMultipleAbortMarkers` (FetchRequestManagerTest.java:2443),
+    // `testReadCommittedAbortMarkerWithNoData` (java:2492), and
+    // `testReadCommittedWithCommittedAndAbortedTransactions` (java:2367) are
+    // NOT translated. All three require resolving an ABORT/COMMIT control
+    // marker under READ_COMMITTED (Java's `containsAbortMarker` →
+    // `abortedProducerIds.remove(producerId)`, `CompletedFetch.java:210-211`).
+    //
+    // The Rust receive path does not yet implement `ControlRecordType`
+    // (ABORT vs COMMIT key parsing): a READ_COMMITTED control batch whose
+    // producer id is in the aborted set returns `KafkaError::unsupported_version`
+    // instead of skipping the marker (`completed_fetch.rs` `load_next_batch`).
+    // This is a PRE-EXISTING limitation (introduced in Phase 7a, not Phase 37);
+    // see the inline note on
+    // `test_consumer_position_updated_when_skipping_aborted_transactions` above.
+    //
+    // Tracked for a dedicated control-record production follow-up
+    // (COMMENTS.37.md Issue 2 / CONTROL-RECORD VERDICT). These three abort-
+    // marker tests remain omitted until that fix lands; the aborted-DATA-batch
+    // skip path IS implemented and covered by
+    // `test_read_committed_with_compacted_topic` and
+    // `test_consumer_position_updated_when_skipping_aborted_transactions`.
 
     /// Translated from `FetchRequestManagerTest.testReadCommittedWithCompactedTopic`:
     /// interleaved committed/aborted transactional batches under READ_COMMITTED
@@ -2882,6 +3109,320 @@ mod round_trip {
         let (built, _prepared) = rt.build_fetch_requests(0);
         assert!(built.is_empty(), "pending partition must not be fetched");
         let _ = topic_id;
+    }
+
+    /// Mirrors Java's `assertNonEmptyFetch` helper
+    /// (`FetchRequestManagerTest.java:343`): build a request for tp0, deliver
+    /// 3 records (offsets 1..3), assert there is a completed fetch, collect,
+    /// and assert tp0's position is 4. Like Java, this asserts the POSITION
+    /// (not the per-call record count) — records at offsets below the current
+    /// position are skipped, so a second call still settles the position at 4.
+    fn assert_non_empty_fetch(rt: &mut RoundTrip, topic_id: Uuid) {
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len(), "exactly one fetch request issued");
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        assert!(rt.has_completed_fetches(), "fetch completed for non-pending partition");
+        let _ = rt.collect_records();
+        assert_eq!(Some(4), rt.position(&tp(0)), "position is 4 after collecting");
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchResultNotProcessedForPartitionsAwaitingCallbackCompletion`
+    /// (`FetchRequestManagerTest.java:323`): while tp0 is marked
+    /// pending-on-assigned-callback, no fetch request is issued and no fetch
+    /// completes for it; once the callback is enabled the partition resumes
+    /// fetching.
+    #[test]
+    fn test_fetch_result_not_processed_for_partitions_awaiting_callback_completion() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Successfully fetch from the partition (not yet awaiting a callback).
+        assert_non_empty_fetch(&mut rt, topic_id);
+
+        // Mark the partition pending-on-assigned-callback. No fetch request is
+        // issued and no fetch completes for it.
+        rt.mark_pending_on_assigned_callback(&tp(0), true);
+        let (built, _p) = rt.build_fetch_requests(0);
+        assert!(built.is_empty(), "no fetch issued while awaiting callback");
+        assert!(!rt.has_completed_fetches(), "no completed fetch while awaiting callback");
+
+        // Once the callback is enabled, fetching resumes.
+        rt.enable_partitions_awaiting_callback(&tp(0));
+        assert_non_empty_fetch(&mut rt, topic_id);
+    }
+
+    // ── pause / resume / seek family ────────────────────────────────────────
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testInFlightFetchOnPausedPartition`
+    /// (`FetchRequestManagerTest.java:1370`): a fetch is issued for tp0, then
+    /// tp0 is paused BEFORE the response arrives. On delivery + collect, no
+    /// records are returned for the paused partition.
+    #[test]
+    fn test_in_flight_fetch_on_paused_partition() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // sendFetches() issues a request for tp0.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len(), "in-flight fetch issued for tp0");
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+
+        // Pause tp0 while the fetch is in flight.
+        rt.pause(&tp(0));
+
+        // Deliver the response and collect: no records for the paused partition.
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+        let records = rt.collect_records();
+        assert!(
+            records.records_for_partition(&tp(0)).is_empty(),
+            "no records for paused partition"
+        );
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchOnCompletedFetchesForSomePausedPartitions`
+    /// (`FetchRequestManagerTest.java:1432`): tp0 and tp1 are fetched (on
+    /// separate nodes), then tp0 is paused before collecting. Only tp1's
+    /// records are returned; tp0's completed fetch is retained.
+    #[test]
+    fn test_fetch_on_completed_fetches_for_some_paused_partitions() {
+        let (topic_id, ids) = single_topic_id();
+        // Two nodes so tp0 and tp1 have different leaders (Java uses 2 nodes).
+        let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_only(&[tp(0), tp(1)]);
+
+        // #1: seek tp0, request, deliver.
+        rt.seek_unvalidated(&tp(0), 1);
+        let (built0, prepared0) = rt.build_fetch_requests(0);
+        assert_eq!(1, built0.len(), "fetch issued for tp0");
+        let (node0, (_n0, rd0)) = prepared0.iter().next().unwrap();
+        let resp0 = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node0, rd0, resp0, built0[node0].version());
+
+        // #2: seek tp1, request, deliver.
+        rt.seek_unvalidated(&tp(1), 1);
+        let (built1, prepared1) = rt.build_fetch_requests(0);
+        assert_eq!(1, built1.len(), "fetch issued for tp1");
+        let (node1, (_n1, rd1)) = prepared1.iter().next().unwrap();
+        let resp1 = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 1, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node1, rd1, resp1, built1[node1].version());
+
+        // Pause tp0 before collecting.
+        rt.pause(&tp(0));
+
+        // Collect: only tp1 returns records; tp0 is skipped (still buffered).
+        let records = rt.collect_records();
+        assert_eq!(3, records.records_for_partition(&tp(1)).len(), "tp1 records returned");
+        assert!(
+            records.records_for_partition(&tp(0)).is_empty(),
+            "paused tp0 returns no records"
+        );
+        assert!(rt.has_completed_fetches(), "tp0's completed fetch is retained");
+        assert!(
+            rt.buffered_partitions().contains(&tp(0)),
+            "tp0 still buffered after being skipped"
+        );
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testPartialFetchWithPausedPartitions`
+    /// (`FetchRequestManagerTest.java:1495`): with maxPollRecords=2, a fetch of
+    /// 3 records is partially collected (2 records), then the partition is
+    /// paused — the remaining record stays cached — then resumed, and the last
+    /// record is returned.
+    #[test]
+    fn test_partial_fetch_with_paused_partitions() {
+        let (topic_id, ids) = single_topic_id();
+        // maxPollRecords=2 (Java's buildFetcher(2)).
+        let mut rt = RoundTrip::new(1, 2, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_only(&[tp(0), tp(1)]);
+        rt.seek(&tp(0), 1);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len(), "fetch issued");
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        // 3 records at offsets 1,2,3.
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+
+        // Collect #1: only 2 of 3 records returned (maxPollRecords=2). The
+        // partial fetch is retained for the next collect.
+        let records = rt.collect_records_max(2);
+        assert_eq!(
+            2,
+            records.records_for_partition(&tp(0)).len(),
+            "2 of 3 records returned with maxPollRecords=2"
+        );
+
+        // Pause tp0: the remaining record is cached, no records returned, the
+        // completed fetch is retained but is not "available".
+        rt.pause(&tp(0));
+        let paused = rt.collect_records_max(2);
+        assert!(paused.records_for_partition(&tp(0)).is_empty(), "no records while paused");
+        assert!(rt.has_completed_fetches(), "partial fetch retained while paused");
+        assert!(!rt.has_available_fetches(), "no available (non-paused) fetch while paused");
+
+        // Resume tp0: the last record is returned and the buffer drains.
+        rt.resume(&tp(0));
+        let resumed = rt.collect_records_max(2);
+        assert_eq!(
+            1,
+            resumed.records_for_partition(&tp(0)).len(),
+            "last remaining record returned after resume"
+        );
+        assert!(!rt.has_completed_fetches(), "buffer drained after resume");
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testFetchDiscardedAfterPausedPartitionResumedAndSeekedToNewOffset`
+    /// (`FetchRequestManagerTest.java:1533`): a fetch is issued, the partition
+    /// is paused, the response is delivered, then the partition is re-seeked to
+    /// a new offset and resumed. The buffered fetch is DISCARDED (its base
+    /// offset no longer matches the position) and no records are returned.
+    #[test]
+    fn test_fetch_discarded_after_paused_partition_resumed_and_seeked_to_new_offset() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len(), "fetch issued");
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+
+        // Pause tp0 before delivery; deliver records at offsets 1..3.
+        rt.pause(&tp(0));
+        let resp = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, resp, built[node_id].version());
+
+        // Re-seek to offset 3 (past the fetched records' base) and resume.
+        rt.seek(&tp(0), 3);
+        rt.resume(&tp(0));
+
+        assert!(rt.has_completed_fetches(), "completed fetch present before collect");
+        // Collect: the buffered fetch is discarded because we seeked away from
+        // its base offset — no records returned.
+        let records = rt.collect_records();
+        assert!(
+            records.records_for_partition(&tp(0)).is_empty(),
+            "buffered fetch discarded after seek to new offset"
+        );
+        assert!(!rt.has_completed_fetches(), "discarded fetch removed from buffer");
+    }
+
+    /// Translated from `FetchRequestManagerTest.testSeekBeforeException`
+    /// (`FetchRequestManagerTest.java:1841`): tp0 returns 4 records, collected
+    /// 2-at-a-time; then tp1 is added, returns OFFSET_OUT_OF_RANGE, but a seek
+    /// on tp1 before collecting suppresses the OOR error so the subsequent
+    /// collect returns no records and does not raise.
+    #[test]
+    fn test_seek_before_exception() {
+        let (topic_id, ids) = single_topic_id();
+        // AutoOffsetReset NONE so OOR would raise, maxPollRecords=2.
+        let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
+        let metadata = Arc::new(ConsumerMetadata::new(
+            100,
+            100,
+            50_000,
+            false,
+            false,
+            subscriptions.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+        let fetch_config = RoundTrip::make_config(2, IsolationLevel::ReadUncommitted);
+        let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+        let mgr = super::FetchRequestManager::new(
+            metadata.clone(),
+            subscriptions.clone(),
+            fetch_config.clone(),
+            fetch_buffer.clone(),
+            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            always_available(),
+            no_auth_failure(),
+            api_versions.clone(),
+        );
+        let mut rt = RoundTrip {
+            mgr,
+            subscriptions,
+            metadata,
+            api_versions,
+            fetch_buffer,
+            fetch_config,
+            topic_ids: ids,
+        };
+        // 2 nodes so tp0 and tp1 have different leaders.
+        rt.seed_metadata(2, &HashMap::from([(TOPIC.to_string(), 4)]));
+        rt.assign_only(&[tp(0)]);
+        rt.seek(&tp(0), 1);
+
+        // Deliver 3 records for tp0; collect 2 (maxPollRecords=2).
+        let (built0, prepared0) = rt.build_fetch_requests(0);
+        let (node0, (_n0, rd0)) = prepared0.iter().next().unwrap();
+        let resp0 = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node0, rd0, resp0, built0[node0].version());
+        let r1 = rt.collect_records_max(2);
+        assert_eq!(2, r1.records_for_partition(&tp(0)).len(), "first collect returns 2");
+
+        // Add tp1, seek it, fetch -> tp1 returns OFFSET_OUT_OF_RANGE.
+        rt.assign_only(&[tp(0), tp(1)]);
+        rt.seek_unvalidated(&tp(1), 1);
+        let (built1, prepared1) = rt.build_fetch_requests(0);
+        for (nid, (_n, rd)) in &prepared1 {
+            let mut resp = FullFetchResponse::new();
+            for topic in &built1[nid].data().topics {
+                for p in &topic.partitions {
+                    if p.partition == 1 {
+                        let mut pd = RespPartitionData::new();
+                        pd.set_partition_index(1);
+                        pd.set_error_code(Errors::OffsetOutOfRange.code());
+                        pd.set_high_watermark(100);
+                        resp = resp.partition_data(TOPIC, topic_id, pd);
+                    } else {
+                        resp = resp.partition(
+                            TOPIC,
+                            topic_id,
+                            p.partition,
+                            Some(build_records(1, 3, 1)),
+                            Errors::None,
+                            100,
+                            0,
+                        );
+                    }
+                }
+            }
+            rt.deliver(*nid, rd, resp.build(), built1[nid].version());
+        }
+
+        // Seek tp1 to offset 10 BEFORE collecting -> the buffered OOR fetch for
+        // tp1 is discarded; collecting must NOT raise OOR and returns no tp1
+        // records.
+        rt.seek(&tp(1), 10);
+        let r2 = rt.collect_records_result().expect("seek before OOR suppresses the error");
+        assert!(
+            r2.records_for_partition(&tp(1)).is_empty(),
+            "no records or error for tp1 after seeking past OOR"
+        );
     }
 
     // ── preferred-read-replica family ──────────────────────────────────────

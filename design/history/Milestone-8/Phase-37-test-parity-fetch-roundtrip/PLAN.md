@@ -116,8 +116,12 @@ Translated (Java name → Rust snake_case):
 - `testFetchSessionIdError` — `FETCH_SESSION_TOPIC_ID_ERROR` top-level handling.
 - buffered-partition exclusion family: `testFetchRequestWithBufferedPartition`
   + `{NotAssigned, MissingLeader, MissingPosition, Paused, PendingAssignment,
-  ResetOffset, Unfetchable}` — partition EXCLUDED from the next FetchRequest for
-  each reason (mutation-resistant: assert the request omits it).
+  PendingRevocation, ResetOffset, Unfetchable}` — partition EXCLUDED from the
+  next FetchRequest for each reason (mutation-resistant: assert the request
+  omits it). `MissingPosition` reproduces Java's genuinely-null-position
+  scenario and documents the deliberate Rust divergence from Java's
+  IllegalState contract (Phase-13 COMMENTS.DONE.1.md Issue 7 closed-race fix);
+  see the test rustdoc.
 - `testFetchCompletedBeforeHandlerAdded` — response for a node with no session
   handler is ignored (no panic, no buffer entry).
 - `testFetchSkipsBlackedOutNodes` — unavailable node skipped in build.
@@ -165,6 +169,35 @@ Translated (Java name → Rust snake_case):
   No Rust metrics framework in Milestone-8 (report finding #2). SKIP.
 - Classic rebalance: `testFetchDuringEagerRebalance`,
   `testFetchDuringCooperativeRebalance` — classic assignors out of scope (§20). SKIP.
+
+## DEFERRED to control-record production follow-up (COMMENTS.37 Issue 2 / CONTROL-RECORD VERDICT)
+
+The abort/commit-MARKER transaction tests `testMultipleAbortMarkers`
+(`FetchRequestManagerTest.java:2443`), `testReadCommittedAbortMarkerWithNoData`
+(java:2492), and `testReadCommittedWithCommittedAndAbortedTransactions`
+(java:2367) — listed in 7b above — are **NOT translated in Phase 37**. They
+require resolving an ABORT/COMMIT control marker under READ_COMMITTED
+(Java `containsAbortMarker` → `abortedProducerIds.remove(producerId)`,
+`CompletedFetch.java:210-211`).
+
+The Rust receive path does not yet implement `ControlRecordType` (ABORT vs
+COMMIT key parsing): a READ_COMMITTED control batch whose producer id is in
+the aborted set returns `KafkaError::unsupported_version` instead of skipping
+the marker (`completed_fetch.rs` `load_next_batch`). This is a **pre-existing
+limitation from Phase 7a** (NOT introduced or regressed by Phase 37) and is the
+subject of **COMMENTS.37.md Issue 2 / the CONTROL-RECORD VERDICT** — being
+handled as a separate, dedicated control-record production-fix follow-up.
+
+Until that control-record fix lands, these three abort-marker tests **remain
+omitted**, and the ABORT-marker half of
+`testConsumerPositionUpdatedWhenSkippingAbortedTransactions` stays omitted
+(the test asserts the position advances past the aborted DATA batch only —
+not past an ABORT control marker). All are flagged with an explicit skip note
+at the test site in `fetch_request_manager.rs`, consistent with DoD #3.
+
+The aborted-DATA-batch skip path IS implemented and is covered by
+`test_read_committed_with_compacted_topic` and
+`test_consumer_position_updated_when_skipping_aborted_transactions`.
 
 ## Folded (not duplicated)
 
