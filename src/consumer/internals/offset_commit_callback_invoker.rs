@@ -121,6 +121,12 @@ pub(crate) trait AutoCommitInterceptorHook: Send + Sync + 'static {
     /// Enqueue an interceptor `on_commit` invocation for the committed
     /// offsets. No-op when the interceptor chain is empty.
     fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>);
+
+    /// Whether any interceptor is registered. Lets the caller skip cloning
+    /// the committed-offsets map on the auto-commit path when no interceptor
+    /// would receive it (mirrors Java capturing the offsets map by reference
+    /// in its BiConsumer — no copy when the chain is empty).
+    fn has_interceptors(&self) -> bool;
 }
 
 impl<K, V> AutoCommitInterceptorHook for OffsetCommitCallbackInvoker<K, V>
@@ -130,6 +136,10 @@ where
 {
     fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
         OffsetCommitCallbackInvoker::enqueue_interceptor_invocation(self, offsets);
+    }
+
+    fn has_interceptors(&self) -> bool {
+        !self.interceptors_empty
     }
 }
 
