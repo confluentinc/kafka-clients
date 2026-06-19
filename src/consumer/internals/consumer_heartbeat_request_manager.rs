@@ -112,6 +112,17 @@ pub(crate) enum PendingMembershipTransition {
     /// to the user separately at the call site that pushes this
     /// transition.
     Fatal(KafkaError),
+    /// The member transitioned to STALE because the poll timer expired
+    /// (poll-timer-expiry path of [`RequestManager::poll`]). The bg-task
+    /// drives `ConsumerMembershipManager::transition_to_stale(now).await`
+    /// to release the assignment via the §31 `onPartitionsLost` listener
+    /// (the STALE state transition itself already happened synchronously
+    /// inside `on_heartbeat_request_generated`). Mirrors the async tail of
+    /// Java's `AbstractMembershipManager.transitionToStale()`
+    /// (`AbstractMembershipManager.java:791-806`), which the Java code
+    /// runs inline after `onHeartbeatRequestGenerated()` inside
+    /// `makeHeartbeatRequest`.
+    Stale,
 }
 
 /// Tracks which fields were sent on the most recent heartbeat. Java's
@@ -862,6 +873,25 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
             // Build leave heartbeat (ignoreResponse=true) per Java's
             // `AbstractHeartbeatRequestManager.java:309`.
             let request = self.build_heartbeat_request(true);
+            // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` always
+            // calls `membershipManager().onHeartbeatRequestGenerated()`
+            // (`AbstractHeartbeatRequestManager.makeHeartbeatRequest`). For a
+            // member whose poll timer expired, that transitions LEAVING →
+            // STALE (`AbstractMembershipManager.onHeartbeatRequestGenerated`
+            // → `transitionToStale()`). The earlier Rust translation omitted
+            // this call here, so the member stayed in LEAVING forever and the
+            // STALE path was unreachable via poll().
+            if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_request_generated() {
+                log::warn!("on_heartbeat_request_generated (poll-timer-expiry) failed: {}", e);
+            }
+            // If the member is now STALE, the assignment must be released via
+            // the §31 onPartitionsLost listener (the async tail of Java's
+            // `transitionToStale`). `poll` is sync, so push the release onto
+            // the membership-transition side-channel for the bg task to await
+            // — same mechanism Fenced / Fatal use.
+            if self.membership_manager.state() == MemberState::Stale {
+                let _ = self.pending_membership_transition_tx.send(PendingMembershipTransition::Stale);
+            }
             self.inner.heartbeat_request_state.reset();
             self.reset_heartbeat_state();
             return PollResult::new(self.inner.heartbeat_request_state.heartbeat_interval_ms(), vec![request]);
@@ -1823,6 +1853,104 @@ mod tests {
             )),
             "BackgroundEvent::Error must be emitted on the unknown-error-code fatal fallback path \
              so poll() surfaces the failure to the user"
+        );
+    }
+
+    // ===============================================================
+    // Phase 35 — poll-timer / leave-group poll lifecycle.
+    // ===============================================================
+
+    /// Default `max.poll.interval.ms` (matches `ConsumerConfig::new`).
+    const DEFAULT_MAX_POLL_INTERVAL_MS: i64 = 300_000;
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testPollTimerExpiration`.
+    /// On poll-timer expiration the member sends a last (leave) heartbeat,
+    /// is transitioned to STALE (no further heartbeats), and resumes
+    /// heartbeating after `reset_poll_timer` + `maybe_rejoin_stale_member`
+    /// bring it back to JOINING.
+    #[tokio::test]
+    async fn poll_timer_expiration() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        make_joining(&mm);
+        // Arm the poll timer (Java arms it at construction; Rust arms on the
+        // first reset_poll_timer — Issue 9).
+        mgr.inner.reset_poll_timer(0);
+
+        // Poll past max.poll.interval.ms: a leave heartbeat is generated and
+        // the member transitions to STALE.
+        let result = mgr.poll(DEFAULT_MAX_POLL_INTERVAL_MS);
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "a leave heartbeat must be sent on poll-timer expiry"
+        );
+        assert_eq!(
+            mm.state(),
+            MemberState::Stale,
+            "poll-timer expiry must transition the member to STALE"
+        );
+        // The release is pushed onto the membership-transition side-channel for
+        // the bg task to await (mirrors Java's transitionToStale tail).
+        let transitions = mgr.take_pending_membership_transitions();
+        assert!(
+            transitions.iter().any(|t| matches!(t, PendingMembershipTransition::Stale)),
+            "a Stale membership transition must be queued so the bg task releases the assignment"
+        );
+
+        // STALE member skips heartbeats.
+        let result = mgr.poll(DEFAULT_MAX_POLL_INTERVAL_MS);
+        assert_eq!(result.unsent_requests.len(), 0, "a STALE member must not send heartbeats");
+
+        // Reset the poll timer (application polled again) — drive the release
+        // and rejoin as the bg task would.
+        mm.transition_to_stale(DEFAULT_MAX_POLL_INTERVAL_MS).await.unwrap();
+        mgr.inner.reset_poll_timer(DEFAULT_MAX_POLL_INTERVAL_MS);
+        mm.abstract_mm.maybe_rejoin_stale_member(mm.join_group_epoch());
+        assert_eq!(mm.state(), MemberState::Joining, "after timer reset the member rejoins");
+        assert!(!mgr.inner.poll_timer_is_expired(DEFAULT_MAX_POLL_INTERVAL_MS));
+
+        // JOINING member resumes heartbeating.
+        let result = mgr.poll(DEFAULT_MAX_POLL_INTERVAL_MS);
+        assert_eq!(result.unsent_requests.len(), 1, "the rejoined member resumes heartbeating");
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testPollTimerExpirationShouldNotMarkMemberStaleIfMemberAlreadyLeaving`.
+    /// A member already leaving the group when the poll timer expires must
+    /// NOT be transitioned to STALE — it continues sending heartbeats to
+    /// complete the ongoing leave.
+    #[tokio::test]
+    async fn poll_timer_expiration_should_not_mark_member_stale_if_member_already_leaving() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        // Drive the member to LEAVING (a user-initiated leave, not poll-timer).
+        mgr.inner.reset_poll_timer(0);
+        make_joining(&mm);
+        mm.leave_group(0).await.unwrap();
+        assert_eq!(mm.state(), MemberState::Leaving);
+        assert!(mm.is_leaving_group());
+
+        // Poll past max.poll.interval.ms.
+        let result = mgr.poll(DEFAULT_MAX_POLL_INTERVAL_MS);
+
+        // No poll-timer-driven leave transition (member was already leaving);
+        // the member is NOT STALE.
+        assert_ne!(
+            mm.state(),
+            MemberState::Stale,
+            "an already-leaving member must not be marked STALE"
+        );
+        assert!(
+            mgr.take_pending_membership_transitions().is_empty(),
+            "no Stale transition should be queued for an already-leaving member"
+        );
+        // A heartbeat is still generated to complete the ongoing leave.
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "a heartbeat request should be generated to complete the ongoing leaving operation"
         );
     }
 }

@@ -144,6 +144,24 @@ pub(crate) struct MembershipInner {
     /// `AtomicBoolean`; the surrounding `Mutex` provides the same
     /// atomicity here.
     pub(crate) subscription_updated: bool,
+    /// `true` while the STALE-member onPartitionsLost assignment release
+    /// (`transition_to_stale`) is in flight. Mirrors the lifetime of
+    /// Java's `staleMemberAssignmentRelease` `CompletableFuture` between
+    /// its creation in `transitionToStale()` and its `whenComplete`
+    /// firing (`AbstractMembershipManager.java:791-806`). While this is
+    /// `true`, `maybe_rejoin_stale_member` must NOT transition STALE →
+    /// JOINING — it records the intent in
+    /// [`Self::stale_rejoin_requested`] and the release-completion path
+    /// performs the transition (Java's
+    /// `staleMemberAssignmentRelease.whenComplete((__, e) ->
+    /// transitionToJoining())`).
+    pub(crate) stale_assignment_release_pending: bool,
+    /// `true` if `maybe_rejoin_stale_member` was called while the STALE
+    /// assignment release was still in flight. The release-completion
+    /// path reads this to know it must transition to JOINING once the
+    /// callback returns. Mirrors Java chaining `transitionToJoining` onto
+    /// the in-flight `staleMemberAssignmentRelease` future.
+    pub(crate) stale_rejoin_requested: bool,
     /// Whether auto-commit is enabled (immutable for the manager's
     /// lifetime; stored here for state-machine queries).
     pub(crate) auto_commit_enabled: bool,
@@ -289,6 +307,8 @@ impl AbstractMembershipManager {
             reconciliation_in_progress: false,
             rejoined_while_reconciliation_in_progress: false,
             is_poll_timer_expired: false,
+            stale_assignment_release_pending: false,
+            stale_rejoin_requested: false,
             subscription_updated: false,
             auto_commit_enabled,
             state_updates_listeners: Vec::new(),
@@ -645,8 +665,20 @@ impl AbstractMembershipManager {
             },
             MemberState::Leaving => {
                 if guard.is_poll_timer_expired {
-                    // Java transitions to STALE here.
+                    // Java transitions to STALE here via `transitionToStale()`,
+                    // which also schedules the onPartitionsLost assignment
+                    // release (`AbstractMembershipManager.java:791-806`). The
+                    // release is async (it awaits the §31 listener) and cannot
+                    // run inside this sync method; the concrete
+                    // `ConsumerMembershipManager::transition_to_stale` performs
+                    // it (driven from the bg task / directly in tests). We mark
+                    // the release pending here so that a `maybe_rejoin_stale_member`
+                    // arriving before the release completes defers the
+                    // STALE → JOINING transition (mirroring Java chaining
+                    // `transitionToJoining` onto the in-flight release future).
                     guard.transition_to(MemberState::Stale)?;
+                    guard.stale_assignment_release_pending = true;
+                    guard.stale_rejoin_requested = false;
                 } else {
                     guard.transition_to(MemberState::Unsubscribed)?;
                 }
@@ -683,7 +715,23 @@ impl AbstractMembershipManager {
                 Err(p) => p.into_inner(),
             };
             guard.is_poll_timer_expired = false;
-            guard.state == MemberState::Stale
+            if guard.state != MemberState::Stale {
+                false
+            } else if guard.stale_assignment_release_pending {
+                // The onPartitionsLost release triggered by
+                // `transition_to_stale` has not completed yet. Java chains
+                // `transitionToJoining` onto the in-flight
+                // `staleMemberAssignmentRelease` future
+                // (`AbstractMembershipManager.java:781`); we record the
+                // intent and let the release-completion path perform the
+                // transition once the callback returns. The member stays
+                // STALE in the meantime (it must not clear its assignment
+                // to rejoin until the callback completes).
+                guard.stale_rejoin_requested = true;
+                false
+            } else {
+                true
+            }
         };
         if should_transition_to_joining {
             // Re-acquire the lock for the transition — `transition_to_joining`

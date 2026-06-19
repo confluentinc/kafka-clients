@@ -458,6 +458,77 @@ impl ConsumerMembershipManager {
         Ok(())
     }
 
+    /// Release the assignment held by a member that has just transitioned
+    /// to STALE because of an expired poll timer, then (if a timer reset
+    /// already requested it) rejoin.
+    ///
+    /// Java: the async tail of `AbstractMembershipManager.transitionToStale()`
+    /// (`AbstractMembershipManager.java:791-806`):
+    ///
+    /// ```java
+    /// CompletableFuture<Void> callbackResult = signalPartitionsLost(subscriptions.assignedPartitions());
+    /// staleMemberAssignmentRelease = callbackResult.whenComplete((result, error) -> {
+    ///     ...
+    ///     clearAssignment();
+    /// });
+    /// ```
+    ///
+    /// The STATE transition to STALE itself happens synchronously inside
+    /// `AbstractMembershipManager::on_heartbeat_request_generated` (mirroring
+    /// Java's `transitionTo(STALE)` at the top of `transitionToStale`); this
+    /// method performs only the release half, which is async because it
+    /// awaits the §31 `onPartitionsLost` listener.
+    ///
+    /// The release-pending flag (set when STALE was entered) is cleared at
+    /// the end; if `maybe_rejoin_stale_member` was called while the release
+    /// was in flight, the member is transitioned to JOINING now — exactly
+    /// Java's `staleMemberAssignmentRelease.whenComplete(__ -> transitionToJoining())`.
+    pub(crate) async fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+        // Release assignment via onPartitionsLost (Java's
+        // `signalPartitionsLost(subscriptions.assignedPartitions())`).
+        let partitions = {
+            let subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.assigned_partitions().into_iter().collect::<Vec<_>>()
+        };
+        if !partitions.is_empty()
+            && let Err(e) = self
+                .abstract_mm
+                .invoke_rebalance_callback(
+                    ConsumerRebalanceListenerMethodName::OnPartitionsLost,
+                    partitions,
+                    current_time_ms,
+                )
+                .await
+        {
+            log::error!(
+                "onPartitionsLost callback invocation failed while releasing assignment after member left group due to expired poll timer: {}",
+                e
+            );
+        }
+        self.abstract_mm.clear_assignment();
+
+        // Java's whenComplete tail: clear the release-pending flag and, if a
+        // timer reset requested a rejoin while the release was in flight,
+        // transition to JOINING now.
+        let rejoin = {
+            let mut guard = match self.abstract_mm.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.stale_assignment_release_pending = false;
+            let rejoin = guard.stale_rejoin_requested && guard.state == MemberState::Stale;
+            guard.stale_rejoin_requested = false;
+            rejoin
+        };
+        if rejoin {
+            self.transition_to_joining()?;
+        }
+        Ok(())
+    }
+
     /// Reconcile the target assignment per §31. Async because it
     /// `.await`s the rebalance-listener oneshot acks.
     ///
@@ -4135,5 +4206,237 @@ mod tests {
         // Empty assignment for a JOINING member: target changes (epoch
         // bumps via update_with), so we transition to RECONCILING.
         assert_eq!(mgr.state(), MemberState::Reconciling);
+    }
+
+    // ===============================================================
+    // Phase 35 — STALE member path
+    // (ConsumerMembershipManagerTest stale-member family).
+    // ===============================================================
+
+    /// Drive a member from STABLE into ACKNOWLEDGING by receiving and
+    /// reconciling an owned partition. Mirrors Java's
+    /// `mockJoinAndReceiveAssignment(true)` tail (leaves the member in
+    /// ACKNOWLEDGING after the assigned callback completes).
+    async fn create_member_acknowledging(
+        mut rx: mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mgr: Arc<ConsumerMembershipManager>,
+        topic_id: Uuid,
+    ) -> mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope> {
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        rx
+    }
+
+    /// Java helper `assertLeaveGroupDueToExpiredPollAndTransitionToStale`:
+    /// `transitionToSendingLeaveGroup(true)` resets epoch to LEAVE, then
+    /// `onHeartbeatRequestGenerated()` transitions the member to STALE.
+    /// (The async onPartitionsLost release is driven separately via
+    /// `transition_to_stale` for owned-partition cases.)
+    fn leave_group_due_to_expired_poll_and_transition_to_stale(mgr: &ConsumerMembershipManager) {
+        mgr.transition_to_sending_leave_group(true).unwrap();
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stale);
+    }
+
+    /// Java helper `assertStaleMemberLeavesGroupAndClearsAssignment` for the
+    /// no-owned-partition case (assignment already none after
+    /// `transitionToSendingLeaveGroup` sets `current_assignment = NONE`).
+    fn assert_stale_member_leaves_group_and_clears_assignment(mgr: &ConsumerMembershipManager) {
+        assert_eq!(mgr.state(), MemberState::Stale);
+        assert!(mgr.current_assignment().is_none());
+        assert!(topics_awaiting_reconciliation(mgr).is_empty());
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToLeavingWhileReconcilingDueToStaleMember`.
+    #[tokio::test]
+    async fn transition_to_leaving_while_reconciling_due_to_stale_member() {
+        // Reach RECONCILING with a fresh (un-reconciled) target assignment.
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        leave_group_due_to_expired_poll_and_transition_to_stale(&mgr);
+        assert_stale_member_leaves_group_and_clears_assignment(&mgr);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToLeavingWhileJoiningDueToStaleMember`.
+    #[tokio::test]
+    async fn transition_to_leaving_while_joining_due_to_stale_member() {
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        leave_group_due_to_expired_poll_and_transition_to_stale(&mgr);
+        assert_stale_member_leaves_group_and_clears_assignment(&mgr);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToLeavingWhileStableDueToStaleMember`.
+    #[tokio::test]
+    async fn transition_to_leaving_while_stable_due_to_stale_member() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        assert_eq!(mgr.state(), MemberState::Stable);
+
+        leave_group_due_to_expired_poll_and_transition_to_stale(&mgr);
+        assert_stale_member_leaves_group_and_clears_assignment(&mgr);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToLeavingWhileAcknowledgingDueToStaleMember`.
+    #[tokio::test]
+    async fn transition_to_leaving_while_acknowledging_due_to_stale_member() {
+        let (mgr, rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        let mgr = Arc::new(mgr);
+        let _rx = create_member_acknowledging(rx, mgr.clone(), topic_id).await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+
+        leave_group_due_to_expired_poll_and_transition_to_stale(&mgr);
+        assert_eq!(mgr.state(), MemberState::Stale);
+        // Acknowledging member owned topic1-0; `transitionToSendingLeaveGroup`
+        // clears `current_assignment` to NONE, so the assignment is already
+        // released from the membership manager's view.
+        assert!(mgr.current_assignment().is_none());
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testStaleMemberDoesNotSendHeartbeatAndAllowsTransitionToJoiningToRecover`.
+    #[tokio::test]
+    async fn stale_member_does_not_send_heartbeat_and_allows_transition_to_joining_to_recover() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.transition_to_sending_leave_group(true).unwrap();
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stale);
+
+        // Stale member should not send heartbeats.
+        assert!(
+            mgr.abstract_mm.inner.lock().unwrap().should_skip_heartbeat(),
+            "Stale member should not send heartbeats"
+        );
+
+        // Run the STALE assignment release (no owned partitions ⇒ a no-op;
+        // mirrors Java's `staleMemberAssignmentRelease` empty-partition future
+        // completing immediately, clearing the release-pending flag).
+        mgr.transition_to_stale(0).await.unwrap();
+
+        // Java asserts only that `maybeRejoinStaleMember` does not throw. With
+        // the release complete, the member is now allowed to transition to
+        // JOINING when the poll timer is reset.
+        mgr.abstract_mm.maybe_rejoin_stale_member(mgr.join_group_epoch());
+        assert_eq!(mgr.state(), MemberState::Joining);
+    }
+
+    /// Drive a member to STALE with NO owned partitions (mirrors Java
+    /// `mockStaleMember`).
+    async fn mock_stale_member() -> (
+        Arc<ConsumerMembershipManager>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        let (mgr, rx) = create_member_in_stable_state(None).await;
+        mgr.transition_to_sending_leave_group(true).unwrap();
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        // No owned partitions ⇒ the STALE release is a no-op; the
+        // release-pending flag is cleared by transition_to_stale (drive it so
+        // the member is not left with a stale pending flag).
+        mgr.transition_to_stale(0).await.unwrap();
+        (mgr, rx)
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testStaleMemberRejoinsWhenTimerResetsNoCallbacks`.
+    #[tokio::test]
+    async fn stale_member_rejoins_when_timer_resets_no_callbacks() {
+        let (mgr, _rx) = mock_stale_member().await;
+        assert_stale_member_leaves_group_and_clears_assignment(&mgr);
+
+        mgr.abstract_mm.maybe_rejoin_stale_member(mgr.join_group_epoch());
+        assert_eq!(mgr.state(), MemberState::Joining);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testStaleMemberWaitsForCallbackToRejoinWhenTimerReset`.
+    /// A STALE member that owns a partition fires onPartitionsLost; the timer
+    /// reset while the callback is in flight must NOT advance the member out
+    /// of STALE — it rejoins (JOINING) only once the callback completes.
+    #[tokio::test]
+    async fn stale_member_waits_for_callback_to_rejoin_when_timer_reset() {
+        let (mgr, mut rx) = create_member_in_stable_state(None).await;
+        // Own a partition so onPartitionsLost has something to release.
+        let topic_name = "topic1";
+        let owned = tp(topic_name, 0);
+        mock_owned_partitions(&mgr, std::slice::from_ref(&owned));
+
+        // LEAVING due to expired poll timer, then STALE.
+        mgr.transition_to_sending_leave_group(true).unwrap();
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stale);
+
+        // Drive the async STALE release on a bg task; it will enqueue an
+        // onPartitionsLost callback-needed event and park awaiting the ack.
+        let mgr_clone = mgr.clone();
+        let release = tokio::spawn(async move { mgr_clone.transition_to_stale(0).await });
+
+        // Capture the callback-needed event WITHOUT acking it yet.
+        let env = rx.recv().await.expect("expected onPartitionsLost callback-needed event");
+        let ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+                let got: HashSet<TopicPartition> = partitions.into_iter().collect();
+                assert_eq!(got, [owned.clone()].into_iter().collect::<HashSet<_>>());
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+
+        // Timer reset while the callback has NOT completed: the member must
+        // stay STALE (must not clear its assignment to rejoin yet).
+        mgr.abstract_mm.maybe_rejoin_stale_member(mgr.join_group_epoch());
+        assert_eq!(
+            mgr.state(),
+            MemberState::Stale,
+            "member must not leave STALE while the onPartitionsLost callback is in flight"
+        );
+
+        // Complete the callback: the release finishes, clears the assignment,
+        // and (because a rejoin was requested) transitions to JOINING.
+        ack.send(Ok(())).unwrap();
+        release.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+        assert!(mgr.current_assignment().is_none());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberIsStale`.
+    /// A STALE member's `leave_group()` unsubscribes but the member stays
+    /// STALE (it has already left the group due to the expired poll timer).
+    #[tokio::test]
+    async fn leave_group_when_member_is_stale() {
+        let (mgr, _rx) = mock_stale_member().await;
+        assert_eq!(mgr.state(), MemberState::Stale);
+
+        mgr.leave_group(0).await.unwrap();
+        // SubscriptionState was unsubscribed.
+        assert!(mgr.abstract_mm.subscriptions.lock().unwrap().subscription().is_empty());
+        assert_eq!(mgr.state(), MemberState::Stale);
     }
 }

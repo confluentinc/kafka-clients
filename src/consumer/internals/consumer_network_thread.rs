@@ -550,6 +550,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                             log::warn!("transition_to_fatal (driven from heartbeat) failed: {}", e);
                         }
                     },
+                    PendingMembershipTransition::Stale => {
+                        if let Err(e) = membership.transition_to_stale(current_time_ms).await {
+                            log::warn!("transition_to_stale (driven from heartbeat) failed: {}", e);
+                        }
+                    },
                 }
             }
         }
