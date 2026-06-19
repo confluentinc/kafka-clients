@@ -3326,4 +3326,127 @@ mod tests {
         );
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
     }
+
+    // -----------------------------------------------------------------
+    //   validate-positions: success / missing-leader / auth-failure
+    //   (OffsetsRequestManagerTest)
+    // -----------------------------------------------------------------
+
+    /// Seek `tp` (assigned, leader = node 0 from the metadata bootstrap)
+    /// into AWAITING_VALIDATION at the given offset/epoch, and install a
+    /// modern `NodeApiVersions` for node 0 so the OffsetsForLeaderEpoch
+    /// request is buildable. Mirrors the Java validate-test fixture
+    /// (`seekUnvalidated` + `apiVersions.update(node, NodeApiVersions.create())`).
+    fn seek_unvalidated_and_install_api_versions(
+        mgr: &OffsetsRequestManager,
+        subscription_state: &Arc<Mutex<SubscriptionState>>,
+        tp: &TopicPartition,
+        offset: i64,
+        epoch: i32,
+    ) {
+        let leader = crate::common::Node::new(0, "localhost".to_string(), 1969);
+        let leader_and_epoch = LeaderAndEpoch::new(Some(leader.clone()), Some(epoch));
+        let position = FetchPosition::with_leader(offset, Some(epoch), leader_and_epoch);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.seek_unvalidated(tp, position).expect("seek_unvalidated");
+        }
+        mgr.api_versions.update(leader.id_string(), crate::NodeApiVersions::create());
+    }
+
+    /// Java parity: `testValidatePositionsSuccess`. A partition awaiting
+    /// validation produces one OffsetsForLeaderEpoch request; a successful
+    /// response (end offset ≥ position, defined epoch) completes the
+    /// validation — the partition is no longer awaiting validation and its
+    /// position becomes valid/fetchable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_positions_success() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 3);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 5, 3);
+
+        mgr.validate_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1, "one OffsetsForLeaderEpoch request expected");
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(subs.awaiting_validation(&tp).expect("assigned"), "awaiting validation before response");
+        }
+
+        // Validate response with a non-divergent end offset (100 > 5) and a
+        // defined leader epoch (3).
+        let response = build_offsets_for_leader_epoch_response("t1", vec![(1, Errors::None, 3, 100)]);
+        assert!(complete_first_oitle_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(
+            !subs.awaiting_validation(&tp).expect("assigned"),
+            "maybe_complete_validation must clear the AWAITING_VALIDATION state"
+        );
+        assert!(subs.has_valid_position(&tp), "position must be valid after successful validation");
+        assert!(subs.is_fetchable(&tp), "partition must be fetchable after validation");
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
+    }
+
+    /// Java parity: `testValidatePositionsMissingLeader`. The partition
+    /// awaiting validation has a no-node leader — the manager requests a
+    /// metadata update (`metadata.requestUpdate(true)`) and enqueues no
+    /// request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_positions_missing_leader() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        // Seek with a NO-NODE leader (Node::no_node) but a defined epoch,
+        // mirroring Java's `new LeaderAndEpoch(Optional.of(Node.noNode()),
+        // Optional.of(5))`.
+        let no_node = crate::common::Node::no_node().clone();
+        let leader_and_epoch = LeaderAndEpoch::new(Some(no_node.clone()), Some(5));
+        let position = FetchPosition::with_leader(5, Some(10), leader_and_epoch);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.seek_unvalidated(&tp, position).expect("seek_unvalidated");
+        }
+        // Install api versions for the no-node id so the only reason the
+        // request is not built is the missing (no-node) leader.
+        mgr.api_versions.update(no_node.id_string(), crate::NodeApiVersions::create());
+
+        let before = mgr.shared.metadata.metadata_arc().update_requested();
+        mgr.validate_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 0, "no request when leader is no-node");
+        assert!(
+            !before && mgr.shared.metadata.metadata_arc().update_requested(),
+            "no-node leader must trigger metadata.requestUpdate(true)"
+        );
+    }
+
+    /// Java parity: `testValidatePositionsFailureWithUnrecoverableAuthException`.
+    /// A validate response carrying `TOPIC_AUTHORIZATION_FAILED` is cached
+    /// (non-retriable) and re-raised on the next `validate_positions_if_needed`
+    /// call without issuing any request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_positions_failure_with_unrecoverable_auth_exception() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 5);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 5, 5);
+
+        mgr.validate_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        let response = build_offsets_for_leader_epoch_response("t1", vec![(1, Errors::TopicAuthorizationFailed, 0, 0)]);
+        assert!(complete_first_oitle_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        // Following validatePositions should re-raise the cached exception.
+        let err = mgr.validate_positions_if_needed(0).expect_err("cached auth error re-raised");
+        assert_eq!(mgr.requests_to_send_count(), 0, "no request issued on cached-error path");
+        assert!(
+            matches!(err, KafkaError::TopicAuthorization(_)),
+            "expected TopicAuthorization, got {err:?}",
+        );
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
+    }
 }
