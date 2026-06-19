@@ -3304,10 +3304,34 @@ mod tests {
         mgr.reset_positions_if_needed(0).expect("ok");
         assert_eq!(mgr.requests_to_send_count(), 1);
 
+        let before_update_requested = mgr.shared.metadata.metadata_arc().update_requested();
         let response =
             build_list_offsets_response("t1", vec![(1, Errors::TopicAuthorizationFailed, -1, -1, UNKNOWN_EPOCH)]);
         assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
         let _ = RequestManager::poll(&mut mgr, 0);
+
+        // Java error-path side effects (verify(...) in the ORM test):
+        //   verify(subscriptionState).requestFailed(any(), anyLong());
+        //   verify(metadata).requestUpdate(false);
+        // `requestFailed` advances the partition's retry backoff: at the same
+        // instant the response was handled (now_ms = 0) the partition is no
+        // longer reset-ready, even though it is still awaiting reset.
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(
+                subs.is_offset_reset_needed(&tp).expect("assigned"),
+                "partition still awaiting reset after auth failure"
+            );
+            assert!(
+                !subs.partitions_needing_reset(0).contains(&tp),
+                "requestFailed must have advanced the retry backoff (partition not reset-ready now)"
+            );
+        }
+        // `metadata.requestUpdate(false)` requests a full metadata update.
+        assert!(
+            !before_update_requested && mgr.shared.metadata.metadata_arc().update_requested(),
+            "auth-failure reset path must request a metadata update (requestUpdate(false))"
+        );
 
         // Following resetPositions should re-raise the cached exception
         // and issue no request.
@@ -3943,6 +3967,172 @@ mod tests {
         let subs = subscription_state.lock().expect("subs");
         assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"), "idempotent reset applies");
         assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
+    }
+
+    /// Java parity: `OffsetFetcherTest.testChangeResetWithInFlightReset`. A
+    /// reset to a DIFFERENT strategy arrives while the first reset response
+    /// is in flight. When the original (LATEST) response returns it is
+    /// discarded by the third `maybe_seek_unvalidated` guard
+    /// (`subscription_state.rs:978-983` — requested strategy mismatches the
+    /// current `reset_strategy`). The new EARLIEST strategy survives: the
+    /// partition is still awaiting reset, no position is applied, and
+    /// `reset_strategy` is EARLIEST.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_change_strategy_with_in_flight_reset_discards_stale_response() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        // Initial reset request is LATEST.
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::LATEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(!subs.has_valid_position(&tp), "no valid position while reset in flight");
+        }
+
+        // Before the in-flight (LATEST) response is handled, the user
+        // re-requests a reset to a DIFFERENT strategy (EARLIEST).
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.request_offset_reset(&tp, AutoOffsetResetStrategy::EARLIEST)
+                .expect("reset");
+        }
+
+        // The original (LATEST) response returns and must be discarded
+        // because the requested strategy no longer matches.
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        unsent.handler().on_complete(build_list_offsets_client_response(response));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(
+            subs.is_offset_reset_needed(&tp).expect("assigned"),
+            "reset still needed after discarding the stale LATEST response"
+        );
+        assert_eq!(
+            subs.reset_strategy(&tp).expect("assigned"),
+            Some(AutoOffsetResetStrategy::EARLIEST),
+            "the newly-requested EARLIEST strategy must survive the discard",
+        );
+        assert!(
+            subs.position(&tp).expect("lookup").is_none(),
+            "no position applied from the discarded LATEST response"
+        );
+    }
+
+    /// Java parity: `OffsetFetcherTest.testEarlierOffsetResetArrivesLate`. A
+    /// two-phase sequence: (1) an in-flight EARLIEST reset response is
+    /// discarded because a LATEST reset was requested before the response
+    /// was handled (the strategy-mismatch guard,
+    /// `subscription_state.rs:978-983`); the partition is still awaiting
+    /// reset under the LATEST strategy. (2) A second reset issued under the
+    /// new LATEST strategy succeeds, applying `position == 10`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_earlier_offset_reset_arrives_late() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        // Initial reset request is EARLIEST.
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+
+        // Before the EARLIEST response is handled, request a reset to LATEST.
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.request_offset_reset(&tp, AutoOffsetResetStrategy::LATEST).expect("reset");
+        }
+
+        // The stale EARLIEST response (offset 0) returns and is ignored.
+        let earlier = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 0, UNKNOWN_EPOCH)]);
+        unsent.handler().on_complete(build_list_offsets_client_response(earlier));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(
+                subs.is_offset_reset_needed(&tp).expect("assigned"),
+                "stale EARLIEST result ignored; reset still needed"
+            );
+            assert_eq!(
+                subs.reset_strategy(&tp).expect("assigned"),
+                Some(AutoOffsetResetStrategy::LATEST),
+                "reset strategy is now LATEST",
+            );
+        }
+
+        // Phase 2: issue a second reset under the LATEST strategy.
+        // `request_offset_reset` cleared the retry backoff, so the partition
+        // needs reset again immediately.
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let later = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 10, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, later, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(
+            !subs.is_offset_reset_needed(&tp).expect("assigned"),
+            "LATEST reset applies on the second pass"
+        );
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 10);
+    }
+
+    /// Java parity: `OffsetFetcherTest.testAssignmentChangeWithInFlightReset`.
+    /// The consumer is reassigned to a different partition while a reset
+    /// response for the original partition is in flight. When the original
+    /// response returns it is discarded by the first `maybe_seek_unvalidated`
+    /// guard (`subscription_state.rs:965-971` — the partition is no longer
+    /// assigned). Observable in Rust: `tp0` is not assigned, `tp1` is, and
+    /// no position is applied.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_assignment_change_with_in_flight_reset_discards_stale_response() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp0 = TopicPartition::new("t1".to_string(), 0);
+        let tp1 = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp0, AutoOffsetResetStrategy::LATEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(!subs.has_valid_position(&tp0), "no valid position while reset in flight");
+        }
+
+        // Assignment change: reassign to tp1, dropping tp0.
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp1.clone()])).expect("assign");
+        }
+
+        // The in-flight tp0 response returns and is discarded (tp0 is no
+        // longer assigned).
+        let response = build_list_offsets_response("t1", vec![(0, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        unsent.handler().on_complete(build_list_offsets_client_response(response));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_assigned(&tp0), "tp0 no longer assigned after reassignment");
+        assert!(subs.is_assigned(&tp1), "tp1 is now assigned");
+        assert!(
+            subs.position(&tp1).expect("lookup").is_none(),
+            "no position applied to tp1 from the discarded tp0 response"
+        );
     }
 
     // -----------------------------------------------------------------
