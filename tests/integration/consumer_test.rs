@@ -36,14 +36,20 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+
+use async_trait::async_trait;
 
 use confluent_kafka::common::KafkaError;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -414,6 +420,183 @@ async fn test_seek_to_beginning_re_reads_records() {
         second_pass_count, 5,
         "second pass after seek_to_beginning should re-read all 5 records"
     );
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+// ── Failed-listener recovery (ConsumerIntegrationTest) ─────────────────
+//
+// Translated from
+// `kafka/clients/clients-integration-tests/src/test/java/org/apache/kafka/clients/consumer/ConsumerIntegrationTest.java`
+// (Apache Kafka 4.2). KIP-848 (`GroupProtocol.CONSUMER`) arm only; the
+// `*WithGroupProtocolClassic` twins are OUT_OF_SCOPE per
+// `consumer-threading.md` §20. These listeners throw (return `Err`) from
+// `on_partitions_assigned` and need NO consumer reentrancy, so — unlike
+// the `PlaintextConsumerCallbackTest` reentrancy suite — they run.
+
+/// Listener that returns `Err` from the FIRST `on_partitions_assigned`
+/// invocation only; subsequent invocations succeed. Mirrors Java's
+/// anonymous listener in `testFetchPartitionsAfterFailedListener` (count
+/// == 1 → throw `IllegalArgumentException("temporary error")`).
+struct FailOnceAssignedListener {
+    count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for FailOnceAssignedListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == 1 {
+            return Err(KafkaError::illegal_state("temporary error"));
+        }
+        Ok(())
+    }
+}
+
+/// Listener that ALWAYS returns `Err` from `on_partitions_assigned`.
+/// Mirrors Java's listener in `testFetchPartitionsWithAlwaysFailedListener`
+/// (always `throw new IllegalArgumentException("always failed")`).
+struct AlwaysFailAssignedListener;
+
+#[async_trait]
+impl ConsumerRebalanceListener for AlwaysFailAssignedListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        Err(KafkaError::illegal_state("always failed"))
+    }
+}
+
+/// Translates Java's
+/// `testFetchPartitionsAfterFailedListenerWithGroupProtocolConsumer`
+/// (line 100).
+///
+/// The listener throws on the first `onPartitionsAssigned`; the consumer
+/// must recover and still deliver the single produced record. We poll
+/// (tolerating the first error surfaced by the failed callback) until one
+/// record arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_fetch_partitions_after_failed_listener() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
+    let topic = ctx.topic("failed_listener");
+    let group_id = ctx.group_id("g_failed_listener");
+
+    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 1).await;
+
+    let mut consumer = new_consumer::<String, String>(
+        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("new_consumer should succeed");
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailOnceAssignedListener { count: Arc::clone(&count) });
+    consumer
+        .subscribe_with_listener(vec![topic.clone()], listener)
+        .await
+        .expect("subscribe_with_listener should succeed");
+
+    // Java: `waitForCondition(() -> consumer.poll(1s).count() == 1, 5000)`.
+    // The first poll may surface the failed-callback error; tolerate it and
+    // keep polling — the consumer recovers on the retry (count == 2 → Ok).
+    let mut delivered = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while delivered < 1 && Instant::now() < deadline {
+        match consumer.poll(Duration::from_secs(1)).await {
+            Ok(records) => {
+                delivered += records.count();
+            },
+            Err(err) => {
+                // The temporary listener error must not be fatal; keep polling.
+                assert!(
+                    !err.is_fatal(),
+                    "first-listener failure should be recoverable, got fatal: {err}"
+                );
+            },
+        }
+    }
+
+    assert_eq!(
+        delivered, 1,
+        "consumer should recover from the one-time listener failure and deliver the record"
+    );
+    assert!(
+        count.load(Ordering::SeqCst) >= 1,
+        "the assigned listener should have been invoked"
+    );
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates Java's
+/// `testFetchPartitionsWithAlwaysFailedListenerWithGroupProtocolConsumer`
+/// (line 148).
+///
+/// The listener always throws. Java's contract: for ~3 seconds, each
+/// `poll(1s)` either returns 0 records (the assigned partitions are never
+/// marked fetchable because the callback never completes successfully) OR
+/// throws a `KafkaException("User rebalance callback throws an error")`.
+///
+/// Rust deviation: `ConsumerRebalanceListenerInvoker` surfaces the
+/// listener's RAW error (here `IllegalState("always failed")`), not Java's
+/// wrapped `KafkaException("User rebalance callback throws an error", e)`
+/// (`AsyncKafkaConsumer.java:2334`). Wrapping the error text is a
+/// behavioral change to already-translated production code and is out of
+/// scope for this test-parity phase. The test therefore asserts the
+/// invariant that survives the deviation: **no successful poll ever
+/// returns a record** (the always-failing callback keeps every assigned
+/// partition un-fetchable). Errors surfaced by the failed callback are
+/// tolerated, exactly as Java's optional `catch (KafkaException)` arm
+/// tolerates them.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_fetch_partitions_with_always_failed_listener() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
+    let topic = ctx.topic("always_failed_listener");
+    let group_id = ctx.group_id("g_always_failed_listener");
+
+    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 1).await;
+
+    let mut consumer = new_consumer::<String, String>(
+        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("new_consumer should succeed");
+
+    let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(AlwaysFailAssignedListener);
+    consumer
+        .subscribe_with_listener(vec![topic.clone()], listener)
+        .await
+        .expect("subscribe_with_listener should succeed");
+
+    // Java loops for 3s asserting `poll().count() == 0` (or catching the
+    // callback KafkaException). Mirror that window.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(3) {
+        match consumer.poll(Duration::from_secs(1)).await {
+            Ok(records) => {
+                assert_eq!(
+                    records.count(),
+                    0,
+                    "an always-failing assigned-listener must keep all partitions un-fetchable; \
+                     poll should never return records"
+                );
+            },
+            Err(_err) => {
+                // Java tolerates a surfaced rebalance-callback error here
+                // (its optional `catch (KafkaException)` arm). The Rust raw
+                // error is tolerated identically — see the deviation note.
+            },
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 
     consumer.close().await.expect("consumer close should succeed");
 }
