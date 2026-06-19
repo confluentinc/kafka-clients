@@ -12,19 +12,26 @@ report-03. Built on Phase 31's helpers; did NOT disturb its tests. 18 new test
 fns (16 in ORM, 2 in AKC) + 3 Phase-31 tests extended. All on `consumer-impl`,
 not a worktree.
 
-## metadata.requestUpdate(true|false) observability
+## metadata.requestUpdate(true|false) observability (UPDATED — Critic-32 Issue 2)
 `update_requested()` conflates `need_full_update` (requestUpdate) and
 `need_partial_update` (request_update_for_new_topics, set by
-`add_transient_topics` inside `fetch_offsets`). To assert the specific Java
-`verify(metadata).requestUpdate(...)` contract, added
-`Metadata::need_full_update_for_test()` (#[cfg(test)] pub(crate),
-src/metadata.rs). Both `request_update(true)` AND `request_update(false)` set
-`need_full_update` (the bool arg only controls equivalent_response_count
-reset), so `need_full_update_for_test()` is the observable for BOTH; the
-true/false distinction itself is not separately observable and Java's verify
-is the only place it matters. `bootstrap_metadata_with_topic` (via
-update_with_current_request_version) RESETS need_full_update to false → clean
-baseline per loop iteration; use a fresh manager per error in matrix loops.
+`add_transient_topics` inside `fetch_offsets`).
+`Metadata::need_full_update_for_test()` (#[cfg(test)] pub(crate)) reads
+need_full_update. BUT both `request_update(true)` AND `request_update(false)`
+set need_full_update — the bool arg ONLY controls whether
+`equivalent_response_count` is reset to 0 (true) or left untouched (false).
+So need_full_update_for_test alone CANNOT pin true-vs-false (Critic flagged
+this as overstated). FIX (option a, the faithful one — the distinction governs
+real backoff behavior + Java verifies the exact boolean): added
+`equivalent_response_count_for_test()` + `set_equivalent_response_count_for_test(n)`
+(both #[cfg(test)] pub(crate), src/metadata.rs). Pattern per test: seed counter
+to non-zero (e.g. 3) → run path → assert RESET to 0 for requestUpdate(true)
+paths, assert UNCHANGED (==seed) for requestUpdate(false) paths. NOTE
+update_with_current_request_version INCREMENTS equivalent_response_count (line
+~734) so reseed after each metadata update if you need a known value.
+`bootstrap_metadata_with_topic` (via update_with_current_request_version)
+RESETS need_full_update to false → clean baseline per loop iteration; use a
+fresh manager per error in matrix loops.
 
 ## Multi-node test helpers (new, in ORM test module)
 - `bootstrap_metadata_with_nodes(metadata, topic, num_partitions, num_nodes)`:
@@ -82,9 +89,28 @@ req.topics() returns &[ListOffsetsTopic]; topic.partitions is a PUBLIC FIELD
 - pure-SubscriptionState paused tests (OUT_OF_SCOPE).
 - reset/validate rows + testGetOffsetsIncludesLeaderEpoch + FencedLeaderEpoch:
   Phase 31.
-- testGetOffsetsForTimesWhenSomeTopicPartitionLeaders{NotKnownInitially,
-  DisconnectException}: same park→update→replay / disconnect→re-park code path
-  as the retry tests; folded.
+
+## Critic-32 Issue 1 + 3: two skips were WRONG, now translated
+- testGetOffsetsForTimesWhenSomeTopicPartitionLeadersNotKnownInitially: the
+  folded-skip rationale ("no ORM code the retry tests don't") was FALSE. It
+  drives the THIRD park path: `build_list_offsets_requests` returns
+  `Ok(unsent)` for known-leader partitions WHILE `group_list_offset_requests`
+  parks unknown-leader partitions in `remaining_to_search` (build-time partial
+  park, Java OffsetsRequestManager.java:575-583). All-leaderless tests hit
+  Err(StaleMetadata); partial-RESPONSE-error tests build every partition on
+  round 1. New test: `fetch_offsets_build_time_partial_park_merges_after_metadata_update`
+  + helper `bootstrap_metadata_multi_topic(&[(topic, parts)], num_nodes)` (one
+  metadata update knows only topic subset; later update adds the rest;
+  fetch_offsets auto-adds requested topics as transient so retain keeps them).
+- testGetOffsetsForTimesWhenSomeTopicPartitionLeadersDisconnectException: the
+  fetch path does NOT re-park on disconnect (that was the WRONG rationale) — it
+  FAILS the global result via fail_request_state (handle_fetch_offsets_response
+  Err arm → NetworkException → all waiters). Java's retry-and-succeed is a
+  CLASSIC OffsetFetcher/ConsumerNetworkClient property (OUT_OF_SCOPE §20). New
+  test: `fetch_offsets_disconnect_fails_global_result_without_reparking` +
+  helper `build_network_disconnect_client_response()` (disconnected=true, NO
+  auth msg → maps to NetworkException not SaslAuthenticationFailed; the existing
+  build_disconnected_client_response sets an auth msg and tests the AUTH path).
 
 ## See also
 - [[phase31_reset_validate_test_notes]] — reset/validate helpers, response-driving

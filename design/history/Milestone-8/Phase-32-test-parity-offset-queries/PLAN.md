@@ -53,6 +53,8 @@ Phase 31's tests.
 | testGetOffsetsForTimes | `offsets_for_times_multi_partition_mixed_errors` | parameterized over Java's mixed-error matrix; both-error / second-error / first-error / unknown-topic / unsupported(→None) / broker-not-available; success after metadata retry |
 | testGetOffsetByTimeWithPartitionsRetryCouldTriggerMetadataUpdate (×7) | `offsets_for_times_retriable_retry_triggers_metadata_update` | loop over the 7-error list; partial (tp0 ok / tp1 retriable) → metadata update → tp1 succeeds against new leader; both offsets present |
 | testGetOffsetsUnknownLeaderEpoch | `fetch_offsets_unknown_leader_epoch_is_retriable` | UNKNOWN_LEADER_EPOCH retriable → re-parked + `requestUpdate(false)` (fetch-path analogue; reset-path covered by Phase 31) |
+| testGetOffsetsForTimesWhenSomeTopicPartitionLeadersNotKnownInitially | `fetch_offsets_build_time_partial_park_merges_after_metadata_update` **(added — Critic Issue 1)** | Drives the `Ok`-with-non-empty-`remaining_to_search` (build-time partial park) branch of `build_list_offsets_requests` (Java `OffsetsRequestManager.java:575-583`): 2 known-leader partitions build into requests while a 3rd (unknown-topic) partition parks in `remaining_to_search` and triggers `requestUpdate(true)`. Round-1 responses merge → re-park (`requestUpdate(false)`) → metadata refresh adds the missing topic → replay resolves the 3rd → all three offsets (11/32/54) merged into one result. Distinct path: the all-leaderless tests hit `Err(StaleMetadata)`; the partial-error tests build every partition on round 1. |
+| testGetOffsetsForTimesWhenSomeTopicPartitionLeadersDisconnectException | `fetch_offsets_disconnect_fails_global_result_without_reparking` **(added — Critic Issue 3)** | Pins the in-scope ORM fetch-path behavior: a per-node disconnect routes to `fail_request_state` → fails the whole `fetch_offsets` future with `NetworkException`, NOTHING re-parked (Java `OffsetsRequestManager.java:586`/`:600` `globalResult.completeExceptionally`). The Java test's retry-and-succeed is a *classic* `OffsetFetcher`/`ConsumerNetworkClient` property (OUT_OF_SCOPE per §20), so the ORM does not reproduce it. This branch was previously covered only on the reset path (Phase 31), not the fetch path. |
 | testBatchedListOffsetsMetadataErrors | `batched_list_offsets_metadata_errors_future_pending` | NOT_LEADER + UNKNOWN_TOPIC batched (1 request, 2 partitions same leader) → both retriable → re-parked, future stays pending (Java's TimeoutException) |
 | testBeginningOffsetsMultipleTopicPartitions | `beginning_offsets_multiple_partitions` (ORM) | 3 partitions, EARLIEST_TIMESTAMP on wire, offsets 2/4/6 |
 | testEndOffsetsMultipleTopicPartitions | `end_offsets_multiple_partitions` (ORM) | 3 partitions, LATEST_TIMESTAMP on wire, offsets 5/7/9 |
@@ -69,26 +71,68 @@ Phase 31's tests.
   (`reset_*`, `validation_*` tests + the `reset_request_includes_current_leader_epoch`
   / `reset_fenced_leader_epoch_still_needs_reset` tests). Not duplicated here.
 - **testGetOffsetsForTimesWhenSomeTopicPartitionLeadersNotKnownInitially /
-  ...DisconnectException** — staged multi-topic metadata refreshes that resolve
-  leaders over several rounds. The Rust `replay_retries_after_metadata_update` path
-  is exercised by `offsets_for_times_retriable_retry_triggers_metadata_update` and
-  `fetch_offsets_metadata_update_retries_successfully` (same code path: park →
-  metadata update → replay → succeed). The leaders-not-known-initially variant adds
-  a second-topic staged refresh that exercises no ORM code the retry tests don't;
-  the disconnect variant is the disconnect→re-park path covered by Phase 31's
-  `reset_disconnect_reparks_and_retries` (shared `pending_completion` failure
-  branch). Folded, not duplicated.
+  ...DisconnectException** — NO LONGER SKIPPED (Critic Issues 1 & 3). Both are now
+  translated as in-scope ORM behavior (see the OffsetFetcherTest table above):
+  - The leaders-not-known-initially variant is `fetch_offsets_build_time_partial_park_merges_after_metadata_update`.
+    The earlier rationale ("exercises no ORM code the retry tests don't") was WRONG:
+    it drives the `Ok`-with-non-empty-`remaining_to_search` *build-time partial park*
+    branch of `build_list_offsets_requests`, which neither the all-leaderless park
+    tests (which hit `Err(StaleMetadata)`) nor the partial-response-error tests (which
+    build every partition on round 1) exercise.
+  - The disconnect variant is `fetch_offsets_disconnect_fails_global_result_without_reparking`.
+    The earlier rationale ("disconnect→re-park, covered by Phase 31") was WRONG for the
+    fetch path: the ORM fetch path does NOT re-park on a disconnect — it fails the global
+    result via `fail_request_state` (Java `OffsetsRequestManager.java:586`/`:600`). The
+    Java test's retry-and-succeed is a classic-`OffsetFetcher` property (OUT_OF_SCOPE);
+    the in-scope ORM behavior (fail-the-future, no re-park) is what the new test pins.
 - **testGetOffsetsForTimesTimeout / testListOffsetsWithZeroTimeout /
   testBeginningOffsets / testEndOffsets / testBeginningOffsetsEmpty /
   testEndOffsetsEmpty** — already REDUCED/PRESERVED at AKC level (existing
   `offsets_for_times_*`, `beginning_offsets_*`, `end_offsets_*` tests). Not
   re-translated.
 
-## requestUpdate observability
-`metadata.requestUpdate(true|false)` is observed via
-`mgr.shared.metadata.metadata_arc().update_requested()` (true once `request_update`
-is called with either arg). Snapshot before / after to assert the transition, as
-Phase 31's reset tests do.
+## requestUpdate observability (Critic Issue 2 — true-vs-false now pinned)
+`metadata.request_update(reset_equivalent_response_backoff: bool)` sets
+`need_full_update = true` for BOTH arguments; the boolean ONLY controls whether the
+`equivalent_response_count` backoff counter is reset to 0 (`true`) or left untouched
+(`false`). So `need_full_update_for_test()` proves *a* full update was requested but
+canNOT distinguish `requestUpdate(true)` from `requestUpdate(false)` — Java's mock
+`verify(metadata).requestUpdate(true|false)` checks the exact boolean.
+
+To faithfully pin the argument (chosen option (a): the distinction IS meaningful — it
+governs real backoff behavior and Java verifies it exactly), `Metadata` gains two
+`#[cfg(test)] pub(crate)` hooks: `equivalent_response_count_for_test()` (reads the
+counter) and `set_equivalent_response_count_for_test(n)` (seeds it). Each
+`requestUpdate`-asserting test now:
+- seeds the counter to a known non-zero value (e.g. 3) before the path under test, then
+- for a `requestUpdate(true)` path, asserts the counter was RESET to 0
+  (`fetch_offsets_unknown_leader_parks_on_retry`,
+  `fetch_offsets_metadata_update_retries_successfully`,
+  `fetch_offsets_build_time_partial_park_*`); and
+- for a `requestUpdate(false)` path, asserts the counter was NOT reset (stays at the
+  seed) (`fetch_offsets_partial_retriable_error_merges_after_retry`,
+  `fetch_offsets_retriable_error_retries_after_metadata_update` (×10),
+  `fetch_offsets_unknown_leader_epoch_is_retriable`,
+  `offsets_for_times_retriable_retry_triggers_metadata_update` (×7)).
+This means a regression flipping `request_update(true)` ↔ `request_update(false)` is now
+caught, matching Java's mock-verification strength.
+
+## Minor / non-blocking notes (Critic observations)
+- **single-leader vs two-leader batching in the mixed-error matrix**:
+  `offsets_for_times_multi_partition_mixed_errors` deliberately places both partitions
+  on ONE leader (`bootstrap_metadata_with_nodes(..., 3, 1)` → 1 batched request),
+  whereas Java's `testGetOffsetsForTimesWithError` uses two distinct leaders. This is a
+  fidelity *reduction*, not a coverage hole: the single-node variant still exercises the
+  fetched+remaining merge, and the genuine multi-node (two-leader) merge is covered by
+  `fetch_offsets_partial_retriable_error_merges_after_retry`,
+  `offsets_for_times_retriable_retry_triggers_metadata_update`, and the new
+  `fetch_offsets_build_time_partial_park_*`. Acknowledged.
+- **destructive `build()` in `complete_all_unsent_with_per_partition_response`**: the
+  helper rebuilds each request via `request_builder_mut().build()` to read back partition
+  indices, then drives completion through the still-held `handler()`. The `build()` is
+  destructive but no test rebuilds the same unsent twice — completion goes through the
+  handler/receiver captured at request-creation time, not a re-built request.
+  Acknowledged.
 
 ## DoD checks run after each commit
 `cargo build`, `cargo test --lib` (ORM/AKC modules), `cargo xtask lint`,
