@@ -953,6 +953,18 @@ where
             commit_arc.set_coordinator(Arc::clone(coord_arc));
         }
 
+        // Wire the `OffsetCommitCallbackInvoker` into the commit manager as a
+        // type-erased `AutoCommitInterceptorHook` so the auto-commit success
+        // path can enqueue the interceptor `on_commit` invocation. Java holds
+        // the invoker directly on `CommitRequestManager`; in Rust the invoker
+        // is generic over `<K, V>` and the commit manager is not, so it is
+        // wired post-construction via the erased trait
+        // (`CommitRequestManager.java:380` `autoCommitCallback`).
+        if let Some(commit_arc) = commit.as_ref() {
+            commit_arc.set_auto_commit_interceptor_hook(Arc::clone(&_offset_commit_callback_invoker)
+                as Arc<dyn crate::consumer::internals::offset_commit_callback_invoker::AutoCommitInterceptorHook>);
+        }
+
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
         // groupProtocol == CONSUMER) config.ignore(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
         // Rust does not track "ignored" config keys (no `ConfigDef`

@@ -76,7 +76,7 @@ use super::consumer_metadata::ConsumerMetadata;
 use super::coordinator_request_manager::CoordinatorRequestManager;
 use super::member_state_listener::MemberStateListener;
 use super::network_client_delegate::{PollResult, UnsentRequest};
-use super::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
+use super::offset_commit_callback_invoker::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
 use super::request_manager::RequestManager;
 use super::subscription_state::SubscriptionState;
 use super::timed_request_state::TimedRequestState;
@@ -424,6 +424,15 @@ struct CommitRequestManagerInner {
     /// passing the coordinator in; in Rust the consumer-construction
     /// flow builds `coordinator` then `commit`, then calls the setter).
     coordinator: Mutex<Option<Arc<CoordinatorRequestManager>>>,
+    /// Type-erased hook into the `OffsetCommitCallbackInvoker` so the
+    /// auto-commit success path can enqueue an interceptor `on_commit`
+    /// invocation. Mirrors Java's `offsetCommitCallbackInvoker` field on
+    /// `CommitRequestManager`, used by `autoCommitCallback` (Java
+    /// `CommitRequestManager.java:380`). Type-erased because the Rust
+    /// commit manager is not generic over `<K, V>` (see
+    /// [`AutoCommitInterceptorHook`]). Wired post-construction via
+    /// [`CommitRequestManager::set_auto_commit_interceptor_hook`].
+    auto_commit_interceptor_hook: Mutex<Option<Arc<dyn AutoCommitInterceptorHook>>>,
 }
 
 /// Mutable runtime state. Held behind `Mutex<...>` so the BG-task `poll`
@@ -498,6 +507,7 @@ impl CommitRequestManager {
             next_request_id: AtomicU64::new(0),
             state: Mutex::new(state),
             coordinator: Mutex::new(None),
+            auto_commit_interceptor_hook: Mutex::new(None),
         });
         Self { inner }
     }
@@ -514,6 +524,21 @@ impl CommitRequestManager {
     pub(crate) fn set_coordinator(&self, coordinator: Arc<CoordinatorRequestManager>) {
         let mut guard = self.inner.coordinator.lock().expect("commit manager coordinator slot poisoned");
         *guard = Some(coordinator);
+    }
+
+    /// Wire up the [`AutoCommitInterceptorHook`] (the type-erased
+    /// `OffsetCommitCallbackInvoker`) so the auto-commit success path can
+    /// enqueue an interceptor `on_commit` invocation. Mirrors Java passing
+    /// `offsetCommitCallbackInvoker` into the `CommitRequestManager`
+    /// constructor; in Rust it is wired post-construction because the
+    /// invoker is generic and the commit manager is not.
+    pub(crate) fn set_auto_commit_interceptor_hook(&self, hook: Arc<dyn AutoCommitInterceptorHook>) {
+        let mut guard = self
+            .inner
+            .auto_commit_interceptor_hook
+            .lock()
+            .expect("commit manager auto-commit interceptor hook poisoned");
+        *guard = Some(hook);
     }
 
     /// Returns a new `CommitRequestManager` handle that **shares** the
@@ -1294,6 +1319,10 @@ impl CommitRequestManager {
             }
             guard.member_info.clone()
         };
+        // Snapshot the offsets so the auto-commit success arm can enqueue
+        // the interceptor invocation with the committed offsets (Java's
+        // `autoCommitCallback(allConsumedOffsets)`).
+        let offsets_for_interceptor = offsets.clone();
         let (request, request_rx) = OffsetCommitRequestState::new(
             offsets,
             member_info,
@@ -1313,20 +1342,33 @@ impl CommitRequestManager {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let outcome = request_rx.await;
-            let mut guard = inner.state.lock().expect("commit manager state poisoned");
-            if let Some(ac) = guard.auto_commit.as_mut() {
-                ac.set_inflight_commit_status(false);
+            // Clear the inflight flag and (on a retriable failure) reset the
+            // auto-commit timer with backoff under a single critical section,
+            // then drop the guard before firing the interceptor hook (which
+            // takes its own lock inside the invoker).
+            {
+                let mut guard = inner.state.lock().expect("commit manager state poisoned");
+                if let Some(ac) = guard.auto_commit.as_mut() {
+                    ac.set_inflight_commit_status(false);
+                }
+                // Java's `maybeResetTimerWithBackoff`: on a retriable failure
+                // reset the auto-commit timer with `retry_backoff_ms`.
+                let is_retriable_failure = matches!(&outcome, Ok(Err(err)) if err.is_retriable());
+                if let (true, Some(ac)) = (is_retriable_failure, guard.auto_commit.as_mut()) {
+                    ac.reset_timer_with_backoff(current_time_ms, inner.retry_backoff_ms);
+                }
             }
             match outcome {
                 Ok(Ok(_committed)) => {
+                    // Java `autoCommitCallback`: on success, enqueue the
+                    // interceptor `on_commit` invocation with the committed
+                    // offsets (`CommitRequestManager.java:380`).
+                    inner.enqueue_interceptor_invocation(offsets_for_interceptor);
                     log::debug!("Completed asynchronous auto-commit of offsets");
                 },
                 Ok(Err(err)) => {
                     if err.is_retriable() {
                         log::debug!("Asynchronous auto-commit of offsets failed due to retriable error: {err}");
-                        if let Some(ac) = guard.auto_commit.as_mut() {
-                            ac.reset_timer_with_backoff(current_time_ms, inner.retry_backoff_ms);
-                        }
                     } else {
                         log::debug!("Asynchronous auto-commit of offsets failed: {err}");
                     }
@@ -1847,6 +1889,25 @@ impl CommitRequestManagerInner {
             coord.mark_coordinator_unknown(cause, current_time_ms);
         }
     }
+
+    /// Enqueue an interceptor `on_commit` invocation on the wired
+    /// [`AutoCommitInterceptorHook`] (the type-erased
+    /// `OffsetCommitCallbackInvoker`) if one is set. No-op when the hook
+    /// is not wired (Phase 9 unit tests) or the interceptor chain is empty.
+    /// Mirrors Java's `autoCommitCallback` success arm
+    /// (`CommitRequestManager.java:380`).
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
+        let hook = {
+            let guard = self
+                .auto_commit_interceptor_hook
+                .lock()
+                .expect("commit manager auto-commit interceptor hook poisoned");
+            guard.as_ref().map(Arc::clone)
+        };
+        if let Some(hook) = hook {
+            hook.enqueue_interceptor_invocation(offsets);
+        }
+    }
 }
 
 // =========================================================================
@@ -1978,7 +2039,10 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     // `subscriptions.allConsumed()` on retry — Java does this via
     // `requestAttempt.offsets = subscriptions.allConsumed();` before
     // recursing. Initial value is preserved for the no-mutation path.
-    let _last_offsets = initial_offsets;
+    // Also used to enqueue the interceptor `on_commit` invocation on
+    // success (Java's `autoCommitCallback`, which `requestAutoCommit`
+    // attaches to every attempt, including the rebalance flush).
+    let mut last_offsets = initial_offsets;
     // Java's `isStaleEpochErrorAndValidEpochAvailable` requires
     // `memberInfo.memberEpoch.isPresent()` (`CommitRequestManager.java:573-575`).
     // Captured here once at driver entry because `member_info` does not
@@ -1986,7 +2050,13 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     let has_valid_member_epoch = member_info.member_epoch.is_some();
     let outcome: Result<(), KafkaError> = loop {
         match request_rx.await {
-            Ok(Ok(_committed)) => break Ok(()),
+            Ok(Ok(_committed)) => {
+                // Java `autoCommitCallback`: on success, enqueue the
+                // interceptor `on_commit` invocation with the offsets that
+                // were committed (`CommitRequestManager.java:380`).
+                inner.enqueue_interceptor_invocation(last_offsets.clone());
+                break Ok(());
+            },
             Ok(Err(err)) => {
                 // Java line 349: enter the retry gate only when the error
                 // is a RetriableException OR the stale-epoch case AND a
@@ -2049,6 +2119,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                     member_info.member_id,
                     err.error().message()
                 );
+                last_offsets = refreshed.clone();
                 let (mut retry_request, retry_rx) = OffsetCommitRequestState::new(
                     refreshed,
                     member_info.clone(),

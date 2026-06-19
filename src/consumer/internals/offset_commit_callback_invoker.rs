@@ -101,6 +101,38 @@ pub(crate) struct OffsetCommitCallbackInvoker<K: 'static, V: 'static> {
     interceptors_empty: bool,
 }
 
+/// Type-erased hook for enqueueing an interceptor `on_commit` invocation on
+/// auto-commit success.
+///
+/// Rust-only shim (no Java analog as a named type): Java's
+/// `CommitRequestManager` holds the `OffsetCommitCallbackInvoker` field
+/// directly and calls `enqueueInterceptorInvocation(...)` from its
+/// `autoCommitCallback` BiConsumer. The Rust `CommitRequestManager` is NOT
+/// generic over `<K, V>` (see consumer-threading.md §28 / Phase 9 notes —
+/// `commit_async` takes the generic invoker as a *parameter* rather than
+/// owning it), so it cannot hold an `Arc<OffsetCommitCallbackInvoker<K, V>>`
+/// field. This trait erases the generic parameters so the commit manager can
+/// hold an `Option<Arc<dyn AutoCommitInterceptorHook>>` and fire the same
+/// interceptor invocation from its auto-commit success path (mirroring Java's
+/// `autoCommitCallback`). The only method needed for that path is
+/// `enqueue_interceptor_invocation`, which carries no `K`/`V` in its
+/// signature.
+pub(crate) trait AutoCommitInterceptorHook: Send + Sync + 'static {
+    /// Enqueue an interceptor `on_commit` invocation for the committed
+    /// offsets. No-op when the interceptor chain is empty.
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>);
+}
+
+impl<K, V> AutoCommitInterceptorHook for OffsetCommitCallbackInvoker<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
+        OffsetCommitCallbackInvoker::enqueue_interceptor_invocation(self, offsets);
+    }
+}
+
 impl<K, V> OffsetCommitCallbackInvoker<K, V>
 where
     K: Send + 'static,

@@ -56,3 +56,4 @@
 - [M8 Phase 30 per-channel wakers](review_m8_phase30_per_channel_wakers.md) — selectedKeys-on-tokio CLEAN; cancel-safety via persistent fired-queue, armed_count drift audit, dirty-site re-derivation, stale-fire structurally-no-spin
 - [io::ErrorKind vs typed exception](review_io_error_kind_vs_typed_exception.md) — TLS reset misclassified as fatal auth: prepare() stamps AuthenticationFailed for any error; ErrorKind heuristic lossy vs Java exception type
 - [M8 Phase 31 reset/validate parity](review_m8_phase31.md) — SKIP-collapse: "same guard" ≠ "same branch" (maybe_seek_unvalidated 3 discard triggers); prod-fix dual-copy drift of groupListOffsetRequests; mock-verify→observable-state under-assertion
+- [M8 Phase 32 offset-query parity](review_m8_phase32.md) — folded-skip drops partial-build-time-park branch; requestUpdate(bool) flag conflation (need_full_update set for both args); ORM fetch FAILS-not-reparks on disconnect

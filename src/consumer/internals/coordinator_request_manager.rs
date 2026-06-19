@@ -142,6 +142,16 @@ impl CoordinatorRequestManager {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").take()
     }
 
+    /// Test-only helper: directly inject a fatal error so sibling-module
+    /// tests (e.g. `CommitRequestManagerTest`'s `testPollWithFatalError*`)
+    /// can drive the coordinator-fatal branch without simulating a failed
+    /// `FindCoordinator` round-trip. Mirrors Mockito
+    /// `when(coordinatorRequestManager.fatalError()).thenReturn(Optional.of(...))`.
+    #[cfg(test)]
+    pub(crate) fn set_fatal_error_for_test(&self, error: KafkaError) {
+        *self.inner.fatal_error.lock().expect("fatal_error poisoned") = Some(error);
+    }
+
     /// Handles the disconnection of the current coordinator: if the
     /// error is a disconnect, marks the coordinator unknown so it will
     /// be re-discovered on the next [`Self::poll`].
