@@ -741,19 +741,25 @@ async fn test_async_consumer_commit_specified_offsets() {
 /// Auto-commit fires on rebalance; after the rebalance, `committed()`
 /// reflects the seeks.
 ///
-/// **Deviation (Issue 8):** Java's listener calls
-/// `consumer.pause(partitions)` inside `onPartitionsAssigned` so that
-/// fetched-position advancement does not overwrite the test's explicit
-/// seeks before the rebalance commits them. A Rust rebalance listener
-/// holds only `&self` (as `Arc<dyn ConsumerRebalanceListener>`) and
-/// cannot call the consumer's `&mut self` `pause()` (Issue 8 in the
-/// Phase-13 COMMENTS, the same gap that `#[ignore]`s the poll-suite's
-/// commit-in-revocation test). We achieve the same isolation differently:
-/// we never `poll()` for records between the seek and the triggering
-/// re-subscribe — `await_assignment` drives only the rebalance, and the
-/// sought partitions never fetch past the sought offset. The
-/// auto-commit-on-rebalance + `committed()` readback (the actual contract)
-/// is preserved faithfully.
+/// **Deviation (Issue 8 / Issue 4):** Java's listener calls
+/// `consumer.pause(partitions)` inside `onPartitionsAssigned` so that the
+/// `awaitAssignment` poll loop does not advance `tp`'s fetch position past
+/// the test's explicit seek (300) before the rebalance auto-commits it
+/// (`tp` has 1000 records). A Rust rebalance listener holds only `&self`
+/// (as `Arc<dyn ConsumerRebalanceListener>`) and cannot call the
+/// consumer's `&mut self` `pause()` (Issue 8 in the Phase-13 COMMENTS, the
+/// structural gap documented in this phase's PLAN.md and the same gap that
+/// `#[ignore]`s the poll-suite's commit-in-revocation test).
+///
+/// To remove the resulting timing dependency entirely, we DO NOT produce
+/// any records to `tp` (Java's 1000-record `sendRecords` is dropped). The
+/// test never consumes those records — they existed only to make the seek
+/// meaningful, and a partition with no fetchable records satisfies the
+/// same purpose deterministically: the post-re-subscribe
+/// `await_assignment` poll loop has nothing to fetch, so the seeked
+/// positions (300/500) cannot be advanced before the rebalance auto-commit
+/// captures them. The auto-commit-on-rebalance + `committed()` readback
+/// (the actual contract) is preserved faithfully and is no longer racy.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_auto_commit_on_rebalance() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -763,7 +769,9 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
+    // NOTE: unlike Java we do not produce records to `tp` — see the
+    // deviation note above. The seeks below set positions deterministically
+    // and no fetch can advance them.
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &topic2).await;
