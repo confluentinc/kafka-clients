@@ -111,14 +111,30 @@ forcing it.)
 
 ## Production change
 
-**NONE expected** — every in-scope behavior is already supported by the
-public API (verified: InvalidGroupId on `commit_sync`/`committed`;
-`position_timeout` returns `Timeout`; `submit_and_drain(enable_wakeup)`
-returns `Wakeup`; `seek_to_end` unassigned returns exact "No current
-assignment" message; `offsets_for_times` negative-ts IllegalArgument;
-`partitions_for` InvalidTopic). If a genuine fidelity bug surfaces during
-implementation it will be perf/CPU-neutral, cited to the Java line, and
-called out in the report.
+**One addition (Critic round-1 fix, perf-neutral):** `Consumer::wakeup_handle()
+-> WakeupHandle` (mirrored on `AsyncKafkaConsumer` + `MockConsumer`).
+
+Java's `Consumer` reference is freely shareable across threads, so
+`CompletableFuture.runAsync(() -> consumer.wakeup())`
+(`PlaintextConsumerTest.java:1501` / `1535`) can fire `wakeup()` from another
+thread while the owner blocks in `position()`. The Rust consumer is borrowed
+`&mut self` for the duration of a blocking call, so a reference cannot cross
+the task boundary — there was no SAFE way to express the cross-task `wakeup()`
+pattern. `WakeupHandle` is a `Clone + Send + 'static` handle that captures only
+the internally-synchronized, `Arc`-backed wakeup state (the rotating
+`WakeupTrigger` watch channel + the bg-task notify closure, now held as
+`Arc<dyn Fn>`); obtain it BEFORE the `&mut` borrow and fire it from the spawned
+task. **This CLOSES the "missing shareable wakeup handle" API gap** that the
+two wakeup tests previously needed an `unsafe` raw-pointer helper to work
+around. **Perf-neutral:** off the hot path entirely (one `Arc`/`watch` clone at
+handle-creation, only when a user opts in); no per-record / per-poll cost.
+
+Every OTHER in-scope behavior is already supported by the public API
+(verified: InvalidGroupId on `commit_sync`/`committed`; `position_timeout`
+returns `Timeout`; `submit_and_drain(enable_wakeup)` returns `Wakeup`;
+`seek_to_end` unassigned returns exact "No current assignment" message;
+`offsets_for_times` negative-ts IllegalArgument; `partitions_for`
+InvalidTopic).
 
 ## Verify (Phase-39 protocol; no Docker in dev env)
 

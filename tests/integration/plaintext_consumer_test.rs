@@ -427,6 +427,10 @@ async fn test_async_consumer_headers() {
 
     let producer = build_producer(ctx.bootstrap_servers());
     ensure_topic_with_2_partitions(&producer, &topic).await;
+    // The provisioner wrote a header-less record at offset 0 on partition 0.
+    // The headers record lands at `base`; seek there (not a hard 0) and read
+    // it — otherwise we would read the provisioner, which has no headers.
+    let base = end_offset(consumer_for_probe(ctx.bootstrap_servers(), &group_id).as_mut(), &tp).await;
 
     // Java: `new ProducerRecord<>(TP.topic(), TP.partition(), null, "key", "value")`
     // then `record.headers().add(...)` thrice.
@@ -447,7 +451,7 @@ async fn test_async_consumer_headers() {
     assert_eq!(consumer.assignment().len(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(consumer.assignment().len(), 1);
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek(tp.clone(), base).await.expect("seek should succeed");
 
     let records = consume_records(consumer.as_mut(), 1).await;
     assert_eq!(records.len(), 1);
@@ -888,19 +892,24 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let group_id = ctx.group_id("g_offsets_for_time");
 
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    // The provisioner produced one record per partition at ts (broker
-    // default if no timestamp) — but our provisioner uses
-    // `with_partition` (no explicit ts), so the broker stamps it. To keep
-    // the timestamp==offset invariant, produce fresh topics WITHOUT the
-    // provisioner: create distinct topics for this test instead.
-    let base0 = end_offset(make_consumer(ctx.bootstrap_servers(), &group_id, &[]).as_mut(), &tp0).await;
-    let base1 = end_offset(make_consumer(ctx.bootstrap_servers(), &group_id, &[]).as_mut(), &tp1).await;
-
+    // Do NOT provision: the `__provisioner__` record at offset 0 carries a
+    // broker wall-clock `CreateTime` timestamp, which is `>=` any small
+    // search target, so `offsets_for_times(ts=0/20)` would resolve to the
+    // provisioner (offset 0) rather than the produced records. Instead,
+    // send the 100 timestamped records directly — the first send to
+    // partition 0 auto-creates the topic with `KAFKA_NUM_PARTITIONS=2`, so
+    // offset 0 on each partition IS a real `ts==0` record (Java's
+    // "key/val/timestamp == sequence number, starting at offset 0").
+    //
     // partition 0: key/val/timestamp == sequence number; partition 1: same.
     send_records(&producer, &tp0, 100, 0).await;
     send_records(&producer, &tp1, 100, 0).await;
     producer.close().await.expect("producer close");
+
+    // No provisioner ⇒ the produced records start at offset 0 on each
+    // partition.
+    let base0 = 0i64;
+    let base1 = 0i64;
 
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
 
@@ -1111,26 +1120,20 @@ async fn test_async_consumer_position_respects_wakeup() {
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
-    // Java: `CompletableFuture.runAsync(() -> { sleep(1s); consumer.wakeup(); })`.
-    // `wakeup()` is sync and `Consumer` is `Send`; the consumer's wakeup
-    // handle is shared, so we trigger it via a cloned trigger captured by a
-    // spawned task. The simplest faithful approach: spawn a task holding a
-    // raw pointer is unsafe; instead we use a scoped task that fires wakeup
-    // through a shared reference. `wakeup()` takes `&self`, so we obtain a
-    // `&dyn Consumer` and move it across via an `Arc`-free path is not
-    // possible here — so we drive wakeup from a separate OS thread that
-    // shares the consumer through a scoped reference.
-    //
-    // Rust constraint: we cannot share `&mut consumer` and `&consumer`
-    // across tasks simultaneously. We therefore fire `wakeup()` from a
-    // spawned task that owns a clone of the consumer's wakeup mechanism.
-    // `Consumer::wakeup(&self)` only needs `&self`; we capture a raw
-    // wakeup via a small helper thread that calls it before the
-    // `position_timeout` future is polled to completion.
-    let result = fire_wakeup_during(&mut consumer, Duration::from_secs(1), |c| {
-        Box::pin(async move { c.position_timeout(&tp, Duration::from_secs(3)).await })
-    })
-    .await;
+    // Java: `CompletableFuture.runAsync(() -> { sleep(1s); consumer.wakeup(); })`
+    // (`PlaintextConsumerTest.java:1501-1504`). Java's `Consumer` reference is
+    // freely shareable across threads. The Rust equivalent obtains a
+    // `Send + 'static` `WakeupHandle` BEFORE the `&mut` borrow taken by
+    // `position_timeout`, then fires `wakeup()` from a spawned task — sound,
+    // no `unsafe`, no reference to the consumer crossing the task boundary.
+    let handle = consumer.wakeup_handle();
+    let waker = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        handle.wakeup();
+    });
+
+    let result = consumer.position_timeout(&tp, Duration::from_secs(3)).await;
+    let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup");
     assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
 
@@ -1154,10 +1157,17 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     let tp = TopicPartition::new(topic, 15);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
-    let result = fire_wakeup_during(&mut consumer, Duration::from_secs(1), |c| {
-        Box::pin(async move { c.position_timeout(&tp, Duration::from_secs(100)).await })
-    })
-    .await;
+    // Java (`PlaintextConsumerTest.java:1535-1538`): a cross-thread
+    // `wakeup()` interrupts a blocking `position` even when the bootstrap
+    // is unreachable. Obtain the shareable handle before the `&mut` borrow.
+    let handle = consumer.wakeup_handle();
+    let waker = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        handle.wakeup();
+    });
+
+    let result = consumer.position_timeout(&tp, Duration::from_secs(100)).await;
+    let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup despite connection error");
     assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
 
@@ -1248,47 +1258,4 @@ async fn end_offset(consumer: &mut BytesConsumer, tp: &TopicPartition) -> i64 {
 /// Builds a short-lived consumer used only to probe `end_offsets`.
 fn consumer_for_probe(bootstrap: &str, group_id: &str) -> Box<BytesConsumer> {
     make_consumer(bootstrap, &format!("{group_id}_probe"), &[])
-}
-
-/// Mirrors Java's `CompletableFuture.runAsync(() -> { sleep(delay);
-/// consumer.wakeup(); })` followed by a blocking `position(...)` on the
-/// main thread.
-///
-/// `Consumer::wakeup(&self)` only needs `&self` and is documented
-/// thread-safe (it touches only the consumer's shared
-/// `watch::Sender<CancellationToken>` and the bg-task `Arc<Notify>` — both
-/// internally synchronized, disjoint from the `&mut self` poll state). The
-/// blocking operation needs `&mut self`. Java shares the object reference
-/// across threads freely; the Rust borrow checker cannot prove the two
-/// accesses are disjoint, so we share a raw pointer and fire `wakeup()`
-/// from a spawned task.
-///
-/// We `await` the waker before returning, so the spawned task never
-/// outlives the borrow.
-async fn fire_wakeup_during<F>(consumer: &mut Box<BytesConsumer>, delay: Duration, op: F) -> Result<i64, KafkaError>
-where
-    F: for<'c> FnOnce(
-        &'c mut BytesConsumer,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64, KafkaError>> + Send + 'c>>,
-{
-    // A `*const Box<BytesConsumer>` is a THIN pointer (the `Box` is sized),
-    // so it round-trips through `usize` cleanly — unlike a `*const dyn
-    // Trait` fat pointer.
-    let raw_addr = (consumer as *const Box<BytesConsumer>) as usize;
-    let waker = tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        // SAFETY: `wakeup()` only mutates the shared, internally-synchronized
-        // wakeup channel / notify — disjoint from the `&mut self` poll state
-        // the `op` future borrows. Mirrors Java's cross-thread `wakeup()`.
-        // The `&Box<_>` (not `&dyn`) is deliberate: a thin `*const Box` is
-        // what round-trips through `usize`; a `*const dyn Trait` is a fat
-        // pointer that cannot.
-        #[allow(clippy::borrowed_box)]
-        let boxed: &Box<BytesConsumer> = unsafe { &*(raw_addr as *const Box<BytesConsumer>) };
-        boxed.wakeup();
-    });
-
-    let result = op(&mut **consumer).await;
-    let _ = waker.await;
-    result
 }

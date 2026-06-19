@@ -119,6 +119,71 @@ enum BgJoin {
     },
 }
 
+/// A `Send + 'static` handle that can fire [`Consumer::wakeup`] from a
+/// task or thread other than the one holding the consumer.
+///
+/// **No Java class counterpart.** Java's `Consumer` reference is itself
+/// freely shareable across threads, so `consumer.wakeup()` can be called
+/// from another thread while the owning thread blocks in
+/// `poll()` / `position()` (e.g.
+/// `CompletableFuture.runAsync(() -> consumer.wakeup())`,
+/// `PlaintextConsumerTest.java:1501`). In Rust the consumer is owned via
+/// `&mut self` for the duration of a blocking call, so a bare reference
+/// cannot cross the task boundary. This handle captures only the
+/// internally-synchronized, `Arc`-backed wakeup state (the rotating
+/// [`WakeupTrigger`] watch channel and the bg-task notify closure) so the
+/// same cross-task wakeup pattern is expressible **without `unsafe`**.
+///
+/// Obtain one via [`Consumer::wakeup_handle`] **before** starting a
+/// blocking call, move it into the other task, and call
+/// [`WakeupHandle::wakeup`].
+///
+/// Cheap to clone — clones share the same underlying wakeup state.
+#[derive(Clone)]
+pub struct WakeupHandle {
+    inner: WakeupHandleInner,
+}
+
+#[derive(Clone)]
+enum WakeupHandleInner {
+    /// `AsyncKafkaConsumer`: fire the rotating-token trigger AND poke the
+    /// bg-task `select!`, exactly as `AsyncKafkaConsumer::wakeup` does.
+    Async {
+        wakeup_trigger: WakeupTrigger,
+        bg_wakeup: Arc<dyn Fn() + Send + Sync>,
+    },
+    /// `MockConsumer`: set the shared wakeup flag observed by the next
+    /// `poll()`.
+    Mock { flag: Arc<AtomicBool> },
+}
+
+impl WakeupHandle {
+    /// Fires the consumer's `wakeup()` from this handle. Equivalent to
+    /// calling [`Consumer::wakeup`] on the owning consumer, but callable
+    /// from any task / thread without holding a reference to the consumer.
+    pub fn wakeup(&self) {
+        match &self.inner {
+            WakeupHandleInner::Async { wakeup_trigger, bg_wakeup } => {
+                wakeup_trigger.wakeup();
+                bg_wakeup();
+            },
+            WakeupHandleInner::Mock { flag } => {
+                flag.store(true, Ordering::SeqCst);
+            },
+        }
+    }
+
+    /// Builds an async-consumer wakeup handle from its shared wakeup state.
+    pub(crate) fn for_async(wakeup_trigger: WakeupTrigger, bg_wakeup: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self { inner: WakeupHandleInner::Async { wakeup_trigger, bg_wakeup } }
+    }
+
+    /// Builds a mock-consumer wakeup handle from its shared wakeup flag.
+    pub(crate) fn for_mock(flag: Arc<AtomicBool>) -> Self {
+        Self { inner: WakeupHandleInner::Mock { flag } }
+    }
+}
+
 /// Type-erased handle to the consumer background task.
 ///
 /// Owns the join mechanism ([`BgJoin`]) for the bg loop and the
@@ -131,8 +196,12 @@ pub(crate) struct NetworkThreadCloseHandle {
     /// Cancels the bg-task `run_once` loop and wakes the trigger so the
     /// next iteration observes the shutdown.
     signal_close_fn: Box<dyn Fn() + Send + Sync>,
-    /// Wakes the bg-task's `select!` on the wakeup token.
-    wakeup_fn: Box<dyn Fn() + Send + Sync>,
+    /// Wakes the bg-task's `select!` on the wakeup token. Held as an
+    /// `Arc` (not `Box`) so a clone can be handed to a shareable
+    /// [`WakeupHandle`] (so cross-task `wakeup()` — a first-class Java
+    /// pattern — is expressible without `unsafe`); the bg-wakeup
+    /// closure is `Send + Sync` and side-effect-idempotent.
+    wakeup_fn: Arc<dyn Fn() + Send + Sync>,
     /// How the bg loop is joined on close (tokio task vs dedicated thread).
     join: BgJoin,
 }
@@ -147,7 +216,11 @@ impl NetworkThreadCloseHandle {
         wakeup_fn: Box<dyn Fn() + Send + Sync>,
         join_handle: JoinHandle<()>,
     ) -> Self {
-        Self { signal_close_fn, wakeup_fn, join: BgJoin::Spawned(Some(join_handle)) }
+        Self {
+            signal_close_fn,
+            wakeup_fn: Arc::from(wakeup_fn),
+            join: BgJoin::Spawned(Some(join_handle)),
+        }
     }
 
     /// Constructor used by the production [`AsyncKafkaConsumer::new`]
@@ -163,9 +236,16 @@ impl NetworkThreadCloseHandle {
     ) -> Self {
         Self {
             signal_close_fn,
-            wakeup_fn,
+            wakeup_fn: Arc::from(wakeup_fn),
             join: BgJoin::Dedicated { done: Some(done), thread: Some(thread) },
         }
+    }
+
+    /// Clones the bg-task wakeup closure as a shareable `Arc`. Used to
+    /// build a [`WakeupHandle`] that can fire the bg-task `select!` from
+    /// another task without holding any reference to the consumer.
+    pub(crate) fn wakeup_fn_clone(&self) -> Arc<dyn Fn() + Send + Sync> {
+        Arc::clone(&self.wakeup_fn)
     }
 
     /// Signals the bg task to exit and wakes it from its current
@@ -865,16 +945,19 @@ where
         // commit-callback invoker owns its own ConsumerInterceptors
         // instance for `on_commit` dispatch (per Phase-9 design).
         //
-        // TODO(milestone-N-interceptors): share the consumer's
-        // `_interceptors` Arc here when reflection-based interceptor
-        // loading lands. Java line 446 passes the SAME `interceptors`
-        // reference to both the consumer and the invoker; the Rust
-        // translation currently constructs a fresh empty
-        // `ConsumerInterceptors` for the invoker. Behaviorally
-        // identical today (both end up with empty Vecs in this
-        // milestone), but would diverge once interceptor loading is
-        // wired — the invoker would dispatch through its empty list
-        // while the consumer's interceptors held the loaded list.
+        // DOCUMENTED LIMITATION (not a TODO): config-based interceptor
+        // loading is untranslated in this milestone. Java line 446 passes
+        // the SAME `interceptors` reference to both the consumer and the
+        // invoker; that `interceptors` list is populated by the reflective
+        // `interceptor.classes` loader, which has no Rust counterpart here.
+        // The Rust `new` path therefore always builds an EMPTY
+        // `ConsumerInterceptors` for both the consumer and this invoker, so
+        // the two are behaviorally identical today (both hold empty Vecs).
+        // The seam that CAN carry a non-empty interceptor chain is
+        // `new_with_components` (`pub(crate)`); when reflective interceptor
+        // loading is added in a future milestone, share the consumer's
+        // interceptor Arc here so the invoker dispatches through the same
+        // loaded list rather than this empty one.
         let _offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>> =
             Arc::new(OffsetCommitCallbackInvoker::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
 
@@ -1606,6 +1689,15 @@ where
         // `KafkaClient::poll` is unblocked even if the wakeup token was
         // already cancelled.
         self.network_thread_close.wakeup();
+    }
+
+    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
+    /// [`Self::wakeup`] from another task / thread. See [`WakeupHandle`]
+    /// for the rationale (Java's `Consumer` is freely shareable across
+    /// threads; this is the safe Rust equivalent for the cross-task
+    /// `wakeup()` pattern).
+    pub fn wakeup_handle(&self) -> WakeupHandle {
+        WakeupHandle::for_async(self.wakeup_trigger.clone(), self.network_thread_close.wakeup_fn_clone())
     }
 
     /// Returns the cached `max_time_to_wait` value, set by the bg task
@@ -3984,6 +4076,10 @@ where
         AsyncKafkaConsumer::wakeup(self);
     }
 
+    fn wakeup_handle(&self) -> WakeupHandle {
+        AsyncKafkaConsumer::wakeup_handle(self)
+    }
+
     // ── Subscribe / unsubscribe / assign ───────────────────────────────
 
     async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError> {
@@ -4551,6 +4647,27 @@ mod tests {
         assert!(!token.is_cancelled());
         consumer.wakeup();
         assert!(token.is_cancelled(), "wakeup() must cancel the current token");
+    }
+
+    /// A `WakeupHandle` obtained from the consumer fires the SAME wakeup
+    /// state as `wakeup()` — proving the shareable handle is a faithful,
+    /// `Send`-able stand-in for the cross-task `wakeup()` pattern (the
+    /// safe replacement for the deleted unsafe test helper).
+    #[tokio::test]
+    async fn wakeup_handle_cancels_current_token() {
+        let consumer = make_test_consumer();
+        let token = consumer.wakeup_trigger.current_token();
+        assert!(!token.is_cancelled());
+
+        // The handle is moved into another task — no reference to the
+        // consumer crosses the task boundary.
+        let handle = consumer.wakeup_handle();
+        let joined = tokio::spawn(async move {
+            handle.wakeup();
+        });
+        joined.await.expect("waker task");
+
+        assert!(token.is_cancelled(), "wakeup_handle().wakeup() must cancel the current token");
     }
 
     /// Phase 12.5 Issue 7 regression: the production ctor must register

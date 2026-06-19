@@ -37,6 +37,7 @@ pub mod subscription_pattern;
 
 pub(crate) mod internals;
 
+pub use async_kafka_consumer::WakeupHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -316,6 +317,16 @@ where
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
     ///     Map<TopicPartition, Long>)`.
+    ///
+    /// **Contract note (deviation from Java):** Java returns a map whose
+    /// value is *nullable*, so an unresolved partition (queried but no
+    /// offset at/after the target time) is conveyed as **key present,
+    /// value `null`**, and `result.keySet()` always contains every queried
+    /// partition. The Rust [`OffsetAndTimestamp`] value is non-nullable, so
+    /// an unresolved partition is **omitted entirely** (key absent) rather
+    /// than present-with-null. Callers porting Java code that iterates
+    /// `result.keySet()` expecting every queried key back must instead treat
+    /// an absent key as "no offset". See [`OffsetAndTimestamp`].
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -324,6 +335,10 @@ where
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
     ///     Map<TopicPartition, Long>, Duration)`.
+    ///
+    /// See [`Self::offsets_for_times`] for the unresolved-partition
+    /// contract note (unresolved partitions are omitted, not
+    /// present-with-null, unlike Java).
     async fn offsets_for_times_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -396,6 +411,19 @@ where
     /// Translates Java's `void wakeup()`. Sync — callable from any task,
     /// including signal handlers.
     fn wakeup(&self);
+
+    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
+    /// [`Consumer::wakeup`] from a task / thread other than the one that
+    /// owns the consumer.
+    ///
+    /// No Java method counterpart: Java's `Consumer` reference is itself
+    /// shareable across threads, so `consumer.wakeup()` can be called from
+    /// another thread while the owning thread blocks in `poll()` /
+    /// `position()`. Rust borrows the consumer as `&mut self` for the
+    /// duration of a blocking call, so a reference cannot cross the task
+    /// boundary; obtain a [`WakeupHandle`] beforehand instead. See
+    /// [`WakeupHandle`].
+    fn wakeup_handle(&self) -> WakeupHandle;
 }
 
 /// Constructs a new [`Consumer`] from a configuration and explicit

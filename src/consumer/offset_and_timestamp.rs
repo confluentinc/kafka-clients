@@ -23,6 +23,13 @@ use crate::common::KafkaError;
 /// A container class for offset and timestamp.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.OffsetAndTimestamp`.
+///
+/// **`offsets_for_times` mapping note:** this value is non-nullable, so when
+/// it is the value type of an `offsets_for_times` result map, an unresolved
+/// partition (queried but with no offset at/after the target time) is
+/// **omitted from the map** (key absent) rather than present with a `null`
+/// value as in Java. See
+/// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OffsetAndTimestamp {
     timestamp: i64,

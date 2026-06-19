@@ -39,7 +39,7 @@ use crate::consumer::internals::auto_offset_reset_strategy::StrategyType;
 use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
 use crate::consumer::{
     AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
+    ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern, WakeupHandle,
 };
 use crate::metadata::LeaderAndEpoch;
 
@@ -96,7 +96,9 @@ pub struct MockConsumer<K, V> {
     /// Atomic so [`Consumer::wakeup`] can
     /// take `&self` (callable from any task / signal handler). `SeqCst`
     /// because wakeup is rare and reorder reasoning is not worth the win.
-    wakeup: AtomicBool,
+    /// `Arc` so [`Consumer::wakeup_handle`] can hand a shareable clone to
+    /// another task.
+    wakeup: Arc<AtomicBool>,
     records: HashMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     poll_exception: Option<KafkaError>,
     offsets_exception: Option<KafkaError>,
@@ -123,7 +125,7 @@ impl<K, V> MockConsumer<K, V> {
             committed: HashMap::new(),
             poll_tasks: VecDeque::new(),
             paused: HashSet::new(),
-            wakeup: AtomicBool::new(false),
+            wakeup: Arc::new(AtomicBool::new(false)),
             records: HashMap::new(),
             poll_exception: None,
             offsets_exception: None,
@@ -981,6 +983,10 @@ where
         // Java line 589-591: sets the flag.
         self.wakeup.store(true, Ordering::SeqCst);
     }
+
+    fn wakeup_handle(&self) -> WakeupHandle {
+        WakeupHandle::for_mock(Arc::clone(&self.wakeup))
+    }
 }
 
 impl<K, V> MockConsumer<K, V> {
@@ -1054,5 +1060,24 @@ mod tests {
         c.closed = true;
         let err = c.update_partitions("t", Vec::new()).unwrap_err();
         assert!(matches!(err, KafkaError::IllegalState(_)));
+    }
+
+    /// A `WakeupHandle` obtained from the mock fires the SAME wakeup flag
+    /// as `wakeup()`: the next `poll` observes it and returns `Wakeup`.
+    #[tokio::test]
+    async fn wakeup_handle_wakes_next_poll() {
+        let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+
+        // Handle is moved into another task — no reference to the consumer
+        // crosses the boundary.
+        let handle = c.wakeup_handle();
+        tokio::spawn(async move {
+            handle.wakeup();
+        })
+        .await
+        .expect("waker task");
+
+        let err = c.poll(Duration::from_millis(0)).await.unwrap_err();
+        assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
     }
 }
