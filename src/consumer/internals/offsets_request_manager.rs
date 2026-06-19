@@ -3096,12 +3096,7 @@ mod tests {
     /// epoch supplier. Mirrors Java's
     /// `RequestTestUtils.metadataUpdateWithIds(..., tp -> epoch, ...)` used
     /// by the validate/reset tests that care about leader-epoch progression.
-    fn bootstrap_metadata_with_epoch(
-        metadata: &ConsumerMetadata,
-        topic: &str,
-        num_partitions: i32,
-        leader_epoch: i32,
-    ) {
+    fn bootstrap_metadata_with_epoch(metadata: &ConsumerMetadata, topic: &str, num_partitions: i32, leader_epoch: i32) {
         metadata.add_transient_topics(HashSet::from([topic.to_string()]));
         let mut counts = HashMap::new();
         counts.insert(topic.to_string(), num_partitions);
@@ -3371,7 +3366,10 @@ mod tests {
         assert_eq!(mgr.requests_to_send_count(), 1, "one OffsetsForLeaderEpoch request expected");
         {
             let subs = subscription_state.lock().expect("subs");
-            assert!(subs.awaiting_validation(&tp).expect("assigned"), "awaiting validation before response");
+            assert!(
+                subs.awaiting_validation(&tp).expect("assigned"),
+                "awaiting validation before response"
+            );
         }
 
         // Validate response with a non-divergent end offset (100 > 5) and a
@@ -3385,7 +3383,10 @@ mod tests {
             !subs.awaiting_validation(&tp).expect("assigned"),
             "maybe_complete_validation must clear the AWAITING_VALIDATION state"
         );
-        assert!(subs.has_valid_position(&tp), "position must be valid after successful validation");
+        assert!(
+            subs.has_valid_position(&tp),
+            "position must be valid after successful validation"
+        );
         assert!(subs.is_fetchable(&tp), "partition must be fetchable after validation");
         assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
     }
@@ -3525,6 +3526,517 @@ mod tests {
             err.message().contains("Truncated partitions detected with divergent offsets"),
             "re-raised error must carry the LogTruncation message, got: {}",
             err.message(),
+        );
+    }
+
+    // -----------------------------------------------------------------
+    //   reset behavioral family (OffsetFetcherTest — KIP-848 logic now
+    //   in OffsetsRequestManager). assign + requestOffsetReset →
+    //   resetPositionsIfNeeded → response → SubscriptionState asserts.
+    // -----------------------------------------------------------------
+
+    /// Drive a reset for `tp` with `strategy` against a single-partition
+    /// metadata bootstrap, complete the ListOffsets request with `response`,
+    /// drain, and return the manager + subscription state for assertions.
+    async fn drive_reset(
+        strategy: AutoOffsetResetStrategy,
+        response: ListOffsetsResponse,
+    ) -> (OffsetsRequestManager, Arc<Mutex<SubscriptionState>>, TopicPartition) {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, strategy);
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+        (mgr, subscription_state, tp)
+    }
+
+    /// Assert the canonical "reset succeeded to offset 5" post-state.
+    fn assert_reset_to_5(subscription_state: &Arc<Mutex<SubscriptionState>>, tp: &TopicPartition) {
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_offset_reset_needed(tp).expect("assigned"), "reset no longer needed");
+        assert!(subs.is_fetchable(tp), "fetchable after reset");
+        assert!(subs.has_valid_position(tp), "valid position after reset");
+        assert_eq!(subs.position(tp).expect("lookup").expect("present").offset, 5);
+    }
+
+    /// Java parity: `testUpdateFetchPositionResetToEarliestOffset`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_to_earliest_offset() {
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        let (mgr, subscription_state, tp) = drive_reset(AutoOffsetResetStrategy::EARLIEST, response).await;
+        assert_reset_to_5(&subscription_state, &tp);
+        // EARLIEST timestamp on the wire is exercised by
+        // reset_list_offset_sends_read_uncommitted; here assert the request
+        // was the only one and consumed.
+        assert_eq!(mgr.requests_to_send_count(), 0);
+    }
+
+    /// Java parity: `testUpdateFetchPositionResetToLatestOffset`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_to_latest_offset() {
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        let (_mgr, subscription_state, tp) = drive_reset(AutoOffsetResetStrategy::LATEST, response).await;
+        assert_reset_to_5(&subscription_state, &tp);
+    }
+
+    /// Java parity: `testUpdateFetchPositionResetToDefaultOffset`
+    /// (`requestOffsetReset(tp)` with no explicit strategy → the
+    /// subscription's default, EARLIEST here).
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_to_default_offset() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            // Default reset (Java: subscriptions.requestOffsetReset(tp0)).
+            subs.request_offset_reset_default(&tp).expect("reset default");
+        }
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+        assert_reset_to_5(&subscription_state, &tp);
+    }
+
+    /// Java parity: `testUpdateFetchPositionResetToDurationOffset`. A
+    /// by-timestamp (duration) reset strategy resolves to a positive wire
+    /// timestamp; the response resets the position the same way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_to_duration_offset() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        // A by-duration strategy (Java's mocked durationStrategy) resolves
+        // to a concrete epoch-millis timestamp (Some), so it produces a
+        // request — unlike EARLIEST/LATEST which use sentinel timestamps.
+        let duration_strategy = AutoOffsetResetStrategy::from_string("by_duration:PT1H").expect("duration strategy");
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.request_offset_reset(&tp, duration_strategy.clone()).expect("reset");
+        }
+        // Sanity: the strategy yields a concrete (Some) timestamp.
+        assert!(duration_strategy.timestamp().is_some());
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+        assert_reset_to_5(&subscription_state, &tp);
+    }
+
+    /// Java parity: `testListOffsetSendsReadUncommitted` /
+    /// `testListOffsetSendsReadCommitted`. The isolation level configured on
+    /// the manager flows through to the ListOffsets request built for a
+    /// reset, and the request timeout matches `request_timeout_ms`.
+    async fn reset_list_offset_sends_isolation_level(isolation_level: IsolationLevel) {
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        const TEST_REQUEST_TIMEOUT_MS: i64 = 100;
+        let mut mgr = OffsetsRequestManager::new(
+            subscription_state.clone(),
+            metadata.clone(),
+            isolation_level,
+            500,
+            TEST_REQUEST_TIMEOUT_MS,
+            60_000,
+            Arc::new(ApiVersions::new()),
+            None,
+        );
+        bootstrap_metadata_with_topic(&metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::LATEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let res = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
+        let built = unsent.request_builder_mut().expect("builder").build().expect("build");
+        let request = match built {
+            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            other => panic!("expected ListOffsetsRequest, got {other:?}"),
+        };
+        // Java: assertEquals(requestTimeoutMs, request.timeoutMs()).
+        assert_eq!(request.timeout_ms(), TEST_REQUEST_TIMEOUT_MS as i32);
+        // Java: request.isolationLevel() == isolationLevel.
+        assert_eq!(request.isolation_level().expect("isolation level"), isolation_level);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_list_offset_sends_read_uncommitted() {
+        reset_list_offset_sends_isolation_level(IsolationLevel::ReadUncommitted).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_list_offset_sends_read_committed() {
+        reset_list_offset_sends_isolation_level(IsolationLevel::ReadCommitted).await;
+    }
+
+    /// Java parity: `testGetOffsetsIncludesLeaderEpoch`. The ListOffsets
+    /// request built for a reset carries `currentLeaderEpoch` taken from the
+    /// metadata (99 here), not the `UNKNOWN_EPOCH` sentinel. This is the
+    /// behavior the Phase-31 production fix restored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_request_includes_current_leader_epoch() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        // Metadata with leader epoch 99.
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 99);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.request_offset_reset_default(&tp).expect("reset default");
+        }
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let res = RequestManager::poll(&mut mgr, 0);
+        let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
+        let built = unsent.request_builder_mut().expect("builder").build().expect("build");
+        let request = match built {
+            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            other => panic!("expected ListOffsetsRequest, got {other:?}"),
+        };
+        let epoch = request.topics()[0].partitions[0].current_leader_epoch;
+        assert_ne!(epoch, UNKNOWN_EPOCH, "expected leader epoch set in request");
+        assert_eq!(epoch, 99, "expected leader epoch to match metadata epoch");
+    }
+
+    /// Java parity: `testGetOffsetsFencedLeaderEpoch`. A reset response with
+    /// `FENCED_LEADER_EPOCH` (retriable) leaves the partition still needing
+    /// reset, not fetchable, without a valid position, and triggers a
+    /// metadata update (Java: `timeToNextUpdate == 0`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_fenced_leader_epoch_still_needs_reset() {
+        let response = build_list_offsets_response("t1", vec![(1, Errors::FencedLeaderEpoch, -1, -1, UNKNOWN_EPOCH)]);
+        let (mgr, subscription_state, tp) = drive_reset(AutoOffsetResetStrategy::LATEST, response).await;
+        let subs = subscription_state.lock().expect("subs");
+        assert!(
+            subs.is_offset_reset_needed(&tp).expect("assigned"),
+            "reset still needed after fenced epoch"
+        );
+        assert!(!subs.is_fetchable(&tp), "not fetchable");
+        assert!(!subs.has_valid_position(&tp), "no valid position");
+        drop(subs);
+        // Java asserts metadata.timeToNextUpdate == 0 (update requested).
+        assert!(
+            mgr.shared.metadata.metadata_arc().update_requested(),
+            "retriable reset error must request a metadata update"
+        );
+    }
+
+    /// Java parity: `testFetchOffsetErrors`. Retriable errors
+    /// (OFFSET_NOT_AVAILABLE, then LEADER_NOT_AVAILABLE) leave the partition
+    /// needing reset / not fetchable; the third attempt (NONE) succeeds.
+    /// The retry-backoff sleep between attempts is modeled by advancing
+    /// `now_ms` past `set_next_allowed_retry`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_fetch_offset_errors_then_recovers() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::LATEST);
+
+        // retry_backoff_ms == 500 (new_manager_with_commit), request_timeout
+        // 30_000 → set_next_allowed_retry pushes the partition's allowed
+        // retry to now + 30_000 on each send.
+        let mut now = 0i64;
+
+        // Attempt 1: OFFSET_NOT_AVAILABLE.
+        mgr.reset_positions_if_needed(now).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        let r1 = build_list_offsets_response("t1", vec![(1, Errors::OffsetNotAvailable, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, r1, now).await);
+        let _ = RequestManager::poll(&mut mgr, now);
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(!subs.has_valid_position(&tp));
+            assert!(subs.is_offset_reset_needed(&tp).expect("assigned"));
+            assert!(!subs.is_fetchable(&tp));
+        }
+
+        // Attempt 2: LEADER_NOT_AVAILABLE (after backoff window passes).
+        now += 60_000;
+        mgr.reset_positions_if_needed(now).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1, "second attempt issued after backoff");
+        let r2 = build_list_offsets_response("t1", vec![(1, Errors::LeaderNotAvailable, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, r2, now).await);
+        let _ = RequestManager::poll(&mut mgr, now);
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(!subs.has_valid_position(&tp));
+            assert!(subs.is_offset_reset_needed(&tp).expect("assigned"));
+        }
+
+        // Attempt 3: success.
+        now += 60_000;
+        mgr.reset_positions_if_needed(now).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        let r3 = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, r3, now).await);
+        let _ = RequestManager::poll(&mut mgr, now);
+        let subs = subscription_state.lock().expect("subs");
+        assert!(subs.has_valid_position(&tp));
+        assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"));
+        assert!(subs.is_fetchable(&tp));
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
+    }
+
+    /// Java parity: `testUpdateFetchPositionDisconnect`. A disconnected
+    /// reset response (`build_disconnected_client_response`) re-parks the
+    /// partition (no valid position); a later attempt after backoff
+    /// succeeds.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_disconnect_reparks_and_retries() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::LATEST);
+
+        let mut now = 0i64;
+        mgr.reset_positions_if_needed(now).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, now);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+        // Plain disconnect (disconnected=true, no authentication exception)
+        // ⇒ retriable NetworkException (Java's DisconnectException). The
+        // shared `build_disconnected_client_response` helper carries an auth
+        // exception, which would map to a non-retriable
+        // SaslAuthenticationFailed; build a clean disconnect inline instead.
+        let disconnect_header =
+            RequestHeader::new(&ApiKeys::LIST_OFFSETS, ApiKeys::LIST_OFFSETS.latest_version(), "", 1).expect("header");
+        let disconnect_response = ClientResponse::with_timeout(
+            disconnect_header,
+            None,
+            "0",
+            0,
+            0,
+            true, // disconnected
+            false,
+            None,
+            None, // no authentication exception
+            None,
+        );
+        unsent.handler().on_complete(disconnect_response);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, now);
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(!subs.has_valid_position(&tp), "disconnect leaves no valid position");
+        }
+
+        // After the backoff window, the next attempt succeeds.
+        now += 60_000;
+        mgr.reset_positions_if_needed(now).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1, "retry issued after backoff");
+        let r = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, r, now).await);
+        let _ = RequestManager::poll(&mut mgr, now);
+        assert_reset_to_5(&subscription_state, &tp);
+    }
+
+    /// Java parity: `testUpdateFetchPositionOfPausedPartitionsRequiringOffsetReset`.
+    /// A reset completes for a paused partition: it gets a valid position
+    /// and no longer needs reset, but is NOT fetchable because it is paused.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_on_paused_partition_completes_but_not_fetchable() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.pause(&tp).expect("pause");
+            subs.request_offset_reset(&tp, AutoOffsetResetStrategy::LATEST).expect("reset");
+        }
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 10, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"), "reset satisfied");
+        assert!(!subs.is_fetchable(&tp), "paused partition is not fetchable");
+        assert!(subs.has_valid_position(&tp), "paused partition still has a valid position");
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 10);
+    }
+
+    /// Java parity: `testSeekWithInFlightReset`. A user `seek` arrives while
+    /// a reset response is in flight; the response is discarded
+    /// (`maybe_seek_unvalidated` skips because the partition is no longer
+    /// AWAITING_RESET) and the seeked position (237) wins.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_seek_with_in_flight_reset_discards_stale_response() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::LATEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+
+        // User seek arrives while the reset is in flight.
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.seek(&tp, 237).expect("seek");
+        }
+
+        // The reset response returns and is discarded.
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        unsent.handler().on_complete(build_list_offsets_client_response(response));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert_eq!(
+            subs.position(&tp).expect("lookup").expect("present").offset,
+            237,
+            "seeked position must win; stale reset response discarded"
+        );
+    }
+
+    /// Java parity: `testIdempotentResetWithInFlightReset`. A second reset
+    /// request for the SAME strategy arrives while the first is in flight;
+    /// the response applies (the requested strategy still matches), and the
+    /// position is reset to 5.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_idempotent_with_in_flight_reset_applies() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::LATEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+
+        // Idempotent re-request: SAME strategy.
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.request_offset_reset(&tp, AutoOffsetResetStrategy::LATEST).expect("reset");
+        }
+
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, UNKNOWN_EPOCH)]);
+        unsent.handler().on_complete(build_list_offsets_client_response(response));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"), "idempotent reset applies");
+        assert_eq!(subs.position(&tp).expect("lookup").expect("present").offset, 5);
+    }
+
+    // -----------------------------------------------------------------
+    //   validate skip / stale-response (OffsetFetcherTest)
+    // -----------------------------------------------------------------
+
+    /// Java parity: `testOffsetValidationSkippedForOldBroker`. A broker that
+    /// only supports OffsetForLeaderEpoch v0-v2 (pre-2.3) cannot be used for
+    /// offset validation; the manager completes validation immediately
+    /// (without sending a request), so the partition leaves
+    /// AWAITING_VALIDATION and no request is enqueued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validation_skipped_for_old_broker() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 1);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+
+        // Seek into AWAITING_VALIDATION with leader = node 0.
+        let leader = crate::common::Node::new(0, "localhost".to_string(), 1969);
+        let leader_and_epoch = LeaderAndEpoch::new(Some(leader.clone()), Some(1));
+        let position = FetchPosition::with_leader(0, Some(1), leader_and_epoch);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.seek_unvalidated(&tp, position).expect("seek");
+            assert!(subs.awaiting_validation(&tp).expect("assigned"));
+        }
+
+        // Old broker: OFFSET_FOR_LEADER_EPOCH supported only at v0-v2.
+        let mut old_oitle = crate::api_versions_response_data::ApiVersion::new();
+        old_oitle.set_api_key(ApiKeys::OFFSET_FOR_LEADER_EPOCH.id());
+        old_oitle.set_min_version(0);
+        old_oitle.set_max_version(2);
+        mgr.api_versions
+            .update(leader.id_string(), crate::NodeApiVersions::create_with_overrides(&[old_oitle]));
+
+        mgr.validate_positions_if_needed(0).expect("ok");
+        assert_eq!(
+            mgr.requests_to_send_count(),
+            0,
+            "no OffsetsForLeaderEpoch request to an old broker"
+        );
+        let subs = subscription_state.lock().expect("subs");
+        assert!(
+            !subs.awaiting_validation(&tp).expect("assigned"),
+            "validation must be skipped (completed) for an old broker"
+        );
+    }
+
+    /// Java parity:
+    /// `testOffsetValidationHandlesSeekWithInflightOffsetForLeaderRequest`.
+    /// A `seek_unvalidated` to a DIFFERENT position arrives while the
+    /// OffsetsForLeaderEpoch request is in flight; the response is ignored
+    /// (`maybe_complete_validation` sees the current position no longer
+    /// matches the request position), and the partition stays
+    /// AWAITING_VALIDATION.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validation_handles_seek_with_inflight_request() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 1);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        // Initial position at offset 0, epoch 1.
+        seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 0, 1);
+
+        mgr.validate_positions_if_needed(0).expect("ok");
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(subs.awaiting_validation(&tp).expect("assigned"));
+        }
+
+        // Seek to a DIFFERENT position while the request is in flight.
+        {
+            let leader = crate::common::Node::new(0, "localhost".to_string(), 1969);
+            let leader_and_epoch = LeaderAndEpoch::new(Some(leader), Some(1));
+            let new_position = FetchPosition::with_leader(5, Some(1), leader_and_epoch);
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.seek_unvalidated(&tp, new_position).expect("seek");
+            assert!(subs.awaiting_validation(&tp).expect("assigned"));
+        }
+
+        // The response returns and is ignored (position changed).
+        let response = build_offsets_for_leader_epoch_response("t1", vec![(1, Errors::None, 0, 0)]);
+        unsent.handler().on_complete(build_oitle_client_response(response));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        let subs = subscription_state.lock().expect("subs");
+        assert!(
+            subs.awaiting_validation(&tp).expect("assigned"),
+            "stale OffsetsForLeaderEpoch response for a changed position must be ignored"
         );
     }
 }

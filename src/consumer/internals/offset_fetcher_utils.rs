@@ -693,8 +693,12 @@ mod tests {
         //   testOffsetValidationresetPositionForUndefinedOffsetWithDefinedResetPolicy: (2, UNDEFINED_EPOCH_OFFSET)
         for (leader_epoch, end_offset) in [(UNDEFINED_EPOCH, 0i64), (2, UNDEFINED_EPOCH_OFFSET)] {
             let tp = TopicPartition::new("t1".to_string(), 0);
-            let (state, subscriptions) =
-                fetcher_utils_awaiting_validation(&tp, initial_offset, initial_epoch, AutoOffsetResetStrategy::EARLIEST);
+            let (state, subscriptions) = fetcher_utils_awaiting_validation(
+                &tp,
+                initial_offset,
+                initial_epoch,
+                AutoOffsetResetStrategy::EARLIEST,
+            );
             let position = subscriptions.lock().unwrap().position(&tp).unwrap().unwrap().clone();
             let mut fetch_positions = HashMap::new();
             fetch_positions.insert(tp.clone(), position);
@@ -790,9 +794,15 @@ mod tests {
         assert_eq!(truncations.len(), 1);
         let t = &truncations[0];
         assert_eq!(t.topic_partition, tp);
-        assert_eq!(t.fetch_position.offset, initial_offset, "offsetOutOfRangePartitions key offset == 5");
+        assert_eq!(
+            t.fetch_position.offset, initial_offset,
+            "offsetOutOfRangePartitions key offset == 5"
+        );
         // Java: OffsetAndMetadata(endOffset, Optional.of(leaderEpoch), "")
-        let divergent = t.divergent_offset_opt.as_ref().expect("divergent offset present for bad offset");
+        let divergent = t
+            .divergent_offset_opt
+            .as_ref()
+            .expect("divergent offset present for bad offset");
         assert_eq!(divergent.offset(), bad_end_offset, "divergent offset == broker end offset (1)");
         assert_eq!(divergent.leader_epoch(), Some(bad_leader_epoch), "divergent leader epoch == 1");
         assert!(
