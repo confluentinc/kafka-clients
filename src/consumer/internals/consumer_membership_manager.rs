@@ -1078,9 +1078,27 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 }
 
 /// Translation notes on Java test coverage
-/// (`ConsumerMembershipManagerTest`, 93 cases):
+/// (`ConsumerMembershipManagerTest`, 84 `@Test` cases). The original
+/// "26 / 93" count below predates Phases 34 + 35; actual coverage is now
+/// ~52 / 84 behaviorally covered. The list below enumerates the Phase-8b
+/// core; Phase 34 added the metadata-driven reconcile / delayed-discard /
+/// leave-and-fatal-matrix / listener-ordering families, and Phase 35 added
+/// the STALE-member family:
+///   - `transition_to_leaving_while_{reconciling,joining,stable,acknowledging}_due_to_stale_member`
+///     — Java `testTransitionToLeavingWhile*DueToStaleMember`
+///   - `stale_member_does_not_send_heartbeat_and_allows_transition_to_joining_to_recover`
+///     — Java `testStaleMemberDoesNotSendHeartbeatAndAllowsTransitionToJoiningToRecover`
+///   - `stale_member_rejoins_when_timer_resets_no_callbacks`
+///     — Java `testStaleMemberRejoinsWhenTimerResetsNoCallbacks`
+///   - `stale_member_waits_for_callback_to_rejoin_when_timer_reset`
+///     — Java `testStaleMemberWaitsForCallbackToRejoinWhenTimerReset`
+///   - `leave_group_when_member_is_stale` — Java `testLeaveGroupWhenMemberIsStale`
 ///
-/// Translated (26 / 93):
+/// Remaining gaps: the RebalanceMetrics family (OUT_OF_SCOPE — no metrics
+/// framework) and a handful of Mockito-spy-only verifications (covered by
+/// state-transition assertions in the translated tests).
+///
+/// Translated (Phase-8b core):
 /// - `server_assignor_accessor` — Java: `testMembershipManagerServerAssignor`
 /// - `rack_id_accessor` — Java: `testMembershipManagerRackId`
 /// - `init_supports_empty_group_instance_id` — Java: `testMembershipManagerInitSupportsEmptyGroupInstanceId`

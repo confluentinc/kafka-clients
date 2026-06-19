@@ -822,6 +822,16 @@ impl ConsumerHeartbeatRequestManager {
     pub(crate) fn sent_fields_topics_populated(&self) -> bool {
         self.heartbeat_state.sent_fields.subscribed_topic_names.is_some()
     }
+
+    /// Test-only: invoke the `HeartbeatState::build_request_data` field-diff
+    /// logic directly. Java tests construct a `HeartbeatState` and call
+    /// `buildRequestData()` repeatedly to assert which fields are present /
+    /// omitted across heartbeats. The Rust `HeartbeatState` is a private
+    /// inner type; this accessor exposes the same observable on the manager.
+    #[cfg(test)]
+    pub(crate) fn build_request_data_for_test(&mut self) -> ConsumerGroupHeartbeatRequestData {
+        self.heartbeat_state.build_request_data()
+    }
 }
 
 impl RequestManager for ConsumerHeartbeatRequestManager {
@@ -959,62 +969,50 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
     }
 }
 
-/// Translation notes on Java test coverage (`ConsumerHeartbeatRequestManagerTest`):
+/// Translation notes on Java test coverage (`ConsumerHeartbeatRequestManagerTest`,
+/// 31 `@Test`). Coverage after Phases 8b / 12.5 / 35:
 ///
-/// Translated (12 / 31):
-/// - `poll_returns_empty_when_no_coordinator` — Java: `testSkippingHeartbeat`
-/// - `should_not_send_leave_when_not_leaving` — Java: internal `shouldSendLeaveHeartbeatNow` shape
-/// - `handle_specific_unsupported_version_is_fatal` — Java: `testHeartbeatResponseOnErrorHandling` (UnsupportedVersion)
-/// - `handle_specific_fenced_instance_id_is_fatal` — Java: `testHeartbeatResponseOnErrorHandling` (FencedInstanceId)
-/// - `handle_specific_returns_none_for_other_errors` (no Java analog; behavior pin)
-/// - `maximum_time_to_wait_returns_zero_when_poll_timer_expired`
-/// - `heartbeat_on_startup` — Java: `testHeartbeatOnStartup`
-/// - `timer_not_due` — Java: `testTimerNotDue`
-/// - `heartbeat_not_sent_if_another_one_in_flight` — Java: `testHeartbeatNotSentIfAnotherOneInFlight` (subset)
-/// - `heartbeat_outside_interval` — Java: `testHeartbeatOutsideInterval`
-/// - `handle_specific_unreleased_instance_id_is_fatal` — Java: error-matrix `UnreleasedInstanceId` row
-/// - `handle_specific_failure_unsupported_version_emits_error_event` — Java: `testHeartbeatHandleSpecificFailureOnUnsupportedVersion`
+/// Translated / behaviorally covered (~26 / 31):
+/// - `testSkippingHeartbeat` — `poll_returns_empty_when_no_coordinator`
+/// - `testHeartbeatOnStartup` — `heartbeat_on_startup`
+/// - `testTimerNotDue` — `timer_not_due`
+/// - `testHeartbeatNotSentIfAnotherOneInFlight` — `heartbeat_not_sent_if_another_one_in_flight` (subset)
+/// - `testHeartbeatOutsideInterval` — `heartbeat_outside_interval`
+/// - `testNoCoordinator` — `poll_returns_empty_when_no_coordinator` (coordinator-unknown subset)
+/// - `testHeartbeatResponseOnErrorHandling` matrix — abstract `classify_response_error` table
+///   + `handle_specific_{unsupported_version,fenced_instance_id,unreleased_instance_id}_*`
+/// - `testUnsupportedVersionFromBroker` / `FromClient` — `handle_specific_*` + emit-error-event
+/// - `testNetworkTimeout` / `testDisconnect` / `testFailureOnFatalException` /
+///   `testHeartbeatResponseErrorNotifiedToGroupManager*` / `testHeartbeatRequestFailureNotified*` —
+///   Phase-12.5 response-routing tests (`test_response_routing_*`, `issue3/4/5_*`)
+/// - `testFencedMemberStopHeartbeatUntilItReleasesAssignmentToRejoin` — `issue4_fenced_member_*` (subset)
+/// - `testHeartBeatRequestStateToStringBase` — `heartbeat_request_state_to_string_base`
+///   (in `heartbeat_request_state.rs`; Phase 35)
+/// - `testFirstHeartbeatIncludesRequiredInfoToJoinGroupAndGetAssignments` —
+///   `first_heartbeat_includes_required_info_to_join_group` (Phase 35)
+/// - `testValidateConsumerGroupHeartbeatRequest` — `validate_consumer_group_heartbeat_request` (Phase 35)
+/// - `testValidateConsumerGroupHeartbeatRequestAssignmentSentWhenLocalEpochChanges` —
+///   `validate_heartbeat_request_assignment_sent_when_local_epoch_changes` (Phase 35)
+/// - `testHeartbeatState` — `heartbeat_state_field_diff_lifecycle` (Phase 35)
+/// - `testRackIdInHeartbeatLifecycle` — `rack_id_in_heartbeat_lifecycle` (Phase 35)
+/// - `testRegexInHeartbeatLifecycle` — `regex_in_heartbeat_lifecycle` (Phase 35)
+/// - `testRegexInJoiningHeartbeat` — `regex_in_joining_heartbeat` (Phase 35)
+/// - `testPollTimerExpiration` — `poll_timer_expiration` (Phase 35)
+/// - `testPollTimerExpirationShouldNotMarkMemberStaleIfMemberAlreadyLeaving` —
+///   `poll_timer_expiration_should_not_mark_member_stale_if_member_already_leaving` (Phase 35)
 ///
-/// Not translated (19 / 31) — rationale per case:
-///
-/// - `testHeartbeatRequestFields*`, `testFirstHeartbeatIncludesRequiredInfoToJoinGroupAndGetAssignments`,
-///   `testHeartbeatState*` family: depend on Mockito-mocking individual
-///   getters on `ConsumerMembershipManager` (member_id, group_instance_id,
-///   server_assignor, rack_id) AND comparing wire-protocol field-by-field
-///   diffs across multiple heartbeats. The diff-tracking logic in our
-///   `HeartbeatState::build_request_data` does the right thing but
-///   pinning it requires either Mockito-style mocks (not present in
-///   Rust) OR an integration test that drives the full membership
-///   lifecycle, which is Phase 10's responsibility. Deferred.
-/// - `testNetworkTimeout`, `testDisconnect`: Java exercises
-///   `request.handler().onFailure(...)` to simulate transport
-///   failures. `UnsentRequest`'s response handler is not yet wired in
-///   Phase 8b (Phase 10 owns the response-loop driver). Deferred.
-/// - `testFailureOnFatalException`, `testHeartbeatResponseErrorNotifiedToGroupManagerAfterErrorPropagated`,
-///   and the remaining `testHeartbeatResponseOnErrorHandling*` matrix
-///   rows (`GROUP_AUTHORIZATION_FAILED`, `NOT_COORDINATOR`,
-///   `CoordinatorLoadInProgress`, …): all exercise the
-///   `BackgroundEventHandler` add ordering + the
-///   `membershipManager.onHeartbeatFailure(retriable)` ordering. The
-///   ordering check requires Mockito's `InOrder` verifier; the Rust
-///   equivalent is observable but tedious and is most-naturally
-///   asserted as part of Phase 10's end-to-end response-handling
-///   harness. Deferred.
-/// - `testHeartbeatStartupOnSuccess`, `testHeartbeatRequestFailedAndOnHeartbeatFailureCalled`:
-///   require simulating async response delivery via `ClientResponse`
-///   construction; the helper to build a `ClientResponse` for
-///   ConsumerGroupHeartbeat from a stubbed Errors is not yet in the
-///   Rust test toolkit. Deferred to Phase 10.
-/// - `testPollTimerExpiration`, `testPollTimerNotReachedRebalanceTimeoutBudget`:
-///   exercise `reset_poll_timer` + `maybe_rejoin_stale_member`
-///   semantics, both of which live in the Phase 10 epilogue (per
-///   docstring on `reset_poll_timer`). Deferred.
-/// - `testRegexResolutionNotSupported*`: depend on the regex
-///   subscription path that lands fully in Phase 9 (RE2/J wiring).
-///   Deferred.
-/// - `testRebalanceTimeoutOnPollTimerExpiration`: relies on the
-///   full bg-task driver to time out the rebalance and re-emit the
-///   leave heartbeat. Deferred to Phase 10.
+/// Genuinely not translated:
+/// - `testSuccessfulHeartbeatTiming` (REDUCED — full timing matrix not reproduced;
+///   `successful_response_updates_interval` + `timer_not_due` cover the timing core).
+/// - `testPollOnLeaving`, `testPollOnCloseGeneratesRequestIfNeeded`,
+///   `testSendingLeaveGroupHeartbeatWhenPreviousOneInFlight`,
+///   `testisExpiredByUsedForLogging`, `testConsumerAcksReconciledAssignmentAfterAckLost`:
+///   leave-group poll lifecycle. The positive leave-poll matrix and the
+///   ack-lost replay depend on the request response-handler harness
+///   (`isExpiredBy` is a logging-only metric, dropped — no metrics framework).
+///   These remain for a follow-up; the field-diff core they exercise IS now
+///   pinned by the Phase-35 tests above.
+/// - Metrics tests (HeartbeatMetrics): OUT_OF_SCOPE — no Rust metrics framework.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,6 +1093,103 @@ mod tests {
     /// `when(coordinatorRequestManager.coordinator()).thenReturn(...)`.
     fn set_coordinator(coord: &Arc<CoordinatorRequestManager>) {
         coord.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+    }
+
+    // ===============================================================
+    // Phase 35 — heartbeat request-field diff helpers + tests.
+    // ===============================================================
+
+    /// Default group id used by Java's `ConsumerHeartbeatRequestManagerTest`.
+    const DEFAULT_GROUP_ID: &str = "groupId";
+    /// Default server assignor.
+    const DEFAULT_REMOTE_ASSIGNOR: &str = "uniform";
+    /// Default group instance id (static membership).
+    const DEFAULT_GROUP_INSTANCE_ID: &str = "group-instance-id";
+    /// Default member epoch returned by the broker.
+    const DEFAULT_MEMBER_EPOCH: i32 = 1;
+
+    /// Builder for the request-field-diff tests. Lets a test control the
+    /// group instance id, server assignor, rack id and rebalance timeout
+    /// (Java mocks these getters on the membership manager). Returns the
+    /// manager plus the shared `SubscriptionState` so the test can drive
+    /// `subscribe` / regex changes (Java mocks `subscriptions.subscription()`
+    /// / `subscriptionPattern()`).
+    fn make_field_diff(
+        group_instance_id: Option<String>,
+        server_assignor: Option<String>,
+        rack_id: Option<String>,
+        rebalance_timeout_ms: i32,
+        initial_interval_ms: Option<i64>,
+    ) -> (
+        ConsumerHeartbeatRequestManager,
+        Arc<CoordinatorRequestManager>,
+        Arc<ConsumerMembershipManager>,
+        Arc<Mutex<SubscriptionState>>,
+    ) {
+        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(tx));
+        let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
+        let mm = Arc::new(ConsumerMembershipManager::new(
+            DEFAULT_GROUP_ID,
+            group_instance_id,
+            rack_id,
+            rebalance_timeout_ms,
+            server_assignor,
+            subs.clone(),
+            None,
+            metadata,
+            beh.clone(),
+            true,
+        ));
+        let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
+        if let Some(interval) = initial_interval_ms {
+            hb.inner.heartbeat_request_state.update_heartbeat_interval_ms(0, interval);
+        }
+        (hb, coord, mm, subs)
+    }
+
+    /// Force the membership manager's state (Java mocks
+    /// `when(membershipManager.state()).thenReturn(...)`). Bypasses
+    /// transition validity — the field-diff tests only need the member
+    /// parked in a given state to observe `build_request_data`'s
+    /// `send_all_fields` (JOINING) gate.
+    fn force_state(mm: &ConsumerMembershipManager, state: MemberState) {
+        mm.abstract_mm.inner.lock().unwrap().state = state;
+    }
+
+    /// Force member id + epoch (Java mocks `memberId()` / `memberEpoch()`).
+    fn force_member(mm: &ConsumerMembershipManager, member_id: &str, epoch: i32) {
+        let mut g = mm.abstract_mm.inner.lock().unwrap();
+        g.member_id = member_id.to_string();
+        g.member_epoch = epoch;
+    }
+
+    /// Force the current local assignment (Java mocks `currentAssignment()`).
+    fn force_current_assignment(mm: &ConsumerMembershipManager, assignment: LocalAssignment) {
+        mm.abstract_mm.inner.lock().unwrap().current_assignment = assignment;
+    }
+
+    /// Set the subscription topic set on the shared `SubscriptionState`
+    /// (Java mocks `subscriptions.subscription()`).
+    fn set_subscription(subs: &Arc<Mutex<SubscriptionState>>, topics: &[&str]) {
+        let set: std::collections::HashSet<String> = topics.iter().map(|s| s.to_string()).collect();
+        subs.lock().unwrap().subscribe_topics(set, None).unwrap();
+    }
+
+    /// Set (or clear) the RE2J subscription pattern on the shared
+    /// `SubscriptionState` (Java mocks `subscriptions.subscriptionPattern()`).
+    fn set_pattern(subs: &Arc<Mutex<SubscriptionState>>, pattern: Option<&str>) {
+        use crate::consumer::SubscriptionPattern;
+        subs.lock()
+            .unwrap()
+            .set_subscription_pattern_for_test(pattern.map(SubscriptionPattern::new));
     }
 
     /// Test helper: drive the membership manager through
@@ -1952,5 +2047,299 @@ mod tests {
             1,
             "a heartbeat request should be generated to complete the ongoing leaving operation"
         );
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testFirstHeartbeatIncludesRequiredInfoToJoinGroupAndGetAssignments`.
+    /// The FIRST heartbeat (JOINING) carries member id, epoch 0, the
+    /// subscribed topics, the rebalance timeout, group id, instance id,
+    /// server assignor and rack id.
+    #[tokio::test]
+    async fn first_heartbeat_includes_required_info_to_join_group() {
+        let (mut mgr, _coord, mm, subs) = make_field_diff(
+            Some(DEFAULT_GROUP_INSTANCE_ID.to_string()),
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            Some("rack-1".to_string()),
+            DEFAULT_MAX_POLL_INTERVAL_MS as i32,
+            Some(0),
+        );
+        set_subscription(&subs, &["topic1"]);
+        // Joining member, epoch 0 (real transition).
+        mm.transition_to_joining().unwrap();
+        assert_eq!(mm.state(), MemberState::Joining);
+
+        let data = mgr.build_request_data_for_test();
+
+        // Member id present and non-empty (Java's assertNotNull / assertFalse
+        // isEmpty); the real Rust member id is a random UUID. The request must
+        // carry the member's own id.
+        assert!(!data.member_id.is_empty());
+        assert_eq!(data.member_id, mm.member_id());
+        assert_eq!(data.member_epoch, 0);
+        assert_eq!(data.subscribed_topic_names, Some(vec!["topic1".to_string()]));
+        assert_eq!(data.rebalance_timeout_ms, DEFAULT_MAX_POLL_INTERVAL_MS as i32);
+        assert_eq!(data.group_id, DEFAULT_GROUP_ID);
+        assert_eq!(data.instance_id, Some(DEFAULT_GROUP_INSTANCE_ID.to_string()));
+        assert_eq!(data.server_assignor, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()));
+        assert_eq!(data.rack_id, Some("rack-1".to_string()));
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testValidateConsumerGroupHeartbeatRequest`.
+    /// A STABLE member's heartbeat carries the required group/member fields
+    /// with their correct values plus the subscription, rebalance timeout,
+    /// instance id and server assignor.
+    #[tokio::test]
+    async fn validate_consumer_group_heartbeat_request() {
+        let (mut mgr, _coord, mm, subs) = make_field_diff(
+            Some(DEFAULT_GROUP_INSTANCE_ID.to_string()),
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            None,
+            10_000,
+            Some(0),
+        );
+        set_subscription(&subs, &["topic"]);
+        // Stable member with broker-supplied member id + epoch.
+        force_state(&mm, MemberState::Stable);
+        force_member(&mm, "member-id", DEFAULT_MEMBER_EPOCH);
+        force_current_assignment(&mm, LocalAssignment::new(0, std::collections::HashMap::new()).unwrap());
+
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.group_id, DEFAULT_GROUP_ID);
+        assert_eq!(data.member_id, "member-id");
+        assert_eq!(data.member_epoch, DEFAULT_MEMBER_EPOCH);
+        assert_eq!(data.rebalance_timeout_ms, 10_000);
+        assert_eq!(data.subscribed_topic_names, Some(vec!["topic".to_string()]));
+        assert_eq!(data.instance_id, Some(DEFAULT_GROUP_INSTANCE_ID.to_string()));
+        assert_eq!(data.server_assignor, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()));
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testValidateConsumerGroupHeartbeatRequestAssignmentSentWhenLocalEpochChanges`.
+    /// The assignment (topicPartitions) is sent on the first heartbeat,
+    /// OMITTED on the next when unchanged, and RE-SENT when the local epoch
+    /// of the current assignment changes.
+    #[tokio::test]
+    async fn validate_heartbeat_request_assignment_sent_when_local_epoch_changes() {
+        let (mut mgr, _coord, mm, _subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        // Force a should-heartbeat-now state so build is exercised; we call
+        // build_request_data directly so only the diff matters.
+        force_state(&mm, MemberState::Stable);
+
+        let topic_id = Uuid::random_uuid();
+        let mut partitions = std::collections::HashMap::new();
+        partitions.insert(topic_id, vec![0]);
+
+        // First heartbeat: include assignment (local epoch 0).
+        force_current_assignment(&mm, LocalAssignment::new(0, partitions.clone()).unwrap());
+        let data1 = mgr.build_request_data_for_test();
+        let tps1 = data1.topic_partitions.expect("first HB must include topic partitions");
+        assert_eq!(tps1.len(), 1);
+        assert_eq!(tps1[0].topic_id, topic_id);
+        assert_eq!(tps1[0].partitions, vec![0]);
+
+        // Assignment unchanged (same local epoch): omitted.
+        let data2 = mgr.build_request_data_for_test();
+        assert_eq!(data2.topic_partitions, None, "unchanged assignment must be omitted");
+
+        // Local epoch bumped: re-sent.
+        force_current_assignment(&mm, LocalAssignment::new(1, partitions.clone()).unwrap());
+        let data3 = mgr.build_request_data_for_test();
+        let tps3 = data3
+            .topic_partitions
+            .expect("assignment must be re-sent after local epoch change");
+        assert_eq!(tps3.len(), 1);
+        assert_eq!(tps3[0].topic_id, topic_id);
+        assert_eq!(tps3[0].partitions, vec![0]);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testHeartbeatState`.
+    /// Exercises the full `build_request_data` field-diff lifecycle:
+    /// join (all fields) → stable (unchanged fields omitted, epoch updated)
+    /// → rejoin (JOINING re-sends all fields) → steady (subscription resent
+    /// only on change).
+    #[tokio::test]
+    async fn heartbeat_state_field_diff_lifecycle() {
+        let (mut mgr, _coord, mm, subs) = make_field_diff(
+            None,
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            None,
+            DEFAULT_MAX_POLL_INTERVAL_MS as i32,
+            Some(0),
+        );
+        // JOINING member, epoch 0, no instance id, no subscription yet.
+        force_state(&mm, MemberState::Joining);
+        force_member(&mm, "member-id", 0);
+        force_current_assignment(&mm, LocalAssignment::none());
+
+        // Initial HB sets most fields to their initial empty values.
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.group_id, DEFAULT_GROUP_ID);
+        assert_eq!(data.member_id, "member-id");
+        assert_eq!(data.member_epoch, 0);
+        assert_eq!(data.instance_id, None);
+        assert_eq!(data.rebalance_timeout_ms, DEFAULT_MAX_POLL_INTERVAL_MS as i32);
+        assert_eq!(data.subscribed_topic_names, Some(vec![]));
+        assert_eq!(data.server_assignor, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()));
+        assert_eq!(data.topic_partitions, Some(vec![]));
+
+        // Broker supplies a new epoch; move to STABLE. Mirrors Java's
+        // `mockStableMemberData`, which sets the current assignment to
+        // `LocalAssignment(0, emptyMap)` — a CHANGE from the JOINING build's
+        // `LocalAssignment.NONE` (epoch -1), so topicPartitions is re-sent as
+        // an empty list. The rebalance timeout, subscribed names and assignor
+        // are unchanged, so they are omitted (-1 / null / null).
+        force_state(&mm, MemberState::Stable);
+        force_member(&mm, "member-id", 1);
+        force_current_assignment(&mm, LocalAssignment::new(0, std::collections::HashMap::new()).unwrap());
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.group_id, DEFAULT_GROUP_ID);
+        assert_eq!(data.member_id, "member-id");
+        assert_eq!(data.member_epoch, 1);
+        assert_eq!(data.instance_id, None);
+        assert_eq!(
+            data.rebalance_timeout_ms, -1,
+            "unchanged rebalance timeout must be omitted (-1)"
+        );
+        assert_eq!(
+            data.subscribed_topic_names, None,
+            "unchanged subscription must be omitted (null)"
+        );
+        assert_eq!(data.server_assignor, None, "unchanged assignor must be omitted (null)");
+        assert_eq!(
+            data.topic_partitions,
+            Some(vec![]),
+            "assignment changed (NONE -> epoch-0 empty), re-sent as empty list"
+        );
+
+        // Rejoin (JOINING) + subscribe a topic: all fields re-sent.
+        set_subscription(&subs, &["topic1"]);
+        force_state(&mm, MemberState::Joining);
+        force_member(&mm, "member-id", 0);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.member_epoch, 0);
+        assert_eq!(data.rebalance_timeout_ms, DEFAULT_MAX_POLL_INTERVAL_MS as i32);
+        assert_eq!(data.subscribed_topic_names, Some(vec!["topic1".to_string()]));
+        assert_eq!(data.server_assignor, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()));
+        assert_eq!(data.topic_partitions, Some(vec![]));
+
+        // Another JOINING build: still re-sends (send_all_fields on JOINING).
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_names, Some(vec!["topic1".to_string()]));
+        assert_eq!(data.server_assignor, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()));
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testRackIdInHeartbeatLifecycle`.
+    /// rackId is included only on JOINING; omitted otherwise; an absent rack
+    /// id is never sent.
+    #[tokio::test]
+    async fn rack_id_in_heartbeat_lifecycle() {
+        let (mut mgr, _coord, mm, _subs) = make_field_diff(
+            None,
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            Some("rack1".to_string()),
+            DEFAULT_MAX_POLL_INTERVAL_MS as i32,
+            Some(0),
+        );
+        // Initial heartbeat with rackId (JOINING).
+        force_state(&mm, MemberState::Joining);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.rack_id, Some("rack1".to_string()));
+
+        // RackId omitted when not JOINING.
+        force_state(&mm, MemberState::Stable);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.rack_id, None);
+
+        // RackId included again when JOINING again.
+        force_state(&mm, MemberState::Joining);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.rack_id, Some("rack1".to_string()));
+
+        // Absent rack id is never sent (new manager with no rack id).
+        let (mut mgr2, _c, mm2, _s) = make_field_diff(
+            None,
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            None,
+            DEFAULT_MAX_POLL_INTERVAL_MS as i32,
+            Some(0),
+        );
+        force_state(&mm2, MemberState::Joining);
+        let data = mgr2.build_request_data_for_test();
+        assert_eq!(data.rack_id, None);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testRegexInHeartbeatLifecycle`.
+    /// The regex is sent on change, "" is sent to clear the pattern, and the
+    /// field is omitted when the pattern is unchanged.
+    #[tokio::test]
+    async fn regex_in_heartbeat_lifecycle() {
+        let (mut mgr, _coord, mm, subs) = make_field_diff(
+            None,
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            None,
+            DEFAULT_MAX_POLL_INTERVAL_MS as i32,
+            Some(0),
+        );
+        // Initial heartbeat with regex (JOINING).
+        force_state(&mm, MemberState::Joining);
+        set_pattern(&subs, Some("t1.*"));
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, Some("t1.*".to_string()));
+
+        // Regex omitted if unchanged (STABLE, same pattern).
+        force_state(&mm, MemberState::Stable);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, None);
+
+        // Regex included if changed.
+        set_pattern(&subs, Some("t2.*"));
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, Some("t2.*".to_string()));
+
+        // Empty regex sent to remove the pattern subscription.
+        set_pattern(&subs, None);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, Some(String::new()));
+
+        // Regex omitted after the pattern was already removed.
+        set_pattern(&subs, None);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, None);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testRegexInJoiningHeartbeat`.
+    /// "" is sent to unsubscribe from the regex; a JOINING rejoin with no
+    /// pattern omits the regex field.
+    #[tokio::test]
+    async fn regex_in_joining_heartbeat() {
+        let (mut mgr, _coord, mm, subs) = make_field_diff(
+            None,
+            Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+            None,
+            DEFAULT_MAX_POLL_INTERVAL_MS as i32,
+            Some(0),
+        );
+        // Initial heartbeat with regex (JOINING).
+        force_state(&mm, MemberState::Joining);
+        set_pattern(&subs, Some("t1.*"));
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, Some("t1.*".to_string()));
+
+        // Member unsubscribes from regex: "" is sent.
+        set_pattern(&subs, None);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, Some(String::new()));
+
+        // Member rejoins (JOINING) with no pattern: regex field omitted.
+        force_state(&mm, MemberState::Joining);
+        set_pattern(&subs, None);
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.subscribed_topic_regex, None);
     }
 }

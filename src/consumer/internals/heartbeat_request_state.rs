@@ -309,4 +309,50 @@ mod tests {
         assert!(!state.can_send_request(now));
         assert!(state.time_to_next_heartbeat_ms(now) > 0);
     }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testHeartBeatRequestStateToStringBase`.
+    /// Java asserts the EXACT `toStringBase()` string content (DoD §3 — the
+    /// string is part of the behavioral contract). Java's
+    /// `HeartbeatRequestState.toStringBase()` returns
+    /// `super.toStringBase() + ", remainingMs=" + remainingMs + ",
+    /// heartbeatIntervalMs=" + heartbeatIntervalMs`. The Rust observable is
+    /// the `Display` impl, which wraps the same content in
+    /// `HeartbeatRequestState{...}`. We assert the full string so that a
+    /// regression in any composed field (owner, exponentialBackoff,
+    /// numAttempts, …) or an accidental `Optional`/`Some(...)` leak fails.
+    #[test]
+    fn heartbeat_request_state_to_string_base() {
+        // Java: new HeartbeatRequestState(logContext, time,
+        //   DEFAULT_HEARTBEAT_INTERVAL_MS, 100, 1000, .2). The freshly
+        //   constructed RequestState has lastSentMs=-1, lastReceivedMs=-1,
+        //   numAttempts=0, backoffMs=retryBackoffMs, requestInFlight=false.
+        let state = HeartbeatRequestState::new(0, HEARTBEAT_INTERVAL_MS, RETRY_BACKOFF_MS, RETRY_BACKOFF_MAX_MS, 0.2);
+
+        // Mirror Java's assertion construction exactly:
+        //   target = requestState.toStringBase()
+        //          + ", remainingMs=" + DEFAULT_HEARTBEAT_INTERVAL_MS
+        //          + ", heartbeatIntervalMs=" + DEFAULT_HEARTBEAT_INTERVAL_MS;
+        // The Rust `Display` wraps the same content in
+        // `HeartbeatRequestState{...}` (the owner is the short struct name —
+        // Java uses the FQCN, a Java-only concept). Building `expected` from
+        // the real `request_state.to_string_base()` keeps the test robust to
+        // the exact `ExponentialBackoff` Display rendering while still
+        // pinning the heartbeat-specific suffix and the field ordering.
+        let expected = format!(
+            "HeartbeatRequestState{{{}, remainingMs={}, heartbeatIntervalMs={}}}",
+            state.request_state.to_string_base(),
+            HEARTBEAT_INTERVAL_MS,
+            HEARTBEAT_INTERVAL_MS,
+        );
+
+        // assertDoesNotThrow(heartbeatRequestState::toString)
+        let rendered = state.to_string();
+        assert_eq!(expected, rendered);
+        // Pin the heartbeat-specific suffix verbatim (Java's distinctive part).
+        assert!(rendered.contains(", remainingMs=1000, heartbeatIntervalMs=1000}"));
+        // No Optional/Some leak in the rendered string.
+        assert!(!rendered.contains("Optional"));
+        assert!(!rendered.contains("Some("));
+    }
 }

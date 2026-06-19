@@ -823,6 +823,18 @@ impl SubscriptionState {
         }
     }
 
+    /// Test-only: directly set (or clear) the RE2J subscription pattern,
+    /// keeping the subscription type at `AutoPatternRe2j` so
+    /// [`Self::subscription_pattern`] reflects the value. Mirrors Java tests
+    /// that stub `when(subscriptions.subscriptionPattern()).thenReturn(...)`
+    /// across a regex lifecycle (set / change / clear) without driving the
+    /// full subscribe pipeline.
+    #[cfg(test)]
+    pub(crate) fn set_subscription_pattern_for_test(&mut self, pattern: Option<SubscriptionPattern>) {
+        self.subscription_type = SubscriptionType::AutoPatternRe2j;
+        self.subscribed_re2j_pattern = pattern;
+    }
+
     /// Translates Java's `subscriptionPattern()`.
     pub(crate) fn subscription_pattern(&self) -> Option<&SubscriptionPattern> {
         if self.has_re2j_pattern_subscription() {
