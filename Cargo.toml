@@ -69,3 +69,11 @@ serde_json = "1.0"
 regex = "1.0"
 generator = { path = "generator" }
 cbindgen = { version = "0.29", optional = true }
+
+# Release-build optimizations (Tier 1, zero behavior change): fat LTO + a single
+# codegen unit let the optimizer inline across crate boundaries (trait dispatch,
+# the per-poll hot path), Rust's AOT counterpart to Java's JIT. NOT panic=abort —
+# std Mutex poisoning (consumer-threading.md §16) relies on unwinding.
+[profile.release]
+lto = "fat"
+codegen-units = 1

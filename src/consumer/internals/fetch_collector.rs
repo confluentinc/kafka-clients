@@ -482,6 +482,17 @@ where
     ///
     /// Translates Java's `CompletedFetch initialize(CompletedFetch)`.
     fn initialize(&self, completed_fetch: CompletedFetch) -> Result<Option<CompletedFetch>, FetchFail> {
+        // DIAGNOSTIC (fetch_diag): age of this fetch when the app first touches
+        // it = the bg-receipt -> app-delivery handoff (FetchBuffer drain depth),
+        // the component of e2e latency that is NOT broker-side fetch wait.
+        if let Some(created) = completed_fetch.created_at {
+            log::info!(
+                target: "fetch_diag",
+                "app first-touch handoff_ms={} partition={}",
+                created.elapsed().as_millis(),
+                completed_fetch.partition
+            );
+        }
         let tp = completed_fetch.partition.clone();
         let error = Errors::for_code(completed_fetch.partition_data.error_code);
 

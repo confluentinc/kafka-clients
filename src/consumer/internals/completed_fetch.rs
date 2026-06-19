@@ -196,6 +196,13 @@ pub(crate) struct CompletedFetch {
     is_consumed: bool,
     /// Whether the cursor has been positioned at the first batch.
     initialized: bool,
+
+    /// DIAGNOSTIC (not in Java): instant this `CompletedFetch` was constructed
+    /// on the background task (when the fetch response was received). Logged
+    /// under the `fetch_diag` target when the app first touches this fetch in
+    /// `FetchCollector::initialize`, to measure the bg-receipt -> app-delivery
+    /// handoff (FetchBuffer drain depth). `None` when `fetch_diag` is disabled.
+    pub(crate) created_at: Option<std::time::Instant>,
 }
 
 /// Cursor through the batches and records inside a [`CompletedFetch`].
@@ -278,6 +285,8 @@ impl CompletedFetch {
             last_epoch: None,
             is_consumed: false,
             initialized: false,
+            // DIAGNOSTIC: stamp construction time only when fetch_diag is on.
+            created_at: log::log_enabled!(target: "fetch_diag", log::Level::Info).then(std::time::Instant::now),
         }
     }
 
@@ -303,6 +312,7 @@ impl CompletedFetch {
             last_epoch: None,
             is_consumed: false,
             initialized: false,
+            created_at: None,
         }
     }
 

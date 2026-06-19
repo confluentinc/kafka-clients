@@ -111,6 +111,20 @@ static int64_t hist_max(const hist_t *h) { return h->count == 0 ? 0 : h->max; }
 static double hist_avg(const hist_t *h) {
     return h->count == 0 ? 0.0 : (double)h->sum / (double)h->count;
 }
+/* Latency stddev computed from the exact histogram (1 ms quantized). */
+static double hist_stddev(const hist_t *h) {
+    if (h->count == 0)
+        return 0.0;
+    double mean = (double)h->sum / (double)h->count;
+    double var = 0.0;
+    for (int64_t i = 0; i <= MAX_LATENCY_MS; i++) {
+        if (h->buckets[i]) {
+            double d = (double)i - mean;
+            var += (double)h->buckets[i] * d * d;
+        }
+    }
+    return sqrt(var / (double)h->count);
+}
 
 /* Percentile, mirrors python: target = ceil(pct/100 * count). */
 static int64_t hist_percentile(const hist_t *h, double pct) {
@@ -170,15 +184,23 @@ static double cpu_sampler_sample(cpu_sampler_t *c, double *rss_mb_out) {
     c->last_wall_s = wall;
     double cpu_pct = dwall > 0 ? (100.0 * dcpu / dwall) : 0.0;
 
+    double rss_mb = 0.0;
+#if defined(__APPLE__)
+    /* macOS: ru_maxrss is bytes (peak — no cheap current-RSS syscall here). */
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
-    double rss_mb;
-#if defined(__APPLE__)
-    /* macOS: ru_maxrss is bytes. */
     rss_mb = (double)ru.ru_maxrss / (1024.0 * 1024.0);
 #else
-    /* Linux: ru_maxrss is kilobytes. */
-    rss_mb = (double)ru.ru_maxrss / 1024.0;
+    /* Linux: CURRENT RSS from /proc/self/statm (resident pages), matching the
+     * B harness's current-RSS semantics rather than peak ru_maxrss. */
+    FILE *sm = fopen("/proc/self/statm", "r");
+    if (sm) {
+        long total_pages = 0, res_pages = 0;
+        if (fscanf(sm, "%ld %ld", &total_pages, &res_pages) == 2)
+            rss_mb = (double)res_pages * (double)sysconf(_SC_PAGESIZE) /
+                     (1024.0 * 1024.0);
+        fclose(sm);
+    }
 #endif
     *rss_mb_out = rss_mb;
     return cpu_pct;
@@ -199,6 +221,7 @@ typedef struct {
     int poll_timeout_ms;
     int join_timeout;
     int max_poll_records; /* batch size for rd_kafka_consume_batch_queue */
+    int single_poll;      /* use rd_kafka_consumer_poll() one message at a time */
     const char *protocol; /* "consumer" or "classic" */
     const char *kafka_bin;
     const char *results_dir;
@@ -403,6 +426,7 @@ int main(int argc, char **argv) {
     a.poll_timeout_ms = 500;
     a.join_timeout = 120;
     a.max_poll_records = 500; /* match Rust max.poll.records=500 */
+    a.single_poll = 0;
     a.protocol = "consumer";
     const char *home = getenv("HOME");
     static char kafka_bin_buf[1024];
@@ -450,6 +474,8 @@ int main(int argc, char **argv) {
             a.join_timeout = atoi(NEXT());
         else if (!strcmp(arg, "--max-poll-records"))
             a.max_poll_records = atoi(NEXT());
+        else if (!strcmp(arg, "--single-poll"))
+            a.single_poll = 1;
         else if (!strcmp(arg, "--fetch-min-bytes"))
             a.fetch_min_bytes = NEXT();
         else if (!strcmp(arg, "--fetch-wait-max-ms"))
@@ -625,6 +651,9 @@ int main(int argc, char **argv) {
     hist_init(&rpp);
     cpu_sampler_t sampler;
     cpu_sampler_init(&sampler);
+    /* Run-level current-RSS aggregation (avg/min/max over interval samples). */
+    double rss_sum = 0.0, rss_min = 1e18, rss_max = 0.0;
+    int rss_samples = 0;
 
     /* JSONL sink: <results_dir>/<group_id>/metrics.jsonl so each run lands in
      * its own directory (e.g. cmp-librdkafka-c2). */
@@ -670,13 +699,23 @@ int main(int argc, char **argv) {
          * This makes the drained batch size reflect what is actually available
          * rather than artificially waiting until `max` messages accumulate, so
          * it is comparable to Rust's broker-reply-driven batches. */
-        ssize_t n = rd_kafka_consume_batch_queue(rkqu, a.poll_timeout_ms,
-                                                 rkmessages, 1);
-        if (n > 0 && max_batch > 1) {
-            ssize_t more = rd_kafka_consume_batch_queue(
-                rkqu, 0, rkmessages + n, (size_t)(max_batch - 1));
-            if (more > 0)
-                n += more;
+        ssize_t n;
+        if (a.single_poll) {
+            /* Single-message consumer poll — the common rdkafka usage pattern
+             * (one message per rd_kafka_consumer_poll call). */
+            rd_kafka_message_t *m = rd_kafka_consumer_poll(rk, a.poll_timeout_ms);
+            n = m ? 1 : 0;
+            if (m)
+                rkmessages[0] = m;
+        } else {
+            n = rd_kafka_consume_batch_queue(rkqu, a.poll_timeout_ms,
+                                             rkmessages, 1);
+            if (n > 0 && max_batch > 1) {
+                ssize_t more = rd_kafka_consume_batch_queue(
+                    rkqu, 0, rkmessages + n, (size_t)(max_batch - 1));
+                if (more > 0)
+                    n += more;
+            }
         }
         if (n < 0) {
             fprintf(stderr, "batch consume error: %s\n",
@@ -752,6 +791,10 @@ int main(int argc, char **argv) {
             double elapsed_s = now_mono - interval_start;
             double rss_mb = 0.0;
             double cpu = cpu_sampler_sample(&sampler, &rss_mb);
+            rss_sum += rss_mb;
+            if (rss_mb < rss_min) rss_min = rss_mb;
+            if (rss_mb > rss_max) rss_max = rss_mb;
+            rss_samples++;
             int64_t icount = interval_hist.count;
             double throughput =
                 elapsed_s > 0 ? (double)icount / elapsed_s : 0.0;
@@ -811,6 +854,9 @@ int main(int argc, char **argv) {
     int64_t p95 = hist_percentile(&overall, 95);
     int64_t p99 = hist_percentile(&overall, 99);
     int64_t p999 = hist_percentile(&overall, 99.9);
+    double sd = hist_stddev(&overall);
+    double rss_avg = rss_samples > 0 ? rss_sum / rss_samples : 0.0;
+    if (rss_samples == 0) rss_min = 0.0;
     double avg_records_per_batch =
         batch_calls > 0 ? (double)batch_records / (double)batch_calls : 0.0;
     /* Records-per-batch distribution (post-warmup, non-empty batches). */
@@ -837,10 +883,12 @@ int main(int argc, char **argv) {
            "p50=%lld p99=%lld max=%lld\n",
            (long long)rpp_n, (long long)rpp_min, rpp_mean, (long long)rpp_p50,
            (long long)rpp_p99, (long long)rpp_max);
-    printf("E2E latency (ms):  min=%lld avg=%.2f p50=%lld p90=%lld p95=%lld "
-           "p99=%lld p99.9=%lld max=%lld\n",
-           (long long)mn, avg, (long long)p50, (long long)p90, (long long)p95,
+    printf("E2E latency (ms):  min=%lld avg=%.2f stddev=%.2f p50=%lld p90=%lld "
+           "p95=%lld p99=%lld p99.9=%lld max=%lld\n",
+           (long long)mn, avg, sd, (long long)p50, (long long)p90, (long long)p95,
            (long long)p99, (long long)p999, (long long)mx);
+    printf("RSS (MB, current):  avg=%.1f min=%.1f max=%.1f (%d samples)\n",
+           rss_avg, rss_min, rss_max, rss_samples);
     printf("======================================================================\n");
 
     fprintf(jsonl,
@@ -851,16 +899,19 @@ int main(int argc, char **argv) {
             "\"batch_records\":%lld,\"avg_records_per_batch\":%.2f,"
             "\"rpp_n\":%lld,\"rpp_min\":%lld,\"rpp_mean\":%.2f,"
             "\"rpp_p50\":%lld,\"rpp_p99\":%lld,\"rpp_max\":%lld,"
-            "\"lat_min_ms\":%lld,\"lat_avg_ms\":%.2f,\"lat_p50_ms\":%lld,"
+            "\"lat_min_ms\":%lld,\"lat_avg_ms\":%.2f,\"lat_stddev_ms\":%.2f,"
+            "\"lat_p50_ms\":%lld,"
             "\"lat_p90_ms\":%lld,\"lat_p95_ms\":%lld,\"lat_p99_ms\":%lld,"
-            "\"lat_p999_ms\":%lld,\"lat_max_ms\":%lld}\n",
+            "\"lat_p999_ms\":%lld,\"lat_max_ms\":%lld,"
+            "\"rss_avg_mb\":%.1f,\"rss_min_mb\":%.1f,\"rss_max_mb\":%.1f}\n",
             a.protocol, (long long)overall.count, measured_duration_s,
             throughput_msg_s, throughput_mib_s, a.max_poll_records,
             (long long)batch_calls, (long long)batch_records,
             avg_records_per_batch, (long long)rpp_n, (long long)rpp_min,
             rpp_mean, (long long)rpp_p50, (long long)rpp_p99, (long long)rpp_max,
-            (long long)mn, avg, (long long)p50, (long long)p90, (long long)p95,
-            (long long)p99, (long long)p999, (long long)mx);
+            (long long)mn, avg, sd, (long long)p50, (long long)p90, (long long)p95,
+            (long long)p99, (long long)p999, (long long)mx,
+            rss_avg, rss_min, rss_max);
     fflush(jsonl);
     fclose(jsonl);
 

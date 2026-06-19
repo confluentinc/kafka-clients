@@ -1,0 +1,278 @@
+======================================================================
+Consumer E2E Latency Benchmark - librdkafka (native C)
+======================================================================
+Bootstrap:   pkc-devc686wq6.us-east-1.aws.devel.cpdev.cloud:9092
+Topic:       bench-200p
+Group:       cmp-librdkafka-c-1781157998542
+Throughput:  200000 msg/s
+Duration:    3600 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      8000000 messages
+Interval:    15 s
+rdkafka ver: 2.13.0
+======================================================================
+
+>>> Subscribed; waiting for partition assignment (group.protocol=consumer)...
+%6|1781157998.841|GETSUBSCRIPTIONS|librdkafka-perf-c#consumer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to xN39LWXTTziY3v4PBs0l0w
+    assigned 200 partition(s)
+    assigned after 1.0s
+>>> Settling to the live edge (polling until empty) before producer...
+    (settle timeout - proceeding)
+    at live edge; starting producer now.
+
+>>> Measuring (warmup 8000000 msgs, then 3600 s)...
+
+>>> first records arrived 0.0s after producer start
+    warmup complete (8000000 msgs); measuring now
+[interval 0] t=  15.0s msgs=2441214 thr=   162529 msg/s  avg=170.69 p50=169 p99=345 p999=376 max=415 ms  cpu= 40.2% rss= 208.6MB
+[interval 1] t=  30.0s msgs=2376939 thr=   158351 msg/s  avg=175.83 p50=174 p99=358 p999=410 max=531 ms  cpu= 40.0% rss= 213.5MB
+[interval 2] t=  45.0s msgs=2428605 thr=   161791 msg/s  avg=172.09 p50=170 p99=351 p999=388 max=449 ms  cpu= 41.3% rss= 213.8MB
+[interval 3] t=  60.0s msgs=2419729 thr=   161245 msg/s  avg=172.39 p50=170 p99=350 p999=382 max=435 ms  cpu= 41.1% rss= 213.8MB
+[interval 4] t=  75.1s msgs=2452063 thr=   163421 msg/s  avg=170.57 p50=169 p99=345 p999=376 max=431 ms  cpu= 41.7% rss= 213.8MB
+[interval 5] t=  90.1s msgs=2397202 thr=   159718 msg/s  avg=173.56 p50=172 p99=354 p999=387 max=437 ms  cpu= 40.1% rss= 213.8MB
+[interval 6] t= 105.1s msgs=2444523 thr=   162796 msg/s  avg=171.15 p50=170 p99=346 p999=376 max=409 ms  cpu= 40.9% rss= 213.8MB
+[interval 7] t= 120.1s msgs=2462808 thr=   164095 msg/s  avg=169.57 p50=168 p99=343 p999=372 max=420 ms  cpu= 42.0% rss= 214.0MB
+[interval 8] t= 135.1s msgs=2463183 thr=   163936 msg/s  avg=169.92 p50=168 p99=342 p999=369 max=398 ms  cpu= 41.7% rss= 214.0MB
+[interval 9] t= 150.1s msgs=2469932 thr=   164639 msg/s  avg=170.92 p50=169 p99=344 p999=377 max=432 ms  cpu= 41.7% rss= 214.0MB
+[interval 10] t= 165.1s msgs=2433737 thr=   162177 msg/s  avg=171.96 p50=170 p99=350 p999=385 max=494 ms  cpu= 40.8% rss= 214.0MB
+[interval 11] t= 180.1s msgs=2463959 thr=   164152 msg/s  avg=169.48 p50=167 p99=345 p999=375 max=413 ms  cpu= 41.7% rss= 214.0MB
+[interval 12] t= 195.1s msgs=2313897 thr=   154229 msg/s  avg=178.65 p50=176 p99=364 p999=399 max=462 ms  cpu= 38.4% rss= 214.0MB
+[interval 13] t= 210.1s msgs=2328010 thr=   155197 msg/s  avg=177.75 p50=176 p99=363 p999=394 max=420 ms  cpu= 39.3% rss= 214.0MB
+[interval 14] t= 225.1s msgs=2452770 thr=   163507 msg/s  avg=171.19 p50=170 p99=345 p999=377 max=437 ms  cpu= 41.1% rss= 214.0MB
+[interval 15] t= 240.2s msgs=2363714 thr=   157377 msg/s  avg=175.40 p50=173 p99=359 p999=390 max=468 ms  cpu= 40.1% rss= 214.0MB
+[interval 16] t= 255.2s msgs=2278766 thr=   151752 msg/s  avg=180.71 p50=179 p99=368 p999=403 max=437 ms  cpu= 38.2% rss= 214.3MB
+[interval 17] t= 270.2s msgs=2285439 thr=   152227 msg/s  avg=181.34 p50=179 p99=368 p999=404 max=439 ms  cpu= 38.2% rss= 214.6MB
+[interval 18] t= 285.2s msgs=2447366 thr=   162874 msg/s  avg=171.57 p50=170 p99=345 p999=374 max=407 ms  cpu= 40.7% rss= 214.6MB
+[interval 19] t= 300.2s msgs=2470875 thr=   164716 msg/s  avg=169.65 p50=168 p99=342 p999=370 max=407 ms  cpu= 41.7% rss= 214.6MB
+[interval 20] t= 315.3s msgs=2467526 thr=   164087 msg/s  avg=169.33 p50=167 p99=342 p999=370 max=400 ms  cpu= 41.1% rss= 214.6MB
+[interval 21] t= 330.3s msgs=2463844 thr=   164133 msg/s  avg=170.56 p50=169 p99=345 p999=376 max=412 ms  cpu= 41.8% rss= 214.6MB
+[interval 22] t= 345.3s msgs=2454841 thr=   163563 msg/s  avg=170.63 p50=169 p99=345 p999=372 max=405 ms  cpu= 41.4% rss= 214.6MB
+[interval 23] t= 360.3s msgs=2466902 thr=   164178 msg/s  avg=169.89 p50=168 p99=344 p999=373 max=415 ms  cpu= 41.1% rss= 214.6MB
+[interval 24] t= 375.3s msgs=2460625 thr=   163986 msg/s  avg=169.53 p50=167 p99=343 p999=370 max=399 ms  cpu= 41.0% rss= 214.6MB
+[interval 25] t= 390.3s msgs=2465326 thr=   164279 msg/s  avg=169.76 p50=168 p99=343 p999=371 max=402 ms  cpu= 41.5% rss= 214.8MB
+[interval 26] t= 405.3s msgs=2469393 thr=   164497 msg/s  avg=169.92 p50=169 p99=342 p999=373 max=411 ms  cpu= 40.9% rss= 214.8MB
+[interval 27] t= 420.3s msgs=2470082 thr=   164654 msg/s  avg=169.32 p50=167 p99=345 p999=377 max=426 ms  cpu= 41.5% rss= 214.8MB
+[interval 28] t= 435.3s msgs=2364388 thr=   157430 msg/s  avg=175.61 p50=173 p99=358 p999=391 max=445 ms  cpu= 39.7% rss= 214.8MB
+[interval 29] t= 450.3s msgs=2438160 thr=   162499 msg/s  avg=171.68 p50=170 p99=348 p999=378 max=415 ms  cpu= 41.7% rss= 214.8MB
+[interval 30] t= 465.4s msgs=2314452 thr=   154231 msg/s  avg=179.77 p50=178 p99=365 p999=403 max=489 ms  cpu= 38.8% rss= 214.8MB
+[interval 31] t= 480.4s msgs=2329326 thr=   155058 msg/s  avg=177.58 p50=175 p99=362 p999=397 max=468 ms  cpu= 39.1% rss= 215.1MB
+[interval 32] t= 495.4s msgs=2390300 thr=   159143 msg/s  avg=173.72 p50=172 p99=356 p999=391 max=433 ms  cpu= 40.9% rss= 215.1MB
+[interval 33] t= 510.4s msgs=2399665 thr=   159971 msg/s  avg=174.24 p50=172 p99=357 p999=388 max=436 ms  cpu= 40.2% rss= 215.1MB
+[interval 34] t= 525.4s msgs=2448283 thr=   163087 msg/s  avg=171.33 p50=170 p99=345 p999=379 max=436 ms  cpu= 41.6% rss= 215.1MB
+[interval 35] t= 540.4s msgs=2400750 thr=   159983 msg/s  avg=173.80 p50=172 p99=352 p999=386 max=449 ms  cpu= 41.0% rss= 215.1MB
+[interval 36] t= 555.4s msgs=2293352 thr=   152761 msg/s  avg=179.42 p50=177 p99=367 p999=403 max=442 ms  cpu= 38.7% rss= 215.1MB
+[interval 37] t= 570.4s msgs=2354166 thr=   156871 msg/s  avg=176.18 p50=174 p99=362 p999=397 max=443 ms  cpu= 40.0% rss= 215.1MB
+[interval 38] t= 585.4s msgs=2323726 thr=   154836 msg/s  avg=178.73 p50=177 p99=363 p999=401 max=437 ms  cpu= 39.7% rss= 215.1MB
+[interval 39] t= 600.4s msgs=2333451 thr=   155520 msg/s  avg=178.06 p50=176 p99=363 p999=395 max=427 ms  cpu= 38.2% rss= 215.1MB
+[interval 40] t= 615.5s msgs=2456107 thr=   163663 msg/s  avg=169.65 p50=168 p99=343 p999=371 max=418 ms  cpu= 41.2% rss= 215.1MB
+[interval 41] t= 630.5s msgs=2357278 thr=   157133 msg/s  avg=176.64 p50=174 p99=358 p999=391 max=443 ms  cpu= 39.4% rss= 215.6MB
+[interval 42] t= 645.5s msgs=2395237 thr=   159634 msg/s  avg=173.45 p50=171 p99=353 p999=384 max=420 ms  cpu= 40.4% rss= 215.6MB
+[interval 43] t= 660.5s msgs=2466714 thr=   164422 msg/s  avg=170.88 p50=169 p99=345 p999=373 max=407 ms  cpu= 41.6% rss= 215.6MB
+[interval 44] t= 675.5s msgs=2463919 thr=   164261 msg/s  avg=169.74 p50=168 p99=341 p999=372 max=427 ms  cpu= 41.7% rss= 215.6MB
+[interval 45] t= 690.5s msgs=2459834 thr=   163986 msg/s  avg=169.71 p50=167 p99=343 p999=373 max=410 ms  cpu= 41.9% rss= 215.6MB
+[interval 46] t= 705.5s msgs=2472921 thr=   164754 msg/s  avg=170.29 p50=168 p99=344 p999=379 max=456 ms  cpu= 41.4% rss= 215.6MB
+[interval 47] t= 720.5s msgs=2463828 thr=   163817 msg/s  avg=170.56 p50=169 p99=344 p999=376 max=414 ms  cpu= 41.6% rss= 215.6MB
+[interval 48] t= 735.5s msgs=2432213 thr=   162048 msg/s  avg=171.84 p50=170 p99=349 p999=383 max=421 ms  cpu= 41.1% rss= 215.6MB
+[interval 49] t= 750.5s msgs=2368303 thr=   157846 msg/s  avg=176.63 p50=174 p99=360 p999=391 max=446 ms  cpu= 39.1% rss= 215.6MB
+[interval 50] t= 765.5s msgs=2456246 thr=   163665 msg/s  avg=171.16 p50=169 p99=347 p999=382 max=432 ms  cpu= 41.4% rss= 215.6MB
+[interval 51] t= 780.5s msgs=2454893 thr=   163644 msg/s  avg=170.62 p50=169 p99=344 p999=377 max=409 ms  cpu= 41.4% rss= 215.6MB
+[interval 52] t= 795.6s msgs=2452524 thr=   163357 msg/s  avg=170.41 p50=169 p99=344 p999=378 max=480 ms  cpu= 40.8% rss= 215.6MB
+[interval 53] t= 810.6s msgs=2463081 thr=   163748 msg/s  avg=170.50 p50=168 p99=346 p999=377 max=453 ms  cpu= 41.8% rss= 215.6MB
+[interval 54] t= 825.6s msgs=2451582 thr=   163375 msg/s  avg=171.36 p50=170 p99=348 p999=383 max=427 ms  cpu= 41.1% rss= 215.6MB
+[interval 55] t= 840.6s msgs=2359360 thr=   157204 msg/s  avg=176.38 p50=175 p99=359 p999=392 max=433 ms  cpu= 39.5% rss= 215.6MB
+[interval 56] t= 855.6s msgs=2438732 thr=   162355 msg/s  avg=171.38 p50=170 p99=347 p999=378 max=439 ms  cpu= 40.4% rss= 215.6MB
+[interval 57] t= 870.6s msgs=2389921 thr=   159314 msg/s  avg=174.25 p50=172 p99=356 p999=388 max=450 ms  cpu= 40.2% rss= 215.6MB
+[interval 58] t= 885.6s msgs=2347111 thr=   156429 msg/s  avg=176.38 p50=174 p99=361 p999=397 max=450 ms  cpu= 39.1% rss= 215.6MB
+[interval 59] t= 900.6s msgs=2355948 thr=   156978 msg/s  avg=176.42 p50=175 p99=361 p999=397 max=434 ms  cpu= 38.9% rss= 215.6MB
+[interval 60] t= 915.7s msgs=2314402 thr=   153909 msg/s  avg=179.61 p50=178 p99=364 p999=396 max=439 ms  cpu= 38.3% rss= 215.6MB
+[interval 61] t= 930.7s msgs=2333807 thr=   155019 msg/s  avg=177.38 p50=175 p99=362 p999=395 max=429 ms  cpu= 39.1% rss= 215.6MB
+[interval 62] t= 945.8s msgs=2332906 thr=   155337 msg/s  avg=177.65 p50=175 p99=362 p999=397 max=457 ms  cpu= 38.9% rss= 215.6MB
+[interval 63] t= 960.8s msgs=2347354 thr=   156351 msg/s  avg=177.15 p50=175 p99=362 p999=398 max=429 ms  cpu= 39.7% rss= 215.6MB
+[interval 64] t= 975.8s msgs=2400028 thr=   159897 msg/s  avg=173.82 p50=172 p99=352 p999=388 max=435 ms  cpu= 40.1% rss= 215.6MB
+[interval 65] t= 990.8s msgs=2459011 thr=   163769 msg/s  avg=169.83 p50=168 p99=344 p999=373 max=429 ms  cpu= 41.0% rss= 215.6MB
+[interval 66] t=1005.8s msgs=2412563 thr=   160826 msg/s  avg=172.86 p50=171 p99=352 p999=384 max=426 ms  cpu= 41.2% rss= 215.6MB
+[interval 67] t=1020.8s msgs=2369763 thr=   157929 msg/s  avg=174.69 p50=173 p99=356 p999=388 max=423 ms  cpu= 39.8% rss= 215.6MB
+[interval 68] t=1035.8s msgs=2409686 thr=   160619 msg/s  avg=174.24 p50=172 p99=355 p999=387 max=431 ms  cpu= 40.7% rss= 215.6MB
+[interval 69] t=1050.8s msgs=2456465 thr=   163421 msg/s  avg=171.20 p50=169 p99=346 p999=377 max=418 ms  cpu= 41.4% rss= 215.6MB
+[interval 70] t=1065.9s msgs=2462326 thr=   163863 msg/s  avg=169.64 p50=167 p99=345 p999=378 max=416 ms  cpu= 41.7% rss= 215.6MB
+[interval 71] t=1080.9s msgs=2455704 thr=   163545 msg/s  avg=171.19 p50=169 p99=346 p999=376 max=413 ms  cpu= 41.7% rss= 215.6MB
+[interval 72] t=1095.9s msgs=2467964 thr=   164335 msg/s  avg=170.10 p50=168 p99=343 p999=371 max=403 ms  cpu= 41.4% rss= 215.6MB
+[interval 73] t=1110.9s msgs=2350022 thr=   156570 msg/s  avg=176.81 p50=175 p99=360 p999=396 max=456 ms  cpu= 39.4% rss= 215.6MB
+[interval 74] t=1125.9s msgs=2380595 thr=   158703 msg/s  avg=174.28 p50=172 p99=359 p999=392 max=444 ms  cpu= 40.1% rss= 215.6MB
+[interval 75] t=1140.9s msgs=2433841 thr=   162167 msg/s  avg=171.34 p50=169 p99=350 p999=385 max=425 ms  cpu= 40.9% rss= 215.6MB
+[interval 76] t=1155.9s msgs=2464466 thr=   164187 msg/s  avg=169.87 p50=168 p99=342 p999=371 max=405 ms  cpu= 41.6% rss= 215.6MB
+[interval 77] t=1171.0s msgs=2468232 thr=   164178 msg/s  avg=169.86 p50=168 p99=344 p999=377 max=414 ms  cpu= 41.5% rss= 215.6MB
+[interval 78] t=1186.0s msgs=2471443 thr=   164735 msg/s  avg=169.44 p50=168 p99=343 p999=373 max=427 ms  cpu= 42.1% rss= 215.6MB
+[interval 79] t=1201.0s msgs=2474660 thr=   164660 msg/s  avg=169.21 p50=167 p99=343 p999=374 max=414 ms  cpu= 41.1% rss= 215.6MB
+[interval 80] t=1216.0s msgs=2475095 thr=   164801 msg/s  avg=169.16 p50=167 p99=341 p999=371 max=446 ms  cpu= 41.5% rss= 215.6MB
+[interval 81] t=1231.0s msgs=2476344 thr=   165039 msg/s  avg=169.18 p50=167 p99=343 p999=377 max=423 ms  cpu= 41.4% rss= 215.6MB
+[interval 82] t=1246.0s msgs=2481391 thr=   165343 msg/s  avg=170.07 p50=168 p99=345 p999=381 max=446 ms  cpu= 41.2% rss= 215.6MB
+[interval 83] t=1261.0s msgs=2468004 thr=   164532 msg/s  avg=169.44 p50=168 p99=342 p999=372 max=428 ms  cpu= 41.6% rss= 215.6MB
+[interval 84] t=1276.1s msgs=2470101 thr=   164299 msg/s  avg=170.16 p50=168 p99=344 p999=375 max=415 ms  cpu= 41.2% rss= 215.6MB
+[interval 85] t=1291.1s msgs=2424497 thr=   161273 msg/s  avg=172.72 p50=171 p99=351 p999=386 max=430 ms  cpu= 40.7% rss= 215.6MB
+[interval 86] t=1306.1s msgs=2419861 thr=   161301 msg/s  avg=172.96 p50=171 p99=351 p999=387 max=443 ms  cpu= 40.6% rss= 215.6MB
+[interval 87] t=1321.1s msgs=2434286 thr=   162216 msg/s  avg=171.12 p50=169 p99=349 p999=383 max=429 ms  cpu= 40.8% rss= 215.6MB
+[interval 88] t=1336.1s msgs=2314099 thr=   153959 msg/s  avg=178.53 p50=177 p99=365 p999=402 max=444 ms  cpu= 38.3% rss= 215.6MB
+[interval 89] t=1351.2s msgs=2402617 thr=   159891 msg/s  avg=173.50 p50=172 p99=353 p999=387 max=452 ms  cpu= 40.7% rss= 215.6MB
+[interval 90] t=1366.2s msgs=2410992 thr=   160603 msg/s  avg=173.79 p50=171 p99=353 p999=389 max=446 ms  cpu= 40.4% rss= 215.6MB
+[interval 91] t=1381.2s msgs=2386901 thr=   159089 msg/s  avg=173.58 p50=171 p99=352 p999=385 max=412 ms  cpu= 40.3% rss= 215.8MB
+[interval 92] t=1396.2s msgs=2353584 thr=   156871 msg/s  avg=176.22 p50=174 p99=358 p999=389 max=426 ms  cpu= 38.8% rss= 215.8MB
+[interval 93] t=1411.2s msgs=2329381 thr=   155234 msg/s  avg=178.40 p50=177 p99=362 p999=396 max=433 ms  cpu= 39.1% rss= 215.8MB
+[interval 94] t=1426.2s msgs=2313602 thr=   154188 msg/s  avg=179.81 p50=178 p99=363 p999=393 max=440 ms  cpu= 39.0% rss= 215.8MB
+[interval 95] t=1441.2s msgs=2284877 thr=   152277 msg/s  avg=180.94 p50=179 p99=368 p999=400 max=434 ms  cpu= 37.8% rss= 215.8MB
+[interval 96] t=1456.2s msgs=2320028 thr=   154594 msg/s  avg=178.02 p50=176 p99=363 p999=395 max=454 ms  cpu= 39.1% rss= 215.8MB
+[interval 97] t=1471.2s msgs=2301004 thr=   153168 msg/s  avg=179.64 p50=178 p99=366 p999=400 max=438 ms  cpu= 38.3% rss= 215.8MB
+[interval 98] t=1486.3s msgs=2391893 thr=   159070 msg/s  avg=174.32 p50=172 p99=355 p999=386 max=422 ms  cpu= 40.4% rss= 215.8MB
+[interval 99] t=1501.3s msgs=2468054 thr=   164479 msg/s  avg=169.52 p50=168 p99=344 p999=375 max=411 ms  cpu= 41.9% rss= 215.8MB
+[interval 100] t=1516.3s msgs=2451169 thr=   163092 msg/s  avg=170.49 p50=169 p99=345 p999=374 max=432 ms  cpu= 41.5% rss= 215.8MB
+[interval 101] t=1531.3s msgs=2429904 thr=   161888 msg/s  avg=171.98 p50=170 p99=350 p999=380 max=423 ms  cpu= 41.0% rss= 215.8MB
+[interval 102] t=1546.3s msgs=2385258 thr=   158844 msg/s  avg=174.56 p50=172 p99=357 p999=396 max=467 ms  cpu= 40.1% rss= 215.8MB
+[interval 103] t=1561.3s msgs=2311570 thr=   153868 msg/s  avg=178.30 p50=176 p99=364 p999=395 max=447 ms  cpu= 38.7% rss= 215.8MB
+[interval 104] t=1576.3s msgs=2315996 thr=   154390 msg/s  avg=178.35 p50=176 p99=363 p999=397 max=441 ms  cpu= 38.8% rss= 215.8MB
+[interval 105] t=1591.4s msgs=2339221 thr=   155632 msg/s  avg=177.75 p50=176 p99=362 p999=395 max=429 ms  cpu= 39.1% rss= 215.8MB
+[interval 106] t=1606.4s msgs=2454179 thr=   163558 msg/s  avg=170.18 p50=169 p99=342 p999=372 max=423 ms  cpu= 41.5% rss= 215.8MB
+[interval 107] t=1621.4s msgs=2457550 thr=   163733 msg/s  avg=170.00 p50=169 p99=345 p999=375 max=412 ms  cpu= 41.3% rss= 215.8MB
+[interval 108] t=1636.4s msgs=2456011 thr=   163600 msg/s  avg=168.91 p50=167 p99=343 p999=374 max=413 ms  cpu= 41.3% rss= 215.8MB
+[interval 109] t=1651.4s msgs=2443814 thr=   162870 msg/s  avg=171.15 p50=169 p99=345 p999=374 max=414 ms  cpu= 41.0% rss= 216.1MB
+[interval 110] t=1666.4s msgs=2441759 thr=   162314 msg/s  avg=171.43 p50=170 p99=348 p999=384 max=425 ms  cpu= 40.9% rss= 216.1MB
+[interval 111] t=1681.5s msgs=2434914 thr=   162032 msg/s  avg=171.75 p50=170 p99=349 p999=379 max=422 ms  cpu= 40.5% rss= 216.1MB
+[interval 112] t=1696.5s msgs=2411222 thr=   160696 msg/s  avg=171.75 p50=169 p99=350 p999=380 max=410 ms  cpu= 40.7% rss= 216.1MB
+[interval 113] t=1711.5s msgs=2398755 thr=   159628 msg/s  avg=173.21 p50=171 p99=354 p999=385 max=424 ms  cpu= 40.1% rss= 216.1MB
+[interval 114] t=1726.5s msgs=2393127 thr=   159526 msg/s  avg=173.95 p50=172 p99=354 p999=387 max=417 ms  cpu= 39.8% rss= 216.1MB
+[interval 115] t=1741.6s msgs=2421961 thr=   160949 msg/s  avg=172.23 p50=171 p99=350 p999=385 max=425 ms  cpu= 40.8% rss= 216.1MB
+[interval 116] t=1756.6s msgs=2462971 thr=   163822 msg/s  avg=169.72 p50=168 p99=344 p999=378 max=419 ms  cpu= 41.2% rss= 216.1MB
+[interval 117] t=1771.6s msgs=2382702 thr=   158827 msg/s  avg=174.17 p50=172 p99=354 p999=385 max=426 ms  cpu= 40.4% rss= 216.1MB
+[interval 118] t=1786.6s msgs=2385102 thr=   158824 msg/s  avg=173.92 p50=172 p99=354 p999=386 max=440 ms  cpu= 39.7% rss= 216.1MB
+[interval 119] t=1801.6s msgs=2467016 thr=   164276 msg/s  avg=169.86 p50=168 p99=343 p999=375 max=418 ms  cpu= 41.6% rss= 216.1MB
+[interval 120] t=1816.6s msgs=2441472 thr=   162746 msg/s  avg=170.42 p50=168 p99=347 p999=379 max=427 ms  cpu= 41.0% rss= 216.1MB
+[interval 121] t=1831.6s msgs=2448356 thr=   163129 msg/s  avg=170.26 p50=168 p99=345 p999=377 max=420 ms  cpu= 40.7% rss= 216.1MB
+[interval 122] t=1846.7s msgs=2455234 thr=   163292 msg/s  avg=169.85 p50=168 p99=344 p999=373 max=410 ms  cpu= 41.1% rss= 216.1MB
+[interval 123] t=1861.7s msgs=2472229 thr=   164711 msg/s  avg=169.44 p50=167 p99=343 p999=374 max=405 ms  cpu= 40.9% rss= 216.1MB
+[interval 124] t=1876.7s msgs=2416393 thr=   161076 msg/s  avg=172.08 p50=170 p99=350 p999=384 max=431 ms  cpu= 40.9% rss= 216.1MB
+[interval 125] t=1891.7s msgs=2468569 thr=   164518 msg/s  avg=169.49 p50=168 p99=343 p999=376 max=408 ms  cpu= 42.1% rss= 216.1MB
+[interval 126] t=1906.7s msgs=2353070 thr=   156744 msg/s  avg=176.24 p50=174 p99=361 p999=394 max=433 ms  cpu= 39.3% rss= 216.1MB
+[interval 127] t=1921.7s msgs=2360473 thr=   157365 msg/s  avg=175.91 p50=174 p99=358 p999=392 max=430 ms  cpu= 39.1% rss= 216.1MB
+[interval 128] t=1936.7s msgs=2410511 thr=   160650 msg/s  avg=172.16 p50=170 p99=352 p999=385 max=443 ms  cpu= 40.7% rss= 216.1MB
+[interval 129] t=1951.7s msgs=2465750 thr=   164378 msg/s  avg=169.69 p50=167 p99=344 p999=373 max=424 ms  cpu= 41.3% rss= 216.1MB
+[interval 130] t=1966.7s msgs=2461008 thr=   164057 msg/s  avg=169.93 p50=168 p99=345 p999=380 max=431 ms  cpu= 41.6% rss= 216.1MB
+[interval 131] t=1981.7s msgs=2459301 thr=   163951 msg/s  avg=169.97 p50=168 p99=344 p999=374 max=407 ms  cpu= 41.8% rss= 216.1MB
+[interval 132] t=1996.7s msgs=2324398 thr=   154918 msg/s  avg=177.54 p50=176 p99=362 p999=396 max=432 ms  cpu= 39.0% rss= 216.1MB
+[interval 133] t=2011.7s msgs=2381637 thr=   158599 msg/s  avg=174.59 p50=172 p99=355 p999=389 max=430 ms  cpu= 40.3% rss= 216.1MB
+[interval 134] t=2026.7s msgs=2330985 thr=   155315 msg/s  avg=177.05 p50=175 p99=361 p999=396 max=435 ms  cpu= 38.9% rss= 216.1MB
+[interval 135] t=2041.7s msgs=2312531 thr=   154164 msg/s  avg=179.45 p50=178 p99=365 p999=397 max=442 ms  cpu= 38.6% rss= 216.1MB
+[interval 136] t=2056.8s msgs=2409184 thr=   160325 msg/s  avg=172.84 p50=171 p99=353 p999=387 max=436 ms  cpu= 40.2% rss= 216.1MB
+[interval 137] t=2071.8s msgs=2444144 thr=   162310 msg/s  avg=171.37 p50=169 p99=348 p999=379 max=427 ms  cpu= 40.7% rss= 216.1MB
+[interval 138] t=2086.8s msgs=2384752 thr=   158882 msg/s  avg=174.70 p50=173 p99=354 p999=388 max=439 ms  cpu= 39.9% rss= 216.1MB
+[interval 139] t=2101.8s msgs=2384823 thr=   158872 msg/s  avg=174.66 p50=173 p99=357 p999=385 max=501 ms  cpu= 39.7% rss= 216.1MB
+[interval 140] t=2116.9s msgs=2316648 thr=   154312 msg/s  avg=178.66 p50=177 p99=363 p999=397 max=437 ms  cpu= 38.1% rss= 216.1MB
+[interval 141] t=2131.9s msgs=2324205 thr=   154837 msg/s  avg=177.69 p50=175 p99=362 p999=396 max=437 ms  cpu= 38.9% rss= 216.1MB
+[interval 142] t=2146.9s msgs=2400838 thr=   160016 msg/s  avg=172.92 p50=171 p99=351 p999=382 max=431 ms  cpu= 40.4% rss= 216.1MB
+[interval 143] t=2161.9s msgs=2391149 thr=   159380 msg/s  avg=174.33 p50=172 p99=353 p999=383 max=421 ms  cpu= 40.3% rss= 216.1MB
+[interval 144] t=2176.9s msgs=2448586 thr=   162656 msg/s  avg=170.69 p50=169 p99=344 p999=374 max=419 ms  cpu= 41.4% rss= 216.1MB
+[interval 145] t=2192.0s msgs=2425220 thr=   161252 msg/s  avg=172.30 p50=170 p99=350 p999=387 max=513 ms  cpu= 40.4% rss= 216.1MB
+[interval 146] t=2207.0s msgs=2283919 thr=   152244 msg/s  avg=180.59 p50=178 p99=369 p999=401 max=436 ms  cpu= 37.6% rss= 216.1MB
+[interval 147] t=2222.0s msgs=2417270 thr=   161001 msg/s  avg=171.92 p50=170 p99=350 p999=382 max=452 ms  cpu= 40.2% rss= 216.1MB
+[interval 148] t=2237.0s msgs=2371192 thr=   158078 msg/s  avg=174.99 p50=173 p99=356 p999=387 max=433 ms  cpu= 39.6% rss= 216.1MB
+[interval 149] t=2252.0s msgs=2457299 thr=   163729 msg/s  avg=170.21 p50=168 p99=346 p999=378 max=408 ms  cpu= 41.6% rss= 216.1MB
+[interval 150] t=2267.0s msgs=2455400 thr=   163671 msg/s  avg=169.53 p50=168 p99=345 p999=376 max=420 ms  cpu= 41.9% rss= 216.1MB
+[interval 151] t=2282.0s msgs=2460120 thr=   164007 msg/s  avg=170.42 p50=169 p99=345 p999=374 max=416 ms  cpu= 41.7% rss= 216.1MB
+[interval 152] t=2297.0s msgs=2456275 thr=   163664 msg/s  avg=170.32 p50=168 p99=344 p999=381 max=436 ms  cpu= 41.7% rss= 216.1MB
+[interval 153] t=2312.0s msgs=2468167 thr=   164476 msg/s  avg=169.63 p50=168 p99=342 p999=373 max=462 ms  cpu= 41.6% rss= 216.1MB
+[interval 154] t=2327.0s msgs=2448029 thr=   163131 msg/s  avg=170.14 p50=169 p99=343 p999=367 max=401 ms  cpu= 41.0% rss= 216.1MB
+[interval 155] t=2342.0s msgs=2370461 thr=   157882 msg/s  avg=175.07 p50=173 p99=356 p999=387 max=433 ms  cpu= 40.5% rss= 216.1MB
+[interval 156] t=2357.0s msgs=2323687 thr=   154847 msg/s  avg=178.02 p50=176 p99=362 p999=394 max=438 ms  cpu= 38.7% rss= 216.1MB
+[interval 157] t=2372.0s msgs=2328978 thr=   155177 msg/s  avg=177.08 p50=175 p99=360 p999=392 max=425 ms  cpu= 38.9% rss= 216.1MB
+[interval 158] t=2387.1s msgs=2326536 thr=   154983 msg/s  avg=178.37 p50=176 p99=361 p999=394 max=430 ms  cpu= 38.9% rss= 216.1MB
+[interval 159] t=2402.1s msgs=2308769 thr=   153909 msg/s  avg=178.45 p50=177 p99=365 p999=398 max=481 ms  cpu= 38.8% rss= 216.1MB
+[interval 160] t=2417.1s msgs=2386504 thr=   159045 msg/s  avg=174.64 p50=173 p99=356 p999=389 max=438 ms  cpu= 40.0% rss= 216.1MB
+[interval 161] t=2432.1s msgs=2292803 thr=   152463 msg/s  avg=179.90 p50=178 p99=368 p999=405 max=473 ms  cpu= 38.0% rss= 216.1MB
+[interval 162] t=2447.1s msgs=2412343 thr=   160730 msg/s  avg=172.63 p50=170 p99=350 p999=378 max=405 ms  cpu= 40.6% rss= 216.1MB
+[interval 163] t=2462.1s msgs=2458088 thr=   163708 msg/s  avg=170.51 p50=169 p99=346 p999=375 max=432 ms  cpu= 41.1% rss= 216.1MB
+[interval 164] t=2477.1s msgs=2431175 thr=   162045 msg/s  avg=171.00 p50=169 p99=346 p999=377 max=411 ms  cpu= 40.8% rss= 216.1MB
+[interval 165] t=2492.1s msgs=2330523 thr=   155317 msg/s  avg=178.79 p50=177 p99=365 p999=397 max=432 ms  cpu= 38.6% rss= 216.1MB
+[interval 166] t=2507.1s msgs=2432630 thr=   162085 msg/s  avg=170.78 p50=169 p99=347 p999=381 max=423 ms  cpu= 41.2% rss= 216.1MB
+[interval 167] t=2522.2s msgs=2455617 thr=   163563 msg/s  avg=170.35 p50=168 p99=346 p999=382 max=421 ms  cpu= 41.1% rss= 216.1MB
+[interval 168] t=2537.2s msgs=2469737 thr=   164538 msg/s  avg=169.45 p50=167 p99=343 p999=372 max=407 ms  cpu= 41.5% rss= 216.1MB
+[interval 169] t=2552.2s msgs=2464471 thr=   163691 msg/s  avg=169.90 p50=168 p99=344 p999=376 max=427 ms  cpu= 41.8% rss= 216.1MB
+[interval 170] t=2567.2s msgs=2470196 thr=   164626 msg/s  avg=169.83 p50=168 p99=343 p999=374 max=429 ms  cpu= 41.0% rss= 216.1MB
+[interval 171] t=2582.2s msgs=2441160 thr=   162707 msg/s  avg=170.79 p50=169 p99=346 p999=381 max=428 ms  cpu= 41.0% rss= 216.1MB
+[interval 172] t=2597.3s msgs=2446270 thr=   162882 msg/s  avg=170.79 p50=169 p99=344 p999=376 max=427 ms  cpu= 41.4% rss= 216.1MB
+[interval 173] t=2612.3s msgs=2321259 thr=   154729 msg/s  avg=179.15 p50=177 p99=364 p999=394 max=451 ms  cpu= 38.8% rss= 216.1MB
+[interval 174] t=2627.3s msgs=2315430 thr=   154317 msg/s  avg=178.12 p50=177 p99=364 p999=397 max=434 ms  cpu= 38.8% rss= 216.1MB
+[interval 175] t=2642.3s msgs=2387310 thr=   159095 msg/s  avg=174.98 p50=173 p99=357 p999=398 max=527 ms  cpu= 40.7% rss= 216.1MB
+[interval 176] t=2657.3s msgs=2460717 thr=   164014 msg/s  avg=169.53 p50=168 p99=343 p999=374 max=425 ms  cpu= 41.8% rss= 216.1MB
+[interval 177] t=2672.3s msgs=2354581 thr=   156970 msg/s  avg=176.74 p50=175 p99=364 p999=400 max=469 ms  cpu= 39.7% rss= 216.1MB
+[interval 178] t=2687.3s msgs=2424940 thr=   161594 msg/s  avg=171.57 p50=169 p99=350 p999=384 max=415 ms  cpu= 40.6% rss= 216.1MB
+[interval 179] t=2702.3s msgs=2443073 thr=   162870 msg/s  avg=170.83 p50=169 p99=346 p999=378 max=426 ms  cpu= 40.8% rss= 216.1MB
+[interval 180] t=2717.3s msgs=2317019 thr=   154367 msg/s  avg=178.66 p50=177 p99=364 p999=398 max=434 ms  cpu= 38.6% rss= 216.1MB
+[interval 181] t=2732.3s msgs=2456802 thr=   163761 msg/s  avg=170.23 p50=168 p99=345 p999=375 max=423 ms  cpu= 41.4% rss= 216.1MB
+[interval 182] t=2747.3s msgs=2424180 thr=   161579 msg/s  avg=171.81 p50=170 p99=348 p999=381 max=427 ms  cpu= 40.8% rss= 216.1MB
+[interval 183] t=2762.3s msgs=2423757 thr=   161533 msg/s  avg=171.92 p50=170 p99=352 p999=383 max=416 ms  cpu= 40.8% rss= 216.4MB
+[interval 184] t=2777.3s msgs=2340286 thr=   155976 msg/s  avg=176.16 p50=174 p99=359 p999=394 max=436 ms  cpu= 39.0% rss= 216.4MB
+[interval 185] t=2792.4s msgs=2401619 thr=   159444 msg/s  avg=173.14 p50=171 p99=355 p999=391 max=458 ms  cpu= 39.8% rss= 216.4MB
+[interval 186] t=2807.4s msgs=2474132 thr=   164907 msg/s  avg=169.75 p50=168 p99=343 p999=376 max=417 ms  cpu= 41.7% rss= 216.4MB
+[interval 187] t=2822.4s msgs=2431513 thr=   161914 msg/s  avg=171.10 p50=169 p99=348 p999=380 max=412 ms  cpu= 40.2% rss= 216.4MB
+[interval 188] t=2837.4s msgs=2392375 thr=   158980 msg/s  avg=174.35 p50=172 p99=357 p999=388 max=437 ms  cpu= 40.1% rss= 216.4MB
+[interval 189] t=2852.4s msgs=2480656 thr=   165198 msg/s  avg=169.46 p50=168 p99=342 p999=371 max=407 ms  cpu= 41.9% rss= 216.4MB
+[interval 190] t=2867.4s msgs=2461352 thr=   164074 msg/s  avg=169.78 p50=168 p99=343 p999=375 max=421 ms  cpu= 41.3% rss= 216.4MB
+[interval 191] t=2882.5s msgs=2417384 thr=   160988 msg/s  avg=172.19 p50=170 p99=349 p999=378 max=442 ms  cpu= 40.6% rss= 216.4MB
+[interval 192] t=2897.5s msgs=2435708 thr=   162324 msg/s  avg=171.31 p50=169 p99=349 p999=384 max=434 ms  cpu= 40.8% rss= 216.4MB
+[interval 193] t=2912.5s msgs=2456276 thr=   163748 msg/s  avg=170.61 p50=169 p99=345 p999=376 max=411 ms  cpu= 41.2% rss= 216.4MB
+[interval 194] t=2927.5s msgs=2352652 thr=   156784 msg/s  avg=176.55 p50=175 p99=362 p999=392 max=426 ms  cpu= 39.2% rss= 216.4MB
+[interval 195] t=2942.5s msgs=2387029 thr=   159050 msg/s  avg=174.03 p50=172 p99=357 p999=393 max=435 ms  cpu= 39.6% rss= 216.4MB
+[interval 196] t=2957.5s msgs=2413479 thr=   160769 msg/s  avg=172.59 p50=171 p99=352 p999=386 max=429 ms  cpu= 40.2% rss= 216.4MB
+[interval 197] t=2972.5s msgs=2412679 thr=   160626 msg/s  avg=173.00 p50=171 p99=353 p999=391 max=444 ms  cpu= 40.3% rss= 216.4MB
+[interval 198] t=2987.5s msgs=2399597 thr=   159954 msg/s  avg=173.77 p50=172 p99=351 p999=381 max=415 ms  cpu= 40.5% rss= 216.4MB
+[interval 199] t=3002.6s msgs=2446825 thr=   162765 msg/s  avg=170.16 p50=168 p99=344 p999=374 max=422 ms  cpu= 40.7% rss= 216.4MB
+[interval 200] t=3017.6s msgs=2468187 thr=   164518 msg/s  avg=169.66 p50=167 p99=344 p999=372 max=412 ms  cpu= 41.0% rss= 216.4MB
+[interval 201] t=3032.6s msgs=2463042 thr=   164144 msg/s  avg=169.48 p50=168 p99=342 p999=371 max=425 ms  cpu= 41.2% rss= 216.4MB
+[interval 202] t=3047.6s msgs=2471355 thr=   164176 msg/s  avg=169.89 p50=168 p99=343 p999=374 max=435 ms  cpu= 41.0% rss= 216.4MB
+[interval 203] t=3062.6s msgs=2447727 thr=   163145 msg/s  avg=170.65 p50=169 p99=346 p999=379 max=430 ms  cpu= 40.9% rss= 216.4MB
+[interval 204] t=3077.6s msgs=2466273 thr=   164199 msg/s  avg=169.35 p50=168 p99=341 p999=369 max=404 ms  cpu= 41.2% rss= 216.4MB
+[interval 205] t=3092.6s msgs=2459985 thr=   163972 msg/s  avg=169.69 p50=168 p99=345 p999=378 max=411 ms  cpu= 41.6% rss= 216.4MB
+[interval 206] t=3107.6s msgs=2476884 thr=   165124 msg/s  avg=169.81 p50=168 p99=342 p999=374 max=403 ms  cpu= 41.1% rss= 216.4MB
+[interval 207] t=3122.6s msgs=2455319 thr=   163601 msg/s  avg=169.55 p50=168 p99=344 p999=374 max=409 ms  cpu= 41.6% rss= 216.4MB
+[interval 208] t=3137.7s msgs=2421197 thr=   161046 msg/s  avg=172.33 p50=170 p99=352 p999=384 max=425 ms  cpu= 40.3% rss= 216.4MB
+[interval 209] t=3152.7s msgs=2360721 thr=   157332 msg/s  avg=175.76 p50=174 p99=360 p999=389 max=424 ms  cpu= 39.4% rss= 216.4MB
+[interval 210] t=3167.7s msgs=2473885 thr=   164916 msg/s  avg=169.31 p50=167 p99=343 p999=381 max=431 ms  cpu= 40.9% rss= 216.4MB
+[interval 211] t=3182.7s msgs=2414021 thr=   160877 msg/s  avg=171.95 p50=170 p99=350 p999=380 max=417 ms  cpu= 40.1% rss= 216.4MB
+[interval 212] t=3197.7s msgs=2443476 thr=   162897 msg/s  avg=170.33 p50=168 p99=346 p999=377 max=413 ms  cpu= 40.8% rss= 216.4MB
+[interval 213] t=3212.7s msgs=2438639 thr=   162423 msg/s  avg=171.26 p50=169 p99=347 p999=376 max=417 ms  cpu= 41.4% rss= 216.4MB
+[interval 214] t=3227.7s msgs=2462990 thr=   164028 msg/s  avg=169.89 p50=168 p99=344 p999=376 max=421 ms  cpu= 41.7% rss= 216.4MB
+[interval 215] t=3242.7s msgs=2454625 thr=   163543 msg/s  avg=170.86 p50=169 p99=345 p999=376 max=416 ms  cpu= 41.5% rss= 216.4MB
+[interval 216] t=3257.7s msgs=2461763 thr=   164111 msg/s  avg=169.07 p50=167 p99=344 p999=373 max=405 ms  cpu= 41.8% rss= 216.4MB
+[interval 217] t=3272.8s msgs=2430972 thr=   161725 msg/s  avg=171.75 p50=170 p99=349 p999=383 max=425 ms  cpu= 41.0% rss= 216.4MB
+[interval 218] t=3287.8s msgs=2438823 thr=   162293 msg/s  avg=171.60 p50=170 p99=348 p999=379 max=439 ms  cpu= 40.5% rss= 216.4MB
+[interval 219] t=3302.8s msgs=2363382 thr=   157503 msg/s  avg=175.64 p50=174 p99=360 p999=396 max=432 ms  cpu= 39.2% rss= 216.4MB
+[interval 220] t=3317.8s msgs=2409216 thr=   160217 msg/s  avg=173.09 p50=171 p99=354 p999=387 max=428 ms  cpu= 40.6% rss= 216.4MB
+[interval 221] t=3332.8s msgs=2395796 thr=   159712 msg/s  avg=174.17 p50=172 p99=355 p999=386 max=432 ms  cpu= 40.1% rss= 216.4MB
+[interval 222] t=3347.8s msgs=2409478 thr=   160570 msg/s  avg=172.26 p50=170 p99=351 p999=383 max=416 ms  cpu= 40.7% rss= 216.4MB
+[interval 223] t=3362.8s msgs=2342967 thr=   156139 msg/s  avg=176.67 p50=174 p99=362 p999=394 max=432 ms  cpu= 39.0% rss= 216.4MB
+[interval 224] t=3377.9s msgs=2468204 thr=   164415 msg/s  avg=169.35 p50=167 p99=343 p999=374 max=422 ms  cpu= 42.2% rss= 216.4MB
+[interval 225] t=3392.9s msgs=2442425 thr=   162522 msg/s  avg=170.91 p50=169 p99=348 p999=383 max=420 ms  cpu= 40.9% rss= 216.4MB
+[interval 226] t=3407.9s msgs=2375931 thr=   158308 msg/s  avg=175.30 p50=173 p99=357 p999=394 max=451 ms  cpu= 40.2% rss= 216.4MB
+[interval 227] t=3422.9s msgs=2455540 thr=   163524 msg/s  avg=169.73 p50=168 p99=344 p999=373 max=422 ms  cpu= 41.1% rss= 216.4MB
+[interval 228] t=3437.9s msgs=2465657 thr=   164288 msg/s  avg=169.87 p50=168 p99=343 p999=370 max=400 ms  cpu= 41.6% rss= 216.4MB
+[interval 229] t=3452.9s msgs=2430852 thr=   162041 msg/s  avg=171.05 p50=169 p99=348 p999=380 max=456 ms  cpu= 41.6% rss= 216.4MB
+[interval 230] t=3468.0s msgs=2443528 thr=   162580 msg/s  avg=170.78 p50=169 p99=348 p999=380 max=413 ms  cpu= 40.9% rss= 216.4MB
+[interval 231] t=3483.0s msgs=2449910 thr=   163304 msg/s  avg=171.50 p50=170 p99=346 p999=380 max=450 ms  cpu= 41.3% rss= 216.4MB
+[interval 232] t=3498.0s msgs=2453760 thr=   163531 msg/s  avg=170.96 p50=169 p99=345 p999=380 max=417 ms  cpu= 41.4% rss= 216.4MB
+[interval 233] t=3513.0s msgs=2447525 thr=   163164 msg/s  avg=170.11 p50=168 p99=346 p999=385 max=455 ms  cpu= 41.0% rss= 216.4MB
+[interval 234] t=3528.0s msgs=2442731 thr=   162674 msg/s  avg=170.55 p50=169 p99=345 p999=378 max=410 ms  cpu= 41.0% rss= 216.4MB
+[interval 235] t=3543.0s msgs=2470088 thr=   164647 msg/s  avg=169.93 p50=168 p99=343 p999=378 max=485 ms  cpu= 41.3% rss= 216.4MB
+[interval 236] t=3558.0s msgs=2456509 thr=   163683 msg/s  avg=169.66 p50=168 p99=342 p999=372 max=415 ms  cpu= 41.7% rss= 216.4MB
+[interval 237] t=3573.0s msgs=2385810 thr=   158959 msg/s  avg=174.64 p50=172 p99=359 p999=395 max=439 ms  cpu= 40.2% rss= 216.6MB
+[interval 238] t=3588.0s msgs=2313472 thr=   154130 msg/s  avg=178.15 p50=176 p99=363 p999=394 max=432 ms  cpu= 38.4% rss= 216.6MB
+
+======================================================================
+SUMMARY - librdkafka-c (warmup 8000000 excluded, group.protocol=consumer)
+======================================================================
+Measured messages: 578631189
+Duration:          3600.01 s
+Throughput:        160730 msg/s  (156.96 MiB/s)
+Batch consume:     max_poll_records=2000, 771799 non-empty batches, 586631189 records, avg 760.1 records/batch
+Records/batch dist (post-warmup): n=761256 min=2 mean=760.1 p50=516 p99=2000 max=2000
+E2E latency (ms):  min=4 avg=172.78 p50=171 p90=295 p95=317 p99=352 p99.9=386 max=531
+======================================================================
+
+Results written to: consumer-perf/results/cmp-librdkafka-c-1781157998542

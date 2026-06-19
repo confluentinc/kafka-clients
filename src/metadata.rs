@@ -601,6 +601,18 @@ impl Metadata {
         inner.need_full_update || inner.need_partial_update
     }
 
+    /// Test-only accessor exposing the `need_full_update` flag in
+    /// isolation. Distinguishes a `request_update(true)` (full update,
+    /// Java `requestUpdate(true)`) from a `request_update_for_new_topics`
+    /// (partial update, set by transient-topic registration) so tests can
+    /// assert the specific `verify(metadata).requestUpdate(true)`
+    /// contract that the conflated [`Self::update_requested`] cannot.
+    #[cfg(test)]
+    pub(crate) fn need_full_update_for_test(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.need_full_update
+    }
+
     /// Adds a cluster update listener.
     pub fn add_cluster_update_listener(&self, listener: Box<dyn crate::common::ClusterResourceListener>) {
         let mut inner = self.inner.lock().unwrap();

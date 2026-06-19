@@ -53,3 +53,6 @@
 - [M8 Phase 17 security-wiring](review_m8_phase17.md) — clean; consumer mirrors producer client_channel_builder; security_protocol() uppercase is Java-faithful; producer send-shadowing API smell (from PR#10)
 - [M8 Phase 19 SSL try_read + Arc<str>](review_m8_phase19.md) — sync-never-await is cancel-safe by construction; try_read==async read body parity; has_bytes_buffered re-poll; Arc<str> intern checklist
 - [M8 Phase 20 recv-CPU copy elim](review_m8_phase20_recv_cpu.md) — into_response_data move parity; alloc-budget non-tautology check (events not bytes); selector drain lifecycle; retained-clone caller audit
+- [M8 Phase 30 per-channel wakers](review_m8_phase30_per_channel_wakers.md) — selectedKeys-on-tokio CLEAN; cancel-safety via persistent fired-queue, armed_count drift audit, dirty-site re-derivation, stale-fire structurally-no-spin
+- [io::ErrorKind vs typed exception](review_io_error_kind_vs_typed_exception.md) — TLS reset misclassified as fatal auth: prepare() stamps AuthenticationFailed for any error; ErrorKind heuristic lossy vs Java exception type
+- [M8 Phase 31 reset/validate parity](review_m8_phase31.md) — SKIP-collapse: "same guard" ≠ "same branch" (maybe_seek_unvalidated 3 discard triggers); prod-fix dual-copy drift of groupListOffsetRequests; mock-verify→observable-state under-assertion

@@ -2797,8 +2797,10 @@ mod tests {
 
     /// Java parity: `testListOffsetsWaitingForMetadataUpdate_Timeout`.
     /// Building the request fails because the leader is unknown; the
-    /// request is parked on `requests_to_retry`, and `poll()` returns no
-    /// unsent requests.
+    /// request is parked on `requests_to_retry`, `metadata.requestUpdate(true)`
+    /// is requested, `poll()` returns no unsent requests, and the fetch
+    /// future never resolves (Java asserts `TimeoutException` on
+    /// `future.get(5ms)`; the Rust analogue is "receiver still pending").
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_offsets_unknown_leader_parks_on_retry() {
         let mut mgr = new_manager();
@@ -2807,13 +2809,29 @@ mod tests {
         let mut timestamps = HashMap::new();
         timestamps.insert(tp, EARLIEST_TIMESTAMP);
 
-        let _rx = mgr.fetch_offsets(timestamps, false);
+        let mut rx = mgr.fetch_offsets(timestamps, false);
         assert_eq!(mgr.requests_to_send_count(), 0, "no request built when leader unknown");
         assert_eq!(mgr.requests_to_retry_count(), 1, "state parked for retry");
+        // Java: `verify(metadata).requestUpdate(true)`. The unknown-leader
+        // build path calls `request_update(true)`, which sets the
+        // `need_full_update` flag (distinct from the transient-topic
+        // partial-update set by `fetch_offsets` itself).
+        assert!(
+            mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+            "unknown leader must trigger metadata.requestUpdate(true)"
+        );
 
         // Subsequent poll yields no unsent requests.
         let res = RequestManager::poll(&mut mgr, 0);
         assert!(res.unsent_requests.is_empty());
+
+        // Java: metadata update never arrives within the future's time
+        // boundary, so `future.get(5ms)` throws `TimeoutException`. The
+        // Rust receiver must still be pending (un-resolved).
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "fetch future must stay pending while the request is parked for retry"
+        );
     }
 
     /// Java parity: `testListOffsetsWaitingForMetadataUpdate_RetrySucceeds`.
@@ -2830,6 +2848,12 @@ mod tests {
         let rx = mgr.fetch_offsets(timestamps, false);
         assert_eq!(mgr.requests_to_send_count(), 0);
         assert_eq!(mgr.requests_to_retry_count(), 1);
+        // Java: `verify(metadata).requestUpdate(true)` — same unknown-leader
+        // path as the timeout test.
+        assert!(
+            mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+            "unknown leader must trigger metadata.requestUpdate(true)"
+        );
 
         // Trigger metadata update — fires the cluster listener which
         // replays the parked request.
@@ -2850,50 +2874,91 @@ mod tests {
         assert_eq!(oat.offset(), 5);
     }
 
-    /// Java parity: `testRequestFailsWithRetriableError_RetrySucceeds`.
-    /// First attempt's response carries a retriable error → parition
-    /// added to `remaining_to_search`, state re-parked. Metadata update
-    /// → replay → success.
+    /// The full retriable-error matrix used by Java's
+    /// `OffsetsRequestManagerTest.retriableErrors()` `@MethodSource`. Every
+    /// one of these, when received in a `ListOffsets` response, must be
+    /// treated as retriable: the partition is re-parked and a
+    /// `metadata.requestUpdate(false)` is requested.
+    const RETRIABLE_LIST_OFFSETS_ERRORS: &[Errors] = &[
+        Errors::NotLeaderOrFollower,
+        Errors::ReplicaNotAvailable,
+        Errors::KafkaStorageError,
+        Errors::OffsetNotAvailable,
+        Errors::LeaderNotAvailable,
+        Errors::FencedLeaderEpoch,
+        Errors::BrokerNotAvailable,
+        Errors::InvalidRequest,
+        Errors::UnknownLeaderEpoch,
+        Errors::UnknownTopicOrPartition,
+    ];
+
+    /// Java parity: `testRequestFailsWithRetriableError_RetrySucceeds`
+    /// (`@ParameterizedTest @MethodSource("retriableErrors")`). Translated
+    /// as a loop over EVERY one of the 10 retriable error codes (DoD §3 —
+    /// no collapsing a parameterized matrix to a single representative).
+    ///
+    /// For each error: first attempt's response carries the retriable
+    /// error → partition added to `remaining_to_search`, state re-parked,
+    /// `metadata.requestUpdate(false)` requested. Metadata update → replay
+    /// → success.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_offsets_retriable_error_retries_after_metadata_update() {
-        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
-        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
-        let tp = TopicPartition::new("t1".to_string(), 1);
-        let mut timestamps = HashMap::new();
-        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+        for &error in RETRIABLE_LIST_OFFSETS_ERRORS {
+            // Fresh manager per error so the metadata `need_full_update`
+            // flag (reset to false by `bootstrap_metadata_with_topic`'s
+            // `update_with_current_request_version`) is a clean baseline.
+            let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+            bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+            let tp = TopicPartition::new("t1".to_string(), 1);
+            let mut timestamps = HashMap::new();
+            timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
 
-        let rx = mgr.fetch_offsets(timestamps, false);
-        assert_eq!(mgr.requests_to_send_count(), 1);
+            let rx = mgr.fetch_offsets(timestamps, false);
+            assert_eq!(mgr.requests_to_send_count(), 1, "{error:?}: one request built");
+            // After the leader is known, `need_full_update` is false (only
+            // the transient-topic partial-update was set by fetch_offsets).
+            assert!(
+                !mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+                "{error:?}: no full-update requested before the error response"
+            );
 
-        // Respond with a retriable error.
-        let response = build_list_offsets_response("t1", vec![(1, Errors::UnknownLeaderEpoch, -1, -1, UNKNOWN_EPOCH)]);
-        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+            // Respond with the retriable error.
+            let response = build_list_offsets_response("t1", vec![(1, error, -1, -1, UNKNOWN_EPOCH)]);
+            assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
 
-        // After the response is drained, the partition should be re-parked.
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-            let _ = RequestManager::poll(&mut mgr, 0);
-            if mgr.requests_to_retry_count() == 1 {
-                break;
+            // After the response is drained, the partition should be re-parked.
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+                let _ = RequestManager::poll(&mut mgr, 0);
+                if mgr.requests_to_retry_count() == 1 {
+                    break;
+                }
             }
+            assert_eq!(
+                mgr.requests_to_retry_count(),
+                1,
+                "{error:?}: retriable error should re-park the state on requests_to_retry"
+            );
+            // Java: `verify(metadata).requestUpdate(false)`. The retriable
+            // branch in `apply_partial_result` calls `request_update(false)`,
+            // setting `need_full_update`.
+            assert!(
+                mgr.shared.metadata.metadata_arc().need_full_update_for_test(),
+                "{error:?}: retriable error must trigger metadata.requestUpdate(false)"
+            );
+
+            // Metadata update fires the listener → replay.
+            bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+            assert_eq!(mgr.requests_to_send_count(), 1, "{error:?}: replayed request");
+            assert_eq!(mgr.requests_to_retry_count(), 0, "{error:?}");
+
+            let response = build_list_offsets_response("t1", vec![(1, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
+            assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+            let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+            let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
+            assert_eq!(oat.offset(), 5, "{error:?}: retried offset");
         }
-        assert_eq!(
-            mgr.requests_to_retry_count(),
-            1,
-            "retriable error should re-park the state on requests_to_retry"
-        );
-
-        // Metadata update fires the listener → replay.
-        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
-        assert_eq!(mgr.requests_to_send_count(), 1);
-        assert_eq!(mgr.requests_to_retry_count(), 0);
-
-        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
-        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
-
-        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
-        let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
-        assert_eq!(oat.offset(), 5);
     }
 
     /// Java parity: `testRequestWithUnknownOffsetInResponseReturnsNullOffset`.

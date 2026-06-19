@@ -1,0 +1,241 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 7K of event 'cycles'
+# Event count (approx.): 19117463099
+#
+# Children      Self  Command          Shared Object      Symbol                                                                                                                                                                                                                                                                                                                                                                                                                           
+# ........  ........  ...............  .................  .................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    71.59%     1.39%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::consumer_network_thread::ConsumerNetworkThread<K>::run_once::{{closure}}
+    70.83%     0.04%  kafka-consumer-  consumer-perf      [.] std::sys::backtrace::__rust_begin_short_backtrace
+    62.60%     0.05%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::async_kafka_consumer::AsyncKafkaConsumer<K,V>::new::{{closure}}::{{closure}}
+    54.23%     0.35%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::network_client_delegate::NetworkClientDelegate<K>::poll::{{closure}}
+    50.28%     1.35%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::network_client::NetworkClient<S,H> as confluent_kafka::kafka_client::KafkaClient>::poll::{{closure}}
+    45.40%     1.45%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::selector::Selector as confluent_kafka::common::network::selectable::Selectable>::poll::{{closure}}
+    29.72%     0.94%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::selector::Selector::poll_channel_reads::{{closure}}
+    24.84%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el0_svc
+    24.84%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el0t_64_sync_handler
+    24.39%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] do_el0_svc
+    24.35%     0.96%  kafka-consumer-  [kernel.kallsyms]  [k] el0_svc_common.constprop.0
+    23.68%     0.22%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::kafka_channel::KafkaChannel::try_read
+    18.11%     0.12%  kafka-consumer-  [kernel.kallsyms]  [k] invoke_syscall
+    16.69%     0.28%  kafka-consumer-  consumer-perf      [.] rustls::msgs::deframer::buffers::DeframerVecBuffer::read
+    15.72%     0.85%  kafka-consumer-  libc.so.6          [.] __libc_recv
+    11.89%     0.00%  kafka-consumer-  [unknown]          [.] 0x0044aaaab490c287
+     9.97%     0.03%  kafka-consumer-  [kernel.kallsyms]  [k] __arm64_sys_recvfrom
+     9.71%     0.05%  kafka-consumer-  [kernel.kallsyms]  [k] __sys_recvfrom
+     8.49%     0.02%  kafka-consumer-  [kernel.kallsyms]  [k] inet_recvmsg
+     8.46%     0.08%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_recvmsg
+     7.80%     0.25%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_recvmsg_locked
+     6.67%     0.91%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::fetch_collector::FetchCollector<K,V>::collect_fetch
+     6.46%     0.16%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::selector::Selector::poll_channels_write_concurrent::{{closure}}
+     6.28%     0.15%  kafka-consumer-  consumer-perf      [.] tokio::runtime::time::Driver::park_internal
+     6.11%     1.24%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::fetch_request_manager::FetchRequestManager::poll_internal
+     5.33%     0.12%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::try_read_append
+     5.29%     0.05%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::selector::do_channel_write::{{closure}}
+     5.27%     0.00%  kafka-consumer-  libc.so.6          [.] __GI_epoll_pwait (inlined)
+     5.19%     0.02%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::byte_buffer_send::ByteBufferSend as confluent_kafka::common::network::send::KafkaSend>::try_write_to
+     5.17%     0.44%  kafka-consumer-  [kernel.kallsyms]  [k] ptrace_notify
+     4.74%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] ptrace_do_notify
+     4.72%     0.81%  kafka-consumer-  [kernel.kallsyms]  [k] ptrace_stop.part.0
+     4.66%     0.01%  kafka-consumer-  [kernel.kallsyms]  [k] skb_copy_datagram_iter
+     4.65%     0.14%  kafka-consumer-  [kernel.kallsyms]  [k] __skb_datagram_iter
+     4.62%     0.00%  kafka-consumer-  consumer-perf      [.] tokio::runtime::scheduler::current_thread::Context::park
+     4.51%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] simple_copy_to_iter
+     4.46%     0.04%  kafka-consumer-  consumer-perf      [.] rustls::vecbuf::ChunkVecBuffer::write_to
+     4.42%     0.00%  kafka-consumer-  libc.so.6          [.] __libc_send (inlined)
+     4.42%     0.00%  kafka-consumer-  [unknown]          [.] 0x002faaaab490c533
+     4.35%     0.11%  kafka-consumer-  consumer-perf      [.] aws_lc_0_40_0_CRYPTO_gcm128_decrypt_ctr32
+     4.13%     4.11%  kafka-consumer-  consumer-perf      [.] aws_lc_0_40_0_aesv8_gcm_8x_dec_128
+     3.97%     0.02%  kafka-consumer-  [kernel.kallsyms]  [k] __arm64_sys_epoll_pwait
+     3.91%     0.00%  kafka-consumer-  [unknown]          [.] 0x0027aaaab491dcef
+     3.85%     0.08%  consumer-perf    consumer-perf      [.] consumer_perf::run::{{closure}}
+     3.83%     0.00%  kafka-consumer-  [unknown]          [.] 0x003faaaab490c287
+     3.82%     0.06%  kafka-consumer-  [kernel.kallsyms]  [k] do_epoll_pwait.part.0
+     3.80%     0.07%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::completed_fetch::CompletedFetch::advance_to_next_fetched_record
+     3.72%     0.04%  kafka-consumer-  [kernel.kallsyms]  [k] do_epoll_wait
+     3.42%     2.80%  kafka-consumer-  consumer-perf      [.] std::collections::hash::map::HashMap<K,V,S,A>::get
+     3.39%     1.43%  kafka-consumer-  consumer-perf      [.] rustls::conn::ConnectionCore<Data>::process_new_packets
+     3.38%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __arm64_sys_sendto
+     3.38%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __sys_sendto
+     3.32%     0.24%  kafka-consumer-  [kernel.kallsyms]  [k] ep_poll
+     3.30%     0.02%  kafka-consumer-  [kernel.kallsyms]  [k] __sock_sendmsg
+     3.24%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] inet_sendmsg
+     3.24%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_sendmsg
+     3.18%     0.12%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_sendmsg_locked
+     3.11%     3.06%  kafka-consumer-  [kernel.kallsyms]  [k] __arch_copy_to_user
+     3.09%     0.00%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::consumer::internals::fetch_request_manager::FetchRequestManager as confluent_kafka::consumer::internals::request_manager::RequestManager>::poll
+     3.05%     0.09%  consumer-perf    consumer-perf      [.] <confluent_kafka::consumer::async_kafka_consumer::AsyncKafkaConsumer<K,V> as confluent_kafka::consumer::Consumer<K,V>>::poll::{{closure}}
+     2.93%     2.91%  kafka-consumer-  libc.so.6          [.] __GI___memcpy_sve
+     2.91%     0.66%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::fetch_request_manager::FetchRequestManager::drain_pending_completions
+     2.73%     0.38%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::selector::Selector::arm_channel
+     2.71%     0.10%  kafka-consumer-  [kernel.kallsyms]  [k] schedule
+     2.70%     0.05%  kafka-consumer-  [kernel.kallsyms]  [k] syscall_trace_enter
+     2.61%     0.19%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::try_read
+     2.61%     0.18%  kafka-consumer-  [kernel.kallsyms]  [k] __schedule
+     2.59%     0.06%  kafka-consumer-  [kernel.kallsyms]  [k] syscall_trace_exit
+     2.57%     0.14%  kafka-consumer-  [kernel.kallsyms]  [k] __tcp_transmit_skb
+     2.36%     2.33%  kafka-consumer-  consumer-perf      [.] __aarch64_swp4_rel
+     2.29%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] ip_queue_xmit
+     2.28%     0.06%  kafka-consumer-  [kernel.kallsyms]  [k] __ip_queue_xmit
+     2.22%     1.79%  kafka-consumer-  [kernel.kallsyms]  [k] arch_local_irq_enable
+     2.21%     0.01%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_push
+     2.19%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __tcp_push_pending_frames
+     2.18%     0.01%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::requests::abstract_response::ConcreteResponse::parse_response
+     2.17%     0.02%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::requests::abstract_response::ConcreteResponse::parse
+     2.14%     2.10%  kafka-consumer-  [kernel.kallsyms]  [k] do_notify_parent_cldstop
+     2.06%     2.06%  kafka-consumer-  consumer-perf      [.] __aarch64_ldadd8_relax
+     2.06%     0.01%  kafka-consumer-  [kernel.kallsyms]  [k] ip_output
+     2.05%     2.05%  kafka-consumer-  libc.so.6          [.] _int_free
+     2.04%     0.00%  kafka-consumer-  libc.so.6          [.] __memset_generic (inlined)
+     2.01%     2.01%  kafka-consumer-  libc.so.6          [.] __GI___memset_generic
+     2.00%     0.05%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_write_xmit
+     2.00%     0.02%  kafka-consumer-  [kernel.kallsyms]  [k] ip_finish_output
+     1.99%     0.00%  consumer-perf    [kernel.kallsyms]  [k] el0_svc
+     1.99%     0.00%  consumer-perf    [kernel.kallsyms]  [k] el0t_64_sync_handler
+     1.98%     0.16%  consumer-perf    consumer-perf      [.] confluent_kafka::common::record::default_record_batch::DefaultRecordBatchRef::compute_checksum
+     1.97%     1.92%  kafka-consumer-  consumer-perf      [.] __aarch64_ldadd8_rel
+     1.97%     0.20%  consumer-perf    [kernel.kallsyms]  [k] el0_svc_common.constprop.0
+     1.97%     0.00%  consumer-perf    [kernel.kallsyms]  [k] do_el0_svc
+     1.95%     0.07%  kafka-consumer-  [kernel.kallsyms]  [k] ip_finish_output2
+     1.93%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __ip_finish_output
+     1.89%     0.01%  kafka-consumer-  [kernel.kallsyms]  [k] neigh_hh_output
+     1.88%     0.02%  kafka-consumer-  consumer-perf      [.] tokio::runtime::scheduler::current_thread::Context::park_yield
+     1.86%     0.07%  kafka-consumer-  consumer-perf      [.] confluent_kafka::generated::fetch_response_data::FetchableTopicResponse::read
+     1.85%     0.05%  kafka-consumer-  [kernel.kallsyms]  [k] __dev_queue_xmit
+     1.82%     1.61%  consumer-perf    consumer-perf      [.] core::iter::traits::iterator::Iterator::fold
+     1.81%     0.05%  kafka-consumer-  consumer-perf      [.] confluent_kafka::generated::fetch_response_data::PartitionData::read
+     1.79%     0.23%  kafka-consumer-  [kernel.kallsyms]  [k] __dev_xmit_skb
+     1.73%     0.00%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::async_kafka_consumer::AsyncKafkaConsumer<K,V>::send_prefetches
+     1.71%     0.01%  kafka-consumer-  [vdso]             [.] __kernel_clock_gettime
+     1.67%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] schedule_hrtimeout_range
+     1.63%     1.63%  kafka-consumer-  libc.so.6          [.] memcmp
+     1.63%     0.00%  kafka-consumer-  libc.so.6          [.] __GI_memcmp (inlined)
+     1.60%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] schedule_hrtimeout_range_clock
+     1.60%     1.44%  kafka-consumer-  libc.so.6          [.] _int_malloc
+     1.54%     0.00%  consumer-perf    consumer-perf      [.] consumer_perf::main
+     1.54%     0.00%  consumer-perf    consumer-perf      [.] tokio::runtime::park::Inner::park
+     1.53%     0.00%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::protocol::readable::Readable::read_bytes
+     1.53%     0.08%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::events::application_event_handler::ApplicationEventHandler::add
+     1.51%     0.39%  kafka-consumer-  [kernel.kallsyms]  [k] sch_direct_xmit
+     1.50%     0.00%  kafka-consumer-  libc.so.6          [.] __GI___libc_malloc (inlined)
+     1.46%     1.46%  kafka-consumer-  libc.so.6          [.] malloc
+     1.41%     0.00%  consumer-perf    [kernel.kallsyms]  [k] invoke_syscall
+     1.41%     1.08%  kafka-consumer-  consumer-perf      [.] indexmap::map::IndexMap<K,V,S>::get_index_of
+     1.38%     0.03%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_send_ack
+     1.36%     0.00%  kafka-consumer-  [unknown]          [.] 0x0009aaaab491dcef
+     1.36%     0.04%  kafka-consumer-  [kernel.kallsyms]  [k] tcp_cleanup_rbuf
+     1.34%     0.01%  kafka-consumer-  [kernel.kallsyms]  [k] __tcp_send_ack.part.0
+     1.33%     0.31%  kafka-consumer-  consumer-perf      [.] confluent_kafka::network_client::NetworkClient<S,H>::do_send
+     1.31%     0.20%  kafka-consumer-  [kernel.kallsyms]  [k] handle_softirqs
+     1.31%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] ____do_softirq
+     1.31%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __irq_exit_rcu
+     1.31%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __softirqentry_text_start
+     1.31%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] call_on_irq_stack
+     1.31%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] do_softirq_own_stack
+     1.31%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] irq_exit_rcu
+     1.29%     0.23%  consumer-perf    libc.so.6          [.] syscall
+     1.29%     0.04%  kafka-consumer-  [kernel.kallsyms]  [k] __tcp_cleanup_rbuf
+     1.21%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __check_object_size
+     1.18%     0.09%  kafka-consumer-  [kernel.kallsyms]  [k] __check_object_size.part.0
+     1.18%     1.10%  kafka-consumer-  consumer-perf      [.] std::collections::hash::map::HashMap<K,V,S,A>::contains_key
+     1.11%     0.01%  kafka-consumer-  consumer-perf      [.] alloc::raw_vec::RawVec<T,A>::grow_one
+     1.08%     0.05%  kafka-consumer-  [kernel.kallsyms]  [k] dev_hard_start_xmit
+     1.08%     0.80%  kafka-consumer-  [kernel.kallsyms]  [k] check_heap_object
+     1.07%     0.04%  kafka-consumer-  consumer-perf      [.] tokio::sync::notify::NotifyGuard::notify_waiters
+     1.05%     0.00%  kafka-consumer-  [unknown]          [.] 0x007aaaaab45c3e07
+     1.04%     0.25%  kafka-consumer-  [kernel.kallsyms]  [k] ep_send_events
+     1.03%     0.12%  kafka-consumer-  [ena]              [k] ena_io_poll
+     1.03%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __napi_poll
+     1.03%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] net_rx_action
+     1.02%     0.63%  kafka-consumer-  [ena]              [k] ena_start_xmit
+     1.00%     0.33%  kafka-consumer-  consumer-perf      [.] tokio::sync::notify::NotifiedProject::poll_notified
+     0.98%     0.00%  kafka-consumer-  consumer-perf      [.] <rustls::client::tls13::ExpectTraffic as rustls::common_state::State<rustls::client::client_conn::ClientConnectionData>>::handle
+     0.97%     0.00%  consumer-perf    consumer-perf      [.] <tokio::runtime::scheduler::current_thread::Handle as tokio::util::wake::Wake>::wake_by_ref
+     0.97%     0.01%  kafka-consumer-  consumer-perf      [.] tokio::runtime::park::wake
+     0.96%     0.63%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::completed_fetch::CompletedFetch::peek_current_record
+     0.94%     0.00%  consumer-perf    libc.so.6          [.] __GI___write (inlined)
+     0.94%     0.00%  consumer-perf    [unknown]          [.] 0x0037aaaab47df137
+     0.94%     0.00%  kafka-consumer-  consumer-perf      [.] tokio::runtime::task::raw::poll
+     0.93%     0.03%  kafka-consumer-  [kernel.kallsyms]  [k] __fdget
+     0.93%     0.02%  kafka-consumer-  libc.so.6          [.] syscall
+     0.90%     0.90%  kafka-consumer-  [kernel.kallsyms]  [k] __fget_light
+     0.88%     0.03%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::completed_fetch::CompletedFetch::drain
+     0.88%     0.03%  kafka-consumer-  consumer-perf      [.] tokio::runtime::scheduler::current_thread::Context::park_internal
+     0.88%     0.88%  consumer-perf    libc.so.6          [.] __GI___memcpy_sve
+     0.87%     0.00%  kafka-consumer-  consumer-perf      [.] tokio::runtime::task::raw::poll
+     0.86%     0.31%  kafka-consumer-  consumer-perf      [.] <rustls::conn::connection::Reader as std::io::Read>::read
+     0.84%     0.02%  kafka-consumer-  consumer-perf      [.] rustls::record_layer::RecordLayer::decrypt_incoming
+     0.83%     0.72%  kafka-consumer-  consumer-perf      [.] hashbrown::map::HashMap<K,V,S,A>::get
+     0.83%     0.83%  kafka-consumer-  consumer-perf      [.] __aarch64_cas4_acq
+     0.82%     0.08%  kafka-consumer-  consumer-perf      [.] <rustls::crypto::aws_lc_rs::tls13::GcmMessageDecrypter as rustls::crypto::cipher::MessageDecrypter>::decrypt
+     0.80%     0.80%  kafka-consumer-  [vdso]             [.] 0x0000000000000518
+     0.80%     0.00%  kafka-consumer-  [vdso]             [.] 0x0000ffff956dc518
+     0.79%     0.00%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::protocol::byte_buffer_accessor::ByteBufferAccessor as confluent_kafka::common::protocol::readable::Readable>::read_array
+     0.78%     0.00%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::try_write_vectored
+     0.77%     0.62%  kafka-consumer-  consumer-perf      [.] hashbrown::map::HashMap<K,V,S,A>::get
+     0.77%     0.02%  consumer-perf    [kernel.kallsyms]  [k] ksys_write
+     0.77%     0.00%  consumer-perf    [kernel.kallsyms]  [k] __arm64_sys_write
+     0.76%     0.54%  kafka-consumer-  consumer-perf      [.] std::collections::hash::map::HashMap<K,V,S,A>::get
+     0.74%     0.01%  kafka-consumer-  consumer-perf      [.] aws_lc_rs::aead::unbound_key::UnboundKey::open_within
+     0.73%     0.15%  kafka-consumer-  consumer-perf      [.] aws_lc_0_40_0_EVP_AEAD_CTX_open
+     0.72%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] __el0_irq_handler_common
+     0.72%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el0_interrupt
+     0.72%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el0t_64_irq_handler
+     0.72%     0.02%  kafka-consumer-  [kernel.kallsyms]  [k] sockfd_lookup_light
+     0.71%     0.02%  kafka-consumer-  consumer-perf      [.] rustls::common_state::CommonState::buffer_plaintext
+     0.71%     0.61%  kafka-consumer-  [kernel.kallsyms]  [k] skb_attempt_defer_free
+     0.71%     0.00%  kafka-consumer-  [unknown]          [.] 0x0027ffff95481123
+     0.71%     0.00%  kafka-consumer-  [unknown]          [.] 0x006caaaab48e7ecf
+     0.70%     0.00%  kafka-consumer-  libc.so.6          [.] __free (inlined)
+     0.70%     0.01%  kafka-consumer-  consumer-perf      [.] tokio::runtime::task::raw::poll
+     0.69%     0.02%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::subscription_state::SubscriptionState::move_partition_to_end
+     0.69%     0.16%  kafka-consumer-  [kernel.kallsyms]  [k] ep_item_poll.isra.0
+     0.69%     0.00%  kafka-consumer-  consumer-perf      [.] rustls::common_state::CommonState::send_single_fragment
+     0.67%     0.00%  kafka-consumer-  [unknown]          [.] 0x0072ffff9545be77
+     0.67%     0.04%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::fetch_request_manager::FetchRequestManager::poll_internal::{{closure}}
+     0.66%     0.66%  kafka-consumer-  libc.so.6          [.] cfree@GLIBC_2.17
+     0.66%     0.66%  consumer-perf    consumer-perf      [.] __aarch64_swp4_rel
+     0.66%     0.03%  kafka-consumer-  consumer-perf      [.] rustls::record_layer::RecordLayer::encrypt_outgoing
+     0.66%     0.66%  kafka-consumer-  libc.so.6          [.] malloc_consolidate
+     0.64%     0.16%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::events::application_event_processor::ApplicationEventProcessor::process_async_poll::{{closure}}
+     0.64%     0.64%  consumer-perf    consumer-perf      [.] __aarch64_cas4_acq
+     0.64%     0.00%  consumer-perf    [kernel.kallsyms]  [k] vfs_write
+     0.63%     0.03%  consumer-perf    [kernel.kallsyms]  [k] futex_wait
+     0.63%     0.00%  consumer-perf    [kernel.kallsyms]  [k] __arm64_sys_futex
+     0.63%     0.00%  consumer-perf    [kernel.kallsyms]  [k] do_futex
+     0.63%     0.07%  kafka-consumer-  consumer-perf      [.] <rustls::crypto::aws_lc_rs::tls13::GcmMessageEncrypter as rustls::crypto::cipher::MessageEncrypter>::encrypt
+     0.62%     0.04%  kafka-consumer-  [kernel.kallsyms]  [k] __alloc_skb
+     0.61%     0.13%  kafka-consumer-  consumer-perf      [.] rustls::common_state::CommonState::take_received_plaintext
+     0.60%     0.52%  consumer-perf    [kernel.kallsyms]  [k] eventfd_write
+     0.60%     0.01%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::events::completable_event::CompletableEventHandle<T>::complete
+     0.59%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el1_interrupt
+     0.59%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el1h_64_irq
+     0.59%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] el1h_64_irq_handler
+     0.58%     0.08%  kafka-consumer-  consumer-perf      [.] aead_aes_gcm_open_gather_impl.part.0
+     0.58%     0.04%  kafka-consumer-  consumer-perf      [.] confluent_kafka::network_client::NetworkClient<S,H>::complete_responses
+     0.58%     0.01%  kafka-consumer-  consumer-perf      [.] aws_lc_0_40_0_EVP_AEAD_CTX_open_gather
+     0.57%     0.04%  consumer-perf    [kernel.kallsyms]  [k] __schedule
+     0.56%     0.00%  kafka-consumer-  consumer-perf      [.] aead_aes_gcm_open_gather
+     0.56%     0.07%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::consumer::internals::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager as confluent_kafka::consumer::internals::request_manager::RequestManager>::poll
+     0.56%     0.03%  consumer-perf    [kernel.kallsyms]  [k] schedule
+     0.55%     0.01%  kafka-consumer-  [kernel.kallsyms]  [k] __arm64_sys_futex
+     0.54%     0.02%  kafka-consumer-  [kernel.kallsyms]  [k] do_futex
+     0.54%     0.00%  kafka-consumer-  libc.so.6          [.] __realloc (inlined)
+     0.53%     0.01%  kafka-consumer-  consumer-perf      [.] aws_lc_rs::aead::unbound_key::UnboundKey::seal_in_place_append_tag
+     0.53%     0.23%  kafka-consumer-  consumer-perf      [.] tokio::sync::oneshot::Sender<T>::send
+     0.52%     0.23%  kafka-consumer-  [ena]              [k] ena_clean_rx_irq
+     0.52%     0.13%  kafka-consumer-  consumer-perf      [.] aws_lc_0_40_0_EVP_AEAD_CTX_seal
+     0.51%     0.51%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::has_bytes_buffered
+     0.51%     0.40%  consumer-perf    [kernel.kallsyms]  [k] arch_local_irq_enable
+     0.50%     0.23%  kafka-consumer-  [kernel.kallsyms]  [k] __sk_mem_reduce_allocated
+     0.50%     0.00%  kafka-consumer-  [kernel.kallsyms]  [k] sock_rfree
+     0.50%     0.03%  kafka-consumer-  consumer-perf      [.] core::ops::function::FnOnce::call_once{{vtable.shim}}
+
+
+#
+# (Tip: To set sample time separation other than 100ms with --sort time use --time-quantum)
+#

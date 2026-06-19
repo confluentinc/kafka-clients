@@ -1,0 +1,53 @@
+strace: Process 267451 attached with 40 threads
+strace: Process 267463 detached
+strace: Process 267492 detached
+strace: Process 267493 detached
+strace: Process 267491 detached
+strace: Process 267490 detached
+strace: Process 267489 detached
+strace: Process 267488 detached
+strace: Process 267487 detached
+strace: Process 267486 detached
+strace: Process 267485 detached
+strace: Process 267484 detached
+strace: Process 267483 detached
+strace: Process 267482 detached
+strace: Process 267481 detached
+strace: Process 267480 detached
+strace: Process 267479 detached
+strace: Process 267478 detached
+strace: Process 267477 detached
+strace: Process 267476 detached
+strace: Process 267475 detached
+strace: Process 267474 detached
+strace: Process 267473 detached
+strace: Process 267472 detached
+strace: Process 267471 detached
+strace: Process 267470 detached
+strace: Process 267469 detached
+strace: Process 267468 detached
+strace: Process 267467 detached
+strace: Process 267466 detached
+strace: Process 267465 detached
+strace: Process 267464 detached
+strace: Process 267462 detached
+strace: Process 267461 detached
+strace: Process 267460 detached
+strace: Process 267459 detached
+strace: Process 267458 detached
+strace: Process 267456 detached
+strace: Process 267455 detached
+strace: Process 267454 detached
+strace: Process 267451 detached
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 90.98   95.011440        1084     87587           ppoll
+  7.14    7.455308          82     90735      5909 futex
+  1.41    1.468463           5    245391     60033 read
+  0.29    0.304125      101375         3         2 restart_syscall
+  0.19    0.195375           7     27296           write
+  0.00    0.000145          20         7           mprotect
+  0.00    0.000057          57         1           munmap
+  0.00    0.000005           5         1           mmap
+------ ----------- ----------- --------- --------- ----------------
+100.00  104.434918         231    451021     65944 total

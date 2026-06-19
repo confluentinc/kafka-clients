@@ -119,6 +119,22 @@ impl LatencyHistogram {
         }
     }
 
+    /// Latency stddev computed from the exact histogram (1 ms quantized).
+    fn stddev(&self) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        let mean = self.sum as f64 / self.count as f64;
+        let mut var = 0.0;
+        for (i, &c) in self.buckets.iter().enumerate() {
+            if c > 0 {
+                let d = i as f64 - mean;
+                var += c as f64 * d * d;
+            }
+        }
+        (var / self.count as f64).sqrt()
+    }
+
     fn percentile(&self, pct: f64) -> i64 {
         if self.count == 0 {
             return 0;
@@ -661,6 +677,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut overall = LatencyHistogram::new();
     let mut interval_hist = LatencyHistogram::new();
     let mut sampler = ResourceSampler::new();
+    // Run-level current-RSS aggregation (avg/min/max over interval samples).
+    let mut rss_sum = 0.0f64;
+    let mut rss_min = f64::MAX;
+    let mut rss_max = 0.0f64;
+    let mut rss_samples: u64 = 0;
 
     let mut messages_consumed: u64 = 0;
     let mut warmup_complete = false;
@@ -753,6 +774,14 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         if warmup_complete && interval_start.elapsed() >= Duration::from_secs(args.interval_s) {
             let elapsed_s = interval_start.elapsed().as_secs_f64();
             let (cpu, rss_mb) = sampler.sample();
+            rss_sum += rss_mb;
+            if rss_mb < rss_min {
+                rss_min = rss_mb;
+            }
+            if rss_mb > rss_max {
+                rss_max = rss_mb;
+            }
+            rss_samples += 1;
             let icount = interval_hist.count;
             let throughput = icount as f64 / elapsed_s;
             emit_interval(
@@ -811,6 +840,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         rpp.max(),
     );
 
+    let rss_avg = if rss_samples > 0 {
+        rss_sum / rss_samples as f64
+    } else {
+        0.0
+    };
+    let rss_min_out = if rss_samples > 0 { rss_min } else { 0.0 };
     write_summary(
         &mut jsonl,
         &run_dir,
@@ -819,6 +854,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         measured_duration_s,
         args.warmup_messages,
         &rpp,
+        rss_avg,
+        rss_min_out,
+        rss_max,
     )?;
 
     println!("\nResults written to: {}", run_dir.display());
@@ -865,6 +903,9 @@ fn write_summary(
     duration_s: f64,
     warmup: u64,
     rpp: &RecordsPerPoll,
+    rss_avg: f64,
+    rss_min: f64,
+    rss_max: f64,
 ) -> std::io::Result<()> {
     let measured = hist.count;
     let throughput_msg_s = if duration_s > 0.0 {
@@ -878,6 +919,7 @@ fn write_summary(
         0.0
     };
     let (min, avg, max) = (hist.min(), hist.avg(), hist.max());
+    let stddev = hist.stddev();
     let p50 = hist.percentile(50.0);
     let p90 = hist.percentile(90.0);
     let p95 = hist.percentile(95.0);
@@ -891,8 +933,9 @@ fn write_summary(
     println!("Duration:          {duration_s:.2} s");
     println!("Throughput:        {throughput_msg_s:.0} msg/s  ({throughput_mb_s:.2} MiB/s)");
     println!(
-        "E2E latency (ms):  min={min} avg={avg:.2} p50={p50} p90={p90} p95={p95} p99={p99} p99.9={p999} max={max}"
+        "E2E latency (ms):  min={min} avg={avg:.2} stddev={stddev:.2} p50={p50} p90={p90} p95={p95} p99={p99} p99.9={p999} max={max}"
     );
+    println!("RSS (MB, current): avg={rss_avg:.1} min={rss_min:.1} max={rss_max:.1}");
     println!("{}", "=".repeat(70));
 
     let rpp_n = rpp.count;
@@ -905,8 +948,9 @@ fn write_summary(
         jsonl,
         "{{\"type\":\"summary\",\"client\":\"rust\",\"messages\":{measured},\"duration_s\":{duration_s:.2},\
          \"throughput_msg_s\":{throughput_msg_s:.2},\"throughput_mib_s\":{throughput_mb_s:.2},\
-         \"lat_min_ms\":{min},\"lat_avg_ms\":{avg:.2},\"lat_p50_ms\":{p50},\"lat_p90_ms\":{p90},\
+         \"lat_min_ms\":{min},\"lat_avg_ms\":{avg:.2},\"lat_stddev_ms\":{stddev:.2},\"lat_p50_ms\":{p50},\"lat_p90_ms\":{p90},\
          \"lat_p95_ms\":{p95},\"lat_p99_ms\":{p99},\"lat_p999_ms\":{p999},\"lat_max_ms\":{max},\
+         \"rss_avg_mb\":{rss_avg:.1},\"rss_min_mb\":{rss_min:.1},\"rss_max_mb\":{rss_max:.1},\
          \"rpp_n\":{rpp_n},\"rpp_min\":{rpp_min},\"rpp_mean\":{rpp_mean:.2},\"rpp_p50\":{rpp_p50},\
          \"rpp_p99\":{rpp_p99},\"rpp_max\":{rpp_max}}}"
     )?;
