@@ -381,6 +381,18 @@ impl ConsumerHeartbeatRequestManager {
         self.heartbeat_state.reset();
     }
 
+    /// Test-only accessor for [`Self::should_send_leave_heartbeat_now`].
+    /// Mirrors what Java's `testPollOnLeaving` isolates (it stubs
+    /// `shouldHeartbeatNow()` to its `false` Mockito default so only the
+    /// `shouldSendLeaveHeartbeatNow()` predicate decides). With a REAL
+    /// membership manager, a LEAVING member's `should_heartbeat_now()` is
+    /// also `true`, so the full `poll()` cannot isolate this predicate — we
+    /// test it directly instead.
+    #[cfg(test)]
+    pub(crate) fn should_send_leave_heartbeat_now_for_test(&self) -> bool {
+        self.should_send_leave_heartbeat_now()
+    }
+
     /// Java: `shouldSendLeaveHeartbeatNow()`.
     fn should_send_leave_heartbeat_now(&self) -> bool {
         use crate::consumer::close_options::GroupMembershipOperation;
@@ -1000,18 +1012,19 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
 /// - `testPollTimerExpiration` — `poll_timer_expiration` (Phase 35)
 /// - `testPollTimerExpirationShouldNotMarkMemberStaleIfMemberAlreadyLeaving` —
 ///   `poll_timer_expiration_should_not_mark_member_stale_if_member_already_leaving` (Phase 35)
+/// - `testPollOnLeaving` — `poll_on_leaving` (Phase 35; asserts the
+///   `should_send_leave_heartbeat_now` predicate directly — see note in the test)
+/// - `testPollOnCloseGeneratesRequestIfNeeded` — `poll_on_close_generates_request_if_needed` (Phase 35)
+/// - `testSendingLeaveGroupHeartbeatWhenPreviousOneInFlight` —
+///   `sending_leave_group_heartbeat_when_previous_one_in_flight` (Phase 35)
+/// - `testisExpiredByUsedForLogging` — `is_expired_by_used_for_logging` (Phase 35;
+///   the `isExpiredBy` value drives only the warn log — no metric is recorded)
+/// - `testConsumerAcksReconciledAssignmentAfterAckLost` —
+///   `consumer_acks_reconciled_assignment_after_ack_lost` (Phase 35)
 ///
 /// Genuinely not translated:
 /// - `testSuccessfulHeartbeatTiming` (REDUCED — full timing matrix not reproduced;
 ///   `successful_response_updates_interval` + `timer_not_due` cover the timing core).
-/// - `testPollOnLeaving`, `testPollOnCloseGeneratesRequestIfNeeded`,
-///   `testSendingLeaveGroupHeartbeatWhenPreviousOneInFlight`,
-///   `testisExpiredByUsedForLogging`, `testConsumerAcksReconciledAssignmentAfterAckLost`:
-///   leave-group poll lifecycle. The positive leave-poll matrix and the
-///   ack-lost replay depend on the request response-handler harness
-///   (`isExpiredBy` is a logging-only metric, dropped — no metrics framework).
-///   These remain for a follow-up; the field-diff core they exercise IS now
-///   pinned by the Phase-35 tests above.
 /// - Metrics tests (HeartbeatMetrics): OUT_OF_SCOPE — no Rust metrics framework.
 #[cfg(test)]
 mod tests {
@@ -2341,5 +2354,217 @@ mod tests {
         set_pattern(&subs, None);
         let data = mgr.build_request_data_for_test();
         assert_eq!(data.subscribed_topic_regex, None);
+    }
+
+    // ===============================================================
+    // Phase 35 — leave-group / poll-on-close lifecycle.
+    // ===============================================================
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testPollOnLeaving` (parameterized
+    /// over the `pollOnLeavingMatrix`). A LEAVING member sends a leave
+    /// heartbeat EXCEPT when it is dynamic (no group-instance-id) AND the
+    /// leave operation is `RemainInGroup`.
+    ///
+    /// Java isolates the `shouldSendLeaveHeartbeatNow()` predicate by leaving
+    /// `shouldHeartbeatNow()` at its Mockito `false` default. With a REAL
+    /// membership manager a LEAVING member's `should_heartbeat_now()` is also
+    /// `true`, so `poll()` cannot isolate the predicate — we assert
+    /// `should_send_leave_heartbeat_now()` directly (the unit Java tests),
+    /// and additionally assert that the full `poll()` DOES send a leave HB
+    /// for the cases where the predicate is true.
+    #[tokio::test]
+    async fn poll_on_leaving() {
+        use crate::consumer::close_options::GroupMembershipOperation;
+        let matrix = [
+            (None, GroupMembershipOperation::Default, true),
+            (None, GroupMembershipOperation::LeaveGroup, true),
+            (None, GroupMembershipOperation::RemainInGroup, false),
+            (Some("gii".to_string()), GroupMembershipOperation::Default, true),
+            (Some("gii".to_string()), GroupMembershipOperation::LeaveGroup, true),
+            (Some("gii".to_string()), GroupMembershipOperation::RemainInGroup, true),
+        ];
+        for (instance_id, op, expect_leave_hb) in matrix {
+            let (mut mgr, coord, mm, _subs) = make_field_diff(
+                instance_id.clone(),
+                Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+                None,
+                10_000,
+                Some(0),
+            );
+            set_coordinator(&coord);
+            force_state(&mm, MemberState::Leaving);
+            mm.set_leave_group_operation(op);
+
+            assert_eq!(
+                mgr.should_send_leave_heartbeat_now_for_test(),
+                expect_leave_hb,
+                "should_send_leave_heartbeat_now (instance_id={instance_id:?}, op={op:?})"
+            );
+
+            // For the cases where the leave HB must be sent, the full poll()
+            // generates it.
+            if expect_leave_hb {
+                let result = mgr.poll(0);
+                assert_eq!(
+                    result.unsent_requests.len(),
+                    1,
+                    "LEAVING member (instance_id={instance_id:?}, op={op:?}) must send a leave heartbeat"
+                );
+            }
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testPollOnCloseGeneratesRequestIfNeeded`
+    /// (parameterized over the `pollOnLeavingMatrix`). `poll_on_close`
+    /// generates a leave heartbeat iff the member is still leaving — and a
+    /// dynamic member with `RemainInGroup` is treated as NOT leaving.
+    #[tokio::test]
+    async fn poll_on_close_generates_request_if_needed() {
+        use crate::consumer::close_options::GroupMembershipOperation;
+        let matrix = [
+            (None, GroupMembershipOperation::Default, true),
+            (None, GroupMembershipOperation::LeaveGroup, true),
+            (None, GroupMembershipOperation::RemainInGroup, false),
+            (Some("gii".to_string()), GroupMembershipOperation::Default, true),
+            (Some("gii".to_string()), GroupMembershipOperation::LeaveGroup, true),
+            (Some("gii".to_string()), GroupMembershipOperation::RemainInGroup, true),
+        ];
+        for (instance_id, op, expect_hb) in matrix {
+            let (mut mgr, _coord, mm, _subs) = make_field_diff(
+                instance_id.clone(),
+                Some(DEFAULT_REMOTE_ASSIGNOR.to_string()),
+                None,
+                10_000,
+                Some(0),
+            );
+            // A member still leaving when the manager closes is in LEAVING.
+            force_state(&mm, MemberState::Leaving);
+            mm.set_leave_group_operation(op);
+
+            let result = mgr.poll_on_close(0);
+            if expect_hb {
+                assert_eq!(
+                    result.unsent_requests.len(),
+                    1,
+                    "poll_on_close must generate a leave request while still leaving (instance_id={instance_id:?}, op={op:?})"
+                );
+            } else {
+                assert!(
+                    result.unsent_requests.is_empty(),
+                    "poll_on_close must NOT generate a leave request for a dynamic RemainInGroup member"
+                );
+            }
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testSendingLeaveGroupHeartbeatWhenPreviousOneInFlight`.
+    /// A regular heartbeat is in flight (so a normal HB is suppressed), but a
+    /// transition to LEAVING forces a leave heartbeat to be sent regardless of
+    /// the in-flight request; once the member is skip-heartbeat, no further HB.
+    #[tokio::test]
+    async fn sending_leave_group_heartbeat_when_previous_one_in_flight() {
+        let (mut mgr, coord, mm, _subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        set_coordinator(&coord);
+        // JOINING so the first HB fires.
+        mm.transition_to_joining().unwrap();
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+
+        // Second poll: previous HB still in flight ⇒ no new HB.
+        let result = mgr.poll(0);
+        assert_eq!(
+            result.unsent_requests.len(),
+            0,
+            "no heartbeat while a previous one is in-flight"
+        );
+
+        // Transition to LEAVING: a leave heartbeat is forced even with the
+        // previous request in flight (`should_send_leave_heartbeat_now`).
+        force_state(&mm, MemberState::Leaving);
+        let result = mgr.poll(0);
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "leave heartbeat must be sent even with a previous HB in-flight"
+        );
+
+        // Member becomes skip-heartbeat (e.g. UNSUBSCRIBED after the leave):
+        // no further heartbeat.
+        force_state(&mm, MemberState::Unsubscribed);
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 0);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testisExpiredByUsedForLogging`.
+    /// On poll-timer expiry the member sends a leave heartbeat and
+    /// `poll_timer_is_expired_by` reports a positive overdue value (used only
+    /// for the warn log). After `reset_poll_timer` the timer is no longer
+    /// expired.
+    #[tokio::test]
+    async fn is_expired_by_used_for_logging() {
+        let (mut mgr, coord, mm, _subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        set_coordinator(&coord);
+        mgr.inner.reset_poll_timer(0);
+        mm.transition_to_joining().unwrap();
+
+        // The poll timer uses the config's max.poll.interval.ms (300_000),
+        // not the membership rebalance timeout (10_000) — distinct fields.
+        let exceeded = 5i64;
+        let now = DEFAULT_MAX_POLL_INTERVAL_MS + exceeded;
+        // Overdue value is positive (logging helper).
+        assert!(mgr.inner.poll_timer_is_expired(now));
+        assert_eq!(mgr.inner.poll_timer_is_expired_by(now), exceeded);
+
+        let result = mgr.poll(now);
+        assert_eq!(result.unsent_requests.len(), 1, "leave heartbeat on poll-timer expiry");
+        assert_eq!(mm.state(), MemberState::Stale);
+
+        // After reset, the poll timer is not expired.
+        mgr.inner.reset_poll_timer(now);
+        assert!(!mgr.inner.poll_timer_is_expired(now));
+        assert!(mgr.inner.poll_timer_is_expired_by(now) < 0, "not overdue after reset");
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testConsumerAcksReconciledAssignmentAfterAckLost`.
+    /// After a heartbeat that acked an assignment is lost (the manager resets
+    /// its `SentFields` via `reset_heartbeat_state`), the next heartbeat
+    /// re-includes the subscription and the assignment (acting as the ack
+    /// again).
+    #[tokio::test]
+    async fn consumer_acks_reconciled_assignment_after_ack_lost() {
+        let (mut mgr, _coord, mm, subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        set_subscription(&subs, &["topic1"]);
+        let topic_id = Uuid::random_uuid();
+        let mut partitions = std::collections::HashMap::new();
+        partitions.insert(topic_id, vec![0]);
+        force_state(&mm, MemberState::Reconciling);
+        force_current_assignment(&mm, LocalAssignment::new(0, partitions.clone()).unwrap());
+
+        // First HB acks the assignment (topic + partitions present).
+        let data1 = mgr.build_request_data_for_test();
+        assert_eq!(data1.subscribed_topic_names, Some(vec!["topic1".to_string()]));
+        let tps1 = data1.topic_partitions.expect("first HB includes topic partitions");
+        assert_eq!(tps1[0].topic_id, topic_id);
+        assert_eq!(tps1[0].partitions, vec![0]);
+
+        // HB lost ⇒ the manager resets its SentFields tracker.
+        mgr.reset_heartbeat_state();
+
+        // The following HB re-includes the subscription AND the assignment
+        // (acting as the ack again), because the reset cleared the diff state.
+        let data2 = mgr.build_request_data_for_test();
+        assert_eq!(data2.subscribed_topic_names, Some(vec!["topic1".to_string()]));
+        let tps2 = data2.topic_partitions.expect("post-reset HB re-includes topic partitions");
+        assert_eq!(tps2.len(), 1);
+        assert_eq!(tps2[0].topic_id, topic_id);
+        assert_eq!(tps2[0].partitions, vec![0]);
     }
 }
