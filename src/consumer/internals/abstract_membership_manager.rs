@@ -532,12 +532,17 @@ impl AbstractMembershipManager {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            if guard.subscription_updated && guard.state == MemberState::Unsubscribed {
-                guard.subscription_updated = false;
-                true
-            } else {
-                false
-            }
+            // Java: `subscriptionUpdated.compareAndSet(true, false) && state == UNSUBSCRIBED`.
+            // The CAS clears the flag whenever it was set, *regardless of
+            // state* (short-circuit `&&` evaluates the CAS first); only
+            // then is the state checked to decide whether to join. The
+            // earlier Rust form gated the clear on `state == Unsubscribed`,
+            // which leaked the flag when polling while in-group (observable
+            // via `subscription_updated()` staying true) — diverging from
+            // Java. (`AbstractMembershipManager.java:491`).
+            let was_updated = guard.subscription_updated;
+            guard.subscription_updated = false;
+            was_updated && guard.state == MemberState::Unsubscribed
         };
         if should_join {
             self.transition_to_joining(join_group_epoch)?;

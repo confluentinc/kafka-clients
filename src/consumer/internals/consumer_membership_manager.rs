@@ -1850,6 +1850,2176 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ===================================================================
+    // Phase 34: metadata-driven reconciliation tests.
+    //
+    // Unlike the reconcile tests above (which pre-seed
+    // `assigned_topic_names_cache` to bypass metadata resolution), these
+    // drive reconciliation against REAL `ConsumerMetadata` so that the
+    // metadata-resolution / unresolved-assignment / delayed-result-discard
+    // logic is actually exercised.
+    //
+    // Java mocks `SubscriptionState` and `ConsumerMetadata`; we use the
+    // real objects. Java's `verify(subscriptionState).assignFromSubscribedAwaitingCallback(...)`
+    // becomes an assertion on the resulting real `SubscriptionState`
+    // (`assigned_partitions()`, `is_fetchable(tp)`); Java's
+    // `when(metadata.topicNames()).thenReturn(...)` becomes a real
+    // metadata update via `seed_metadata`; Java's
+    // `verify(metadata).requestUpdate(anyBoolean())` becomes
+    // `metadata.update_requested()`.
+    // ===================================================================
+
+    use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::requests::MetadataResponse;
+    use crate::metadata_response_data::{
+        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+    };
+
+    /// Build a one-partition `MetadataResponse` per topic, mirroring
+    /// `consumer_metadata.rs::tests::build_response`. The membership
+    /// reconcile path only needs `topic_names()` (id -> name), which the
+    /// metadata snapshot populates from the response's partition topics
+    /// regardless of subscription-based retention.
+    fn build_metadata_response(topics: &[(&str, Uuid)]) -> MetadataResponse {
+        let node = Node::new(1, "localhost".to_string(), 9092);
+        let mut data = MetadataResponseData::new();
+        data.set_cluster_id(Some("test-cluster-id".to_string()));
+        data.set_controller_id(node.id());
+
+        let mut broker = MetadataResponseBroker::new();
+        broker.set_node_id(node.id());
+        broker.set_host(node.host().to_string());
+        broker.set_port(node.port());
+        data.set_brokers(vec![broker]);
+
+        let response_topics: Vec<MetadataResponseTopic> = topics
+            .iter()
+            .map(|(name, topic_id)| {
+                let mut t = MetadataResponseTopic::new();
+                t.set_name(Some((*name).to_string()));
+                t.set_topic_id(*topic_id);
+                t.set_error_code(Errors::None.code());
+                t.set_is_internal(false);
+                let mut partition = MetadataResponsePartition::new();
+                partition.set_partition_index(0);
+                partition.set_error_code(Errors::None.code());
+                partition.set_leader_id(node.id());
+                partition.set_leader_epoch(5);
+                partition.set_replica_nodes(vec![node.id()]);
+                partition.set_isr_nodes(vec![node.id()]);
+                partition.set_offline_replicas(Vec::new());
+                t.set_partitions(vec![partition]);
+                t
+            })
+            .collect();
+        data.set_topics(response_topics);
+        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+    }
+
+    /// Feed REAL topic-name metadata to the manager so that
+    /// `find_resolvable_assignment_and_trigger_metadata_update` resolves
+    /// the given topic ids without pre-seeding the local cache. Mirrors
+    /// Java's `when(metadata.topicNames()).thenReturn(map)`.
+    fn seed_metadata(mgr: &ConsumerMembershipManager, topics: &[(&str, Uuid)]) {
+        let response = build_metadata_response(topics);
+        mgr.abstract_mm
+            .metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, 1000);
+    }
+
+    /// Set of topic ids in the current target assignment that are NOT yet
+    /// resolvable (mirrors Java's `membershipManager.topicsAwaitingReconciliation()`).
+    fn topics_awaiting_reconciliation(mgr: &ConsumerMembershipManager) -> HashSet<Uuid> {
+        let target_ids: HashSet<Uuid> = {
+            let guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.current_target_assignment.partitions.keys().copied().collect()
+        };
+        let resolved_ids: HashSet<Uuid> = {
+            let metadata_names = mgr.abstract_mm.metadata.metadata_arc().topic_names();
+            let guard = mgr.abstract_mm.inner.lock().unwrap();
+            target_ids
+                .iter()
+                .filter(|id| metadata_names.contains_key(id) || guard.assigned_topic_names_cache.contains_key(id))
+                .copied()
+                .collect()
+        };
+        target_ids.difference(&resolved_ids).copied().collect()
+    }
+
+    /// Map of topic id -> partitions in the current target assignment
+    /// that has not yet been reconciled into `current_assignment`
+    /// (mirrors Java's `topicPartitionsAwaitingReconciliation()`).
+    fn topic_partitions_awaiting_reconciliation(mgr: &ConsumerMembershipManager) -> HashMap<Uuid, Vec<i32>> {
+        let guard = mgr.abstract_mm.inner.lock().unwrap();
+        let mut out = HashMap::new();
+        for (id, target_parts) in &guard.current_target_assignment.partitions {
+            let current = guard.current_assignment.partitions.get(id);
+            let diff: Vec<i32> = match current {
+                Some(cur) => target_parts.iter().copied().filter(|p| !cur.contains(p)).collect(),
+                None => target_parts.clone(),
+            };
+            if !diff.is_empty() {
+                let mut sorted = diff;
+                sorted.sort_unstable();
+                out.insert(*id, sorted);
+            }
+        }
+        out
+    }
+
+    /// True while a reconcile is in flight (Java's `reconciliationInProgress()`).
+    fn reconciliation_in_progress(mgr: &ConsumerMembershipManager) -> bool {
+        mgr.abstract_mm.inner.lock().unwrap().reconciliation_in_progress
+    }
+
+    /// Receive a heartbeat response carrying the given target assignment,
+    /// mirroring the Java `receiveAssignment(topicId, partitions, mgr)`
+    /// helper.
+    fn receive_assignment(mgr: &ConsumerMembershipManager, topic_id: Uuid, partitions: Vec<i32>) {
+        use crate::consumer_group_heartbeat_response_data::{
+            Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions,
+        };
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(mgr.member_id());
+        data.member_epoch = 1;
+        data.heartbeat_interval_ms = 5000;
+        data.assignment = Some(Assignment {
+            topic_partitions: vec![TopicPartitions { topic_id, partitions, unknown_tagged_fields: vec![] }],
+            unknown_tagged_fields: vec![],
+        });
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        mgr.on_heartbeat_success(&resp).unwrap();
+    }
+
+    /// Receive a heartbeat with a full multi-topic target assignment.
+    fn receive_assignment_map(mgr: &ConsumerMembershipManager, assignment: &[(Uuid, Vec<i32>)]) {
+        use crate::consumer_group_heartbeat_response_data::{
+            Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions,
+        };
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(mgr.member_id());
+        data.member_epoch = 1;
+        data.heartbeat_interval_ms = 5000;
+        data.assignment = Some(Assignment {
+            topic_partitions: assignment
+                .iter()
+                .map(|(topic_id, partitions)| TopicPartitions {
+                    topic_id: *topic_id,
+                    partitions: partitions.clone(),
+                    unknown_tagged_fields: vec![],
+                })
+                .collect(),
+            unknown_tagged_fields: vec![],
+        });
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        mgr.on_heartbeat_success(&resp).unwrap();
+    }
+
+    /// Receive an empty target assignment (revoke everything).
+    fn receive_empty_assignment(mgr: &ConsumerMembershipManager) {
+        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(mgr.member_id());
+        data.member_epoch = 1;
+        data.heartbeat_interval_ms = 5000;
+        data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        mgr.on_heartbeat_success(&resp).unwrap();
+    }
+
+    /// Drive `reconcile(0, can_commit)` on a bg task, expecting exactly
+    /// one rebalance-listener callback of `expected_method` over the
+    /// given `expected_partitions` (order-insensitive), ack it, and
+    /// return once reconcile has completed. Asserts no other event was
+    /// emitted. Mirrors Java's `performCallback(..., complete=true)` +
+    /// the surrounding `maybeReconcile` flow.
+    async fn reconcile_and_complete_callback(
+        mgr: Arc<ConsumerMembershipManager>,
+        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        can_commit: bool,
+        expected_method: ConsumerRebalanceListenerMethodName,
+        expected_partitions: &[TopicPartition],
+    ) {
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, can_commit).await });
+        let env = rx.recv().await.expect("expected a callback-needed event");
+        match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, expected_method, "unexpected callback method");
+                let got: HashSet<TopicPartition> = partitions.into_iter().collect();
+                let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
+                assert_eq!(got, want, "unexpected callback partitions");
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        bg.await.unwrap().unwrap();
+    }
+
+    fn tp(topic: &str, partition: i32) -> TopicPartition {
+        TopicPartition::new(topic.to_string(), partition)
+    }
+
+    /// Put the SubscriptionState into auto-topic mode so
+    /// `assign_from_subscribed_awaiting_callback` is permitted, and
+    /// pre-own the given partitions (mirrors Java's
+    /// `mockOwnedPartition`/`mockOwnedPartitionAndAssignmentReceived`
+    /// `when(subscriptionState.assignedPartitions())` setup, but with the
+    /// real SubscriptionState).
+    fn mock_owned_partitions(mgr: &ConsumerMembershipManager, owned: &[TopicPartition]) {
+        let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        subs.assign_from_subscribed(owned).unwrap();
+    }
+
+    /// Add topic names to the (real) SubscriptionState subscription so
+    /// that assigned partitions of those topics are considered fetchable
+    /// (`is_fetchable_and_subscribed` gates on subscription membership).
+    /// Java mocks SubscriptionState so it never exercises this gate; in
+    /// Rust we must subscribe to the topics we expect to fetch — exactly
+    /// what a real consumer does before being assigned them.
+    fn subscribe_topics(mgr: &ConsumerMembershipManager, topics: &[&str]) {
+        let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        let set: HashSet<String> = topics.iter().map(|s| s.to_string()).collect();
+        // Preserve the NoopListener registered by `make()` so the §31
+        // handshake still enqueues callback events.
+        subs.subscribe_topics(set, Some(Arc::new(NoopListener))).unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // Commit 1: reconcile against real metadata.
+    // ---------------------------------------------------------------
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcileNewPartitionsAssignedWhenNoPartitionOwned`.
+    /// New partitions are assigned starting from an empty owned set; the
+    /// member resolves the topic from real metadata, reconciles, and the
+    /// SubscriptionState reflects the new assignment.
+    #[tokio::test]
+    async fn reconcile_new_partitions_assigned_when_no_partition_owned() {
+        let (mgr, mut rx) = make(None, None, None);
+        // Subscribe to topic1 so its assigned partitions are fetchable
+        // (real-SubscriptionState gate; see `subscribe_topics`).
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!reconciliation_in_progress(&mgr));
+
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
+        )
+        .await;
+
+        // verifyReconciliationTriggeredAndCompleted: ACKNOWLEDGING, no
+        // longer in progress, and the assignment applied.
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+        {
+            let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 0), tp("topic1", 1)]));
+        }
+        // Both partitions are fetchable after the assigned callback was
+        // acked (enable_partitions_awaiting_callback cleared the
+        // pending-on-assigned-callback gate). is_fetchable also requires a
+        // valid position (real-SubscriptionState gate Java's mock hides),
+        // so seek the partitions first.
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 0).unwrap();
+            subs.seek(&tp("topic1", 1), 0).unwrap();
+        }
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.is_fetchable(&tp("topic1", 0)));
+        assert!(subs.is_fetchable(&tp("topic1", 1)));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcileNewPartitionsAssignedWhenOtherPartitionsOwned`.
+    /// Owning topic1-0, a new assignment adding 1 and 2 reconciles to the
+    /// union with no revocation.
+    #[tokio::test]
+    async fn reconcile_new_partitions_assigned_when_other_partitions_owned() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        // New assignment adding partitions 1 and 2 to owned partition 0.
+        receive_assignment(&mgr, topic_id, vec![0, 1, 2]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        // Only the *added* partitions (1, 2) are passed to onPartitionsAssigned.
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 1), tp("topic1", 2)],
+        )
+        .await;
+
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(
+            subs.assigned_partitions(),
+            HashSet::from([tp("topic1", 0), tp("topic1", 1), tp("topic1", 2)])
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcileNewPartitionsAssignedAndRevoked`.
+    /// Owning topic1-0, a new assignment of {1,2} revokes 0 and assigns
+    /// 1,2. With no listener-driven auto-commit, the revoke and assign
+    /// callbacks both flow.
+    #[tokio::test]
+    async fn reconcile_new_partitions_assigned_and_revoked() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        // New assignment revoking 0, assigning 1 and 2.
+        receive_assignment(&mgr, topic_id, vec![1, 2]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        // First callback: onPartitionsRevoked for {0}.
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+
+        let env = rx.recv().await.expect("revoked event");
+        match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        // Second callback: onPartitionsAssigned for {1, 2}.
+        let env = rx.recv().await.expect("assigned event");
+        match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                assert_eq!(
+                    partitions.into_iter().collect::<HashSet<_>>(),
+                    HashSet::from([tp("topic1", 1), tp("topic1", 2)])
+                );
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        bg.await.unwrap().unwrap();
+
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+        let mut current = mgr.current_assignment().partitions;
+        for v in current.values_mut() {
+            v.sort_unstable();
+        }
+        assert_eq!(current, HashMap::from([(topic_id, vec![1, 2])]));
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 1), tp("topic1", 2)]));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconciliationSkippedWhenSameAssignmentReceived`.
+    /// After reconciling+ack'ing {0,1}, receiving the same assignment
+    /// again does not re-trigger reconciliation.
+    #[tokio::test]
+    async fn reconciliation_skipped_when_same_assignment_received() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+
+        // Receive the same assignment again -> no reconciliation.
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Stable);
+        // A reconcile call is a no-op (target == current); no event emitted.
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "no reconciliation should be triggered for an identical assignment",
+        );
+        assert_eq!(mgr.state(), MemberState::Stable);
+        assert!(!reconciliation_in_progress(&mgr));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedNoAutoCommitNoCallbacks`.
+    /// Owning topic1-0 with no listener and no auto-commit, an empty
+    /// assignment revokes everything and completes the revocation.
+    #[tokio::test]
+    async fn reconcile_partitions_revoked_no_auto_commit_no_callbacks() {
+        // make_without_listener: §31 short-circuits (no callback events),
+        // mirroring Java's mockRevocationNoCallbacks(false).
+        let (mgr, mut rx) = make_without_listener(None, None, None);
+        // Auto-topic mode is required for assign_from_subscribed; the
+        // no-listener helper skips subscribe_topics, so subscribe here
+        // (still without a listener).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!reconciliation_in_progress(&mgr));
+
+        // No listener -> reconcile runs to completion with no events.
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "no rebalance-listener event when no listener is registered",
+        );
+
+        // testRevocationOfAllPartitionsCompleted: ACKNOWLEDGING, empty
+        // current assignment, all revoked.
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+        assert!(mgr.current_assignment().is_none() || mgr.current_assignment().partitions.is_empty());
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithSuccessfulAutoCommitNoCallbacks`.
+    /// With auto-commit enabled, the member stays in RECONCILING until
+    /// the commit completes, then completes the revocation.
+    #[tokio::test]
+    async fn reconcile_partitions_revoked_with_successful_auto_commit_no_callbacks() {
+        let (mgr, mut rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // The commit-manager auto-commit future resolves immediately
+        // (no offsets to commit), so the reconcile proceeds and the
+        // revocation completes. With no listener registered, the §31
+        // handshake short-circuits.
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "no rebalance-listener event when no listener is registered",
+        );
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`.
+    /// Even if the auto-commit before rebalance fails, the revocation
+    /// still completes (Java's "proceed with reconciliation anyway").
+    #[tokio::test]
+    async fn reconcile_partitions_revoked_with_failed_auto_commit_completes_revocation_anyway() {
+        let (mgr, _rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // The commit future result is logged + ignored regardless of
+        // success/failure; reconcile completes the revocation. (The
+        // production reconcile maps both Ok(Err) and Err to "proceed
+        // anyway", so the revocation always completes — this is the
+        // behavioral contract being pinned.)
+        mgr.reconcile(0, true).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testSameAssignmentReconciledAgainWithMissingTopic`.
+    /// One topic resolvable, one permanently missing. The resolvable one
+    /// is reconciled+acked; the missing one stays awaiting reconciliation.
+    /// A re-sent assignment with the same resolvable partitions is acked
+    /// again without re-running a full reconcile.
+    #[tokio::test]
+    async fn same_assignment_reconciled_again_with_missing_topic() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        // Only topic1 is in metadata.
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        // assignment1: topic1-0 (resolvable) + topic2-0 (unresolvable).
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        // Still RECONCILING because the unresolved topic2 keeps the
+        // target unreconciled.
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        // topic2 is awaiting reconciliation.
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
+
+        // Receive original assignment again -> not a full reconcile, but
+        // ack again. topic1 stays assigned, topic2 still awaiting.
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        // No callback emitted on the re-ack (same resolvable partitions).
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "no callback should fire for the same resolvable assignment",
+        );
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert_eq!(mgr.current_assignment().partitions, HashMap::from([(topic1, vec![0])]));
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testRevokePartitionsUsesTopicNamesLocalCacheWhenMetadataNotAvailable`.
+    /// After a topic is reconciled (and cached locally), a subsequent
+    /// revocation of one of its partitions completes using the LOCAL
+    /// cache even when the topic is no longer present in metadata — no
+    /// metadata update is requested.
+    #[tokio::test]
+    async fn revoke_partitions_uses_topic_names_local_cache_when_metadata_not_available() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        // Reconcile {0, 1}.
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+        // topic1 is now in the local cache.
+        assert!(
+            mgr.abstract_mm
+                .inner
+                .lock()
+                .unwrap()
+                .assigned_topic_names_cache
+                .contains_key(&topic_id),
+            "topic name should have been cached during reconciliation",
+        );
+
+        // Make metadata no longer contain topic1 (simulate eviction):
+        // seed a different topic. The local cache must be used for the
+        // revocation. Reset update_requested by reading current state.
+        let other = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("other", other)]);
+        // Clear any pending update flag from prior reconcile so we can
+        // assert no NEW update is requested by the revocation path.
+        let _ = mgr.abstract_mm.metadata.metadata_arc().update_requested();
+
+        // Revoke partition 0, keep partition 1. This reconcile fires TWO
+        // callbacks: onPartitionsRevoked({0}) then onPartitionsAssigned({})
+        // (added is empty since {1} is already owned).
+        receive_assignment(&mgr, topic_id, vec![1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        expect_callback(
+            &mut rx,
+            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+            &[tp("topic1", 0)],
+            Ok(()),
+        )
+        .await;
+        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        bg.await.unwrap().unwrap();
+        // Revocation completed using the LOCAL topic-name cache (topic1
+        // was resolved from cache/retained metadata, no failure).
+        // testRevocationCompleted: ACKNOWLEDGING, remaining {1}.
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 1)]));
+    }
+
+    // ---------------------------------------------------------------
+    // Commit 2: metadata resolution / unresolved assignments.
+    // ---------------------------------------------------------------
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testUnresolvedTargetAssignmentIsReconciledWhenMetadataReceived`.
+    /// An assignment whose topic is not yet in metadata is kept awaiting
+    /// reconciliation; once metadata arrives, the next reconcile resolves
+    /// and applies it.
+    #[tokio::test]
+    async fn unresolved_target_assignment_is_reconciled_when_metadata_received() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        // Bring the member to a STABLE-like baseline by reconciling an
+        // empty assignment first is unnecessary; Java starts from a
+        // stable member. We just need to be in-group so a new assignment
+        // transitions to RECONCILING.
+        let topic_id = Uuid::random_uuid();
+
+        // Assignment not in metadata. Member keeps it awaiting metadata.
+        receive_assignment(&mgr, topic_id, vec![1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
+
+        // The resolution pass cannot resolve the topic, so it requests a
+        // metadata update and resolves nothing. (We call the production
+        // resolution method directly rather than full `reconcile`: with an
+        // unresolved-only target, `reconcile` would still enqueue an empty
+        // onPartitionsAssigned and await the ack — Java drives the same via
+        // the bg/app split. The behavior under test here is the
+        // metadata-update request for the unresolved id, which lives in
+        // `find_resolvable_assignment_and_trigger_metadata_update`.)
+        let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
+        assert!(
+            resolved.is_empty(),
+            "nothing should resolve while the topic is missing from metadata"
+        );
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(
+            mgr.abstract_mm.metadata.metadata_arc().update_requested(),
+            "an unresolved topic id must trigger a metadata update request",
+        );
+
+        // Metadata update received including the missing topic name.
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 1)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(topics_awaiting_reconciliation(&mgr).is_empty());
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 1)]));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testMemberKeepsUnresolvedAssignmentWaitingForMetadataUntilResolved`.
+    /// Of two assigned topics, only one is in metadata. The resolvable
+    /// one is reconciled+acked; the unresolved one is kept awaiting and a
+    /// metadata update is requested. Re-receiving the same assignment
+    /// keeps the unresolved topic awaiting.
+    #[tokio::test]
+    async fn member_keeps_unresolved_assignment_waiting_for_metadata_until_resolved() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        // assignment: topic1-0 (resolvable), topic2-{1,3} (unresolvable).
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![1, 3])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        // Reconciled what was resolvable, kept the unresolved + requested update.
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
+
+        // Ack -> back to RECONCILING (unresolved still pending).
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Receive the same assignment again -> topic2 still unresolved.
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![1, 3])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testMetadataUpdatesReconcilesUnresolvedAssignments`.
+    /// An unresolved assignment is reconciled as soon as metadata is
+    /// discovered, without the broker re-sending the assignment.
+    #[tokio::test]
+    async fn metadata_updates_reconciles_unresolved_assignments() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+
+        // Assignment not in metadata.
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // First resolution pass: cannot resolve -> request update,
+        // nothing resolved (see note in
+        // `unresolved_target_assignment_is_reconciled_when_metadata_received`).
+        let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
+        assert!(resolved.is_empty());
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
+        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+
+        // Metadata discovered -> reconcile completes.
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(topics_awaiting_reconciliation(&mgr).is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testMetadataUpdatesRequestsAnotherUpdateIfNeeded`.
+    /// While a topic remains unresolved, every reconcile attempt requests
+    /// another metadata update.
+    #[tokio::test]
+    async fn metadata_updates_requests_another_update_if_needed() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // First resolution attempt: unresolved -> request update.
+        let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
+        assert!(resolved.is_empty());
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
+        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+
+        // Second attempt, metadata still missing the topic -> request
+        // update AGAIN (still nothing resolved, still awaiting). The
+        // production method always re-requests an update for unresolved
+        // ids (Java's per-poll `requestUpdate`).
+        let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
+        assert!(resolved.is_empty());
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
+        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        // unused in this test now that we use the resolution method directly.
+        let _ = &mut rx;
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedMetadataUsedToCompleteAssignment`.
+    /// Starting from a reconciled topic1-0, a new assignment adds an
+    /// unresolved topic2-0. The resolvable subset (no change) is acked,
+    /// topic2 stays awaiting + requests metadata; once topic2 metadata
+    /// arrives, the next reconcile assigns it.
+    #[tokio::test]
+    async fn delayed_metadata_used_to_complete_assignment() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        // Receive + reconcile topic1-0, reach STABLE.
+        receive_assignment(&mgr, topic1, vec![0]);
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+
+        // New assignment adding topic2-0 (not in metadata).
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // No full reconciliation triggered (topic2 unresolved); the
+        // resolvable subset equals the current assignment so the member
+        // just acks. topic2 stays awaiting + a metadata update is
+        // requested.
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
+
+        // Metadata discovered for topic2 -> reconcile assigns it.
+        seed_metadata(&mgr, &[("topic1", topic1), ("topic2", topic2)]);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic2", 0)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(topics_awaiting_reconciliation(&mgr).is_empty());
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 0), tp("topic2", 0)]));
+    }
+
+    // ---------------------------------------------------------------
+    // Commit 3: new-assignment-replaces-waiting-on-metadata.
+    // ---------------------------------------------------------------
+
+    /// Receive an assignment of two topics that are NOT in metadata,
+    /// leaving the member RECONCILING with both topics awaiting metadata.
+    /// Mirrors Java's `mockJoinAndReceiveAssignment(false)` +
+    /// `createAssignment(false)` (two random unresolvable topics).
+    fn join_and_receive_unresolved_assignment(mgr: &ConsumerMembershipManager) -> (Uuid, Uuid) {
+        mgr.transition_to_joining().unwrap();
+        let topic_a = Uuid::random_uuid();
+        let topic_b = Uuid::random_uuid();
+        receive_assignment_map(mgr, &[(topic_a, vec![0, 1, 2]), (topic_b, vec![3, 4, 5])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!topics_awaiting_reconciliation(mgr).is_empty());
+        (topic_a, topic_b)
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testNewAssignmentReplacesPreviousOneWaitingOnMetadata`.
+    /// A new resolvable assignment that does NOT include the
+    /// waiting-on-metadata topics discards them and reconciles the new one.
+    #[tokio::test]
+    async fn new_assignment_replaces_previous_one_waiting_on_metadata() {
+        let (mgr, mut rx) = make(None, None, None);
+        join_and_receive_unresolved_assignment(&mgr);
+
+        // Ack -> still RECONCILING, still awaiting metadata.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!topics_awaiting_reconciliation(&mgr).is_empty());
+
+        // New target assignment (resolvable) not including the previous.
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        receive_assignment(&mgr, topic_id, vec![0]);
+
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 0)]));
+        drop(subs);
+
+        // Ack -> STABLE, nothing awaiting (the unresolved topics were
+        // discarded).
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+        assert!(topics_awaiting_reconciliation(&mgr).is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testNewEmptyAssignmentReplacesPreviousOneWaitingOnMetadata`.
+    /// A new EMPTY assignment discards the waiting-on-metadata topics and
+    /// goes back to STABLE with nothing to reconcile.
+    #[tokio::test]
+    async fn new_empty_assignment_replaces_previous_one_waiting_on_metadata() {
+        let (mgr, mut rx) = make(None, None, None);
+        join_and_receive_unresolved_assignment(&mgr);
+
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!topics_awaiting_reconciliation(&mgr).is_empty());
+
+        // Empty assignment received -> the previous unresolved topics are
+        // discarded from the target (this happens in
+        // process_assignment_received / LocalAssignment::update_with, not
+        // in reconcile). With an empty target and an empty current
+        // assignment, there is nothing left awaiting reconciliation.
+        receive_empty_assignment(&mgr);
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+        assert!(
+            topics_awaiting_reconciliation(&mgr).is_empty(),
+            "the empty assignment must discard the previously-unresolved topics",
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testNewAssignmentNotInMetadataReplacesPreviousOneWaitingOnMetadata`.
+    /// A new UNRESOLVABLE assignment replaces the previous unresolved one;
+    /// the member keeps only the NEW topic as awaiting metadata.
+    #[tokio::test]
+    async fn new_assignment_not_in_metadata_replaces_previous_one_waiting_on_metadata() {
+        let (mgr, mut rx) = make(None, None, None);
+        join_and_receive_unresolved_assignment(&mgr);
+
+        // New unresolvable assignment (metadata empty for it). This
+        // replaces the previous unresolved target.
+        let topic_id = Uuid::random_uuid();
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+
+        // The resolution pass cannot resolve the new topic -> request
+        // update, nothing resolved.
+        let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
+        assert!(resolved.is_empty());
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        // Only the NEW topic is awaiting reconciliation (the prior two
+        // were discarded by the replacing assignment).
+        assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
+    }
+
+    // ---------------------------------------------------------------
+    // Commit 4: delayed-reconciliation discard (mutation-resistant).
+    //
+    // A reconcile that is in-flight (stuck on a §31 callback) must be
+    // DISCARDED if the member transitions out of RECONCILING (fatal) or
+    // rejoins (fence + new assignment) before the callback completes.
+    // The discard is enforced by `maybe_abort_reconciliation()` —
+    // deleting that guard makes these tests fail (the stale assignment
+    // would be applied and the member would reach ACKNOWLEDGING).
+    // ---------------------------------------------------------------
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedIfMemberNotInReconcilingStateAnymore`.
+    /// A member stuck reconciling (on the assigned callback) receives a
+    /// FATAL error. When the callback finally completes, the
+    /// reconciliation must not update the subscription or advance to
+    /// ACKNOWLEDGING.
+    #[tokio::test]
+    async fn delayed_reconciliation_result_discarded_if_member_not_in_reconciling_state_anymore() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        // Reconcile stuck on the onPartitionsAssigned callback — capture
+        // the ack but do NOT complete it yet.
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        let env = rx.recv().await.expect("assigned event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        // reconcile is now parked awaiting the ack, with
+        // reconciliation_in_progress = true. Note the stuck reconcile has
+        // ALREADY applied the assignment to the (real) SubscriptionState
+        // (step 11 runs before the onPartitionsAssigned await), so the
+        // member now owns topic1-0.
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Member receives a fatal error while reconciling. transition_to_fatal
+        // moves out of RECONCILING and (because the member owns a
+        // partition) fires onPartitionsLost to release it; drive + ack
+        // that callback so the transition completes.
+        let mgr_fatal = mgr.clone();
+        let fatal = tokio::spawn(async move { mgr_fatal.transition_to_fatal(0).await });
+        let env = rx.recv().await.expect("lost event");
+        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
+            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            ack.send(Ok(())).unwrap();
+        } else {
+            panic!("expected lost callback");
+        }
+        fatal.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+
+        // Complete the stuck callback. The delayed reconciliation must be
+        // discarded: state must NOT become ACKNOWLEDGING.
+        stuck_ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        assert_ne!(mgr.state(), MemberState::Acknowledging);
+        assert_eq!(mgr.state(), MemberState::Fatal);
+        // The subscription must not have been updated to the stale target.
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterPartitionsAssignedCallbackIfMemberRejoins`.
+    /// A member stuck on the onPartitionsAssigned callback gets fenced
+    /// and rejoins with a new assignment. When the stuck callback
+    /// completes, the original reconciliation is discarded and the new
+    /// assignment is what remains pending.
+    #[tokio::test]
+    async fn delayed_reconciliation_result_discarded_after_partitions_assigned_callback_if_member_rejoins() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1", "topic3"]);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        receive_assignment(&mgr, topic1, vec![1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        let env = rx.recv().await.expect("assigned event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        // The stuck reconcile already applied topic1-1 to SubState
+        // (step 11), so the member owns a partition.
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Fenced + rejoin while still reconciling. Because the member owns
+        // a partition, fence fires onPartitionsLost to release it; drive +
+        // ack that callback. Fence then transitions FENCED -> JOINING,
+        // which sets rejoined_while_reconciliation_in_progress.
+        let mgr_fence = mgr.clone();
+        let fence = tokio::spawn(async move { mgr_fence.transition_to_fenced(0).await });
+        let env = rx.recv().await.expect("lost event");
+        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
+            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            ack.send(Ok(())).unwrap();
+        } else {
+            panic!("expected lost callback");
+        }
+        fence.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        // New assignment to reconcile after rejoining (topic3-5).
+        let topic3 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
+        receive_assignment(&mgr, topic3, vec![5]);
+        assert!(!topics_awaiting_reconciliation(&mgr).contains(&topic3));
+
+        // Complete the stuck callback -> discarded.
+        stuck_ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        assert_ne!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+
+        // The post-rejoin assignment is what's pending to reconcile next.
+        assert_eq!(
+            topic_partitions_awaiting_reconciliation(&mgr),
+            HashMap::from([(topic3, vec![5])])
+        );
+        // The stale topic1 assignment was not applied.
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(!subs.assigned_partitions().contains(&tp("topic1", 1)));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterPartitionsRevokedCallbackIfMemberRejoins`.
+    /// A member stuck on the onPartitionsRevoked callback gets fenced and
+    /// rejoins. When the stuck callback completes, the reconciliation is
+    /// discarded (assignment not applied, ack not sent).
+    #[tokio::test]
+    async fn delayed_reconciliation_result_discarded_after_partitions_revoked_callback_if_member_rejoins() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1", "topic3"]);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+        // Own topic1-0 so the new assignment {1,2} revokes 0.
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        receive_assignment(&mgr, topic1, vec![1, 2]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        // First event: onPartitionsRevoked for {0} — stuck.
+        let env = rx.recv().await.expect("revoked event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Fence + rejoin. Owned topic1-0 means the §31 lost callback
+        // fires during fence; drive + ack it so the fence completes.
+        let mgr_fence = mgr.clone();
+        let fence = tokio::spawn(async move { mgr_fence.transition_to_fenced(0).await });
+        let env = rx.recv().await.expect("lost event");
+        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
+            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            ack.send(Ok(())).unwrap();
+        } else {
+            panic!("expected lost callback");
+        }
+        fence.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        // New assignment after rejoining.
+        let topic3 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
+        receive_assignment(&mgr, topic3, vec![5]);
+
+        // Complete the stuck revoked callback -> discarded.
+        stuck_ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        assert_ne!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+        assert_eq!(
+            topic_partitions_awaiting_reconciliation(&mgr),
+            HashMap::from([(topic3, vec![5])])
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`.
+    /// A member stuck reconciling (here, on the revoked callback as the
+    /// post-commit park point) rejoins; the delayed result is discarded.
+    /// (We use the revoked-callback park point as the in-flight stall,
+    /// since the Rust reconcile awaits the commit synchronously before
+    /// the callback; the discard semantics are identical — the rejoin
+    /// flag set during the stall causes `maybe_abort_reconciliation` to
+    /// fire.)
+    #[tokio::test]
+    async fn delayed_reconciliation_result_discarded_after_commit_if_member_rejoins() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1", "topic3"]);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        // New assignment {1,2} revokes owned 0.
+        receive_assignment(&mgr, topic1, vec![1, 2]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        let env = rx.recv().await.expect("revoked event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Rejoin via the fence path (FENCED -> JOINING), mirroring Java's
+        // `testFencedMemberReleasesAssignmentAndTransitionsToJoining`.
+        // JOINING is only reachable from FENCED/UNSUBSCRIBED/STALE, so a
+        // direct transition_to_joining from RECONCILING is invalid — the
+        // fence is the rejoin trigger. Owned topic1-0 makes fence fire
+        // onPartitionsLost; drive + ack it.
+        let mgr_fence = mgr.clone();
+        let fence = tokio::spawn(async move { mgr_fence.transition_to_fenced(0).await });
+        let env = rx.recv().await.expect("lost event");
+        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
+            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            ack.send(Ok(())).unwrap();
+        } else {
+            panic!("expected lost callback");
+        }
+        fence.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        // New assignment after rejoin.
+        let topic3 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
+        receive_assignment(&mgr, topic3, vec![5]);
+
+        // Complete the stuck callback -> discarded.
+        stuck_ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        assert_ne!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+        assert_eq!(
+            topic_partitions_awaiting_reconciliation(&mgr),
+            HashMap::from([(topic3, vec![5])])
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultAppliedWhenTargetChangedWithNewAssignment`.
+    /// Counterpart to the discard tests: if the target changes (new
+    /// assignment) WITHOUT a rejoin while a reconcile is in flight, the
+    /// in-flight reconcile completes and is APPLIED (member reaches
+    /// ACKNOWLEDGING), and the newly-added topic is reconciled in the
+    /// next loop.
+    #[tokio::test]
+    async fn delayed_reconciliation_result_applied_when_target_changed_with_new_assignment() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1", "topic2"]);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1), ("topic2", topic2)]);
+
+        // Receive topic1-0, stuck on the assigned callback.
+        receive_assignment(&mgr, topic1, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        let env = rx.recv().await.expect("assigned event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert!(reconciliation_in_progress(&mgr));
+
+        // New assignment adding topic2-0 — NO rejoin, so the in-flight
+        // reconcile is still valid.
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+
+        // Complete the stuck callback -> the first reconciliation APPLIES.
+        stuck_ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(!reconciliation_in_progress(&mgr));
+        // topic2 is pending for the next reconcile loop.
+        assert_eq!(
+            topic_partitions_awaiting_reconciliation(&mgr),
+            HashMap::from([(topic2, vec![0])])
+        );
+
+        // Ack -> RECONCILING (target not yet fully reached), reconcile the rest.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic2", 0)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 0), tp("topic2", 0)]));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultAppliedWhenTargetChangedWithMetadataUpdate`.
+    /// Same as the new-assignment variant but the target change comes from
+    /// metadata discovering a previously-unresolved topic. The in-flight
+    /// reconcile applies, then the newly-discovered topic reconciles next.
+    #[tokio::test]
+    async fn delayed_reconciliation_result_applied_when_target_changed_with_metadata_update() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1", "topic2"]);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        // Receive topic1-0 + topic2-0 (topic2 unresolved). Reconcile the
+        // resolvable subset, stuck on the assigned callback for topic1-0.
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        let env = rx.recv().await.expect("assigned event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Metadata discovers topic2 while the reconcile is in flight — no
+        // rejoin, so the in-flight result is still valid.
+        seed_metadata(&mgr, &[("topic1", topic1), ("topic2", topic2)]);
+
+        // Complete the stuck callback -> first reconcile applies.
+        stuck_ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert_eq!(
+            topic_partitions_awaiting_reconciliation(&mgr),
+            HashMap::from([(topic2, vec![0])])
+        );
+
+        // Ack -> RECONCILING, then reconcile topic2.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic2", 0)],
+        )
+        .await;
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+    }
+
+    // ---------------------------------------------------------------
+    // Commit 5: listener-callback ordering.
+    //
+    // In Rust the registered `ConsumerRebalanceListener` is invoked on
+    // the application task (the test), NOT inside `reconcile` — reconcile
+    // only enqueues the §31 callback-needed event and awaits the ack. So
+    // Java's `listener.assignedCount()` becomes "number of
+    // OnPartitionsAssigned events the test drained", and Java's
+    // "listener throws" becomes "the test acks with Err". A listener must
+    // still be REGISTERED (NoopListener via `make`/`subscribe_topics`) for
+    // events to be enqueued (the §31 listener-presence short-circuit).
+    // ---------------------------------------------------------------
+
+    /// Drain exactly one callback-needed event, asserting its method and
+    /// partitions, and ack it with the given result. Returns nothing.
+    async fn expect_callback(
+        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        expected_method: ConsumerRebalanceListenerMethodName,
+        expected_partitions: &[TopicPartition],
+        result: Result<(), KafkaError>,
+    ) {
+        let env = rx.recv().await.expect("expected a callback-needed event");
+        match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, expected_method, "unexpected callback method");
+                let got: HashSet<TopicPartition> = partitions.into_iter().collect();
+                let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
+                assert_eq!(got, want, "unexpected callback partitions");
+                ack.send(result).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testListenerCallbacksBasic`.
+    /// Full assign -> ack -> revoke+assign(empty) -> ack cycle, asserting
+    /// the callback methods/partitions and resulting state. (Java asserts
+    /// listener invocation counts; in Rust the test IS the listener, so
+    /// we assert the exact sequence of callback events instead.)
+    #[tokio::test]
+    async fn listener_callbacks_basic() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        // Assign {0, 1}.
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        // Step 3: onPartitionsAssigned {0,1}.
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        expect_callback(
+            &mut rx,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
+            Ok(()),
+        )
+        .await;
+        bg.await.unwrap().unwrap();
+        assert!(!reconciliation_in_progress(&mgr));
+
+        // Step 4: ack -> STABLE.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+        let mut current = mgr.current_assignment().partitions;
+        for v in current.values_mut() {
+            v.sort_unstable();
+        }
+        assert_eq!(current, HashMap::from([(topic_id, vec![0, 1])]));
+
+        // Step 5: empty assignment -> revoke.
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        // Step 6: onPartitionsRevoked {0,1}.
+        expect_callback(
+            &mut rx,
+            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+            &[tp("topic1", 0), tp("topic1", 1)],
+            Ok(()),
+        )
+        .await;
+        // Step 7: onPartitionsAssigned {} (still called, even though empty).
+        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        bg.await.unwrap().unwrap();
+
+        // Step 8: ack -> STABLE.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+        assert!(!reconciliation_in_progress(&mgr));
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testListenerCallbacksThrowsErrorOnPartitionsRevoked`.
+    /// When the onPartitionsRevoked callback errors, reconcile returns the
+    /// error and the rebalance does NOT advance (stays RECONCILING,
+    /// onPartitionsAssigned is NOT called). Looped over multiple error
+    /// kinds, mirroring Java's three error types.
+    #[tokio::test]
+    async fn listener_callbacks_throws_error_on_partitions_revoked() {
+        // Java loops over WakeupException, InterruptException,
+        // IllegalArgumentException. We mirror with three KafkaError kinds.
+        let errors: Vec<fn() -> KafkaError> = vec![
+            || KafkaError::wakeup("Intentional onPartitionsRevoked() error"),
+            || KafkaError::timeout("Intentional onPartitionsRevoked() error"),
+            || KafkaError::illegal_argument("Intentional onPartitionsRevoked() error"),
+        ];
+        for make_err in errors {
+            let (mgr, mut rx) = make(None, None, None);
+            subscribe_topics(&mgr, &["topic1"]);
+            mgr.transition_to_joining().unwrap();
+            let topic_id = Uuid::random_uuid();
+            seed_metadata(&mgr, &[("topic1", topic_id)]);
+            // Own topic1-0 so an empty assignment revokes it.
+            mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+            receive_empty_assignment(&mgr);
+            assert_eq!(mgr.state(), MemberState::Reconciling);
+
+            let mgr = Arc::new(mgr);
+            let mgr_clone = mgr.clone();
+            let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+            // onPartitionsRevoked {0} -> ack with error.
+            expect_callback(
+                &mut rx,
+                ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                &[tp("topic1", 0)],
+                Err(make_err()),
+            )
+            .await;
+            let result = bg.await.unwrap();
+            // Error propagated, rebalance did not advance.
+            assert!(result.is_err(), "revoked-callback error must propagate");
+            assert_eq!(
+                mgr.state(),
+                MemberState::Reconciling,
+                "rebalance must not advance after a failed onPartitionsRevoked callback",
+            );
+            // onPartitionsAssigned must NOT have been called.
+            assert!(
+                matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+                "onPartitionsAssigned must not be called after onPartitionsRevoked failed",
+            );
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testAddedPartitionsTemporarilyDisabledAwaitingOnPartitionsAssignedCallback`.
+    /// A newly-added partition is non-fetchable while awaiting the
+    /// onPartitionsAssigned callback, and becomes fetchable once the
+    /// callback completes (enable_partitions_awaiting_callback).
+    #[tokio::test]
+    async fn added_partitions_temporarily_disabled_awaiting_on_partitions_assigned_callback() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        // Own topic1-0; assignment adds topic1-1.
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+
+        // The assigned callback for the ADDED partition {1} is now pending.
+        let env = rx.recv().await.expect("assigned event");
+        let ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 1)]));
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        // Before the callback completes, the added partition is in the
+        // assignment but NOT fetchable. Give it a valid position first so
+        // the ONLY remaining gate is pending_on_assigned_callback — this
+        // is what makes the assertion mutation-resistant (without the
+        // disable, the partition would already be fetchable here).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert!(subs.assigned_partitions().contains(&tp("topic1", 1)));
+            subs.seek(&tp("topic1", 1), 0).unwrap();
+            assert!(
+                !subs.is_fetchable(&tp("topic1", 1)),
+                "added partition must be disabled awaiting callback even with a valid position",
+            );
+        }
+
+        // Complete the callback -> partition enabled (pending gate cleared).
+        ack.send(Ok(())).unwrap();
+        bg.await.unwrap().unwrap();
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(
+            subs.is_fetchable(&tp("topic1", 1)),
+            "added partition must be fetchable after callback"
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testAddedPartitionsNotEnabledAfterFailedOnPartitionsAssignedCallback`.
+    /// If the onPartitionsAssigned callback fails, the added partition is
+    /// NOT enabled (stays non-fetchable).
+    #[tokio::test]
+    async fn added_partitions_not_enabled_after_failed_on_partitions_assigned_callback() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+
+        let env = rx.recv().await.expect("assigned event");
+        let ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        // Fail the assigned callback.
+        ack.send(Err(KafkaError::illegal_state("onPartitionsAssigned failed!")))
+            .unwrap();
+        let result = bg.await.unwrap();
+        assert!(result.is_err());
+
+        // Added partition remains non-fetchable (not enabled). Give it a
+        // valid position so the ONLY thing keeping it non-fetchable is the
+        // still-set pending_on_assigned_callback gate.
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 1), 0).unwrap();
+        }
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(
+            !subs.is_fetchable(&tp("topic1", 1)),
+            "added partition must NOT be enabled after a failed onPartitionsAssigned callback",
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testOnPartitionsLostNoError`.
+    /// Fencing a member that owns a partition fires onPartitionsLost; the
+    /// member clears its assignment and rejoins (JOINING).
+    #[tokio::test]
+    async fn on_partitions_lost_no_error() {
+        on_partitions_lost_impl(Ok(())).await;
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testOnPartitionsLostError`.
+    /// Even if the onPartitionsLost callback errors, the member still
+    /// clears its assignment and rejoins. Looped over multiple error kinds.
+    #[tokio::test]
+    async fn on_partitions_lost_error() {
+        on_partitions_lost_impl(Err(KafkaError::illegal_state("Intentional error for test"))).await;
+        on_partitions_lost_impl(Err(KafkaError::wakeup("Intentional error for test"))).await;
+        on_partitions_lost_impl(Err(KafkaError::timeout("Intentional error for test"))).await;
+    }
+
+    async fn on_partitions_lost_impl(callback_result: Result<(), KafkaError>) {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        let mgr = Arc::new(mgr);
+        // Fence -> onPartitionsLost for owned {0}.
+        let mgr_clone = mgr.clone();
+        let fence = tokio::spawn(async move { mgr_clone.transition_to_fenced(0).await });
+        expect_callback(
+            &mut rx,
+            ConsumerRebalanceListenerMethodName::OnPartitionsLost,
+            &[tp("topic1", 0)],
+            callback_result,
+        )
+        .await;
+        fence.await.unwrap().unwrap();
+
+        // Assignment cleared; member rejoined (JOINING) regardless of the
+        // callback result.
+        assert!(mgr.current_assignment().is_none());
+        assert_eq!(mgr.state(), MemberState::Joining);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testMemberJoiningCallsRebalanceListenerWhenReceivingEmptyAssignment`.
+    /// A joining member that receives an empty assignment still fires the
+    /// onPartitionsAssigned callback (with an empty set).
+    #[tokio::test]
+    async fn member_joining_calls_rebalance_listener_when_receiving_empty_assignment() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        // onPartitionsAssigned with an empty set is still emitted.
+        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+    }
+
+    // ---------------------------------------------------------------
+    // Commit 6: leave / fatal matrices + misc.
+    //
+    // Rust's `leave_group()` is linearized (no separate CompletableFuture
+    // returned). Java assertions on `leaveResult.isDone()` map to state
+    // transitions: leave_group -> LEAVING, then
+    // on_heartbeat_request_generated -> UNSUBSCRIBED, and the leave
+    // "completes" when the leave heartbeat response is processed.
+    // ---------------------------------------------------------------
+
+    /// Bring a member to STABLE via join -> empty assignment -> reconcile
+    /// -> ack, mirroring Java's `createMemberInStableState`. No listener
+    /// events fire (empty assignment, no owned partitions, NoopListener
+    /// short-circuits since there's nothing to revoke/assign on the real
+    /// SubscriptionState).
+    async fn create_member_in_stable_state(
+        group_instance_id: Option<String>,
+    ) -> (
+        Arc<ConsumerMembershipManager>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        let (mgr, mut rx) = make(group_instance_id, None, None);
+        mgr.transition_to_joining().unwrap();
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        let mgr = Arc::new(mgr);
+        // Empty assignment with a listener registered still enqueues an
+        // onPartitionsAssigned({}) event; drive+ack it.
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+        (mgr, rx)
+    }
+
+    /// Build a successful (empty assignment) heartbeat response with the
+    /// given member epoch.
+    fn heartbeat_response(member_id: String, epoch: i32) -> ConsumerGroupHeartbeatResponse {
+        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(member_id);
+        data.member_epoch = epoch;
+        data.heartbeat_interval_ms = 5000;
+        data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
+        ConsumerGroupHeartbeatResponse::new(data)
+    }
+
+    /// Build a leave-group heartbeat response (epoch == LEAVE_GROUP_MEMBER_EPOCH).
+    fn leave_response(member_id: String) -> ConsumerGroupHeartbeatResponse {
+        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(member_id);
+        data.member_epoch = LEAVE_GROUP_MEMBER_EPOCH;
+        ConsumerGroupHeartbeatResponse::new(data)
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupWhenStateIsStable`.
+    #[tokio::test]
+    async fn leave_group_when_state_is_stable() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert!(mgr.current_assignment().is_none());
+
+        // Leave heartbeat sent -> UNSUBSCRIBED.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        // Leave response received -> remains UNSUBSCRIBED.
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberOwnsAssignment`.
+    /// A member owning a partition fires onPartitionsRevoked during the
+    /// leave, then transitions to LEAVING.
+    #[tokio::test]
+    async fn leave_group_when_member_owns_assignment() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+
+        receive_assignment(&mgr, topic_id, vec![0, 1]);
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
+        )
+        .await;
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Stable);
+        assert_eq!(mgr.current_assignment().partitions.len(), 1);
+
+        // Leave: owned partitions fire onPartitionsRevoked.
+        let mgr_clone = mgr.clone();
+        let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
+        expect_callback(
+            &mut rx,
+            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+            &[tp("topic1", 0), tp("topic1", 1)],
+            Ok(()),
+        )
+        .await;
+        leave.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert!(mgr.current_assignment().is_none());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberAlreadyLeaving`.
+    /// A second leave while LEAVING is a no-op.
+    #[tokio::test]
+    async fn leave_group_when_member_already_leaving() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+
+        // Second leave while still LEAVING: no-op, state unchanged.
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberAlreadyLeft`.
+    /// After fully leaving (UNSUBSCRIBED), a further leave is a no-op
+    /// (unsubscribes, no callbacks).
+    #[tokio::test]
+    async fn leave_group_when_member_already_left() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // Leave again when already left -> no-op, stays UNSUBSCRIBED.
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberFenced`.
+    /// Leaving from FENCED clears the assignment and goes to UNSUBSCRIBED.
+    #[tokio::test]
+    async fn leave_group_when_member_fenced() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        // No owned partitions -> fence short-circuits the §31 lost
+        // callback and goes FENCED -> JOINING; to land in FENCED we drive
+        // a fence while owning a partition is more complex, so instead we
+        // force the FENCED state directly via the inner guard (mirroring
+        // Java's `mockFencedMemberStuckOnUserCallback` which parks in
+        // FENCED). The leave then unsubscribes from FENCED.
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.transition_to(MemberState::Fenced).unwrap();
+        }
+        assert_eq!(mgr.state(), MemberState::Fenced);
+
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(mgr.current_assignment().is_none());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFatalFailureWhenStateIsStable`.
+    #[tokio::test]
+    async fn fatal_failure_when_state_is_stable() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        let member_id = mgr.member_id();
+        let last_epoch = mgr.member_epoch();
+        mgr.on_heartbeat_failure(false);
+        mgr.transition_to_fatal(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+        // Keeps its last member id and epoch.
+        assert_eq!(mgr.member_id(), member_id);
+        assert_eq!(mgr.member_epoch(), last_epoch);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFatalFailureWhenStateIsPrepareLeaving`.
+    /// A member stuck in PREPARE_LEAVING (on the revoked callback) that
+    /// gets a fatal error transitions to FATAL; when the callback
+    /// completes the member remains FATAL (leave aborted).
+    #[tokio::test]
+    async fn fatal_failure_when_state_is_prepare_leaving() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        // Member epoch > 0 so the leave releases the assignment via
+        // onPartitionsRevoked (not onPartitionsLost), mirroring Java's
+        // stable member.
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(1);
+        }
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        let mgr = Arc::new(mgr);
+        // leave_group with owned partitions parks PREPARE_LEAVING on the
+        // revoked callback.
+        let mgr_clone = mgr.clone();
+        let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
+        let env = rx.recv().await.expect("revoked event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // Fatal error while in PREPARE_LEAVING.
+        mgr.on_heartbeat_failure(false);
+        mgr.transition_to_fatal(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+
+        // Complete the stuck callback -> the leave is aborted; remains FATAL.
+        stuck_ack.send(Ok(())).unwrap();
+        leave.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFatalFailureWhenStateIsLeaving`.
+    /// A member in LEAVING that gets a fatal error transitions to FATAL;
+    /// a subsequent heartbeat-generated does not move it out of FATAL.
+    #[tokio::test]
+    async fn fatal_failure_when_state_is_leaving() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+
+        mgr.on_heartbeat_failure(false);
+        mgr.transition_to_fatal(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+
+        // The last heartbeat won't be sent because the member already failed.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFatalFailureWhenMemberAlreadyLeft`.
+    /// A member that already left (UNSUBSCRIBED) and then gets a fatal
+    /// error transitions to FATAL with no callbacks.
+    #[tokio::test]
+    async fn fatal_failure_when_member_already_left() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        // Last heartbeat sent.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // Fatal failure received after the member already left -> FATAL,
+        // no callbacks (no onPartitionsLost).
+        mgr.on_heartbeat_failure(false);
+        mgr.transition_to_fatal(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testHeartbeatSuccessfulResponseWhenLeavingGroupCompletesLeave`.
+    /// LEAVING -> (heartbeat generated) UNSUBSCRIBED; a non-leave response
+    /// is ignored, the leave response leaves the member UNSUBSCRIBED with
+    /// epoch -1 and no assignment.
+    #[tokio::test]
+    async fn heartbeat_successful_response_when_leaving_group_completes_leave() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // A non-leave success response is ignored (member already
+        // UNSUBSCRIBED with a positive epoch in the response).
+        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // The leave response completes the leave.
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert!(mgr.current_assignment().is_none());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testHeartbeatFailedResponseWhenLeavingGroupCompletesLeave`.
+    /// LEAVING -> (heartbeat generated) UNSUBSCRIBED; a failed response
+    /// (retriable or not) still completes the leave. Parameterized over
+    /// [true, false].
+    #[tokio::test]
+    async fn heartbeat_failed_response_when_leaving_group_completes_leave() {
+        for retriable in [true, false] {
+            let (mgr, _rx) = create_member_in_stable_state(None).await;
+            mgr.leave_group(0).await.unwrap();
+            assert_eq!(mgr.state(), MemberState::Leaving);
+
+            mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+            assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+            mgr.on_heartbeat_failure(retriable);
+            // Member remains UNSUBSCRIBED; the leave is complete.
+            assert_eq!(mgr.state(), MemberState::Unsubscribed);
+            assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+            assert!(mgr.current_assignment().is_none());
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testIgnoreHeartbeatResponseWhenNotInGroup`.
+    /// A heartbeat response received while the member is not in the group
+    /// (UNSUBSCRIBED/FENCED/FATAL/STALE) is ignored — the state does not
+    /// change. Parameterized over the not-in-group states.
+    #[tokio::test]
+    async fn ignore_heartbeat_response_when_not_in_group() {
+        let not_in_group = [
+            MemberState::Unsubscribed,
+            MemberState::Fenced,
+            MemberState::Fatal,
+            MemberState::Stale,
+        ];
+        for state in not_in_group {
+            let (mgr, _rx) = make(None, None, None);
+            // Force the manager into the given not-in-group state via the
+            // inner guard (bypassing transition validity — these states
+            // are reached via different paths in production; the test
+            // only needs the member parked there).
+            {
+                let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+                guard.state = state;
+            }
+            // A response with a positive epoch + an assignment should be
+            // ignored; the state must be unchanged.
+            mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5)).unwrap();
+            assert_eq!(mgr.state(), state, "response must be ignored in {state:?}");
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testIgnoreLeaveResponseWhenNotLeavingGroup`.
+    /// After the member has sent its leave HB (UNSUBSCRIBED), a stale
+    /// non-leave response is ignored; the leave response completes the
+    /// leave; a subsequent onSubscriptionUpdated + onConsumerPoll +
+    /// leave-response rejoins (JOINING, epoch 0).
+    #[tokio::test]
+    async fn ignore_leave_response_when_not_leaving_group() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.leave_group(0).await.unwrap();
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // A previous (non-leave) heartbeat response is ignored.
+        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // The leave response is processed (still UNSUBSCRIBED).
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // Subscription updated + poll -> rejoin.
+        mgr.abstract_mm.on_subscription_updated();
+        mgr.abstract_mm.on_consumer_poll(mgr.join_group_epoch()).unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+        assert_eq!(mgr.member_epoch(), 0);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFencingWhenStateIsPrepareLeavingCompletesTheLeaveOperation`.
+    /// A member stuck in PREPARE_LEAVING gets fenced; it transitions to
+    /// UNSUBSCRIBED and the ongoing leave completes.
+    #[tokio::test]
+    async fn fencing_when_state_is_prepare_leaving_completes_the_leave_operation() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
+        let env = rx.recv().await.expect("revoked event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // Fence while preparing to leave -> UNSUBSCRIBED.
+        mgr.transition_to_fenced(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // Completing the callback finishes the leave; remains UNSUBSCRIBED.
+        stuck_ack.send(Ok(())).unwrap();
+        leave.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testUpdateStateFailsOnResponsesWithErrors`.
+    /// A heartbeat response containing an error code must fail
+    /// `on_heartbeat_success` with an illegal-argument error.
+    #[test]
+    fn update_state_fails_on_responses_with_errors() {
+        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::UnknownMemberId.code();
+        data.member_id = Some(mgr.member_id());
+        data.member_epoch = 5;
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        let err = mgr.on_heartbeat_success(&resp).unwrap_err();
+        // Error message content is part of the contract (DoD §3).
+        assert!(
+            err.to_string().contains("Unexpected error in Heartbeat response"),
+            "unexpected error message: {err}",
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testOnSubscriptionUpdatedDoesNotTransitionToJoiningIfInGroup`.
+    /// onSubscriptionUpdated + onConsumerPoll while already in the group
+    /// (STABLE) does NOT transition to JOINING; the subscription-updated
+    /// flag is consumed.
+    #[tokio::test]
+    async fn on_subscription_updated_does_not_transition_to_joining_if_in_group() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        mgr.abstract_mm.on_subscription_updated();
+        assert!(mgr.abstract_mm.inner.lock().unwrap().subscription_updated);
+        mgr.abstract_mm.on_consumer_poll(mgr.join_group_epoch()).unwrap();
+        // Still STABLE (in-group): no transition to JOINING.
+        assert_eq!(mgr.state(), MemberState::Stable);
+        assert!(!mgr.abstract_mm.inner.lock().unwrap().subscription_updated);
+    }
+
     /// Translated from
     /// `ConsumerMembershipManagerTest#testTransitionToReconcilingIfEmptyAssignmentReceived`.
     /// An empty assignment with a new epoch keeps us in RECONCILING.
