@@ -1653,14 +1653,32 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testCorruptedMessage`.
     ///
-    /// The Java test asserts the structured fields on
-    /// `RecordDeserializationException` (origin, offset, key/value buffers,
-    /// headers). The Rust port uses the collapsed
-    /// `KafkaError::Serialization(String)` form, so it asserts the same
-    /// behavior at the granularity Rust can express: which call raises,
-    /// the error message identifies KEY vs VALUE, the offset is embedded
-    /// in the message, and the cached-exception re-raise path triggers
-    /// on subsequent calls.
+    /// # What this asserts vs Java (and why the rest is unassertable)
+    ///
+    /// Java asserts the structured fields on `RecordDeserializationException`:
+    /// `origin` (KEY/VALUE), `offset`, `topicPartition`, `timestamp`, the raw
+    /// `keyBuffer`/`valueBuffer` bytes, and `headers`. The Rust port collapses
+    /// every deserialization failure to `KafkaError::Serialization(String)`
+    /// (`kafka_error.rs`), which can only carry a human-readable message. The
+    /// Rust tests therefore assert the fields the message string CAN express:
+    ///
+    ///   - **origin** — "KEY"/"VALUE" (asserted)
+    ///   - **offset** — embedded in the message (asserted)
+    ///   - **partition** — `topic-partition` string e.g. `test-0` (asserted)
+    ///   - **cached re-raise** — subsequent calls re-raise (asserted)
+    ///
+    /// The collapsed error type CANNOT carry, so these are NOT asserted (a
+    /// documented reduction — see report-01 Key finding #6):
+    ///
+    ///   - **timestamp** — not present in the error.
+    ///   - **raw key/value buffers** — not present (only a human-readable
+    ///     cause, not the original bytes).
+    ///   - **headers** — not present.
+    ///
+    /// We do NOT change the error type to carry these: the consumer *behavior*
+    /// (which call raises, KEY-vs-VALUE classification, offset, partition,
+    /// cached re-raise) is correct and fully asserted; only the error's
+    /// introspection surface is reduced, which is not a behavioral defect.
     ///
     /// The Java test's `KEY` case fails on the SECOND record after the
     /// first one decodes successfully. The Rust port models this with a
@@ -1723,6 +1741,126 @@ mod tests {
         let msg = err.message();
         assert!(msg.contains("VALUE"), "expected VALUE origin: {msg}");
         assert!(msg.contains(" 3"), "expected failed offset 3 in message: {msg}");
+        assert!(msg.contains("test-0"), "expected partition string: {msg}");
+
+        // Cached-exception re-raise: a third call re-raises the same error
+        // (Java re-raises until the user seeks past the offset).
+        let err3 = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap_err();
+        assert!(
+            err3.message().contains("VALUE"),
+            "cached re-raise must keep VALUE origin: {}",
+            err3.message()
+        );
+    }
+
+    /// Translated from `CompletedFetchTest.testAbortedTransactionRecordsRemoved`.
+    ///
+    /// Direct port of the simple aborted-transaction contract (the existing
+    /// `test_aborted_transaction_batch_skipped_mid_payload` only covers it
+    /// indirectly via a multi-batch fixture):
+    ///   - READ_COMMITTED: an aborted transactional batch yields 0 records.
+    ///   - READ_UNCOMMITTED: the SAME batch yields all `num_records`.
+    ///
+    /// # Deviation from Java's control-marker layout (documented)
+    ///
+    /// Java's `newTranscactionalRecords` appends an `EndTransactionMarker`
+    /// control batch after the data batch. The Rust `CompletedFetch` does not
+    /// translate `ControlRecordType` / `containsAbortMarker` (see module
+    /// docstring) and rejects a control batch from a previously-aborted
+    /// producer with `UnsupportedVersion`. We therefore use a plain
+    /// transactional data batch (no control marker); the abort is driven by the
+    /// response's `aborted_transactions` list, which is the same mechanism
+    /// `isBatchAborted` consults. The record-count contract is identical.
+    #[test]
+    fn test_aborted_transaction_records_removed_direct() {
+        const PRODUCER_ID: i64 = 1000;
+        let num_records = 10;
+
+        // READ_COMMITTED: aborted batch ⇒ 0 records.
+        {
+            let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
+            let partition_data = partition_data_with_aborted_txn(buf, PRODUCER_ID, 0);
+            let mut cf = CompletedFetch::new_full(
+                make_subscriptions(),
+                Arc::new(BufferSupplier::create()),
+                tp("test", 0),
+                partition_data,
+                0,
+            );
+            let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+            let key_de = StringDeserializer;
+            let value_de = StringDeserializer;
+            let records = cf
+                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .unwrap();
+            assert_eq!(0, records.len(), "READ_COMMITTED must remove aborted records");
+        }
+
+        // READ_UNCOMMITTED: same aborted batch ⇒ all num_records returned.
+        {
+            let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
+            let partition_data = partition_data_with_aborted_txn(buf, PRODUCER_ID, 0);
+            let mut cf = CompletedFetch::new_full(
+                make_subscriptions(),
+                Arc::new(BufferSupplier::create()),
+                tp("test", 0),
+                partition_data,
+                0,
+            );
+            let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+            let key_de = StringDeserializer;
+            let value_de = StringDeserializer;
+            let records = cf
+                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .unwrap();
+            assert_eq!(
+                num_records as usize,
+                records.len(),
+                "READ_UNCOMMITTED must return all aborted records"
+            );
+        }
+    }
+
+    /// Translated from `CompletedFetchTest.testCommittedTransactionRecordsIncluded`.
+    ///
+    /// A COMMITTED transactional batch (no entry in the response's
+    /// `aborted_transactions` list) returns all its records under
+    /// READ_COMMITTED. Direct port of the simple contract (previously only
+    /// covered indirectly by the control-batch mid-payload fixture).
+    ///
+    /// As with the aborted case, Java appends an `EndTransactionMarker` COMMIT
+    /// control batch; the Rust port omits the control marker (no
+    /// `ControlRecordType` translation) and relies on the absence of an
+    /// aborted-txn entry to mark the batch committed — the same observable
+    /// record-count contract.
+    #[test]
+    fn test_committed_transaction_records_included_direct() {
+        const PRODUCER_ID: i64 = 1000;
+        let num_records = 10;
+        // Transactional batch, NOT in any aborted-txn list ⇒ committed.
+        let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
+        let mut partition_data = PartitionData::new();
+        partition_data.set_records(Some(buf));
+        let mut cf = CompletedFetch::new_full(
+            make_subscriptions(),
+            Arc::new(BufferSupplier::create()),
+            tp("test", 0),
+            partition_data,
+            0,
+        );
+        let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+        let key_de = StringDeserializer;
+        let value_de = StringDeserializer;
+        let records = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(
+            num_records as usize,
+            records.len(),
+            "READ_COMMITTED must include committed transaction records"
+        );
     }
 
     /// `drain` is idempotent and clears the consumed state.
