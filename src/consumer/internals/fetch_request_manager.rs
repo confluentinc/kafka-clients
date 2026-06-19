@@ -178,6 +178,7 @@ impl FetchRequestManager {
         decompression_buffer_supplier: Arc<BufferSupplier>,
         is_unavailable: IsUnavailableFn,
         maybe_throw_auth_failure: MaybeAuthFailureFn,
+        api_versions: Arc<crate::api_versions::ApiVersions>,
     ) -> Self {
         let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
         Self {
@@ -187,6 +188,7 @@ impl FetchRequestManager {
                 fetch_config,
                 fetch_buffer,
                 decompression_buffer_supplier,
+                api_versions,
             ),
             pending_fetch_requests: None,
             is_unavailable,
@@ -577,6 +579,7 @@ mod tests {
             Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
             always_available(),
             no_auth_failure(),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         )
     }
 

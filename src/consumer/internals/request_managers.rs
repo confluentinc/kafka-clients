@@ -426,6 +426,7 @@ mod tests {
             std::sync::Arc::new(BufferSupplier::create()),
             always_available(),
             no_auth_failure(),
+            std::sync::Arc::new(crate::api_versions::ApiVersions::new()),
         )
     }
 

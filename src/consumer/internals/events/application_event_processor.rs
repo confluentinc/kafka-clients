@@ -1675,6 +1675,7 @@ mod tests {
                 Arc::new(BufferSupplier::create()),
                 always_available(),
                 no_auth_failure(),
+                Arc::new(ApiVersions::new()),
             ))
         } else {
             None

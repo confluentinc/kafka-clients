@@ -125,6 +125,14 @@ pub(crate) struct AbstractFetch {
     /// fetch.min.bytes), not consumer-side processing. Opt-in via
     /// `RUST_LOG=fetch_diag=info`; zero cost when that target is disabled.
     fetch_sent_at: FxHashMap<i32, std::time::Instant>,
+
+    /// Per-node negotiated API versions. Java's `AbstractFetch` holds this
+    /// to decide, on a KIP-951 leadership change, whether the new leader
+    /// supports a usable `OffsetsForLeaderEpoch` version before validating
+    /// the position (`maybeValidatePositionForCurrentLeader`). Phase 7a
+    /// dropped this parameter; Phase 37 re-introduces it because the
+    /// leadership-change branch of `handle_fetch_success` needs it.
+    api_versions: Arc<crate::api_versions::ApiVersions>,
 }
 
 impl AbstractFetch {
@@ -134,10 +142,12 @@ impl AbstractFetch {
     /// `AbstractFetch(LogContext, ConsumerMetadata, SubscriptionState,
     ///   FetchConfig, FetchBuffer, FetchMetricsManager, Time, ApiVersions,
     ///   BufferSupplier)`. Drops the `LogContext` (we use the `log` crate),
-    /// `FetchMetricsManager` (no Rust metrics framework), `Time` (Phase 7b
-    /// will plumb a clock if needed for read-replica leasing), and
-    /// `ApiVersions` (negotiation lives in Phase 7b alongside
-    /// `RequestManager::poll`).
+    /// `FetchMetricsManager` (no Rust metrics framework), and `Time`
+    /// (Phase 7b will plumb a clock if needed for read-replica leasing).
+    /// `ApiVersions` IS kept (Phase 37): the KIP-951 leadership-change
+    /// branch of `handle_fetch_success` needs it to decide whether the new
+    /// leader supports a usable `OffsetsForLeaderEpoch` version before
+    /// validating the position.
     ///
     /// The `decompression_buffer_supplier` is shared with the consumer's
     /// other decompression call sites (Java's `KafkaConsumer` creates a
@@ -150,6 +160,7 @@ impl AbstractFetch {
         fetch_config: FetchConfig,
         fetch_buffer: Arc<FetchBuffer>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
+        api_versions: Arc<crate::api_versions::ApiVersions>,
     ) -> Self {
         Self {
             metadata,
@@ -161,6 +172,7 @@ impl AbstractFetch {
             closed: false,
             session_handlers: FxHashMap::default(),
             fetch_sent_at: FxHashMap::default(),
+            api_versions,
         }
     }
 
@@ -343,6 +355,12 @@ impl AbstractFetch {
             return;
         }
 
+        // KIP-951: capture the response's node endpoints BEFORE
+        // `into_response_data` consumes the response. Cheap clone of a
+        // small Vec that is empty on the happy path; only the leadership-
+        // change branch reads it after the loop.
+        let response_node_endpoints = response.data().node_endpoints.clone();
+
         // Phase 20 Fix #2b: MOVE each PartitionData (and its owned record
         // bytes) out of the response rather than cloning it — §27 zero-copy
         // receive contract. `into_response_data` consumes the response, so the
@@ -380,6 +398,15 @@ impl AbstractFetch {
 
         let mut needs_wakeup = true;
 
+        // KIP-951: accumulate per-partition new-leader info reported on a
+        // leadership-change error, applied to metadata after the loop.
+        // Translates Java's `partitionsWithUpdatedLeaderInfo`
+        // (`AbstractFetch.java:180`). Lazily allocated like Java — empty on
+        // the steady-state happy path (no leadership errors), so the hot
+        // path pays only the per-partition `i16` error-code compare below.
+        let mut partitions_with_updated_leader_info: HashMap<TopicPartition, crate::metadata::LeaderIdAndEpoch> =
+            HashMap::new();
+
         for (partition, partition_data) in response_data {
             let request_pd = match request_data.to_send.get(&partition).or_else(|| {
                 // The Java code also consults `sessionPartitions` which
@@ -410,6 +437,28 @@ impl AbstractFetch {
                 self.fetch_config.isolation_level, fetch_offset, partition
             );
 
+            // KIP-951: when a partition reports a leadership-change error AND
+            // carries new leader info, record it for the post-loop metadata
+            // update. Translates `AbstractFetch.java:207-214`.
+            let partition_error = crate::common::protocol::Errors::for_code(partition_data.error_code);
+            if matches!(
+                partition_error,
+                crate::common::protocol::Errors::NotLeaderOrFollower
+                    | crate::common::protocol::Errors::FencedLeaderEpoch
+            ) {
+                let leader_id = partition_data.current_leader.leader_id;
+                let leader_epoch = partition_data.current_leader.leader_epoch;
+                debug!(
+                    "For {partition}, received error {partition_error:?}, with leaderId {leader_id} leaderEpoch {leader_epoch}"
+                );
+                if leader_id != -1 && leader_epoch != -1 {
+                    partitions_with_updated_leader_info.insert(
+                        partition.clone(),
+                        crate::metadata::LeaderIdAndEpoch::new(Some(leader_id), Some(leader_epoch)),
+                    );
+                }
+            }
+
             // `partition` is the owned loop key; move it into the
             // CompletedFetch (its topic is an Arc<str>, so even the prior
             // clone was an Arc bump, not a String copy — §27 topic-name rule).
@@ -429,6 +478,38 @@ impl AbstractFetch {
         if needs_wakeup {
             self.fetch_buffer.wakeup();
         }
+
+        // KIP-951: apply any new-leader info reported on leadership-change
+        // errors. Translates `AbstractFetch.java:233-251`. Empty on the
+        // happy path — no allocation or lock on the steady-state path.
+        if !partitions_with_updated_leader_info.is_empty() {
+            // Build the leader node list from the response's node endpoints,
+            // skipping `Node.noNode()`-equivalent entries (node_id == -1).
+            let mut leader_nodes: Vec<Node> = Vec::new();
+            for endpoint in &response_node_endpoints {
+                if endpoint.node_id != -1 {
+                    leader_nodes.push(Node::with_rack(
+                        endpoint.node_id,
+                        endpoint.host.clone(),
+                        endpoint.port,
+                        endpoint.rack.clone(),
+                    ));
+                }
+            }
+
+            let metadata = self.metadata.metadata_arc();
+            let updated_partitions =
+                metadata.update_partition_leadership(&partitions_with_updated_leader_info, &leader_nodes);
+            if !updated_partitions.is_empty() {
+                let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                for tp in &updated_partitions {
+                    debug!("For {tp}, as the leader was updated, position will be validated.");
+                    let current_leader = metadata.current_leader(tp);
+                    guard.maybe_validate_position_for_current_leader(&self.api_versions, tp, &current_leader);
+                }
+            }
+        }
+
         self.remove_pending_fetch_request(fetch_target, session_id);
     }
 
@@ -894,6 +975,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         )
     }
 
@@ -1092,6 +1174,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         );
         // The only node (id 0) has an in-flight fetch.
         af.nodes_with_pending_fetch_requests.insert(0);
@@ -1131,6 +1214,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         );
         // No node is pending, but every node is unavailable.
         let all_unavailable = |_: &Node| true;
@@ -1157,6 +1241,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         );
 
         // Assign + seek the partition with a validated position whose leader is
@@ -1258,6 +1343,7 @@ mod tests {
             make_fetch_config(),
             fetch_buffer.clone(),
             Arc::new(BufferSupplier::create()),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         );
 
         let partition = TopicPartition::new("topic-a", 0);
@@ -1362,6 +1448,7 @@ mod tests {
             make_fetch_config(),
             fetch_buffer,
             Arc::new(BufferSupplier::create()),
+            Arc::new(crate::api_versions::ApiVersions::new()),
         );
 
         let node = Node::new(1, "host".to_string(), 9092);

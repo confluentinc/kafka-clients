@@ -1087,6 +1087,7 @@ where
                 Arc::new(BufferSupplier::create()),
                 is_unavailable,
                 maybe_auth,
+                Arc::clone(&api_versions),
             );
             // Wake the bg task when a fetch response is ready so it is drained
             // into the FetchBuffer promptly, instead of waiting for the
