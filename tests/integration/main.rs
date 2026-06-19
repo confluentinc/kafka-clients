@@ -28,6 +28,7 @@ mod consumer_test;
 mod metadata_test;
 mod performance_test;
 mod plaintext_consumer_assign_test;
+mod plaintext_consumer_callback_test;
 mod plaintext_consumer_commit_test;
 mod plaintext_consumer_fetch_test;
 mod plaintext_consumer_poll_test;
