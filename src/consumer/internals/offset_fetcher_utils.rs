@@ -612,4 +612,192 @@ mod tests {
         assert_eq!(entry_a.leader_epoch(), Some(5));
         assert!(result.get(&tp_b).unwrap().is_none());
     }
+
+    // =================================================================
+    //   Phase 31: OffsetValidation → LogTruncation structured payload
+    //
+    //   Translated from `OffsetFetcherTest.testOffsetValidationWithGivenEpochOffset`
+    //   (the @MethodSource matrix). These assert the structured
+    //   `LogTruncation` payload (offsetOutOfRangePartitions, divergentOffsets)
+    //   returned by `on_successful_response_for_validating_positions`. The
+    //   end-to-end `KafkaError::from(ConsumerError::log_truncation(..))`
+    //   conversion flattens to `KafkaError::IllegalState` and loses the
+    //   structured fields (documented design choice in
+    //   `src/consumer/errors.rs:237`), so the structured payload MUST be
+    //   asserted here, against the `LogTruncation` struct directly.
+    // =================================================================
+
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::ConsumerConfig;
+    use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
+
+    /// Build an `OffsetFetcherUtilsState` with `tp` assigned and seeked
+    /// (unvalidated) to `offset`/`epoch` — i.e. AWAITING_VALIDATION with a
+    /// known leader. `reset_strategy` controls the subscription's default
+    /// reset policy (EARLIEST → reset on truncation; NONE → LogTruncation).
+    fn fetcher_utils_awaiting_validation(
+        tp: &TopicPartition,
+        offset: i64,
+        epoch: i32,
+        reset_strategy: AutoOffsetResetStrategy,
+    ) -> (OffsetFetcherUtilsState, std::sync::Arc<Mutex<SubscriptionState>>) {
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscriptions = std::sync::Arc::new(Mutex::new(SubscriptionState::new(reset_strategy)));
+        let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscriptions.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let leader = Node::new(0, "localhost".to_string(), 1969);
+        let leader_and_epoch = LeaderAndEpoch::new(Some(leader), Some(epoch));
+        let position = FetchPosition::with_leader(offset, Some(epoch), leader_and_epoch);
+        {
+            let mut subs = subscriptions.lock().expect("subs");
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            subs.seek_unvalidated(tp, position).expect("seek");
+        }
+        let state =
+            OffsetFetcherUtilsState::new(metadata, subscriptions.clone(), std::sync::Arc::new(ApiVersions::new()), 500);
+        (state, subscriptions)
+    }
+
+    /// Helper: build an `OffsetForEpochResult` carrying a single `tp` end
+    /// offset / leader epoch (mirrors Java's
+    /// `prepareOffsetsForLeaderEpochResponse`).
+    fn epoch_result(tp: &TopicPartition, leader_epoch: i32, end_offset: i64) -> OffsetForEpochResult {
+        let mut eeo = EpochEndOffset::new();
+        eeo.set_partition(tp.partition());
+        eeo.set_error_code(Errors::None.code());
+        eeo.set_leader_epoch(leader_epoch);
+        eeo.set_end_offset(end_offset);
+        let mut end_offsets = HashMap::new();
+        end_offsets.insert(tp.clone(), eeo);
+        OffsetForEpochResult::new(end_offsets, HashSet::new())
+    }
+
+    /// Java parity: `testOffsetValidationresetPositionForUndefined*WithDefinedResetPolicy`
+    /// — undefined epoch/offset + EARLIEST reset policy → the partition is
+    /// reset (request_offset_reset_default), no LogTruncation is returned,
+    /// and the partition leaves AWAITING_VALIDATION.
+    #[test]
+    fn validation_undefined_with_defined_reset_policy_resets() {
+        use crate::common::requests::offsets_for_leader_epoch_response::{UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET};
+        let initial_offset = 5i64;
+        let initial_epoch = 1i32;
+        // (leader_epoch, end_offset) cases mirroring Java:
+        //   testOffsetValidationresetPositionForUndefinedEpochWithDefinedResetPolicy:  (UNDEFINED_EPOCH, 0)
+        //   testOffsetValidationresetPositionForUndefinedOffsetWithDefinedResetPolicy: (2, UNDEFINED_EPOCH_OFFSET)
+        for (leader_epoch, end_offset) in [(UNDEFINED_EPOCH, 0i64), (2, UNDEFINED_EPOCH_OFFSET)] {
+            let tp = TopicPartition::new("t1".to_string(), 0);
+            let (state, subscriptions) =
+                fetcher_utils_awaiting_validation(&tp, initial_offset, initial_epoch, AutoOffsetResetStrategy::EARLIEST);
+            let position = subscriptions.lock().unwrap().position(&tp).unwrap().unwrap().clone();
+            let mut fetch_positions = HashMap::new();
+            fetch_positions.insert(tp.clone(), position);
+
+            let truncations = state.on_successful_response_for_validating_positions(
+                &fetch_positions,
+                &epoch_result(&tp, leader_epoch, end_offset),
+                0,
+            );
+            assert!(
+                truncations.is_empty(),
+                "EARLIEST reset policy must NOT surface LogTruncation (case {leader_epoch}/{end_offset})"
+            );
+            let subs = subscriptions.lock().unwrap();
+            // Reset requested → partition is now AWAITING_RESET, no longer
+            // awaiting validation.
+            assert!(
+                !subs.awaiting_validation(&tp).expect("assigned"),
+                "partition must leave AWAITING_VALIDATION after reset"
+            );
+            assert!(
+                subs.is_offset_reset_needed(&tp).expect("assigned"),
+                "EARLIEST reset must mark the partition AWAITING_RESET"
+            );
+        }
+    }
+
+    /// Java parity:
+    /// `testOffsetValidationresetPositionForUndefined{Epoch,Offset}WithUndefinedResetPolicy`
+    /// — undefined epoch/offset + NONE reset policy → LogTruncation with
+    /// `offsetOutOfRangePartitions == {tp: initialOffset}` and EMPTY
+    /// `divergentOffsets`. The partition stays AWAITING_VALIDATION.
+    #[test]
+    fn validation_undefined_with_undefined_reset_policy_log_truncation() {
+        use crate::common::requests::offsets_for_leader_epoch_response::{UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET};
+        let initial_offset = 5i64;
+        let initial_epoch = 1i32;
+        for (leader_epoch, end_offset) in [(UNDEFINED_EPOCH, 0i64), (2, UNDEFINED_EPOCH_OFFSET)] {
+            let tp = TopicPartition::new("t1".to_string(), 0);
+            let (state, subscriptions) =
+                fetcher_utils_awaiting_validation(&tp, initial_offset, initial_epoch, AutoOffsetResetStrategy::NONE);
+            let position = subscriptions.lock().unwrap().position(&tp).unwrap().unwrap().clone();
+            let mut fetch_positions = HashMap::new();
+            fetch_positions.insert(tp.clone(), position);
+
+            let truncations = state.on_successful_response_for_validating_positions(
+                &fetch_positions,
+                &epoch_result(&tp, leader_epoch, end_offset),
+                0,
+            );
+            assert_eq!(truncations.len(), 1, "NONE reset policy must surface one LogTruncation");
+            let t = &truncations[0];
+            assert_eq!(t.topic_partition, tp);
+            // Java: assertEquals(singletonMap(tp, initialOffset),
+            //                     thrown.offsetOutOfRangePartitions())
+            assert_eq!(t.fetch_position.offset, initial_offset);
+            // Java: assertEquals(Collections.emptyMap(), thrown.divergentOffsets())
+            assert!(
+                t.divergent_offset_opt.is_none(),
+                "undefined epoch/offset must produce EMPTY divergent offsets (case {leader_epoch}/{end_offset})"
+            );
+            assert!(
+                subscriptions.lock().unwrap().awaiting_validation(&tp).expect("assigned"),
+                "partition must STAY AWAITING_VALIDATION on LogTruncation"
+            );
+        }
+    }
+
+    /// Java parity:
+    /// `testOffsetValidationTriggerLogTruncationForBadOffsetWithUndefinedResetPolicy`
+    /// — a bad end offset (1 < initialOffset 5) with a defined epoch +
+    /// NONE reset policy → LogTruncation with
+    /// `offsetOutOfRangePartitions == {tp: 5}` and
+    /// `divergentOffsets == {tp: OffsetAndMetadata(endOffset=1, epoch=1, "")}`.
+    #[test]
+    fn validation_bad_offset_with_undefined_reset_policy_log_truncation() {
+        let initial_offset = 5i64;
+        let initial_epoch = 1i32;
+        let bad_leader_epoch = 1i32;
+        let bad_end_offset = 1i64;
+        let tp = TopicPartition::new("t1".to_string(), 0);
+        let (state, subscriptions) =
+            fetcher_utils_awaiting_validation(&tp, initial_offset, initial_epoch, AutoOffsetResetStrategy::NONE);
+        let position = subscriptions.lock().unwrap().position(&tp).unwrap().unwrap().clone();
+        let mut fetch_positions = HashMap::new();
+        fetch_positions.insert(tp.clone(), position);
+
+        let truncations = state.on_successful_response_for_validating_positions(
+            &fetch_positions,
+            &epoch_result(&tp, bad_leader_epoch, bad_end_offset),
+            0,
+        );
+        assert_eq!(truncations.len(), 1);
+        let t = &truncations[0];
+        assert_eq!(t.topic_partition, tp);
+        assert_eq!(t.fetch_position.offset, initial_offset, "offsetOutOfRangePartitions key offset == 5");
+        // Java: OffsetAndMetadata(endOffset, Optional.of(leaderEpoch), "")
+        let divergent = t.divergent_offset_opt.as_ref().expect("divergent offset present for bad offset");
+        assert_eq!(divergent.offset(), bad_end_offset, "divergent offset == broker end offset (1)");
+        assert_eq!(divergent.leader_epoch(), Some(bad_leader_epoch), "divergent leader epoch == 1");
+        assert!(
+            subscriptions.lock().unwrap().awaiting_validation(&tp).expect("assigned"),
+            "partition must STAY AWAITING_VALIDATION on LogTruncation"
+        );
+    }
 }

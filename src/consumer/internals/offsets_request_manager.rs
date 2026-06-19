@@ -3449,4 +3449,82 @@ mod tests {
         );
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
     }
+
+    // -----------------------------------------------------------------
+    //   OffsetValidation → LogTruncation end-to-end re-raise
+    //   (OffsetFetcherTest.testOffsetValidationTriggerLogTruncation...)
+    // -----------------------------------------------------------------
+
+    /// Build a manager whose subscription state uses the NONE reset policy,
+    /// so a validate truncation surfaces as a LogTruncation instead of a
+    /// reset. Mirrors Java's `buildFetcher(AutoOffsetResetStrategy.NONE)`.
+    fn new_manager_none_reset() -> (OffsetsRequestManager, Arc<Mutex<SubscriptionState>>) {
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let mgr = OffsetsRequestManager::new(
+            subscription_state.clone(),
+            metadata,
+            IsolationLevel::ReadUncommitted,
+            500,
+            30_000,
+            60_000,
+            Arc::new(ApiVersions::new()),
+            None,
+        );
+        (mgr, subscription_state)
+    }
+
+    /// Java parity:
+    /// `testOffsetValidationTriggerLogTruncationForBadOffsetWithUndefinedResetPolicy`
+    /// (end-to-end re-raise half). With the NONE reset policy, a validate
+    /// response carrying a bad end offset (1 < position 5) caches a
+    /// LogTruncation; the next `validate_positions_if_needed` re-raises it.
+    /// The structured payload is asserted at the OFU level
+    /// (`validation_bad_offset_with_undefined_reset_policy_log_truncation`);
+    /// here we assert the end-to-end re-raise carries the truncation message
+    /// (DoD §3).
+    #[tokio::test(flavor = "current_thread")]
+    async fn validation_bad_offset_triggers_log_truncation_reraise() {
+        let (mut mgr, subscription_state) = new_manager_none_reset();
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 1);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 5, 1);
+
+        mgr.validate_positions_if_needed(0).expect("ok");
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        // Bad end offset (1) with defined leader epoch (1) → truncation.
+        let response = build_offsets_for_leader_epoch_response("t1", vec![(1, Errors::None, 1, 1)]);
+        assert!(complete_first_oitle_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+
+        // The partition stays awaiting validation; the error is cached.
+        {
+            let subs = subscription_state.lock().expect("subs");
+            assert!(
+                subs.awaiting_validation(&tp).expect("assigned"),
+                "partition must stay AWAITING_VALIDATION on truncation"
+            );
+        }
+
+        // Next validate call re-raises the LogTruncation. The conversion
+        // flattens to KafkaError::IllegalState carrying the truncation
+        // Display string (the structured payload is verified at OFU level).
+        let err = mgr.validate_positions_if_needed(0).expect_err("LogTruncation re-raised");
+        assert_eq!(mgr.requests_to_send_count(), 0, "no request on cached-error path");
+        assert!(
+            err.message().contains("Truncated partitions detected with divergent offsets"),
+            "re-raised error must carry the LogTruncation message, got: {}",
+            err.message(),
+        );
+    }
 }
