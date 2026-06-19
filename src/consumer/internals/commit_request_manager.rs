@@ -1358,10 +1358,13 @@ impl CommitRequestManager {
             }
             guard.member_info.clone()
         };
-        // Snapshot the offsets so the auto-commit success arm can enqueue
+        // Keep a copy of the offsets so the auto-commit success arm can enqueue
         // the interceptor invocation with the committed offsets (Java's
-        // `autoCommitCallback(allConsumedOffsets)`).
-        let offsets_for_interceptor = offsets.clone();
+        // `autoCommitCallback(allConsumedOffsets)`). `OffsetCommitRequestState`
+        // takes ownership of `offsets`, so the success arm holds the request's
+        // own offsets via the spawned task; we snapshot only when an
+        // interceptor is actually wired to avoid the no-interceptor clone.
+        let offsets_for_interceptor = self.inner.has_auto_commit_interceptors().then(|| offsets.clone());
         let (request, request_rx) = OffsetCommitRequestState::new(
             offsets,
             member_info,
@@ -1401,8 +1404,12 @@ impl CommitRequestManager {
                 Ok(Ok(_committed)) => {
                     // Java `autoCommitCallback`: on success, enqueue the
                     // interceptor `on_commit` invocation with the committed
-                    // offsets (`CommitRequestManager.java:380`).
-                    inner.enqueue_interceptor_invocation(offsets_for_interceptor);
+                    // offsets (`CommitRequestManager.java:380`). The snapshot
+                    // is `Some` only when an interceptor is wired (the
+                    // no-interceptor path clones nothing).
+                    if let Some(offsets) = offsets_for_interceptor {
+                        inner.enqueue_interceptor_invocation(&offsets);
+                    }
                     log::debug!("Completed asynchronous auto-commit of offsets");
                 },
                 Ok(Err(err)) => {
@@ -1945,7 +1952,20 @@ impl CommitRequestManagerInner {
     /// is not wired (Phase 9 unit tests) or the interceptor chain is empty.
     /// Mirrors Java's `autoCommitCallback` success arm
     /// (`CommitRequestManager.java:380`).
-    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
+    /// Whether a wired auto-commit interceptor hook has at least one
+    /// interceptor registered. Used to gate the committed-offsets clone on
+    /// the auto-commit success path so the common (no-interceptor) case
+    /// clones nothing — matching Java's by-reference capture in
+    /// `autoCommitCallback`.
+    fn has_auto_commit_interceptors(&self) -> bool {
+        let guard = self
+            .auto_commit_interceptor_hook
+            .lock()
+            .expect("commit manager auto-commit interceptor hook poisoned");
+        guard.as_ref().is_some_and(|hook| hook.has_interceptors())
+    }
+
+    fn enqueue_interceptor_invocation(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
         let hook = {
             let guard = self
                 .auto_commit_interceptor_hook
@@ -1953,8 +1973,14 @@ impl CommitRequestManagerInner {
                 .expect("commit manager auto-commit interceptor hook poisoned");
             guard.as_ref().map(Arc::clone)
         };
-        if let Some(hook) = hook {
-            hook.enqueue_interceptor_invocation(offsets);
+        // Clone the committed-offsets map ONLY when a hook is wired AND has
+        // at least one interceptor to receive it. The common case (no
+        // interceptor configured) clones nothing, matching Java's
+        // by-reference capture in its `autoCommitCallback` BiConsumer.
+        if let Some(hook) = hook
+            && hook.has_interceptors()
+        {
+            hook.enqueue_interceptor_invocation(offsets.clone());
         }
     }
 
@@ -2125,8 +2151,11 @@ async fn auto_commit_sync_before_rebalance_with_retries(
             Ok(Ok(_committed)) => {
                 // Java `autoCommitCallback`: on success, enqueue the
                 // interceptor `on_commit` invocation with the offsets that
-                // were committed (`CommitRequestManager.java:380`).
-                inner.enqueue_interceptor_invocation(last_offsets.clone());
+                // were committed (`CommitRequestManager.java:380`). Pass by
+                // reference — `enqueue_interceptor_invocation` clones only
+                // when an interceptor is actually wired (no-interceptor path
+                // clones nothing).
+                inner.enqueue_interceptor_invocation(&last_offsets);
                 break Ok(());
             },
             Ok(Err(err)) => {
@@ -3415,6 +3444,12 @@ mod tests {
         InvalidCommitOffsetSize,
         TopicAuthorization,
         CommitFailed,
+        /// OffsetFetch maps UNKNOWN_MEMBER_ID to its specific
+        /// `UnknownMemberIdException` (CommitRequestManagerTest.java:1499).
+        UnknownMemberId,
+        /// OffsetFetch maps STALE_MEMBER_EPOCH to its specific
+        /// `StaleMemberEpochException` (CommitRequestManagerTest.java:1502).
+        StaleMemberEpoch,
         KafkaException,
     }
 
@@ -3456,9 +3491,9 @@ mod tests {
             (Errors::OffsetMetadataTooLarge, ExpectedClass::KafkaException),
             (Errors::InvalidCommitOffsetSize, ExpectedClass::KafkaException),
             (Errors::TopicAuthorizationFailed, ExpectedClass::KafkaException),
-            (Errors::UnknownMemberId, ExpectedClass::KafkaException),
+            (Errors::UnknownMemberId, ExpectedClass::UnknownMemberId),
             // STALE_MEMBER_EPOCH is non-retriable here (only retried with a new epoch).
-            (Errors::StaleMemberEpoch, ExpectedClass::KafkaException),
+            (Errors::StaleMemberEpoch, ExpectedClass::StaleMemberEpoch),
             // Generic → KafkaException.
             (Errors::UnknownServerError, ExpectedClass::KafkaException),
         ]
@@ -3511,6 +3546,12 @@ mod tests {
                 // Generic KafkaException → KafkaError with UnknownServerError
                 // and the "Unexpected error in commit" wrapper message.
                 assert_eq!(err.error(), Errors::UnknownServerError, "expected KafkaException, got {err:?}");
+            },
+            // The commit supplier maps UNKNOWN_MEMBER_ID / STALE_MEMBER_EPOCH
+            // to CommitFailed (not these OffsetFetch-only classes), so they
+            // never reach this asserter.
+            ExpectedClass::UnknownMemberId | ExpectedClass::StaleMemberEpoch => {
+                panic!("unexpected commit error class {expected:?}")
             },
         }
     }
@@ -4601,12 +4642,32 @@ mod tests {
                     "expected GroupAuthorization, got {err:?}"
                 );
             },
+            ExpectedClass::UnknownMemberId => {
+                // Java pins UnknownMemberIdException.class
+                // (CommitRequestManagerTest.java:1499). Assert the exact error
+                // code — a mutation remapping it to UnknownServerError must FAIL.
+                assert_eq!(
+                    err.error(),
+                    Errors::UnknownMemberId,
+                    "expected UnknownMemberIdException ({source:?}), got {err:?}"
+                );
+            },
+            ExpectedClass::StaleMemberEpoch => {
+                // Java pins StaleMemberEpochException.class
+                // (CommitRequestManagerTest.java:1502). Assert the exact error
+                // code — a mutation remapping it to UnknownServerError must FAIL.
+                assert_eq!(
+                    err.error(),
+                    Errors::StaleMemberEpoch,
+                    "expected StaleMemberEpochException ({source:?}), got {err:?}"
+                );
+            },
             ExpectedClass::KafkaException => {
-                // The fetch group-error classifier surfaces UNKNOWN_MEMBER_ID
-                // / STALE_MEMBER_EPOCH as their own error (retriable=false),
-                // and TopicAuthorization as a topic-auth error; everything
-                // else wraps as UnknownServerError. Assert the source error is
-                // reflected (either directly or wrapped).
+                // The genuinely-wrapped rows (OFFSET_METADATA_TOO_LARGE,
+                // INVALID_COMMIT_OFFSET_SIZE, UNKNOWN_SERVER_ERROR) and the
+                // topic-auth row. Java itself only asserts these as
+                // KafkaException.class. Tolerate the generic
+                // UnknownServerError wrap and the topic-auth subtype here.
                 let surfaced = err.error();
                 assert!(
                     surfaced == source
