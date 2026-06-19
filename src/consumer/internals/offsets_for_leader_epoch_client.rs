@@ -337,6 +337,24 @@ mod tests {
         assert!(result.end_offsets().contains_key(&tp));
     }
 
+    /// Java parity: `testEmptyResponse`. An empty request (no partitions)
+    /// paired with an empty response yields empty `end_offsets` and empty
+    /// `partitions_to_retry` — `partitions_to_retry` seeds from the request
+    /// keys, so with no requested partitions there is nothing to retry.
+    /// Distinct from `testUnexpectedEmptyResponse`, which requests a
+    /// partition that is then absent from the response.
+    #[test]
+    fn handle_response_empty_request_and_response_are_both_empty() {
+        let request_data: HashMap<TopicPartition, FetchPosition> = HashMap::new();
+        let response = OffsetsForLeaderEpochResponse::new(OffsetForLeaderEpochResponseData::new());
+        let result = OffsetsForLeaderEpochClient::handle_response(&request_data, &response).expect("ok");
+        assert!(
+            result.partitions_to_retry().is_empty(),
+            "no requested partitions ⇒ nothing to retry"
+        );
+        assert!(result.end_offsets().is_empty(), "empty response ⇒ no end offsets");
+    }
+
     /// Java parity: `testUnexpectedEmptyResponse`. A partition that was
     /// requested but is ABSENT from the response must remain in
     /// `partitions_to_retry` (distinct code path from "unrequested partition

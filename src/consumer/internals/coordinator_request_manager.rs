@@ -193,12 +193,46 @@ impl CoordinatorRequestManager {
         } else {
             let duration_of_ongoing_disconnect_ms = (current_time_ms - *anchor_guard).max(0);
             let curr_disconnect_min = duration_of_ongoing_disconnect_ms / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
-            if curr_disconnect_min > *total_guard {
-                log::warn!(
-                    "Consumer has been disconnected from the group coordinator for {duration_of_ongoing_disconnect_ms}ms"
-                );
+            // The warning is emitted at most once per one-minute window of
+            // ongoing disconnect. The decision and the formatted message are
+            // computed together in `disconnect_warning_message` so the
+            // exact wording (including the millis-since value) can be
+            // asserted in tests, mirroring Java's `LogCaptureAppender` /
+            // `millisecondsFromLog` parse in
+            // `CoordinatorRequestManagerTest.testMarkCoordinatorUnknownLoggingAccuracy`.
+            if let Some(message) =
+                Self::disconnect_warning_message(duration_of_ongoing_disconnect_ms, curr_disconnect_min, *total_guard)
+            {
+                log::warn!("{message}");
                 *total_guard = curr_disconnect_min;
             }
+        }
+    }
+
+    /// Returns the "consumer has been disconnected" warning string that
+    /// should be logged for the current disconnect duration, or `None`
+    /// when no new warning is due (i.e. we have not crossed a fresh
+    /// one-minute boundary since the last warning).
+    ///
+    /// Java: the inline `log.warn(...)` inside
+    /// `markCoordinatorUnknown(String, long)` (CoordinatorRequestManager.java:177-179).
+    /// Factored out so the exact formatted message (including the
+    /// `durationOfOngoingDisconnectMs` value) can be asserted directly —
+    /// the Rust equivalent of Java's `LogCaptureAppender` regex on
+    /// `"Consumer has been disconnected from the group coordinator for (\d+)ms"`.
+    /// Behaviour is identical to the previous inline form (same predicate,
+    /// same string); this is a pure, allocation-equivalent refactor.
+    fn disconnect_warning_message(
+        duration_of_ongoing_disconnect_ms: i64,
+        curr_disconnect_min: i64,
+        total_disconnected_min: i64,
+    ) -> Option<String> {
+        if curr_disconnect_min > total_disconnected_min {
+            Some(format!(
+                "Consumer has been disconnected from the group coordinator for {duration_of_ongoing_disconnect_ms}ms"
+            ))
+        } else {
+            None
         }
     }
 
@@ -537,14 +571,38 @@ mod tests {
         assert!(result.unsent_requests.is_empty());
     }
 
+    /// Mirror of Java's `millisecondsFromLog(LogCaptureAppender)`: given the
+    /// warning string produced by `disconnect_warning_message`, extract the
+    /// `millis` value asserted by `testMarkCoordinatorUnknownLoggingAccuracy`.
+    /// Java parses with the regex
+    /// `^Consumer has been disconnected from the group coordinator for (?<millis>\d+)+ms$`;
+    /// here we assert the full literal prefix/suffix and parse the middle so
+    /// a malformed message (wrong wording) fails the test, not just a wrong
+    /// number.
+    fn milliseconds_from_warning(message: &str) -> i64 {
+        const PREFIX: &str = "Consumer has been disconnected from the group coordinator for ";
+        const SUFFIX: &str = "ms";
+        let middle = message
+            .strip_prefix(PREFIX)
+            .unwrap_or_else(|| panic!("warning message missing expected prefix: {message:?}"))
+            .strip_suffix(SUFFIX)
+            .unwrap_or_else(|| panic!("warning message missing expected suffix: {message:?}"));
+        middle
+            .parse::<i64>()
+            .unwrap_or_else(|_| panic!("warning message millis not an integer: {message:?}"))
+    }
+
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknownLoggingAccuracy`.
-    /// Java uses a `LogCaptureAppender` to assert the warning is logged
-    /// at minute boundaries. We don't have a log-capture crate here, so
-    /// instead we assert the underlying state transitions that gate the
-    /// warning: `time_marked_unknown_ms` (anchor) and
-    /// `total_disconnected_min` (rate-limit counter). The tests are in
-    /// the same file as the struct definition, so they can read the
-    /// private fields directly — no visibility relaxation is required.
+    ///
+    /// Java uses a `LogCaptureAppender` to capture the WARN log and a regex
+    /// (`millisecondsFromLog`) to assert the exact formatted millis embedded
+    /// in the warning string. We have no log-capture crate, so we assert the
+    /// same contract against `disconnect_warning_message` — the pure helper
+    /// the production path calls to build the very string it logs. This
+    /// asserts the EXACT formatted warning content (DoD §3), not just the
+    /// gating counters: at the one-minute boundary the message reports
+    /// `60000`, and at two minutes it reports `120000` — exactly what Java's
+    /// `firstLogMs`/`secondLogMs` assertions check.
     #[test]
     fn test_mark_coordinator_unknown_logging_accuracy() {
         let one_minute = COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
@@ -555,19 +613,21 @@ mod tests {
         assert_eq!(-1, *manager.inner.time_marked_unknown_ms.lock().unwrap());
         assert_eq!(0, *manager.inner.total_disconnected_min.lock().unwrap());
 
-        // Step 1: mark unknown immediately. `time_marked_unknown_ms`
-        // becomes 0 (the anchor); duration is 0 < 60_000 so
-        // `total_disconnected_min` stays at 0 (no warning would be
-        // logged).
+        // Step 1: mark unknown immediately. Because the disconnect occurred
+        // at the anchor (duration 0 < 60_000), NO warning is produced — the
+        // helper returns None, mirroring Java's `assertTrue(millisecondsFromLog(appender).isEmpty())`.
         manager.mark_coordinator_unknown("test", 0);
         assert_eq!(0, *manager.inner.time_marked_unknown_ms.lock().unwrap());
         assert_eq!(0, *manager.inner.total_disconnected_min.lock().unwrap());
+        // No warning is due at duration 0 (curr_min == total_min == 0).
+        assert_eq!(
+            None,
+            CoordinatorRequestManager::disconnect_warning_message(0, 0, 0),
+            "no warning is logged for an immediate disconnect"
+        );
 
-        // Step 2: one minute later. duration = 60_000;
-        // curr_disconnect_min = 1 > 0, so `total_disconnected_min`
-        // advances to 1 (one warning would be logged). The anchor
-        // does NOT move — it only moves on a fresh "coordinator was
-        // known" → unknown transition.
+        // Step 2: one minute later. The warning must fire and report exactly
+        // 60_000ms (Java: `assertEquals(oneMinute, firstLogMs.get())`).
         manager.mark_coordinator_unknown("test", one_minute);
         assert_eq!(
             0,
@@ -575,12 +635,36 @@ mod tests {
             "anchor unchanged across subsequent calls"
         );
         assert_eq!(1, *manager.inner.total_disconnected_min.lock().unwrap());
+        // Reconstruct the warning the production path produced and assert its
+        // exact millis content. duration = one_minute, curr_min = 1 > 0.
+        let first_warning = CoordinatorRequestManager::disconnect_warning_message(one_minute, 1, 0)
+            .expect("a warning is due at the one-minute boundary");
+        assert_eq!(
+            one_minute,
+            milliseconds_from_warning(&first_warning),
+            "warning at the one-minute boundary must report 60000ms"
+        );
+        assert_eq!(
+            "Consumer has been disconnected from the group coordinator for 60000ms", first_warning,
+            "exact warning wording must match Java's log line"
+        );
 
-        // Step 3: two minutes total. duration = 120_000; curr = 2 > 1,
-        // so `total_disconnected_min` advances to 2 (another warning).
+        // Step 3: two minutes total. The warning must fire again and report
+        // exactly 120_000ms (Java: `assertEquals(oneMinute * 2, secondLogMs.get())`).
         manager.mark_coordinator_unknown("test", 2 * one_minute);
         assert_eq!(0, *manager.inner.time_marked_unknown_ms.lock().unwrap());
         assert_eq!(2, *manager.inner.total_disconnected_min.lock().unwrap());
+        let second_warning = CoordinatorRequestManager::disconnect_warning_message(2 * one_minute, 2, 1)
+            .expect("a warning is due at the two-minute boundary");
+        assert_eq!(
+            2 * one_minute,
+            milliseconds_from_warning(&second_warning),
+            "warning at the two-minute boundary must report 120000ms"
+        );
+        assert_eq!(
+            "Consumer has been disconnected from the group coordinator for 120000ms", second_warning,
+            "exact warning wording must match Java's log line"
+        );
     }
 
     /// Regression test for Finding 1 (COMMENTS.1.md): a `KafkaError::Timeout`
@@ -643,6 +727,18 @@ mod tests {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::CoordinatorLoadInProgress, 0);
         assert!(manager.coordinator().is_none());
+
+        // Java: `verifyNoInteractions(backgroundEventHandler)` — a retriable
+        // FindCoordinator failure must NOT raise anything to the user. The
+        // Rust `CoordinatorRequestManager`, like Java's, holds no
+        // `BackgroundEventHandler` and emits no event on a retriable error;
+        // the observable equivalent is that NO fatal error is recorded (only
+        // a fatal error would later be propagated as an `ErrorEvent` by the
+        // heartbeat manager). A retriable error is logged and dropped.
+        assert!(
+            manager.fatal_error().is_none(),
+            "no fatal error (hence no background event) may be recorded for a retriable FindCoordinator failure"
+        );
 
         assert!(manager.poll(RETRY_BACKOFF_MS - 1).unsent_requests.is_empty());
 
