@@ -298,6 +298,14 @@ struct OffsetFetchRequestState {
     /// wire (v10+). Mirrors Java's `topicNamesCache`.
     topic_names_cache: HashMap<Uuid, String>,
     future_tx: FetchFutureTx,
+    /// Public-future senders of duplicate `fetch_offsets` calls that were
+    /// coalesced onto this request (Java: `chainFuture`). When the retry
+    /// driver resolves this request's public future, it also resolves every
+    /// chained sender with the same result, so a single wire request serves
+    /// all identical concurrent fetches. Shared with the retry driver via
+    /// `Arc` so the app-side `fetch_offsets` dup path can push onto it after
+    /// the driver has been spawned.
+    chained_public_senders: Arc<Mutex<Vec<oneshot::Sender<FetchResult>>>>,
 }
 
 impl OffsetFetchRequestState {
@@ -325,6 +333,7 @@ impl OffsetFetchRequestState {
                 state,
                 topic_names_cache: HashMap::new(),
                 future_tx: Arc::new(Mutex::new(Some(tx))),
+                chained_public_senders: Arc::new(Mutex::new(Vec::new())),
             },
             rx,
         )
@@ -1013,21 +1022,46 @@ impl CommitRequestManager {
             deadline_ms,
             now_ms,
         );
-        // Try to dedupe against an unsent or in-flight identical request
-        // — Java does this inside `PendingRequests.addOffsetFetchRequest`.
-        // Dedup is best-effort: if a duplicate is found we still enqueue
-        // a *fresh* request because the public `oneshot::Receiver` would
-        // not naturally chain with the in-flight one (Java chains
-        // CompletableFutures; we keep one request per call for simpler
-        // semantics — duplicate fetches are wasted bytes, never wrong).
-        {
+        // Dedupe against an unsent or in-flight identical request — Java does
+        // this in `PendingRequests.addOffsetFetchRequest`: if the same request
+        // is already pending, chain this call's future to the existing one
+        // (`chainFuture`) instead of enqueuing a second wire request. The
+        // existing request's retry driver resolves all chained senders with
+        // the same result when it completes, so one wire request serves all
+        // identical concurrent fetches.
+        let chained_public_senders = {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            let existing = guard
+                .pending
+                .unsent_offset_fetches
+                .iter()
+                .find(|r| r.same_request(&request))
+                .or_else(|| guard.pending.inflight_offset_fetches.iter().find(|r| r.same_request(&request)));
+            if let Some(existing) = existing {
+                existing
+                    .chained_public_senders
+                    .lock()
+                    .expect("OffsetFetch chained senders poisoned")
+                    .push(tx);
+                return rx;
+            }
+            let chained = Arc::clone(&request.chained_public_senders);
             guard.pending.unsent_offset_fetches.push(request);
-        }
+            chained
+        };
         let result_tx = Arc::new(Mutex::new(Some(tx)));
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            fetch_offsets_with_retries(inner, request_rx, result_tx, requested_partitions, deadline_ms, now_ms).await;
+            fetch_offsets_with_retries(
+                inner,
+                request_rx,
+                result_tx,
+                requested_partitions,
+                deadline_ms,
+                now_ms,
+                chained_public_senders,
+            )
+            .await;
         });
         rx
     }
@@ -2236,6 +2270,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 ///
 /// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
 /// [`KafkaError::timeout`] wrapping the original error message.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_offsets_with_retries(
     inner: Arc<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<FetchResult>,
@@ -2243,6 +2278,10 @@ async fn fetch_offsets_with_retries(
     requested_partitions: HashSet<TopicPartition>,
     deadline_ms: i64,
     now_ms: i64,
+    // Shared list of duplicate-call public senders coalesced onto this logical
+    // fetch (Java's `chainFuture`); carried forward into each retry request so
+    // dups arriving during a retry window are still served.
+    chained_public_senders: Arc<Mutex<Vec<oneshot::Sender<FetchResult>>>>,
 ) {
     let mut request_rx = initial_request_rx;
     let mut current_time_ms = now_ms;
@@ -2317,6 +2356,10 @@ async fn fetch_offsets_with_retries(
                     current_time_ms,
                 );
                 retry_request.seed_failed_attempts(attempts, current_time_ms);
+                // Carry the shared chained-senders list forward so duplicate
+                // fetches that coalesced onto the prior attempt (or onto this
+                // retry while it is pending) are still served on completion.
+                retry_request.chained_public_senders = Arc::clone(&chained_public_senders);
                 {
                     let mut guard = inner.state.lock().expect("commit manager state poisoned");
                     guard.pending.unsent_offset_fetches.push(retry_request);
@@ -2326,9 +2369,26 @@ async fn fetch_offsets_with_retries(
             Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
         }
     };
-    let mut guard = result_tx.lock().expect("fetch_offsets tx poisoned");
-    if let Some(tx) = guard.take() {
-        let _ = tx.send(outcome);
+    // Resolve the primary public future, then fan the same result out to every
+    // duplicate-call sender chained onto this logical fetch (Java: chainFuture).
+    {
+        let mut guard = result_tx.lock().expect("fetch_offsets tx poisoned");
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(clone_fetch_result(&outcome));
+        }
+    }
+    let chained = std::mem::take(&mut *chained_public_senders.lock().expect("OffsetFetch chained senders poisoned"));
+    for tx in chained {
+        let _ = tx.send(clone_fetch_result(&outcome));
+    }
+}
+
+/// Clone a `FetchResult` so the same outcome can be sent to multiple chained
+/// duplicate-fetch senders. `KafkaError` and the offset map are both `Clone`.
+fn clone_fetch_result(result: &FetchResult) -> FetchResult {
+    match result {
+        Ok(v) => Ok(v.clone()),
+        Err(e) => Err(e.clone()),
     }
 }
 
@@ -4288,5 +4348,940 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("no unsent request shipped within the iteration cap");
+    }
+
+    // =====================================================================
+    //       Phase 33b — offset-fetch + auto-commit parity translations
+    // =====================================================================
+
+    /// `testSuccessfulOffsetFetch`: a successful fetch completes with the
+    /// offset / metadata / leader-epoch from the response, and the inflight
+    /// fetch is drained on completion.
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_offset_fetch() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        assert_eq!(manager.inner.state.lock().unwrap().pending.inflight_offset_fetches.len(), 1);
+
+        unsent.handler().on_complete(offset_fetch_response(
+            GROUP_ID,
+            vec![(("topic1", Uuid::zero()), vec![(0, 100, 1, "metadata", Errors::None)])],
+            Errors::None,
+        ));
+
+        let offsets = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        assert_eq!(offsets.len(), 1);
+        let oam = offsets.get(&tp).expect("tp present").as_ref().expect("has offset");
+        assert_eq!(oam.offset(), 100);
+        assert_eq!(oam.metadata(), "metadata");
+        assert_eq!(oam.leader_epoch(), Some(1));
+        // Inflight drained on response.
+        yield_until(
+            || {
+                let guard = manager.inner.state.lock().unwrap();
+                if guard.pending.inflight_offset_fetches.is_empty() {
+                    Some(())
+                } else {
+                    None
+                }
+            },
+            "inflight fetch not drained on response",
+        )
+        .await;
+    }
+
+    /// `testOffsetFetchRequestEnsureDuplicatedRequestSucceed`: two identical
+    /// concurrent fetches coalesce into ONE wire request; both futures
+    /// succeed with the same offsets.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_request_ensure_duplicated_request_succeed() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("t1", 0);
+        let partitions = HashSet::from([tp.clone()]);
+
+        let mut rx1 = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+        let mut rx2 = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+
+        // Only ONE wire request is produced for the two duplicate fetches.
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert_eq!(poll_result.unsent_requests.len(), 1, "two duplicate fetches → one wire request");
+
+        let unsent = poll_result.unsent_requests.into_iter().next().unwrap();
+        unsent.handler().on_complete(offset_fetch_response_for_partitions(&partitions));
+
+        // Both futures complete successfully with the same offsets.
+        let r1 = recv_fetch_result(&mut rx1).await.expect("dup fetch 1 succeeds");
+        let r2 = recv_fetch_result(&mut rx2).await.expect("dup fetch 2 succeeds");
+        assert!(r1.contains_key(&tp));
+        assert_eq!(r1, r2);
+
+        // Buffers emptied after success.
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert!(poll_result.unsent_requests.is_empty());
+        let guard = manager.inner.state.lock().unwrap();
+        assert!(guard.pending.inflight_offset_fetches.is_empty());
+        assert!(guard.pending.unsent_offset_fetches.is_empty());
+    }
+
+    /// `testOffsetFetchRequestShouldSucceedWithTopicId`: with the topic id
+    /// known, two duplicate fetches coalesce to one wire request using the
+    /// topic-id wire form (apiVersion ≥ 10), and both succeed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_request_should_succeed_with_topic_id() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let topic_id = Uuid::new(11, 13);
+        seed_topic_id(&manager, "t1", topic_id);
+        let tp = topic_partition("t1", 0);
+        let partitions = HashSet::from([tp.clone()]);
+
+        let mut rx1 = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+        let mut rx2 = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert_eq!(
+            poll_result.unsent_requests.len(),
+            1,
+            "duplicate topic-id fetches → one wire request"
+        );
+        let unsent = poll_result.unsent_requests.into_iter().next().unwrap();
+        assert!(
+            unsent.request_builder().expect("builder present").latest_allowed_version() >= 10,
+            "topic-id fetch must use apiVersion >= 10"
+        );
+        // Response carries the topic id (empty name); the production handler
+        // resolves the name from the per-request topic_names_cache.
+        unsent.handler().on_complete(offset_fetch_response(
+            GROUP_ID,
+            vec![(("", topic_id), vec![(0, 100, 1, "metadata", Errors::None)])],
+            Errors::None,
+        ));
+
+        let r1 = recv_fetch_result(&mut rx1).await.expect("dup fetch 1 succeeds");
+        let r2 = recv_fetch_result(&mut rx2).await.expect("dup fetch 2 succeeds");
+        assert!(r1.contains_key(&tp), "result keyed by resolved topic name");
+        assert_eq!(r1, r2);
+    }
+
+    /// `testFetchOffsetsWithTopicIdsDoesNotFailOnUnsubscribedTopics`: a
+    /// response carrying a topic id resolves via the per-request name cache,
+    /// so it succeeds even though the topic is no longer in metadata.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_with_topic_ids_does_not_fail_on_unsubscribed_topics() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let topic_id = Uuid::new(17, 19);
+        seed_topic_id(&manager, "t1", topic_id);
+        let tp = topic_partition("t1", 0);
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        // Topic id on the wire, empty name — resolved from the request cache.
+        unsent.handler().on_complete(offset_fetch_response(
+            GROUP_ID,
+            vec![(("", topic_id), vec![(0, 100, 1, "metadata", Errors::None)])],
+            Errors::None,
+        ));
+
+        let offsets = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        assert!(offsets.contains_key(&tp), "topic resolved from per-request name cache");
+    }
+
+    /// `testOffsetFetchRequestErroredRequests` (×14): retriable errors leave
+    /// the future pending and re-queue (one numAttempts); non-retriable
+    /// errors complete the future exceptionally and empty the buffers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_request_errored_requests() {
+        for (error, _expected) in offset_fetch_exception_supplier() {
+            let manager = make_manager(0, true);
+            let coordinator = coordinator_with_node();
+            let tp = topic_partition("t1", 0);
+            let mut public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            // Group-level error code drives the response error.
+            unsent.handler().on_complete(offset_fetch_response(GROUP_ID, vec![], error));
+
+            if error.is_retriable() {
+                // Pending + re-queued with exactly one failed attempt.
+                let attempts = yield_until(
+                    || {
+                        let guard = manager.inner.state.lock().unwrap();
+                        guard.pending.unsent_offset_fetches.first().map(|r| r.state.num_attempts())
+                    },
+                    "retriable fetch error did not re-queue",
+                )
+                .await;
+                assert_eq!(attempts, 1, "one failed attempt for {error:?}");
+                assert!(
+                    matches!(public_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                    "still pending"
+                );
+            } else {
+                let err = recv_fetch_result(&mut public_rx).await.expect_err("non-retriable fetch fails");
+                // Non-retriable error surfaces (StaleMemberEpoch is non-retriable
+                // here because no member epoch is set).
+                let _ = err;
+                yield_until(
+                    || {
+                        let guard = manager.inner.state.lock().unwrap();
+                        if guard.pending.unsent_offset_fetches.is_empty()
+                            && guard.pending.inflight_offset_fetches.is_empty()
+                        {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    },
+                    "non-retriable fetch error did not empty the buffers",
+                )
+                .await;
+            }
+        }
+    }
+
+    /// `testOffsetFetchRequestTimeoutRequests` (×14): retriable errors retried
+    /// to the deadline surface a TimeoutException; non-retriable errors
+    /// surface their specific class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_request_timeout_requests() {
+        for (error, expected) in offset_fetch_exception_supplier() {
+            let manager = make_manager(0, false);
+            let coordinator = coordinator_with_node();
+            let tp = topic_partition("t1", 0);
+            let retry_backoff_ms = manager.inner.retry_backoff_ms;
+            let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
+            let mut public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), deadline_ms, 0);
+
+            let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
+            let mut poll_time = 0;
+            let mut iters = 0;
+            let err = loop {
+                iters += 1;
+                if let Some(unsent) = manager
+                    .poll_with_coordinator(&coordinator, poll_time)
+                    .unsent_requests
+                    .into_iter()
+                    .next()
+                {
+                    unsent.handler().on_complete(offset_fetch_response(GROUP_ID, vec![], error));
+                }
+                if let Ok(result) = public_rx.try_recv() {
+                    break result.expect_err("fetch must fail");
+                }
+                tokio::task::yield_now().await;
+                poll_time = poll_time.saturating_add(poll_step);
+                assert!(iters < 200, "fetch {error:?} did not resolve within 200 iterations");
+            };
+            if error.is_retriable() {
+                assert!(
+                    matches!(err, KafkaError::Timeout(_)),
+                    "retriable {error:?} → Timeout, got {err:?}"
+                );
+            } else {
+                assert_fetch_error_class(&err, expected, error);
+            }
+        }
+    }
+
+    /// Assert the OffsetFetch error class for non-retriable errors. The fetch
+    /// supplier maps OffsetMetadataTooLarge / InvalidCommitOffsetSize /
+    /// TopicAuthorization / UnknownMemberId all to `KafkaException` (unlike
+    /// the commit supplier), so the assertion is by underlying `Errors`.
+    fn assert_fetch_error_class(err: &KafkaError, expected: ExpectedClass, source: Errors) {
+        match expected {
+            ExpectedClass::GroupAuthorization => {
+                assert!(
+                    matches!(err, KafkaError::GroupAuthorization(_)),
+                    "expected GroupAuthorization, got {err:?}"
+                );
+            },
+            ExpectedClass::KafkaException => {
+                // The fetch group-error classifier surfaces UNKNOWN_MEMBER_ID
+                // / STALE_MEMBER_EPOCH as their own error (retriable=false),
+                // and TopicAuthorization as a topic-auth error; everything
+                // else wraps as UnknownServerError. Assert the source error is
+                // reflected (either directly or wrapped).
+                let surfaced = err.error();
+                assert!(
+                    surfaced == source
+                        || surfaced == Errors::UnknownServerError
+                        || matches!(err, KafkaError::TopicAuthorization(_)),
+                    "expected KafkaException reflecting {source:?}, got {err:?}"
+                );
+            },
+            _ => panic!("unexpected fetch error class {expected:?}"),
+        }
+    }
+
+    /// `testOffsetFetchRequestPartitionDataError` (×5): a per-partition error
+    /// in the response. UNSTABLE_OFFSET_COMMIT is retriable (re-queues);
+    /// others are non-retriable (fail).
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_request_partition_data_error() {
+        // (error, isRetriable) from Java's partitionDataErrorSupplier.
+        let cases = [
+            (Errors::UnstableOffsetCommit, true),
+            (Errors::UnknownTopicOrPartition, false),
+            (Errors::UnknownTopicId, false),
+            (Errors::TopicAuthorizationFailed, false),
+            (Errors::UnknownServerError, false),
+        ];
+        for (error, is_retriable) in cases {
+            let manager = make_manager(0, true);
+            let coordinator = coordinator_with_node();
+            let tp1 = topic_partition("t1", 2);
+            let tp2 = topic_partition("t2", 3);
+            let tp3 = topic_partition("t3", 4);
+            let mut public_rx =
+                manager.fetch_offsets(HashSet::from([tp1.clone(), tp2.clone(), tp3.clone()]), i64::MAX, 0);
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            // tp1 and tp3 carry the error; tp2 is clean.
+            unsent.handler().on_complete(offset_fetch_response(
+                GROUP_ID,
+                vec![
+                    (("t1", Uuid::zero()), vec![(2, 100, 1, "metadata", error)]),
+                    (("t2", Uuid::zero()), vec![(3, 100, 1, "metadata", Errors::None)]),
+                    (("t3", Uuid::zero()), vec![(4, 100, 1, "metadata", error)]),
+                ],
+                Errors::None,
+            ));
+
+            if is_retriable {
+                let attempts = yield_until(
+                    || {
+                        let guard = manager.inner.state.lock().unwrap();
+                        guard.pending.unsent_offset_fetches.first().map(|r| r.state.num_attempts())
+                    },
+                    "retriable partition error did not re-queue",
+                )
+                .await;
+                assert_eq!(
+                    attempts, 1,
+                    "one failed attempt for {error:?} despite multiple partition errors"
+                );
+            } else {
+                let _err = recv_fetch_result(&mut public_rx)
+                    .await
+                    .expect_err("non-retriable partition error fails");
+            }
+        }
+    }
+
+    /// `testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors`
+    /// (×3): NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE mark the coordinator
+    /// unknown (rediscover); COORDINATOR_LOAD_IN_PROGRESS does not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_marks_coordinator_unknown_on_retriable_coordinator_errors() {
+        let cases = [
+            (Errors::NotCoordinator, true),
+            (Errors::CoordinatorNotAvailable, true),
+            (Errors::CoordinatorLoadInProgress, false),
+        ];
+        for (error, should_rediscover) in cases {
+            let manager = make_manager(0, false);
+            let coordinator = Arc::new(coordinator_with_node());
+            manager.set_coordinator(Arc::clone(&coordinator));
+            let tp = topic_partition("t1", 0);
+            let _public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            unsent.handler().on_complete(offset_fetch_response(GROUP_ID, vec![], error));
+
+            // Wait for the spawned handler to process the response.
+            yield_until(
+                || {
+                    let guard = manager.inner.state.lock().unwrap();
+                    // The retriable error re-queues an unsent fetch.
+                    if !guard.pending.unsent_offset_fetches.is_empty() {
+                        Some(())
+                    } else {
+                        None
+                    }
+                },
+                "retriable coordinator error did not re-queue fetch",
+            )
+            .await;
+
+            if should_rediscover {
+                assert!(coordinator.coordinator().is_none(), "{error:?} must mark coordinator unknown");
+            } else {
+                assert!(
+                    coordinator.coordinator().is_some(),
+                    "{error:?} must NOT mark coordinator unknown"
+                );
+            }
+        }
+    }
+
+    /// `testOffsetFetchMarksCoordinatorUnknownOnCoordinatorDisconnectedAndRetries`:
+    /// a disconnect marks the coordinator unknown and the fetch is retried.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_marks_coordinator_unknown_on_coordinator_disconnected_and_retries() {
+        let manager = make_manager(0, true);
+        let coordinator = Arc::new(coordinator_with_node());
+        manager.set_coordinator(Arc::clone(&coordinator));
+        let tp = topic_partition("t1", 0);
+        let _public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+
+        // Disconnect marks the coordinator unknown and re-queues the fetch.
+        yield_until(
+            || {
+                let guard = manager.inner.state.lock().unwrap();
+                if !guard.pending.unsent_offset_fetches.is_empty() {
+                    Some(())
+                } else {
+                    None
+                }
+            },
+            "disconnect did not re-queue fetch",
+        )
+        .await;
+        assert!(coordinator.coordinator().is_none(), "disconnect must mark coordinator unknown");
+    }
+
+    /// `testSyncOffsetFetchFailsWithStaleEpochAndRetriesWithNewEpoch`: a fetch
+    /// failing with STALE_MEMBER_EPOCH, when the member has a valid new epoch,
+    /// is retried with the latest member id + epoch on the wire.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_offset_fetch_fails_with_stale_epoch_and_retries_with_new_epoch() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("t1", 0);
+        let _public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+        // Member gets a new valid epoch.
+        let new_epoch = 8;
+        manager.on_member_epoch_updated(Some(new_epoch), "member1".to_string());
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_fetch_response(GROUP_ID, vec![], Errors::StaleMemberEpoch));
+
+        // The retry is re-queued; inflight drained.
+        let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2);
+        let mut retried = yield_until_unsent(&manager, &coordinator, poll_step).await;
+        // The retried request carries the new member id + epoch.
+        let req = retried.request_builder_mut().expect("builder present").build().expect("build");
+        if let crate::common::requests::ConcreteRequest::OffsetFetch(fetch) = req {
+            let groups = &fetch.data().groups;
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].member_epoch, new_epoch);
+            assert_eq!(groups[0].member_id.as_deref(), Some("member1"));
+        } else {
+            panic!("expected an OffsetFetch request");
+        }
+    }
+
+    /// `testSyncOffsetFetchFailsWithStaleEpochAndNotRetriedIfMemberNotInGroupAnymore`:
+    /// a fetch failing with STALE_MEMBER_EPOCH when the member has no valid
+    /// epoch fails without retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_offset_fetch_fails_with_stale_epoch_and_not_retried_if_member_not_in_group_anymore() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("t1", 0);
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
+
+        // Member has no valid epoch (left / failed / fenced).
+        manager.on_member_epoch_updated(None, "member1".to_string());
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_fetch_response(GROUP_ID, vec![], Errors::StaleMemberEpoch));
+
+        // Fails without retry.
+        let err = recv_fetch_result(&mut public_rx).await.expect_err("fetch fails without retry");
+        assert_eq!(
+            err.error(),
+            Errors::StaleMemberEpoch,
+            "surfaces StaleMemberEpoch unchanged, got {err:?}"
+        );
+        // No new request generated on the next poll.
+        tokio::task::yield_now().await;
+        let poll_result = manager.poll_with_coordinator(&coordinator, 0);
+        assert!(
+            poll_result.unsent_requests.is_empty(),
+            "no retry after non-retriable stale epoch"
+        );
+    }
+
+    /// `testOffsetFetchRequestStateToStringBase`: the request-state debug
+    /// string includes member info + requested partitions and contains no
+    /// `Optional` leak. Rust uses `MemberInfo`'s Display + the partition set.
+    #[test]
+    fn offset_fetch_request_state_to_string_base() {
+        let manager = make_manager(0, false);
+        manager.on_member_epoch_updated(Some(1), "member-x".to_string());
+        let member_info = manager.member_info_for_test();
+        let to_string_base = render_offset_fetch_to_string_base(&member_info);
+        // Java asserts the rendered string contains no "Optional" leak.
+        assert!(
+            !to_string_base.contains("Optional"),
+            "toStringBase must not leak 'Optional', got: {to_string_base}"
+        );
+        assert!(to_string_base.contains("memberId=member-x"));
+        assert!(to_string_base.contains("memberEpoch=1"));
+    }
+
+    /// Build the `MemberInfo` portion of `OffsetFetchRequestState`'s
+    /// `toStringBase` rendering. Mirrors Java's `super.toStringBase() + ", " +
+    /// memberInfo + ", requestedPartitions=..."` (the member-info Display is
+    /// the part that historically leaked `Optional`).
+    fn render_offset_fetch_to_string_base(member_info: &MemberInfo) -> String {
+        format!("{member_info}, requestedPartitions=[t1-0]")
+    }
+
+    /// `testPollSkipIfCoordinatorUnknown`: when the coordinator is unknown, a
+    /// pending async commit is NOT sent on poll.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_skip_if_coordinator_unknown() {
+        let manager = make_manager(0, false);
+        // Coordinator unknown (no node injected).
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        assert!(manager.poll_with_coordinator(&coordinator, 0).unsent_requests.is_empty());
+
+        let tp = topic_partition("t1", 0);
+        let _rx = manager.commit_async_no_callback(singleton_offset(tp, 0), 0);
+        // Coordinator still unknown → nothing sent.
+        assert!(manager.poll_with_coordinator(&coordinator, 0).unsent_requests.is_empty());
+    }
+
+    /// `testAsyncCommitWhileCoordinatorUnknownIsSentOutWhenCoordinatorDiscovered`:
+    /// a commit enqueued while the coordinator is unknown is sent once the
+    /// coordinator is discovered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_commit_while_coordinator_unknown_is_sent_out_when_coordinator_discovered() {
+        let manager = make_manager(0, false);
+        let unknown = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        assert!(manager.poll_with_coordinator(&unknown, 0).unsent_requests.is_empty());
+
+        let tp = topic_partition("t1", 0);
+        let _rx = manager.commit_async_no_callback(singleton_offset(tp, 0), 0);
+        // Coordinator unknown → not sent.
+        assert!(manager.poll_with_coordinator(&unknown, 0).unsent_requests.is_empty());
+
+        // Coordinator discovered → sent.
+        let known = coordinator_with_node();
+        let poll_result = manager.poll_with_coordinator(&known, 0);
+        assert_eq!(poll_result.unsent_requests.len(), 1, "commit sent once coordinator discovered");
+    }
+
+    /// `testAsyncAutocommitNotRetriedAfterException`: an auto-commit on the
+    /// interval that fails is NOT retried until the next interval expires.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_autocommit_not_retried_after_exception() {
+        let commit_interval = 200; // retryBackoffMs * 2 in Java.
+        let (manager, subs) = make_manager_with_subs_interval(0, true, commit_interval);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        // Fire auto-commit after the interval.
+        manager.update_timer_and_maybe_commit(commit_interval);
+        let unsent = poll_one_unsent(&manager, &coordinator, commit_interval);
+        // Fail it with a retriable error. The auto-commit completion task
+        // resets the timer with retry backoff (Java: maybeResetTimerWithBackoff),
+        // so the failed request itself is NOT re-queued — only the timer is
+        // reset for the next interval-based attempt.
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorLoadInProgress));
+        // Let the auto-commit completion task run (resets the timer).
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        // The failed request was not re-queued for immediate retry: nothing is
+        // pending right after the failure.
+        assert!(
+            manager
+                .poll_with_coordinator(&coordinator, commit_interval)
+                .unsent_requests
+                .is_empty(),
+            "failed auto-commit must not be re-queued for immediate retry"
+        );
+
+        // After the next interval expires → a new auto-commit is generated
+        // (this is a fresh interval auto-commit, not a retry of the failed one).
+        let next = commit_interval * 4;
+        manager.update_timer_and_maybe_commit(next);
+        let poll_result = manager.poll_with_coordinator(&coordinator, next);
+        assert_eq!(
+            poll_result.unsent_requests.len(),
+            1,
+            "new auto-commit generated after the interval"
+        );
+    }
+
+    /// `testAutoCommitAsyncFailsWithStaleMemberEpochContinuesToCommitOnTheInterval`:
+    /// an interval auto-commit failing with fatal STALE_MEMBER_EPOCH just
+    /// resets the timer; the next auto-commit fires after the interval.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_async_fails_with_stale_member_epoch_continues_to_commit_on_the_interval() {
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000 (test_config)
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        let interval = 1_000;
+        manager.update_timer_and_maybe_commit(interval);
+        let unsent = poll_one_unsent(&manager, &coordinator, interval);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
+        tokio::task::yield_now().await;
+
+        // No request until the interval expires again.
+        assert!(
+            manager.poll_with_coordinator(&coordinator, interval).unsent_requests.is_empty(),
+            "no request until the interval expires"
+        );
+        manager.update_timer_and_maybe_commit(interval * 2);
+        let poll_result = manager.poll_with_coordinator(&coordinator, interval * 2);
+        assert_eq!(poll_result.unsent_requests.len(), 1, "auto-commit retried on the next interval");
+    }
+
+    /// `testAutoCommitEmptyDoesNotLeaveInflightRequestFlagOn`: an auto-commit
+    /// of empty offsets followed by a non-empty one still generates a request
+    /// (the empty one did not leave the inflight flag stuck on).
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_empty_does_not_leave_inflight_request_flag_on() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        // Assign but no position yet → allConsumed empty.
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+        }
+        // Auto-commit of empty offsets.
+        manager.update_timer_and_maybe_commit(1_000);
+        assert!(manager.inner.state.lock().unwrap().pending.unsent_offset_commits.is_empty());
+
+        // Now seek and auto-commit non-empty → must generate a request.
+        {
+            let mut s = subs.lock().unwrap();
+            s.seek(&tp, 100).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(2_000);
+        assert_eq!(
+            manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len(),
+            1,
+            "non-empty auto-commit after empty must generate a request"
+        );
+        let _ = coordinator;
+    }
+
+    /// `testAutocommitEnsureOnlyOneInflightRequest`: while an auto-commit is
+    /// in-flight, the next interval does NOT generate another request; once
+    /// the inflight completes, the next poll generates one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn autocommit_ensure_only_one_inflight_request() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(1_000);
+        let unsent = poll_one_unsent(&manager, &coordinator, 1_000);
+
+        // Next interval, inflight not yet completed → no new auto-commit.
+        manager.update_timer_and_maybe_commit(2_000);
+        assert!(
+            manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.is_empty(),
+            "no resend while a previous auto-commit is in-flight"
+        );
+
+        // Complete the inflight, then the next interval generates one.
+        unsent.handler().on_complete(offset_commit_response(HashMap::new()));
+        tokio::task::yield_now().await;
+        manager.update_timer_and_maybe_commit(3_000);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 3_000);
+        assert_eq!(
+            poll_result.unsent_requests.len(),
+            1,
+            "auto-commit resumes after inflight completes"
+        );
+    }
+
+    /// `testAutoCommitOnIntervalSkippedIfPreviousOneInFlight`: like the above,
+    /// but additionally verifies the timer is NOT reset while inflight (so the
+    /// next auto-commit fires as soon as the inflight completes).
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_on_interval_skipped_if_previous_one_in_flight() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(1_000);
+        let unsent = poll_one_unsent(&manager, &coordinator, 1_000);
+        // The timer was reset to 1000+1000=2000 by the firing auto-commit.
+        assert_eq!(manager.maximum_time_to_wait(1_000), 1_000);
+
+        // Next interval, inflight pending → no new request.
+        manager.update_timer_and_maybe_commit(2_000);
+        assert!(manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.is_empty());
+
+        // Complete inflight → next poll generates a request.
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+        tokio::task::yield_now().await;
+        manager.update_timer_and_maybe_commit(2_000);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 2_000);
+        assert_eq!(poll_result.unsent_requests.len(), 1);
+    }
+
+    /// `testAutoCommitBeforeRevocationNotBlockedByAutoCommitOnIntervalInflightRequest`:
+    /// a rebalance-flush auto-commit is generated even while an interval
+    /// auto-commit is in-flight, and does not complete until it gets its own
+    /// response.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_before_revocation_not_blocked_by_interval_inflight() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        // Interval auto-commit in-flight.
+        manager.update_timer_and_maybe_commit(1_000);
+        let interval_commit = poll_one_unsent(&manager, &coordinator, 1_000);
+
+        // Rebalance-flush auto-commit: generates a second request even though
+        // the interval one is in-flight.
+        let mut revocation_rx = manager.maybe_auto_commit_sync_before_rebalance(2_000, 0);
+        assert_eq!(
+            manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len(),
+            1,
+            "rebalance flush enqueues its own commit despite the interval one in-flight"
+        );
+
+        // Completing the interval commit does NOT complete the revocation one.
+        interval_commit
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::None));
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(revocation_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "rebalance flush must not complete until it receives its own response"
+        );
+    }
+
+    /// `testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch`
+    /// (×13): a rebalance-flush commit failing with a retriable error (or
+    /// STALE_MEMBER_EPOCH when a new epoch is known, but not
+    /// UNKNOWN_TOPIC_OR_PARTITION) is re-queued for retry; otherwise it is not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_sync_before_revocation_retries_on_retriable_and_stale_epoch() {
+        for (error, _expected) in offset_commit_exception_supplier() {
+            // Very long interval so interval auto-commits don't interfere.
+            let (manager, subs) = make_manager_with_subs_interval(0, true, i64::MAX);
+            let coordinator = coordinator_with_node();
+            let tp = topic_partition("topic", 1);
+            {
+                let mut s = subs.lock().unwrap();
+                s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+                s.seek(&tp, 5).expect("seek");
+            }
+            let deadline_ms = manager.inner.retry_backoff_ms.saturating_mul(2);
+            let _rx = manager.maybe_auto_commit_sync_before_rebalance(deadline_ms, 0);
+
+            // STALE_MEMBER_EPOCH is only retried when a new valid epoch is known.
+            if error == Errors::StaleMemberEpoch {
+                manager.on_member_epoch_updated(Some(8), "member1".to_string());
+            }
+
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            unsent.handler().on_complete(offset_commit_response_single(&tp, error));
+
+            let retriable_for_rebalance =
+                (error.is_retriable() || error == Errors::StaleMemberEpoch) && error != Errors::UnknownTopicOrPartition;
+            if retriable_for_rebalance {
+                let n = yield_until(
+                    || {
+                        let len = manager.inner.state.lock().unwrap().pending.unsent_offset_commits.len();
+                        if len > 0 { Some(len) } else { None }
+                    },
+                    "retriable rebalance-flush error did not re-queue",
+                )
+                .await;
+                assert_eq!(n, 1, "retriable {error:?} re-queues the rebalance flush");
+            } else {
+                // Non-retriable (or UTOP): not re-queued. Yield so the driver
+                // observes the failure first.
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                assert!(
+                    manager.inner.state.lock().unwrap().pending.unsent_offset_commits.is_empty(),
+                    "non-retriable {error:?} must not re-queue the rebalance flush"
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    //                §31 — interceptor invocation on auto-commit
+    // ---------------------------------------------------------------------
+
+    use crate::consumer::ConsumerRecords;
+    use crate::consumer::interceptor::ConsumerInterceptor;
+    use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
+
+    /// Records `on_commit` invocations so the §31 tests can assert the
+    /// interceptor fired (and with which offsets).
+    struct RecordingInterceptor {
+        recorded: Mutex<Vec<HashMap<TopicPartition, OffsetAndMetadata>>>,
+    }
+
+    impl RecordingInterceptor {
+        fn new() -> Self {
+            Self { recorded: Mutex::new(Vec::new()) }
+        }
+        fn calls(&self) -> Vec<HashMap<TopicPartition, OffsetAndMetadata>> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    impl<K: 'static, V: 'static> ConsumerInterceptor<K, V> for RecordingInterceptor {
+        fn on_consume(&self, _records: &mut ConsumerRecords<K, V>) {}
+        fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+            self.recorded.lock().unwrap().push(offsets.clone());
+        }
+    }
+
+    /// `testAutocommitInterceptorsInvoked` (§31): on auto-commit success, the
+    /// interceptor `on_commit` is enqueued (and fires on
+    /// `invoke_pending_callbacks`) with the committed offsets.
+    #[tokio::test(flavor = "current_thread")]
+    async fn autocommit_interceptors_invoked() {
+        // Need an Arc<RecordingInterceptor> we can both register and inspect.
+        // ConsumerInterceptors takes Box<dyn ConsumerInterceptor>, so use a
+        // shared recorder behind two Arc clones via a thin forwarding wrapper.
+        let recorder = Arc::new(RecordingInterceptor::new());
+        let interceptors: ConsumerInterceptors<Vec<u8>, Vec<u8>> =
+            ConsumerInterceptors::new(vec![Box::new(SharedRecorder(Arc::clone(&recorder)))]);
+        let invoker = Arc::new(OffsetCommitCallbackInvoker::new(interceptors));
+
+        let (manager, subs) = make_manager_with_subs(0, true);
+        manager.set_auto_commit_interceptor_hook(Arc::clone(&invoker) as Arc<dyn AutoCommitInterceptorHook>);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(1_000);
+        let unsent = poll_one_unsent(&manager, &coordinator, 1_000);
+        // Successful response → interceptor invocation enqueued.
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+
+        // Let the spawned auto-commit completion task run so it enqueues the
+        // interceptor invocation, then drain the invoker.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        invoker.invoke_pending_callbacks().await;
+
+        let calls = recorder.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "interceptor on_commit fired exactly once on auto-commit success"
+        );
+        let expected = singleton_offset(tp, 100);
+        assert_eq!(calls[0], expected, "interceptor invoked with the committed offsets");
+    }
+
+    /// `testAutocommitInterceptorsNotInvokedOnError` (§31): on an auto-commit
+    /// that fails with a partition error, the interceptor `on_commit` is NOT
+    /// enqueued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn autocommit_interceptors_not_invoked_on_error() {
+        let recorder = Arc::new(RecordingInterceptor::new());
+        let interceptors: ConsumerInterceptors<Vec<u8>, Vec<u8>> =
+            ConsumerInterceptors::new(vec![Box::new(SharedRecorder(Arc::clone(&recorder)))]);
+        let invoker = Arc::new(OffsetCommitCallbackInvoker::new(interceptors));
+
+        let (manager, subs) = make_manager_with_subs(0, true);
+        manager.set_auto_commit_interceptor_hook(Arc::clone(&invoker) as Arc<dyn AutoCommitInterceptorHook>);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic1", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(1_000);
+        let unsent = poll_one_unsent(&manager, &coordinator, 1_000);
+        // Partition error → interceptor must NOT be enqueued.
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::NetworkException));
+
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        invoker.invoke_pending_callbacks().await;
+        assert!(recorder.calls().is_empty(), "interceptor must NOT fire on auto-commit error");
+    }
+
+    /// Thin forwarding wrapper so a single `Arc<RecordingInterceptor>` can be
+    /// both registered in the interceptor chain (which takes ownership via
+    /// `Box`) and inspected by the test.
+    struct SharedRecorder(Arc<RecordingInterceptor>);
+
+    impl<K: 'static, V: 'static> ConsumerInterceptor<K, V> for SharedRecorder {
+        fn on_consume(&self, _records: &mut ConsumerRecords<K, V>) {}
+        fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+            ConsumerInterceptor::<K, V>::on_commit(&*self.0, offsets);
+        }
+    }
+
+    /// `make_manager_with_subs` variant with a caller-chosen auto-commit
+    /// interval (Java's `create(autoCommitEnabled, autoCommitInterval)`).
+    fn make_manager_with_subs_interval(
+        now_ms: i64,
+        enable_auto_commit: bool,
+        interval_ms: i64,
+    ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>) {
+        let mut cfg = test_config(enable_auto_commit);
+        cfg.auto_commit_interval_ms = interval_ms.clamp(0, i64::from(i32::MAX)) as i32;
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &cfg,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        let mgr = CommitRequestManager::new(&cfg, metadata, Arc::clone(&subs), GROUP_ID, None, now_ms);
+        (mgr, subs)
     }
 }
