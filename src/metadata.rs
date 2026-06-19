@@ -197,6 +197,14 @@ struct MetadataInner {
     is_closed: bool,
     last_seen_leader_epochs: HashMap<TopicPartition, i32>,
     bootstrap_addresses: Vec<(String, SocketAddr)>,
+    /// Test-only counter of [`Metadata::request_update`] invocations. Java
+    /// tests assert `verify(metadata, times(N)).requestUpdate(anyBoolean())`;
+    /// the sticky `need_full_update` flag (read by `update_requested`) cannot
+    /// distinguish a second call from the flag left set by the first, so a
+    /// call-count probe is required to mirror Mockito's `times(N)`.
+    /// `#[cfg(test)]`-gated — no production memory or CPU cost.
+    #[cfg(test)]
+    request_update_call_count: i64,
 }
 
 /// Result of `new_metadata_request_and_version`.
@@ -347,6 +355,8 @@ impl Metadata {
                 metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
+                #[cfg(test)]
+                request_update_call_count: 0,
             }),
             update_notify: Notify::new(),
             retain_topic_fn: None,
@@ -408,6 +418,8 @@ impl Metadata {
                 metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
+                #[cfg(test)]
+                request_update_call_count: 0,
             }),
             update_notify: Notify::new(),
             retain_topic_fn: overrides.retain_topic_fn,
@@ -504,6 +516,10 @@ impl Metadata {
     /// Returns the current `update_version` before the update.
     pub fn request_update(&self, reset_equivalent_response_backoff: bool) -> i32 {
         let mut inner = self.inner.lock().unwrap();
+        #[cfg(test)]
+        {
+            inner.request_update_call_count += 1;
+        }
         inner.need_full_update = true;
         if reset_equivalent_response_backoff {
             inner.equivalent_response_count = 0;
@@ -599,6 +615,19 @@ impl Metadata {
     pub fn update_requested(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.need_full_update || inner.need_partial_update
+    }
+
+    /// Test-only accessor exposing the cumulative count of
+    /// [`Self::request_update`] calls. Mirrors Mockito's
+    /// `verify(metadata, times(N)).requestUpdate(anyBoolean())`: the sticky
+    /// `need_full_update` flag read by [`Self::update_requested`] stays `true`
+    /// once set, so it cannot detect whether a *second* code path
+    /// independently re-requested an update. Snapshot this counter
+    /// before/after each pass to pin the per-pass re-request contract.
+    #[cfg(test)]
+    pub(crate) fn request_update_call_count_for_test(&self) -> i64 {
+        let inner = self.inner.lock().unwrap();
+        inner.request_update_call_count
     }
 
     /// Test-only accessor exposing the `need_full_update` flag in

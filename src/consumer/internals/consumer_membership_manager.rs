@@ -2354,11 +2354,26 @@ mod tests {
     }
 
     /// Translated from
-    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`.
-    /// Even if the auto-commit before rebalance fails, the revocation
-    /// still completes (Java's "proceed with reconciliation anyway").
+    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`
+    /// (`ConsumerMembershipManagerTest.java:1579`).
+    /// Even if the auto-commit before rebalance fails EXCEPTIONALLY, the
+    /// revocation still completes (Java's "proceed with reconciliation
+    /// anyway"). Java arranges a commit future and
+    /// `commitResult.completeExceptionally(new KafkaException("...non-retriable
+    /// error"))` (test:1596), then asserts the revocation reaches
+    /// completion regardless.
+    ///
+    /// To exercise the failure arm (`Ok(Err(err))` at reconcile step 8a,
+    /// lines 638-645) we must drive a REAL commit failure: seed a consumed
+    /// offset so the auto-commit actually enqueues a request, spawn the
+    /// reconcile (which parks awaiting the commit future), then fail that
+    /// commit with a non-retriable error. A mutation that changed the
+    /// `Ok(Err(err))` arm to `return Err(err)` (abort revocation on commit
+    /// failure) would leave the member in RECONCILING and fail this test.
     #[tokio::test]
     async fn reconcile_partitions_revoked_with_failed_auto_commit_completes_revocation_anyway() {
+        // No listener: the §31 revoked-callback handshake short-circuits,
+        // so the only thing the reconcile parks on is the commit future.
         let (mgr, _rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
@@ -2368,16 +2383,37 @@ mod tests {
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
         mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // Seed a valid position on the owned partition so
+        // `subscriptions.allConsumed()` is non-empty and the auto-commit
+        // before rebalance actually enqueues a commit request (otherwise it
+        // short-circuits to immediate Ok — the previous bug in this test).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
 
         receive_empty_assignment(&mgr);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
-        // The commit future result is logged + ignored regardless of
-        // success/failure; reconcile completes the revocation. (The
-        // production reconcile maps both Ok(Err) and Err to "proceed
-        // anyway", so the revocation always completes — this is the
-        // behavioral contract being pinned.)
-        mgr.reconcile(0, true).await.unwrap();
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+
+        // The reconcile parks at step 8a awaiting the auto-commit. Wait for
+        // the commit manager to enqueue the unsent commit request, then
+        // fail it with a NON-retriable error — mirroring Java's
+        // `commitResult.completeExceptionally(new KafkaException(...))`.
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        loop {
+            if commit_mgr.fail_first_unsent_commit_for_test(KafkaError::new(Errors::OffsetMetadataTooLarge)) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Reconcile must proceed with the revocation ANYWAY despite the
+        // failed commit, reaching ACKNOWLEDGING with everything revoked.
+        bg.await.unwrap().unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
@@ -2659,20 +2695,40 @@ mod tests {
         receive_assignment(&mgr, topic_id, vec![0, 1]);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
+        let metadata = mgr.abstract_mm.metadata.metadata_arc();
+
         // First resolution attempt: unresolved -> request update.
+        // Java asserts `verify(metadata).requestUpdate(anyBoolean())` here.
+        // The sticky `update_requested()` flag cannot tell a second call
+        // from the flag left set by the first; assert on the per-pass call
+        // counter instead (Mockito `times(N)` equivalent).
         let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
         assert!(resolved.is_empty());
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
-        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert!(metadata.update_requested());
+        assert_eq!(
+            metadata.request_update_call_count_for_test(),
+            1,
+            "first pass must request a metadata update exactly once",
+        );
 
         // Second attempt, metadata still missing the topic -> request
         // update AGAIN (still nothing resolved, still awaiting). The
         // production method always re-requests an update for unresolved
-        // ids (Java's per-poll `requestUpdate`).
+        // ids (Java's per-poll `requestUpdate`). Java asserts
+        // `verify(metadata, times(2)).requestUpdate(anyBoolean())` — the
+        // call count must advance 1 -> 2 across the two passes. A mutation
+        // dropping the second re-request would leave the counter at 1 and
+        // fail this assertion (the sticky flag would NOT catch it).
         let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
         assert!(resolved.is_empty());
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
-        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert!(metadata.update_requested());
+        assert_eq!(
+            metadata.request_update_call_count_for_test(),
+            2,
+            "second pass must independently re-request a metadata update (times(2))",
+        );
         assert_eq!(mgr.state(), MemberState::Reconciling);
         // unused in this test now that we use the resolution method directly.
         let _ = &mut rx;
@@ -3056,63 +3112,98 @@ mod tests {
     }
 
     /// Translated from
-    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`.
-    /// A member stuck reconciling (here, on the revoked callback as the
-    /// post-commit park point) rejoins; the delayed result is discarded.
-    /// (We use the revoked-callback park point as the in-flight stall,
-    /// since the Rust reconcile awaits the commit synchronously before
-    /// the callback; the discard semantics are identical — the rejoin
-    /// flag set during the stall causes `maybe_abort_reconciliation` to
-    /// fire.)
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`
+    /// (`ConsumerMembershipManagerTest.java:566`).
+    /// A member is stuck reconciling assignment A, parked on the REVOCATION
+    /// COMMIT future (Java's `mockNewAssignmentAndRevocationStuckOnCommit`,
+    /// test:576). While parked on the commit it gets fenced and rejoins;
+    /// when the commit later completes (`commitResult.complete(null)`,
+    /// test:591) the in-flight reconcile must be DISCARDED — no assignment
+    /// applied, no ack sent.
+    ///
+    /// Unlike the sibling
+    /// `delayed_reconciliation_result_discarded_after_partitions_revoked_callback_if_member_rejoins`
+    /// (which parks on the revoked CALLBACK), this test parks specifically
+    /// on the COMMIT future to exercise the rejoin-during-commit timing
+    /// Java places at this park point. We therefore use a manager with a
+    /// real `CommitRequestManager` (`make_with_commit_manager`) and seed a
+    /// consumed offset so the auto-commit before rebalance actually
+    /// enqueues a request the test controls.
+    ///
+    /// No listener: the §31 revoked/lost callbacks short-circuit, so the
+    /// reconcile's ONLY park point is the commit future — the rejoin is
+    /// guaranteed to land while the member is stalled on the commit.
+    ///
+    /// Mutation resistance: the discard relies on `maybe_abort_reconciliation`
+    /// (step 10, after the commit await + revoked callback). Deleting that
+    /// abort guard would let the empty-target reconcile transition to
+    /// ACKNOWLEDGING, failing the `assert_ne!(.., Acknowledging)` below.
     #[tokio::test]
     async fn delayed_reconciliation_result_discarded_after_commit_if_member_rejoins() {
-        let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1", "topic3"]);
+        let (mgr, _rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
         mgr.transition_to_joining().unwrap();
         let topic1 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1)]);
         mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // Seed a consumed offset so the auto-commit before rebalance
+        // enqueues a real commit request (otherwise it short-circuits and
+        // there is no commit to park on).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
 
-        // New assignment {1,2} revokes owned 0.
-        receive_assignment(&mgr, topic1, vec![1, 2]);
+        // Empty assignment revokes owned topic1-0, triggering the
+        // revocation commit the reconcile parks on.
+        receive_empty_assignment(&mgr);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
         let mgr = Arc::new(mgr);
         let mgr_clone = mgr.clone();
         let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
-        let env = rx.recv().await.expect("revoked event");
-        let stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => ack,
-            other => panic!("unexpected event: {other:?}"),
-        };
-        assert!(reconciliation_in_progress(&mgr));
 
-        // Rejoin via the fence path (FENCED -> JOINING), mirroring Java's
-        // `testFencedMemberReleasesAssignmentAndTransitionsToJoining`.
-        // JOINING is only reachable from FENCED/UNSUBSCRIBED/STALE, so a
-        // direct transition_to_joining from RECONCILING is invalid — the
-        // fence is the rejoin trigger. Owned topic1-0 makes fence fire
-        // onPartitionsLost; drive + ack it.
-        let mgr_fence = mgr.clone();
-        let fence = tokio::spawn(async move { mgr_fence.transition_to_fenced(0).await });
-        let env = rx.recv().await.expect("lost event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
-            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
-            ack.send(Ok(())).unwrap();
-        } else {
-            panic!("expected lost callback");
+        // Wait until the reconcile has parked on the commit, i.e. the
+        // commit manager has enqueued the unsent commit request AND the
+        // reconcile has marked reconciliation in progress.
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        loop {
+            if commit_mgr.unsent_offset_commits_len_for_test() > 0 && reconciliation_in_progress(&mgr) {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        fence.await.unwrap().unwrap();
+
+        // Rejoin via the fence path while still parked on the commit
+        // (FENCED -> JOINING), mirroring Java's
+        // `testFencedMemberReleasesAssignmentAndTransitionsToJoining`. With
+        // no listener the onPartitionsLost callback short-circuits, so the
+        // fence completes synchronously and sets
+        // `rejoined_while_reconciliation_in_progress`.
+        mgr.transition_to_fenced(0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
 
-        // New assignment after rejoin.
+        // New assignment after rejoin (topic3-5).
         let topic3 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
         receive_assignment(&mgr, topic3, vec![5]);
 
-        // Complete the stuck callback -> discarded.
-        stuck_ack.send(Ok(())).unwrap();
+        // The commit completes AFTER the rejoin (Java: commitResult.complete(null)).
+        // The in-flight reconcile must now be discarded.
+        assert!(
+            commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()),
+            "expected an unsent commit to complete",
+        );
         bg.await.unwrap().unwrap();
+
+        // Discarded: member did NOT advance to ACKNOWLEDGING (no ack sent)
+        // and the in-flight reconcile was interrupted. The fence already
+        // released the old assignment and transitioned to JOINING; the
+        // post-rejoin target (topic3-5) is what is pending to reconcile
+        // next — proving the stale empty-target reconcile was NOT applied.
         assert_ne!(mgr.state(), MemberState::Acknowledging);
         assert!(!reconciliation_in_progress(&mgr));
         assert_eq!(

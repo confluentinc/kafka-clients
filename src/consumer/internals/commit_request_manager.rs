@@ -1077,6 +1077,18 @@ impl CommitRequestManager {
         guard.pending.unsent_offset_fetches.len()
     }
 
+    /// Test-only accessor exposing the number of pending (unsent)
+    /// `OffsetCommit` requests on the queue. Sibling to
+    /// [`Self::inner_state_for_test`] (which counts unsent `OffsetFetch`).
+    /// Used by `ConsumerMembershipManager` reconcile tests to detect when
+    /// the auto-commit before rebalance has enqueued its commit request —
+    /// i.e. when the reconcile has parked on the commit future.
+    #[cfg(test)]
+    pub(crate) fn unsent_offset_commits_len_for_test(&self) -> usize {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard.pending.unsent_offset_commits.len()
+    }
+
     /// Test-only accessor exposing a clone of the current `MemberInfo`
     /// (member id + member epoch). Used by sibling-module tests
     /// (e.g. `async_kafka_consumer` Issue-7 regression) to verify that
