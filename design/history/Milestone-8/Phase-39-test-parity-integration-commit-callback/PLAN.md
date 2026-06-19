@@ -172,3 +172,64 @@ Re-evaluate after first run.
    `cargo xtask format-check`. Broker availability — attempt to run; if no
    Docker, report compile-only + identical gating.
 4. Self-review vs report 07.
+
+## KNOWN API-CAPABILITY GAP — calling consumer methods from inside a rebalance callback (Issue 8 / Issue 3)
+
+**Status: confirmed structural limitation of the current Rust consumer API.
+NOT under-delivery. Tracked separately by the team; do NOT attempt an API
+redesign in this phase.** The Critic confirmed this in COMMENTS.39 Issue 3.
+
+### The gap
+
+In the Java client a `ConsumerRebalanceListener` callback may freely call
+back into the same consumer instance — `assign()`, `position()`, `seek()`,
+`pause()`, `assignment()`, `beginningOffsets()`, etc. are all routinely used
+from inside `onPartitionsAssigned` / `onPartitionsRevoked` /
+`onPartitionsLost`. Several `PlaintextConsumerCallbackTest` cases exercise
+exactly this, and `testAutoCommitOnRebalance` depends on an in-callback
+`pause()`.
+
+The Rust API cannot support this with its current shape:
+
+1. `ConsumerRebalanceListener` methods take `&self`, and the listener is held
+   as `Arc<dyn ConsumerRebalanceListener>` (it has NO handle to the
+   consumer). See `src/consumer/consumer_rebalance_listener.rs`.
+2. Per `consumer-threading.md` §31 the listener is invoked INLINE on the
+   caller's task inside `process_background_events`, which runs inside
+   `poll()` / `commit_*()` while `&mut self` (the whole consumer) is
+   exclusively borrowed by that stack frame. The borrow checker therefore
+   forbids the listener from holding any `&mut`-capable consumer handle, and
+   `Box<dyn Consumer>` is not `Clone`, so there is no second handle to lend.
+3. Even the read-only `&self` calls (`assignment()`, `beginning_offsets()`,
+   `position()`) cannot be rescued by a driver/controller-channel pattern:
+   the driver task is the very task currently blocked inside `poll()`, so it
+   could not service the listener's request until `poll()` returns — but
+   `poll()` will not return until the listener returns. That is a deadlock,
+   which is precisely why §31 mandates inline invocation. So the read-only
+   subset is structurally unsupported too.
+
+### Consequence in this phase
+
+The 8 in-callback-reentrancy tests in
+`plaintext_consumer_callback_test.rs` (assign / assignment / seek / pause /
+position / beginningOffsets called from inside a rebalance callback) are
+`#[ignore]`d test bodies that preserve the Java assertion shape and cite
+this gap, keeping the Java inventory traceable and wired into CI. This
+matches the precedent set by the poll suite (Phase-13a Issue 8).
+`testAutoCommitOnRebalance` is translated WITHOUT the in-callback `pause()`
+and de-flaked by producing no records to the seeked partition (so no fetch
+can advance the seeked position before the rebalance auto-commit captures
+it) — see the deviation note on `test_async_consumer_auto_commit_on_rebalance`.
+
+### Future direction (for the separate tracking item — not implemented here)
+
+A future API revision could close the gap, e.g.:
+  - a `ConsumerRebalanceListener` variant whose callbacks receive a
+    restricted, `&mut`-capable rebalance-context handle (a `RebalanceCallbacks`
+    object exposing the subset of consumer operations that are safe to call
+    mid-rebalance); or
+  - a re-entrant consumer handle design that lets the inline callback issue
+    operations against the consumer it is running inside.
+
+Recording the gap here (per consumer-threading.md §31) prevents it from being
+silently normalized by the growing set of `#[ignore]`d callback tests.
