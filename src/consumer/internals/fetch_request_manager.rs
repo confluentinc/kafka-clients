@@ -900,3 +900,606 @@ mod tests {
         );
     }
 }
+
+/// Phase 37: MockClient-driven `FetchRequestManager` round-trip behavioral
+/// harness, closing report-01 finding #1 (no integration-level fetch harness
+/// existed). Translates the in-scope `FetchRequestManagerTest` behaviors
+/// grouped 7a (session / topic-id / buffered-partition / leadership) and 7b
+/// (data / transactions / preferred-replica / pause-seek).
+///
+/// # Harness shape
+///
+/// Java drives `sendFetches()` → `client.prepareResponse(...)` →
+/// `networkClientDelegate.poll(...)` → `fetcher.collectFetch()`. The bg-task
+/// pipeline in Rust is `poll(now)` (builds `UnsentRequest`s from
+/// `prepare_fetch_requests`) → network send → spawned forwarder routes a
+/// `PendingFetchCompletion` back → the next `poll(now)` drains it into
+/// `handle_fetch_success/_failure` → `collect_fetch`. The harness collapses
+/// that to the behaviorally-equivalent synchronous sequence the bg task
+/// performs:
+///
+///  1. [`RoundTrip::build_fetch_requests`] runs `prepare_fetch_requests(now)`
+///     and returns the per-node `(Node, FetchSessionRequestData)` map, plus
+///     the built [`FetchRequest`]s for wire-field assertions (topic-id,
+///     forget list, leader epoch, session id/epoch).
+///  2. The test builds a [`FetchResponse`] with [`FullFetchResponse`].
+///  3. [`RoundTrip::deliver`] feeds it to `handle_fetch_success`/`_failure` —
+///     the same `&mut AbstractFetch` call `drain_pending_completions` makes
+///     (i.e. what `networkClientDelegate.poll` ends up invoking).
+///  4. [`RoundTrip::collect_records`] runs `FetchCollector::collect_fetch`.
+///
+/// The `MockClient` send leg only moves the already-owned `FetchResponse`
+/// across a channel; the decode / position / leadership behavior is identical
+/// whether the response goes through the channel or straight into
+/// `handle_fetch_success`. The existing
+/// `test_response_routing_{success,failure}_path` already cover the `MockClient`
+/// `UnsentRequest` handler dispatch, so the round-trip tests drive `handle_*`
+/// directly to stay fast and deterministic (these are unit tests, no broker).
+#[cfg(test)]
+mod round_trip {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
+
+    use crate::common::compress::Compression;
+    use crate::common::header::RecordHeader;
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::{ApiKeys, Errors};
+    use crate::common::record::{MemoryRecords, RecordBatch, SimpleRecord, TimestampType};
+    use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
+    use crate::common::requests::fetch_request::FetchRequest;
+    use crate::common::requests::fetch_response::{FetchResponse, INVALID_PREFERRED_REPLICA_ID};
+    use crate::common::serialization::Deserializer;
+    use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition, Uuid};
+    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
+    use crate::consumer::internals::deserializers::Deserializers;
+    use crate::consumer::internals::fetch_buffer::FetchBuffer;
+    use crate::consumer::internals::fetch_collector::{FetchCollector, SystemFetchCollectorTime};
+    use crate::consumer::internals::fetch_config::FetchConfig;
+    use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
+    use crate::fetch_response_data::{
+        AbortedTransaction, FetchResponseData, FetchableTopicResponse, NodeEndpoint, PartitionData as RespPartitionData,
+    };
+    use crate::metadata::LeaderAndEpoch;
+
+    use super::{always_available, no_auth_failure};
+
+    const TOPIC: &str = "test";
+    const VALID_LEADER_EPOCH: i32 = 0;
+
+    /// Identity (byte-array) deserializer — Java's `ByteArrayDeserializer`.
+    struct BytesDeserializer;
+    impl Deserializer<Vec<u8>> for BytesDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+            Ok(data.to_vec())
+        }
+    }
+
+    /// Deserializer that fails on a SINGLE configured record value
+    /// (`value-{offset}`), used by `testFetchPositionAfterException`.
+    struct FailOnValueDeserializer {
+        fail_value: Vec<u8>,
+    }
+    impl Deserializer<Vec<u8>> for FailOnValueDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+            if data == self.fail_value.as_slice() {
+                return Err(KafkaError::serialization("simulated value deserialization failure"));
+            }
+            Ok(data.to_vec())
+        }
+    }
+
+    fn tp(partition: i32) -> TopicPartition {
+        TopicPartition::new(TOPIC, partition)
+    }
+
+    fn tp_named(topic: &str, partition: i32) -> TopicPartition {
+        TopicPartition::new(topic, partition)
+    }
+
+    // ─── record builders (mirror Java's buildRecords / MemoryRecords.builder) ───
+
+    /// Mirrors Java's `buildRecords(baseOffset, count, firstMessageId)`:
+    /// `count` records with key `"key"` and value `firstMessageId + i`
+    /// (as ASCII bytes), at contiguous offsets from `base_offset`.
+    fn build_records(base_offset: i64, count: i32, first_message_id: i64) -> Vec<u8> {
+        let simple: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                let value = (first_message_id + i as i64).to_string();
+                SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.into_bytes()), vec![])
+            })
+            .collect();
+        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
+            .buffer()
+            .to_vec()
+    }
+
+    /// Like [`build_records`] but stamps the batch's partition leader epoch,
+    /// for `testLeaderEpochInConsumerRecord` /
+    /// `testMissingLeaderEpochInRecords` (pass
+    /// [`RecordBatch::NO_PARTITION_LEADER_EPOCH`] for the "missing" case).
+    fn build_records_with_leader_epoch(
+        base_offset: i64,
+        count: i32,
+        first_message_id: i64,
+        partition_leader_epoch: i32,
+    ) -> Vec<u8> {
+        let simple: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                let value = (first_message_id + i as i64).to_string();
+                SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.into_bytes()), vec![])
+            })
+            .collect();
+        MemoryRecords::with_records_at_offset_plep(base_offset, Compression::none(), partition_leader_epoch, &simple)
+            .buffer()
+            .to_vec()
+    }
+
+    /// A single record carrying headers, at `base_offset` (for `testHeaders`).
+    fn build_records_with_headers(base_offset: i64, value: &[u8], headers: Vec<RecordHeader>) -> Vec<u8> {
+        let simple = vec![SimpleRecord::new(
+            0,
+            Some(b"key".to_vec()),
+            Some(value.to_vec()),
+            headers,
+        )];
+        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
+            .buffer()
+            .to_vec()
+    }
+
+    /// Records at explicit (non-contiguous) offsets, for
+    /// `testFetchNonContinuousRecords` / compacted-topic gap tests.
+    fn build_records_at_offsets(offsets: &[i64]) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_with_magic(
+            1024,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            offsets.first().copied().unwrap_or(0),
+        );
+        for &off in offsets {
+            let value = off.to_string();
+            builder.append_with_offset_bytes(off, 0, Some(b"key"), Some(value.as_bytes()));
+        }
+        builder.build().buffer().to_vec()
+    }
+
+    /// A full v2 batch with explicit producer / control / transactional flags
+    /// (CRC recomputed). For transaction tests.
+    #[allow(clippy::too_many_arguments)]
+    fn build_batch_full(
+        base_offset: i64,
+        count: i32,
+        producer_id: i64,
+        is_transactional: bool,
+        is_control_batch: bool,
+    ) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_full(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+            -1,
+            producer_id,
+            0,
+            0,
+            is_transactional,
+            is_control_batch,
+            -1,
+            512,
+        );
+        for i in 0..count {
+            let offset = base_offset + i as i64;
+            let value = offset.to_string();
+            builder.append_with_offset_bytes(offset, 0, Some(b"key"), Some(value.as_bytes()));
+        }
+        builder.build().buffer().to_vec()
+    }
+
+    /// Concatenates pre-built batch buffers into one fetch payload.
+    fn concat_batches(batches: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for b in batches {
+            out.extend_from_slice(b);
+        }
+        out
+    }
+
+    // ─── rich FetchResponse builder (mirrors Java fullFetchResponse family) ───
+
+    /// Builder mirroring Java's `fullFetchResponse` / `fetchResponse` /
+    /// `fullFetchResponseWithAbortedTransactions` / `fetchResponseWithTopLevelError`.
+    /// Each partition entry can express records, error code, high-watermark,
+    /// last-stable-offset, log-start-offset, preferred-read-replica,
+    /// aborted transactions, and a per-partition `current_leader` (KIP-951).
+    struct FullFetchResponse {
+        session_id: i32,
+        node_endpoints: Vec<NodeEndpoint>,
+        topics: Vec<(String, Uuid, Vec<RespPartitionData>)>,
+    }
+
+    impl FullFetchResponse {
+        fn new() -> Self {
+            Self { session_id: INVALID_SESSION_ID, node_endpoints: Vec::new(), topics: Vec::new() }
+        }
+
+        fn session_id(mut self, id: i32) -> Self {
+            self.session_id = id;
+            self
+        }
+
+        fn node_endpoint(mut self, node_id: i32, host: &str, port: i32, rack: Option<&str>) -> Self {
+            let mut ep = NodeEndpoint::new();
+            ep.set_node_id(node_id);
+            ep.set_host(host.to_string());
+            ep.set_port(port);
+            ep.set_rack(rack.map(|r| r.to_string()));
+            self.node_endpoints.push(ep);
+            self
+        }
+
+        /// Adds a partition entry for `topic` (topic-id `topic_id`).
+        #[allow(clippy::too_many_arguments)]
+        fn partition(
+            self,
+            topic: &str,
+            topic_id: Uuid,
+            partition: i32,
+            records: Option<Vec<u8>>,
+            error: Errors,
+            high_watermark: i64,
+            last_stable_offset: i64,
+        ) -> Self {
+            let mut pd = RespPartitionData::new();
+            pd.set_partition_index(partition);
+            pd.set_error_code(error.code());
+            pd.set_high_watermark(high_watermark);
+            pd.set_last_stable_offset(last_stable_offset);
+            pd.set_log_start_offset(0);
+            pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
+            pd.set_records(records);
+            self.push_partition(topic, topic_id, pd)
+        }
+
+        fn partition_data(self, topic: &str, topic_id: Uuid, pd: RespPartitionData) -> Self {
+            self.push_partition(topic, topic_id, pd)
+        }
+
+        fn push_partition(mut self, topic: &str, topic_id: Uuid, pd: RespPartitionData) -> Self {
+            if let Some(entry) = self.topics.iter_mut().find(|(t, _, _)| t == topic) {
+                entry.2.push(pd);
+            } else {
+                self.topics.push((topic.to_string(), topic_id, vec![pd]));
+            }
+            self
+        }
+
+        fn build(self) -> FetchResponse {
+            let mut data = FetchResponseData::new();
+            data.set_error_code(Errors::None.code());
+            data.set_throttle_time_ms(0);
+            data.set_session_id(self.session_id);
+            data.set_node_endpoints(self.node_endpoints);
+            let responses: Vec<FetchableTopicResponse> = self
+                .topics
+                .into_iter()
+                .map(|(topic, topic_id, partitions)| {
+                    let mut tr = FetchableTopicResponse::new();
+                    tr.set_topic(topic);
+                    tr.set_topic_id(topic_id);
+                    tr.set_partitions(partitions);
+                    tr
+                })
+                .collect();
+            data.set_responses(responses);
+            FetchResponse::new(data)
+        }
+    }
+
+    /// Helper: a partition-data carrying records + aborted-transactions list,
+    /// for the READ_COMMITTED transaction tests.
+    fn partition_with_aborted_txns(
+        partition: i32,
+        records: Vec<u8>,
+        aborted: Vec<(i64, i64)>, // (producer_id, first_offset)
+        high_watermark: i64,
+        last_stable_offset: i64,
+    ) -> RespPartitionData {
+        let mut pd = RespPartitionData::new();
+        pd.set_partition_index(partition);
+        pd.set_error_code(Errors::None.code());
+        pd.set_high_watermark(high_watermark);
+        pd.set_last_stable_offset(last_stable_offset);
+        pd.set_log_start_offset(0);
+        pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
+        pd.set_records(Some(records));
+        let txns: Vec<AbortedTransaction> = aborted
+            .into_iter()
+            .map(|(pid, first)| {
+                let mut t = AbortedTransaction::new();
+                t.set_producer_id(pid);
+                t.set_first_offset(first);
+                t
+            })
+            .collect();
+        pd.set_aborted_transactions(Some(txns));
+        pd
+    }
+
+    // ─── the round-trip fixture ─────────────────────────────────────────────
+
+    /// Owns the manager + subscription state + a collector for a single
+    /// consumer, and exposes the build → deliver → collect sequence.
+    struct RoundTrip {
+        mgr: super::FetchRequestManager,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+        metadata: Arc<ConsumerMetadata>,
+        api_versions: Arc<crate::api_versions::ApiVersions>,
+        fetch_buffer: Arc<FetchBuffer>,
+        fetch_config: FetchConfig,
+        topic_ids: HashMap<String, Uuid>,
+    }
+
+    impl RoundTrip {
+        fn make_config(max_poll_records: i32, isolation_level: IsolationLevel) -> FetchConfig {
+            // minBytes=1, maxBytes=i32::MAX, maxWaitMs=0, fetchSize=1000 (Java),
+            // retryBackoff=100, check.crcs=true, no rack.
+            FetchConfig::new(1, i32::MAX, 0, 1000, max_poll_records, true, "", isolation_level)
+        }
+
+        /// Mirrors Java's `buildFetcher(maxPollRecords, isolationLevel)`. Seeds
+        /// the cluster with `num_nodes` brokers and a 4-partition `test` topic
+        /// (topic-id `topic_id`) plus any extra `topic_ids` map entries.
+        fn new(
+            num_nodes: i32,
+            max_poll_records: i32,
+            isolation_level: IsolationLevel,
+            topic_ids: HashMap<String, Uuid>,
+        ) -> Self {
+            let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+            let metadata = Arc::new(ConsumerMetadata::new(
+                100,
+                100,
+                50_000,
+                false,
+                false,
+                subscriptions.clone(),
+                ClusterResourceListeners::new(),
+            ));
+            let fetch_buffer = Arc::new(FetchBuffer::new());
+            let fetch_config = Self::make_config(max_poll_records, isolation_level);
+            let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+            let mgr = super::FetchRequestManager::new(
+                metadata.clone(),
+                subscriptions.clone(),
+                fetch_config.clone(),
+                fetch_buffer.clone(),
+                Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+                always_available(),
+                no_auth_failure(),
+                api_versions.clone(),
+            );
+            let rt = Self {
+                mgr,
+                subscriptions,
+                metadata,
+                api_versions,
+                fetch_buffer,
+                fetch_config,
+                topic_ids,
+            };
+            rt.seed_metadata(num_nodes, &HashMap::from([(TOPIC.to_string(), 4)]));
+            rt
+        }
+
+        /// Seeds the metadata snapshot with `num_nodes` brokers and the given
+        /// topic → partition-count map, stamping topic-ids from `self.topic_ids`
+        /// and `VALID_LEADER_EPOCH` (mirrors Java's `metadataUpdateWithIds`).
+        fn seed_metadata(&self, num_nodes: i32, topic_partition_counts: &HashMap<String, i32>) {
+            let topics: HashSet<String> = topic_partition_counts.keys().cloned().collect();
+            self.metadata.add_transient_topics(topics);
+            let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+                "dummy",
+                num_nodes,
+                &HashMap::new(),
+                topic_partition_counts,
+                &|_tp| Some(VALID_LEADER_EPOCH),
+                &self.topic_ids,
+            );
+            self.metadata
+                .metadata_arc()
+                .update_with_current_request_version(&response, false, 0);
+        }
+
+        /// `subscriptions.assignFromUser(partitions)` + validated seek to
+        /// offset 0 with the leader resolved from the seeded metadata.
+        fn assign_and_seek(&self, partitions: &[TopicPartition]) {
+            let cluster = self.metadata.metadata_arc().fetch();
+            let mut guard = self.subscriptions.lock().unwrap();
+            let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+            guard.assign_from_user(set).unwrap();
+            for p in partitions {
+                self.seek_validated_locked(&mut guard, &cluster, p, 0);
+            }
+        }
+
+        /// Seeks `tp` to `offset` with a validated position (leader from
+        /// metadata), so `prepare_fetch_requests` issues a fetch for it. This
+        /// is the Rust equivalent of Java's `subscriptions.seek(tp, offset)`
+        /// after the leader epoch was seeded by `assignFromUser`.
+        fn seek_validated_locked(
+            &self,
+            guard: &mut SubscriptionState,
+            cluster: &crate::common::Cluster,
+            tp: &TopicPartition,
+            offset: i64,
+        ) {
+            let leader = cluster.leader_for(tp).cloned();
+            let position = FetchPosition::with_leader(
+                offset,
+                Some(VALID_LEADER_EPOCH),
+                LeaderAndEpoch::new(leader, Some(VALID_LEADER_EPOCH)),
+            );
+            guard.seek_validated(tp, position).unwrap();
+        }
+
+        fn seek(&self, tp: &TopicPartition, offset: i64) {
+            let cluster = self.metadata.metadata_arc().fetch();
+            let mut guard = self.subscriptions.lock().unwrap();
+            self.seek_validated_locked(&mut guard, &cluster, tp, offset);
+        }
+
+        fn pause(&self, tp: &TopicPartition) {
+            self.subscriptions.lock().unwrap().pause(tp).unwrap();
+        }
+
+        fn resume(&self, tp: &TopicPartition) {
+            self.subscriptions.lock().unwrap().resume(tp).unwrap();
+        }
+
+        fn position(&self, tp: &TopicPartition) -> Option<i64> {
+            self.subscriptions.lock().unwrap().position(tp).ok().flatten().map(|p| p.offset)
+        }
+
+        fn preferred_read_replica(&self, tp: &TopicPartition, now_ms: i64) -> Option<i32> {
+            self.subscriptions.lock().unwrap().preferred_read_replica(tp, now_ms)
+        }
+
+        fn is_fetchable(&self, tp: &TopicPartition) -> bool {
+            self.subscriptions.lock().unwrap().is_fetchable(tp)
+        }
+
+        /// Runs `prepare_fetch_requests(now)`, returning the per-node built
+        /// `FetchRequest`s keyed by node id, alongside the
+        /// `(Node, FetchSessionRequestData)` map needed to deliver a response.
+        /// Mirrors Java's `sendFetches()` + the `MockClient` request capture.
+        fn build_fetch_requests(
+            &mut self,
+            now_ms: i64,
+        ) -> (
+            HashMap<i32, FetchRequest>,
+            HashMap<i32, (Node, crate::fetch_session_handler::FetchSessionRequestData)>,
+        ) {
+            let af = self.mgr.abstract_fetch_mut();
+            let prepared = af
+                .prepare_fetch_requests(now_ms, |_n| false, |_n| Ok(()))
+                .expect("prepare_fetch_requests should not error in this fixture");
+            let mut built: HashMap<i32, FetchRequest> = HashMap::new();
+            for (node_id, (node, data)) in &prepared {
+                let builder = af.create_fetch_request(node, data);
+                built.insert(*node_id, builder.build());
+            }
+            (built, prepared)
+        }
+
+        /// Delivers a successful `FetchResponse` to the manager for
+        /// `node_id`'s request, dispatching through `handle_fetch_success`
+        /// (i.e. `networkClientDelegate.poll`). `version` is the negotiated
+        /// fetch version (latest for topic-id sessions, 12 otherwise).
+        fn deliver(
+            &mut self,
+            node_id: i32,
+            request_data: &crate::fetch_session_handler::FetchSessionRequestData,
+            response: FetchResponse,
+            version: i16,
+        ) {
+            let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
+            self.mgr
+                .abstract_fetch_mut()
+                .handle_fetch_success(&node, request_data, response, version);
+        }
+
+        /// Delivers a transport-level failure (disconnect) for `node_id`'s
+        /// request, dispatching through `handle_fetch_failure`.
+        fn deliver_failure(
+            &mut self,
+            node_id: i32,
+            request_data: &crate::fetch_session_handler::FetchSessionRequestData,
+            error: KafkaError,
+        ) {
+            let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
+            self.mgr.abstract_fetch_mut().handle_fetch_failure(&node, request_data, &error);
+        }
+
+        fn has_completed_fetches(&self) -> bool {
+            self.mgr.abstract_fetch().has_completed_fetches()
+        }
+
+        /// Collects records via `FetchCollector::collect_fetch`, returning the
+        /// decoded `ConsumerRecords` (byte-array key/value, Java's
+        /// `ByteArrayDeserializer`).
+        fn collect_records(&self) -> crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>> {
+            let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> =
+                Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
+            let collector = FetchCollector::new(
+                self.metadata.clone(),
+                self.subscriptions.clone(),
+                self.fetch_config.clone(),
+                deserializers,
+                Arc::new(SystemFetchCollectorTime),
+            );
+            collector
+                .collect_fetch(&self.fetch_buffer)
+                .expect("collect_fetch should not error in this fixture")
+        }
+
+        /// Like [`Self::collect_records`] but with a value-deserializer that
+        /// fails on a single configured value (for the deser-exception test).
+        fn collect_records_failing_on_value(
+            &self,
+            fail_value: Vec<u8>,
+        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+            let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> = Arc::new(Deserializers::new(
+                Box::new(BytesDeserializer),
+                Box::new(FailOnValueDeserializer { fail_value }),
+            ));
+            let collector = FetchCollector::new(
+                self.metadata.clone(),
+                self.subscriptions.clone(),
+                self.fetch_config.clone(),
+                deserializers,
+                Arc::new(SystemFetchCollectorTime),
+            );
+            collector.collect_fetch(&self.fetch_buffer)
+        }
+    }
+
+    fn single_topic_id() -> (Uuid, HashMap<String, Uuid>) {
+        let topic_id = Uuid::random_uuid();
+        (topic_id, HashMap::from([(TOPIC.to_string(), topic_id)]))
+    }
+
+    // ─── harness smoke / testFetchNormal ────────────────────────────────────
+
+    /// Translated from `FetchRequestManagerTest.testFetchNormal`: a full
+    /// round-trip — build request, deliver 3 records (offsets 1..3), collect
+    /// them, and verify the position advances to 4.
+    #[test]
+    fn test_fetch_normal() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len(), "exactly one node should be fetched");
+        let (node_id, (_node, request_data)) = prepared.iter().next().unwrap();
+        assert!(!rt.has_completed_fetches());
+
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, response, ApiKeys::FETCH.latest_version());
+        assert!(rt.has_completed_fetches());
+
+        let records = rt.collect_records();
+        let recs = records.records_for_partition(&tp(0));
+        assert_eq!(3, recs.len());
+        // Next fetch position is 4.
+        assert_eq!(Some(4), rt.position(&tp(0)));
+        for (i, rec) in recs.iter().enumerate() {
+            assert_eq!(1 + i as i64, rec.offset());
+        }
+    }
+}
