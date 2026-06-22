@@ -255,6 +255,11 @@ impl DefaultRecord {
 
     /// Read a record body from a byte slice. The slice should contain exactly
     /// `size_of_body` bytes starting after the length varint.
+    ///
+    /// This is the owned form: it deep-copies key/value/header bytes out of
+    /// `body`. The zero-copy receive path (`consumer-threading.md` §27) uses
+    /// [`DefaultRecord::read_ref_from_buffer`] instead, which borrows from the
+    /// buffer. Both share the same parse logic via [`DefaultRecordRef`].
     fn read_from_body(
         body: &[u8],
         size_of_body: i32,
@@ -263,12 +268,46 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<DefaultRecord, InvalidRecordError> {
+        let record_ref = DefaultRecordRef::parse_body(
+            body,
+            size_of_body,
+            base_offset,
+            base_timestamp,
+            base_sequence,
+            log_append_time,
+        )?;
+        Ok(record_ref.to_owned_record())
+    }
+
+    /// Read a borrowing [`DefaultRecordRef`] from a byte buffer, plus the
+    /// number of bytes consumed (length varint + body).
+    ///
+    /// The buffer must be positioned at the start of the record (the length
+    /// varint). The returned view borrows key/value/header bytes directly from
+    /// `buffer` — **no copy** is made. This is the zero-copy entry point used
+    /// by the consumer receive path (`consumer-threading.md` §27).
+    ///
+    /// # Errors
+    /// Returns `InvalidRecordError` if the record is malformed.
+    pub fn read_ref_from_buffer(
+        buffer: &[u8],
+        base_offset: i64,
+        base_timestamp: i64,
+        base_sequence: i32,
+        log_append_time: Option<i64>,
+    ) -> Result<(DefaultRecordRef<'_>, usize), InvalidRecordError> {
+        let (size_of_body, varint_size) = varint::read_varint(buffer)
+            .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
+
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
                 "Invalid record size: expected non-negative size but got {}",
                 size_of_body
             )));
         }
+
+        let body_start = varint_size;
+        let body = &buffer[body_start..];
 
         if (body.len() as i32) < size_of_body {
             return Err(InvalidRecordError::new(format!(
@@ -278,96 +317,18 @@ impl DefaultRecord {
             )));
         }
 
-        let mut pos = 0;
+        let record_body = &body[..size_of_body as usize];
+        let record_ref = DefaultRecordRef::parse_body(
+            record_body,
+            size_of_body,
+            base_offset,
+            base_timestamp,
+            base_sequence,
+            log_append_time,
+        )?;
 
-        // attributes
-        if pos >= body.len() {
-            return Err(InvalidRecordError::new("Found invalid record structure"));
-        }
-        let attributes = body[pos] as i8;
-        pos += 1;
-
-        // timestamp delta
-        let (timestamp_delta, consumed) = varint::read_varlong(&body[pos..])
-            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        pos += consumed;
-
-        let mut timestamp = base_timestamp + timestamp_delta;
-        if let Some(lat) = log_append_time {
-            timestamp = lat;
-        }
-
-        // offset delta
-        let (offset_delta, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        pos += consumed;
-
-        let offset = base_offset + offset_delta as i64;
-        let sequence = if base_sequence >= 0 {
-            increment_sequence(base_sequence, offset_delta)
-        } else {
-            RecordBatch::NO_SEQUENCE
-        };
-
-        // key
-        let (key_size, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        pos += consumed;
-
-        let key = read_bytes(body, &mut pos, key_size)?;
-
-        // value
-        let (value_size, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        pos += consumed;
-
-        let value = read_bytes(body, &mut pos, value_size)?;
-
-        // headers
-        let (num_headers, consumed) =
-            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        pos += consumed;
-
-        if num_headers < 0 {
-            return Err(InvalidRecordError::new(format!(
-                "Found invalid number of record headers {}",
-                num_headers
-            )));
-        }
-
-        let remaining = body.len() - pos;
-        if (num_headers as usize) > remaining {
-            return Err(InvalidRecordError::new(format!(
-                "Found invalid number of record headers. {} is larger than the remaining size of the buffer",
-                num_headers
-            )));
-        }
-
-        let headers = if num_headers == 0 {
-            Vec::new()
-        } else {
-            read_headers(body, &mut pos, num_headers)?
-        };
-
-        // validate that we consumed exactly the right number of bytes
-        if pos != size_of_body as usize {
-            return Err(InvalidRecordError::new(format!(
-                "Invalid record size: expected to read {} bytes in record payload, but instead read {}",
-                size_of_body, pos
-            )));
-        }
-
-        let total_size_in_bytes = varint::size_of_varint(size_of_body) + size_of_body;
-        Ok(DefaultRecord::new(
-            total_size_in_bytes,
-            attributes,
-            offset,
-            timestamp,
-            sequence,
-            key,
-            value,
-            headers,
-        ))
+        let total_consumed = varint_size + size_of_body as usize;
+        Ok((record_ref, total_consumed))
     }
 
     /// Compute the total serialized size of a record with the given parameters.
@@ -461,8 +422,10 @@ fn size_of_key_value_headers(key_size: i32, value_size: i32, headers: &[RecordHe
     size
 }
 
-/// Read bytes from a buffer slice. If `size` is negative (null marker), returns `None`.
-fn read_bytes(buffer: &[u8], pos: &mut usize, size: i32) -> Result<Option<Vec<u8>>, InvalidRecordError> {
+/// Borrow `size` bytes from `buffer` at `*pos`, advancing the cursor. If
+/// `size` is negative (null marker), returns `None`. Zero-copy: returns a
+/// slice into `buffer`, never a fresh allocation.
+fn slice_bytes<'a>(buffer: &'a [u8], pos: &mut usize, size: i32) -> Result<Option<&'a [u8]>, InvalidRecordError> {
     if size < 0 {
         return Ok(None);
     }
@@ -470,42 +433,278 @@ fn read_bytes(buffer: &[u8], pos: &mut usize, size: i32) -> Result<Option<Vec<u8
     if *pos + size > buffer.len() {
         return Err(InvalidRecordError::new("Found invalid record structure"));
     }
-    let data = buffer[*pos..*pos + size].to_vec();
+    let data = &buffer[*pos..*pos + size];
     *pos += size;
     Ok(Some(data))
 }
 
-/// Read headers from a buffer slice.
-fn read_headers(buffer: &[u8], pos: &mut usize, num_headers: i32) -> Result<Vec<RecordHeader>, InvalidRecordError> {
-    let mut headers = Vec::with_capacity(num_headers as usize);
+/// A borrowing view of a single v2 record, parsed from a batch buffer without
+/// copying its key, value, or header bytes.
+///
+/// Corresponds to the per-record data of Java's `DefaultRecord`, but the
+/// key/value/header bytes remain borrowed from the underlying fetch buffer
+/// (see `consumer-threading.md` §27). The header bytes are kept as the raw
+/// (unparsed) slice and decoded on demand by [`DefaultRecordRef::headers`] so
+/// that records whose headers are never read incur no header-parsing cost.
+#[derive(Clone, Debug)]
+pub struct DefaultRecordRef<'a> {
+    size_in_bytes: i32,
+    attributes: i8,
+    offset: i64,
+    timestamp: i64,
+    sequence: i32,
+    key: Option<&'a [u8]>,
+    value: Option<&'a [u8]>,
+    /// Raw, still-encoded header section ([HeaderKeyLength HeaderKey
+    /// HeaderValueLength HeaderValue]*), borrowed from the buffer.
+    headers_bytes: &'a [u8],
+    num_headers: i32,
+}
 
-    for _ in 0..num_headers {
-        let (header_key_size, consumed) = varint::read_varint(&buffer[*pos..])
-            .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        *pos += consumed;
-
-        if header_key_size < 0 {
+impl<'a> DefaultRecordRef<'a> {
+    /// Parse a record body (the bytes after the length varint) into a
+    /// borrowing view. `body` must contain exactly `size_of_body` bytes.
+    fn parse_body(
+        body: &'a [u8],
+        size_of_body: i32,
+        base_offset: i64,
+        base_timestamp: i64,
+        base_sequence: i32,
+        log_append_time: Option<i64>,
+    ) -> Result<DefaultRecordRef<'a>, InvalidRecordError> {
+        if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
-                "Invalid negative header key size {}",
-                header_key_size
+                "Invalid record size: expected non-negative size but got {}",
+                size_of_body
             )));
         }
 
-        let key_bytes = read_bytes(buffer, pos, header_key_size)?
-            .ok_or_else(|| InvalidRecordError::new("Header key cannot be null"))?;
-        let header_key =
-            String::from_utf8(key_bytes).map_err(|_| InvalidRecordError::new("Invalid UTF-8 in header key"))?;
+        if (body.len() as i32) < size_of_body {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: expected {} bytes in record payload, but instead the buffer has only {} remaining bytes.",
+                size_of_body,
+                body.len()
+            )));
+        }
 
-        let (header_value_size, consumed) = varint::read_varint(&buffer[*pos..])
+        let mut pos = 0;
+
+        // attributes
+        if pos >= body.len() {
+            return Err(InvalidRecordError::new("Found invalid record structure"));
+        }
+        let attributes = body[pos] as i8;
+        pos += 1;
+
+        // timestamp delta
+        let (timestamp_delta, consumed) = varint::read_varlong(&body[pos..])
             .map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
-        *pos += consumed;
+        pos += consumed;
 
-        let header_value = read_bytes(buffer, pos, header_value_size)?;
+        let mut timestamp = base_timestamp + timestamp_delta;
+        if let Some(lat) = log_append_time {
+            timestamp = lat;
+        }
 
-        headers.push(RecordHeader::new(header_key, header_value));
+        // offset delta
+        let (offset_delta, consumed) =
+            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        pos += consumed;
+
+        let offset = base_offset + offset_delta as i64;
+        let sequence = if base_sequence >= 0 {
+            increment_sequence(base_sequence, offset_delta)
+        } else {
+            RecordBatch::NO_SEQUENCE
+        };
+
+        // key
+        let (key_size, consumed) =
+            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        pos += consumed;
+
+        let key = slice_bytes(body, &mut pos, key_size)?;
+
+        // value
+        let (value_size, consumed) =
+            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        pos += consumed;
+
+        let value = slice_bytes(body, &mut pos, value_size)?;
+
+        // headers
+        let (num_headers, consumed) =
+            varint::read_varint(&body[pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+        pos += consumed;
+
+        if num_headers < 0 {
+            return Err(InvalidRecordError::new(format!(
+                "Found invalid number of record headers {}",
+                num_headers
+            )));
+        }
+
+        let remaining = body.len() - pos;
+        if (num_headers as usize) > remaining {
+            return Err(InvalidRecordError::new(format!(
+                "Found invalid number of record headers. {} is larger than the remaining size of the buffer",
+                num_headers
+            )));
+        }
+
+        // The header section is the rest of the body. We borrow it raw and
+        // validate by fully parsing it (so malformed-header tests still
+        // fail), but we do NOT allocate owned `RecordHeader`s here — that is
+        // deferred to `headers()` / `to_owned_record()`.
+        let headers_start = pos;
+        let mut header_pos = pos;
+        for _ in 0..num_headers {
+            parse_one_header(body, &mut header_pos)?;
+        }
+        let headers_bytes = &body[headers_start..header_pos];
+
+        // validate that we consumed exactly the right number of bytes
+        if header_pos != size_of_body as usize {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: expected to read {} bytes in record payload, but instead read {}",
+                size_of_body, header_pos
+            )));
+        }
+
+        let total_size_in_bytes = varint::size_of_varint(size_of_body) + size_of_body;
+        Ok(DefaultRecordRef {
+            size_in_bytes: total_size_in_bytes,
+            attributes,
+            offset,
+            timestamp,
+            sequence,
+            key,
+            value,
+            headers_bytes,
+            num_headers,
+        })
     }
 
-    Ok(headers)
+    /// The record's offset in the log.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// The producer-assigned sequence number.
+    pub fn sequence(&self) -> i32 {
+        self.sequence
+    }
+
+    /// The record's total serialized size, including the length prefix.
+    pub fn size_in_bytes(&self) -> i32 {
+        self.size_in_bytes
+    }
+
+    /// The record's timestamp.
+    pub fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    /// The record attributes byte.
+    pub fn attributes(&self) -> i8 {
+        self.attributes
+    }
+
+    /// The size in bytes of the key, or -1 if there is no key.
+    pub fn key_size(&self) -> i32 {
+        self.key.map_or(-1, |k| k.len() as i32)
+    }
+
+    /// Whether this record has a key.
+    pub fn has_key(&self) -> bool {
+        self.key.is_some()
+    }
+
+    /// The record's key bytes, borrowed from the buffer, or `None`.
+    pub fn key(&self) -> Option<&'a [u8]> {
+        self.key
+    }
+
+    /// The size in bytes of the value, or -1 if the value is null.
+    pub fn value_size(&self) -> i32 {
+        self.value.map_or(-1, |v| v.len() as i32)
+    }
+
+    /// Whether a value is present (i.e. the value is not null).
+    pub fn has_value(&self) -> bool {
+        self.value.is_some()
+    }
+
+    /// The record's value bytes, borrowed from the buffer, or `None`.
+    pub fn value(&self) -> Option<&'a [u8]> {
+        self.value
+    }
+
+    /// Decode and return the record's headers as owned `RecordHeader`s.
+    ///
+    /// Per `consumer-threading.md` §27, Milestone-8 holds owned headers on the
+    /// emitted `ConsumerRecord`; this is the single point where that owned copy
+    /// is produced (only when the caller actually needs headers).
+    pub fn headers(&self) -> Result<Vec<RecordHeader>, InvalidRecordError> {
+        if self.num_headers == 0 {
+            return Ok(Vec::new());
+        }
+        let mut headers = Vec::with_capacity(self.num_headers as usize);
+        let mut pos = 0;
+        for _ in 0..self.num_headers {
+            let (header_key, header_value) = parse_one_header(self.headers_bytes, &mut pos)?;
+            let header_key =
+                std::str::from_utf8(header_key).map_err(|_| InvalidRecordError::new("Invalid UTF-8 in header key"))?;
+            headers.push(RecordHeader::new(header_key.to_string(), header_value.map(|v| v.to_vec())));
+        }
+        Ok(headers)
+    }
+
+    /// Materialize this borrowing view into an owned [`DefaultRecord`],
+    /// copying the key, value, and header bytes.
+    fn to_owned_record(&self) -> DefaultRecord {
+        // Header parsing here cannot fail: `parse_body` already validated the
+        // header section fully. `expect` documents that invariant.
+        let headers = self.headers().expect("header section validated in parse_body");
+        DefaultRecord::new(
+            self.size_in_bytes,
+            self.attributes,
+            self.offset,
+            self.timestamp,
+            self.sequence,
+            self.key.map(|k| k.to_vec()),
+            self.value.map(|v| v.to_vec()),
+            headers,
+        )
+    }
+}
+
+/// Parse a single header `[HeaderKeyLength HeaderKey HeaderValueLength
+/// HeaderValue]` from `buffer` at `*pos`, advancing the cursor. Returns the
+/// key bytes (borrowed) and the optional value bytes (borrowed). The header
+/// key may not be null.
+fn parse_one_header<'a>(buffer: &'a [u8], pos: &mut usize) -> Result<(&'a [u8], Option<&'a [u8]>), InvalidRecordError> {
+    let (header_key_size, consumed) =
+        varint::read_varint(&buffer[*pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+    *pos += consumed;
+
+    if header_key_size < 0 {
+        return Err(InvalidRecordError::new(format!(
+            "Invalid negative header key size {}",
+            header_key_size
+        )));
+    }
+
+    let header_key = slice_bytes(buffer, pos, header_key_size)?
+        .ok_or_else(|| InvalidRecordError::new("Header key cannot be null"))?;
+
+    let (header_value_size, consumed) =
+        varint::read_varint(&buffer[*pos..]).map_err(|_| InvalidRecordError::new("Found invalid record structure"))?;
+    *pos += consumed;
+
+    let header_value = slice_bytes(buffer, pos, header_value_size)?;
+
+    Ok((header_key, header_value))
 }
 
 /// Read up to `buf.len()` bytes from `reader`, returning the number of bytes read.
@@ -1105,6 +1304,57 @@ mod tests {
         assert!(display.contains("DefaultRecord"));
         assert!(display.contains("offset=100"));
         assert!(display.contains("timestamp=1000"));
+    }
+
+    /// §27 zero-copy proof: the key/value slices returned by
+    /// `read_ref_from_buffer` point INTO the source buffer — no copy is
+    /// made. We assert this by comparing the slice's address range to the
+    /// source buffer's address range.
+    #[test]
+    fn test_read_ref_is_zero_copy() {
+        let mut out = Vec::new();
+        DefaultRecord::write_to(&mut out, 5, 100, Some(b"mykey"), Some(b"myvalue"), &[]).unwrap();
+
+        let (record_ref, consumed) = DefaultRecord::read_ref_from_buffer(&out, 0, 0, 0, None).unwrap();
+        assert_eq!(consumed, out.len());
+        assert_eq!(record_ref.offset(), 5);
+        assert_eq!(record_ref.timestamp(), 100);
+        assert_eq!(record_ref.key(), Some(b"mykey".as_slice()));
+        assert_eq!(record_ref.value(), Some(b"myvalue".as_slice()));
+
+        let buf_start = out.as_ptr() as usize;
+        let buf_end = buf_start + out.len();
+        for slice in [record_ref.key().unwrap(), record_ref.value().unwrap()] {
+            let slice_start = slice.as_ptr() as usize;
+            assert!(
+                slice_start >= buf_start && slice_start + slice.len() <= buf_end,
+                "borrowed slice must point into the source buffer (zero-copy)"
+            );
+        }
+    }
+
+    /// The borrowing `read_ref_from_buffer` and the owned `read_from_buffer`
+    /// must decode to equivalent records (the owned path is implemented in
+    /// terms of the borrowed one).
+    #[test]
+    fn test_read_ref_matches_owned() {
+        let headers = vec![
+            RecordHeader::new("key1".to_string(), Some(b"val1".to_vec())),
+            RecordHeader::new("key2".to_string(), None),
+        ];
+        let mut out = Vec::new();
+        DefaultRecord::write_to(&mut out, 3, 42, Some(b"k"), Some(b"v"), &headers).unwrap();
+
+        let (owned, _) = DefaultRecord::read_from_buffer(&out, 10, 1000, 7, None).unwrap();
+        let (record_ref, _) = DefaultRecord::read_ref_from_buffer(&out, 10, 1000, 7, None).unwrap();
+
+        assert_eq!(owned.offset(), record_ref.offset());
+        assert_eq!(owned.timestamp(), record_ref.timestamp());
+        assert_eq!(owned.sequence(), record_ref.sequence());
+        assert_eq!(owned.size_in_bytes(), record_ref.size_in_bytes());
+        assert_eq!(owned.key(), record_ref.key());
+        assert_eq!(owned.value(), record_ref.value());
+        assert_eq!(owned.headers(), record_ref.headers().unwrap().as_slice());
     }
 
     #[test]

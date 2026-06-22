@@ -22,7 +22,6 @@
 //!
 //! This class is not thread-safe!
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
@@ -36,7 +35,6 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::common::network::NetworkSend;
-use crate::common::network::Receive;
 use crate::common::network::Selectable;
 use crate::common::network::{ChannelState, channel_state};
 use crate::common::protocol::{ApiKeys, Errors};
@@ -117,8 +115,9 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     discover_broker_versions: bool,
     /// API versions for each node.
     api_versions: Arc<ApiVersions>,
-    /// Nodes that need an ApiVersions fetch.
-    nodes_needing_api_versions_fetch: HashMap<String, ApiVersionsRequestBuilder>,
+    /// Nodes that need an ApiVersions fetch. `FxHashMap` (Phase 27):
+    /// touched every poll on the bg hot loop; internal only.
+    nodes_needing_api_versions_fetch: rustc_hash::FxHashMap<String, ApiVersionsRequestBuilder>,
     /// Aborted sends due to unsupported versions or disconnects.
     aborted_sends: Vec<ClientResponse>,
     /// The client state (ACTIVE, CLOSING, CLOSED).
@@ -218,7 +217,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             metadata_recovery_strategy,
             discover_broker_versions,
             api_versions,
-            nodes_needing_api_versions_fetch: HashMap::new(),
+            nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
@@ -293,7 +292,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             metadata_recovery_strategy,
             discover_broker_versions,
             api_versions,
-            nodes_needing_api_versions_fetch: HashMap::new(),
+            nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
@@ -440,13 +439,16 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             panic!("Attempt to send a request to node {} which is not ready.", node_id);
         }
 
-        let version_info = self.api_versions.get(&node_id);
-        let version = if let Some(ref vi) = version_info {
-            match vi.latest_usable_version_in_range(
-                client_request.api_key(),
-                client_request.request_builder().oldest_allowed_version(),
-                client_request.request_builder().latest_allowed_version(),
-            ) {
+        // Compute the usable version under the read lock without deep-cloning the node's
+        // NodeApiVersions (three HashMaps + a Vec) on every request build (Phase 20 Fix #1).
+        let usable_version = self.api_versions.latest_usable_version_in_range(
+            &node_id,
+            client_request.api_key(),
+            client_request.request_builder().oldest_allowed_version(),
+            client_request.request_builder().latest_allowed_version(),
+        );
+        let version = if let Some(result) = usable_version {
+            match result {
                 Ok(v) => v,
                 Err(_e) => {
                     kafka_debug!(
@@ -609,14 +611,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// Handle any completed receives and update the response list.
     async fn handle_completed_receives(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
-        // Collect owned copies so we release the borrow on self.selector
-        // before calling &mut self methods.
-        let receives: Vec<(String, Option<Vec<u8>>)> = self
-            .selector
-            .completed_receives()
-            .iter()
-            .map(|r| (Receive::source(*r).to_string(), r.payload().map(|p| p.to_vec())))
-            .collect();
+        // Drain the completed receives BY MOVE so the payload Vec<u8> is taken
+        // out of the selector without copying (§27 Phase 20 Fix #3), and the
+        // borrow on self.selector is released before calling &mut self methods.
+        // The list is now empty, so the next poll's clear() is a no-op.
+        let receives: Vec<(String, Option<Vec<u8>>)> = self.selector.drain_completed_receives();
 
         for (source, payload) in receives {
             let mut req = self.in_flight_requests.complete_next(&source);
@@ -1433,6 +1432,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn wakeup(&self) {
         self.selector.wakeup();
+    }
+
+    fn wakeup_handle(&self) -> Arc<Notify> {
+        self.selector.wakeup_handle()
     }
 
     fn wakeup_notify(&self) -> Arc<Notify> {

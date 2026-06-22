@@ -1,0 +1,10 @@
+run_group,setting,client,partitions,msg_bytes,producer,batch_or_maxpoll,duration_s,throughput_msg_s,lat_min_ms,lat_avg_ms,lat_stddev_ms,lat_p50_ms,lat_p90_ms,lat_p95_ms,lat_p99_ms,lat_p999_ms,lat_max_ms,cpu_pct,rss_mb,notes
+longrun-200p-2kb-300mbs,same-az,librdkafka,200,2048,fixed-300MBs,2000,1800,150005,3,265.45,446.86,254,449,483,525,551,31478,38.3,323.7,intel_m8i_usw2;crc_off;max=startup_bootstrap_connect_artifact;cpu_self_report
+longrun-200p-2kb-300mbs,same-az,rust,200,2048,fixed-300MBs,2500,1800,150003,4,310.82,150.81,307,511,554,636,832,1581,41.7,117.9,intel_m8i_usw2;crc_off
+longrun-200p-2kb-300mbs,same-az,java,200,2048,fixed-300MBs,2500,1800,149952,4,286.29,142.76,283,481,518,568,595,987,55.2,2874,intel_m8i_usw2;crc_off;rss=jvm_heap
+default-200p-2kb-300mbs,same-az,librdkafka-single-poll,200,2048,fixed-300MBs,single-poll,1800,150001,1,12.43,395.99,4,7,10,21,88,31937,131.7,144.1,intel_m8i_usw2;crc_off_aligned;single_message_rd_kafka_consumer_poll;max=startup_bootstrap_connect_artifact;cpu_self_report
+default-200p-2kb-300mbs,same-az,rust,200,2048,fixed-300MBs,500,1800,150000,1,6.54,8.47,5,10,16,40,111,460,108.0,32.5,intel_m8i_usw2;crc_off_aligned;fetch.min.bytes=1;clean_run_40M_warmup;TLS_reset_fix_d5b0e50;aggregate_incl_~13min_settling_converged_p99~25
+default-200p-2kb-300mbs,same-az,java,200,2048,fixed-300MBs,500,1800,149995,1,4.62,3.27,4,7,9,19,37,177,118.1,1885,intel_m8i_usw2;crc_off_aligned;fetch.min.bytes=1;rss=jvm_heap
+default-36p-2kb-300mbs,same-az,librdkafka-single-poll,36,2048,fixed-300MBs,single-poll,1800,150000,1,4.39,3.63,4,6,9,19,43,222,110.7,63.4,intel_m8i_usw2;crc_off_aligned;single_message_rd_kafka_consumer_poll;4min_warmup;cpu_self_report
+default-36p-2kb-300mbs,same-az,rust,36,2048,fixed-300MBs,500,1800,150000,1,11.22,20.63,6,21,34,98,270,663,89.8,38.8,intel_m8i_usw2;crc_off_aligned;fetch.min.bytes=1;4min_warmup;TLS_reset_fix_d5b0e50;survived_19_broker_tls_resets;fatter_tail_at_36p
+default-36p-2kb-300mbs,same-az,java,36,2048,fixed-300MBs,500,1800,149997,1,4.86,4.36,4,7,10,21,51,326,115.0,846.1,intel_m8i_usw2;crc_off_aligned;fetch.min.bytes=1;4min_warmup;rss=jvm_heap

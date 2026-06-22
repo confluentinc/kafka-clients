@@ -56,6 +56,23 @@ use super::common_client_configs;
 /// Parameters: `(topic_name, is_internal, now_ms) -> should_retain`.
 type RetainTopicFn = dyn Fn(&str, bool, i64) -> bool + Send + Sync;
 
+/// Type alias for the topic-id-aware retain topic function.
+///
+/// Corresponds to Java's two-argument `retainTopic(topicName, topicId, isInternal, nowMs)`
+/// override pattern (used by `ConsumerMetadata` to retain topics by id received in
+/// a broker-side regex assignment). Parameters:
+/// `(topic_name, topic_id_or_none, is_internal, now_ms) -> should_retain`.
+///
+/// `topic_id_or_none` is `None` when the metadata response has no topic id for the
+/// topic (older protocol versions); in that case implementations should fall back
+/// to the name-only retain check, matching Java's default delegation.
+type RetainTopicWithIdFn = dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + Send + Sync;
+
+/// Borrowed-closure aliases used by `handle_metadata_response`; not `Send+Sync`
+/// because they capture local references on each `update()` call.
+type RetainTopicCb<'a> = dyn Fn(&str, bool, i64) -> bool + 'a;
+type RetainTopicWithIdCb<'a> = dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + 'a;
+
 /// Type alias for a function that builds metadata request builders.
 ///
 /// Used by subclasses (e.g., `ProducerMetadata`) to override metadata request
@@ -81,6 +98,14 @@ pub struct MetadataOverrides {
     /// Optional function to override topic retention behavior.
     /// When `None`, the default (retain all topics) is used.
     pub retain_topic_fn: Option<Box<RetainTopicFn>>,
+    /// Optional topic-id-aware retain function. Corresponds to Java's
+    /// `retainTopic(topicName, topicId, isInternal, nowMs)`.
+    ///
+    /// When set, this is invoked at metadata-response parsing time with the
+    /// topic id (if any) carried by the response — used by `ConsumerMetadata`
+    /// to retain topics received as topic ids in a broker-side regex
+    /// assignment. When `None`, `retain_topic_fn` is used.
+    pub retain_topic_with_id_fn: Option<Box<RetainTopicWithIdFn>>,
     /// When `true`, `new_metadata_request_builder_for_new_topics()` returns a
     /// builder, enabling partial metadata requests.
     pub enable_partial_updates: bool,
@@ -115,6 +140,14 @@ pub struct Metadata {
     /// subclasses (e.g., `ConsumerMetadata`). Lives outside the mutex because
     /// it is set once at construction and never mutated.
     retain_topic_fn: Option<Box<RetainTopicFn>>,
+    /// Optional custom topic-id-aware retain function. When set, this is
+    /// invoked at `MetadataResponse` parsing time and takes precedence over
+    /// `retain_topic_fn` for the per-topic retention check.
+    ///
+    /// Corresponds to Java's two-argument
+    /// `retainTopic(topicName, topicId, isInternal, nowMs)` override pattern
+    /// used by `ConsumerMetadata`.
+    retain_topic_with_id_fn: Option<Box<RetainTopicWithIdFn>>,
     /// When true, `new_metadata_request_builder_for_new_topics` returns a builder
     /// instead of `None`, enabling partial update requests.
     ///
@@ -164,6 +197,14 @@ struct MetadataInner {
     is_closed: bool,
     last_seen_leader_epochs: HashMap<TopicPartition, i32>,
     bootstrap_addresses: Vec<(String, SocketAddr)>,
+    /// Test-only counter of [`Metadata::request_update`] invocations. Java
+    /// tests assert `verify(metadata, times(N)).requestUpdate(anyBoolean())`;
+    /// the sticky `need_full_update` flag (read by `update_requested`) cannot
+    /// distinguish a second call from the flag left set by the first, so a
+    /// call-count probe is required to mirror Mockito's `times(N)`.
+    /// `#[cfg(test)]`-gated — no production memory or CPU cost.
+    #[cfg(test)]
+    request_update_call_count: i64,
 }
 
 /// Result of `new_metadata_request_and_version`.
@@ -314,9 +355,12 @@ impl Metadata {
                 metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
+                #[cfg(test)]
+                request_update_call_count: 0,
             }),
             update_notify: Notify::new(),
             retain_topic_fn: None,
+            retain_topic_with_id_fn: None,
             enable_partial_updates: false,
             request_builder_fn: None,
             new_topics_request_builder_fn: None,
@@ -374,9 +418,12 @@ impl Metadata {
                 metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
+                #[cfg(test)]
+                request_update_call_count: 0,
             }),
             update_notify: Notify::new(),
             retain_topic_fn: overrides.retain_topic_fn,
+            retain_topic_with_id_fn: overrides.retain_topic_with_id_fn,
             enable_partial_updates: overrides.enable_partial_updates,
             request_builder_fn: overrides.request_builder_fn,
             new_topics_request_builder_fn: overrides.new_topics_request_builder_fn,
@@ -469,6 +516,10 @@ impl Metadata {
     /// Returns the current `update_version` before the update.
     pub fn request_update(&self, reset_equivalent_response_backoff: bool) -> i32 {
         let mut inner = self.inner.lock().unwrap();
+        #[cfg(test)]
+        {
+            inner.request_update_call_count += 1;
+        }
         inner.need_full_update = true;
         if reset_equivalent_response_backoff {
             inner.equivalent_response_count = 0;
@@ -564,6 +615,56 @@ impl Metadata {
     pub fn update_requested(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.need_full_update || inner.need_partial_update
+    }
+
+    /// Test-only accessor exposing the cumulative count of
+    /// [`Self::request_update`] calls. Mirrors Mockito's
+    /// `verify(metadata, times(N)).requestUpdate(anyBoolean())`: the sticky
+    /// `need_full_update` flag read by [`Self::update_requested`] stays `true`
+    /// once set, so it cannot detect whether a *second* code path
+    /// independently re-requested an update. Snapshot this counter
+    /// before/after each pass to pin the per-pass re-request contract.
+    #[cfg(test)]
+    pub(crate) fn request_update_call_count_for_test(&self) -> i64 {
+        let inner = self.inner.lock().unwrap();
+        inner.request_update_call_count
+    }
+
+    /// Test-only accessor exposing the `need_full_update` flag in
+    /// isolation. Distinguishes a `request_update(true)` (full update,
+    /// Java `requestUpdate(true)`) from a `request_update_for_new_topics`
+    /// (partial update, set by transient-topic registration) so tests can
+    /// assert the specific `verify(metadata).requestUpdate(true)`
+    /// contract that the conflated [`Self::update_requested`] cannot.
+    #[cfg(test)]
+    pub(crate) fn need_full_update_for_test(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.need_full_update
+    }
+
+    /// Test-only accessor exposing the `equivalent_response_count` backoff
+    /// counter. This is the ONLY state that differs between
+    /// `request_update(true)` and `request_update(false)`:
+    /// `request_update(true)` resets it to `0` (line in [`Self::request_update`]),
+    /// while `request_update(false)` leaves it untouched. Both set
+    /// `need_full_update = true` identically, so [`Self::need_full_update_for_test`]
+    /// alone cannot distinguish the two arguments. Tests snapshot this counter
+    /// before/after a code path to pin the exact `verify(metadata).requestUpdate(true)`
+    /// vs `verify(metadata).requestUpdate(false)` contract from the Java mocks.
+    #[cfg(test)]
+    pub(crate) fn equivalent_response_count_for_test(&self) -> i64 {
+        let inner = self.inner.lock().unwrap();
+        inner.equivalent_response_count
+    }
+
+    /// Test-only setter to seed `equivalent_response_count` to a known
+    /// non-zero value, so a subsequent `request_update(true)` reset (vs a
+    /// `request_update(false)` non-reset) is observable via
+    /// [`Self::equivalent_response_count_for_test`].
+    #[cfg(test)]
+    pub(crate) fn set_equivalent_response_count_for_test(&self, count: i64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.equivalent_response_count = count;
     }
 
     /// Adds a cluster update listener.
@@ -670,6 +771,7 @@ impl Metadata {
     /// this can't actually happen).
     pub fn update(&self, request_version: i32, response: &MetadataResponse, is_partial_update: bool, now_ms: i64) {
         let retain_fn = &self.retain_topic_fn;
+        let retain_with_id_fn = &self.retain_topic_with_id_fn;
         let mut inner = self.inner.lock().unwrap();
         assert!(!inner.is_closed, "Update requested after metadata close");
 
@@ -687,11 +789,24 @@ impl Metadata {
 
         let previous_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
 
+        // Name-only retain (used for `last_seen_leader_epochs` cleanup and the
+        // partial-update mergeWith retain filter; both call sites have no topic id).
         let retain = |topic: &str, is_internal: bool, now: i64| -> bool {
             if let Some(f) = retain_fn {
                 f(topic, is_internal, now)
             } else {
                 Self::retain_topic_default(topic, is_internal, now)
+            }
+        };
+        // Topic-id-aware retain (mirrors Java `retainTopic(topicName, topicId, isInternal, nowMs)`
+        // called from `handleMetadataResponse`). Falls back to the name-only retain
+        // when no `retain_topic_with_id_fn` is registered — matches Java's default
+        // `retainTopic(name, id, internal, ms) -> retainTopic(name, internal, ms)`.
+        let retain_with_id = |topic: &str, topic_id: Option<Uuid>, is_internal: bool, now: i64| -> bool {
+            if let Some(f) = retain_with_id_fn {
+                f(topic, topic_id, is_internal, now)
+            } else {
+                retain(topic, is_internal, now)
             }
         };
 
@@ -701,6 +816,7 @@ impl Metadata {
             is_partial_update,
             now_ms,
             &retain,
+            &retain_with_id,
             &self.log_context,
         ));
 
@@ -902,12 +1018,19 @@ impl Metadata {
     }
 
     /// Transform a MetadataResponse into a new MetadataSnapshot.
+    ///
+    /// `retain_topic` is the name-only retain used by `mergeWith` (partial update)
+    /// and other call sites that lack a topic id; `retain_topic_with_id` is the
+    /// topic-id-aware retain matching Java's
+    /// `retainTopic(topicName, topicId, isInternal, nowMs)` invoked on every
+    /// topic in the response (mirrors `Metadata.java:511`).
     fn handle_metadata_response(
         inner: &mut MetadataInner,
         metadata_response: &MetadataResponse,
         is_partial_update: bool,
         now_ms: i64,
-        retain_topic: &dyn Fn(&str, bool, i64) -> bool,
+        retain_topic: &RetainTopicCb<'_>,
+        retain_topic_with_id: &RetainTopicWithIdCb<'_>,
         log_context: &LogContext,
     ) -> MetadataSnapshot {
         // All encountered topics
@@ -938,7 +1061,7 @@ impl Metadata {
                 effective_topic_id = None;
             }
 
-            if !retain_topic(&topic_name, metadata.is_internal(), now_ms) {
+            if !retain_topic_with_id(&topic_name, effective_topic_id, metadata.is_internal(), now_ms) {
                 continue;
             }
 
@@ -1301,9 +1424,10 @@ impl Metadata {
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and all active topics.
     ///
-    /// When a custom `request_builder_fn` is set (e.g. by `ProducerMetadata`),
-    /// that function is called instead of the default `all_topics()`.
-    fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
+    /// When a custom `request_builder_fn` is set (e.g. by `ProducerMetadata`
+    /// or `ConsumerMetadata`), that function is called instead of the
+    /// default `all_topics()`.
+    pub(crate) fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
         if let Some(f) = &self.request_builder_fn {
             f()
         } else {

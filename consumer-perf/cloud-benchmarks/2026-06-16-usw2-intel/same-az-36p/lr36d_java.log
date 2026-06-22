@@ -1,0 +1,70 @@
+Java e2e: bootstrap=pkc-devcg13mnr.us-west-2.aws.devel.cpdev.cloud:9092 topic=cmp-bench-36p proto=consumer maxPoll=500 fetch.min=default partFetch=default crc=off dur=1800s warmup=36000000
+subscribed; waiting for assignment/records...
+warmup complete (36000000 msgs); measuring 1800s now
+[interval 0] t=  30.0s msgs=4499949 thr=   149998 msg/s avg=  4.60 p50=4 p99=19 p999=40 max=115 ms rss=834.6MB
+[interval 1] t=  60.0s msgs=4500020 thr=   150001 msg/s avg=  4.95 p50=4 p99=22 p999=44 max=109 ms rss=838.9MB
+[interval 2] t=  90.0s msgs=4500265 thr=   150009 msg/s avg=  4.57 p50=4 p99=18 p999=32 max=83 ms rss=838.9MB
+[interval 3] t= 120.0s msgs=4500195 thr=   150007 msg/s avg=  4.98 p50=4 p99=22 p999=51 max=140 ms rss=839.3MB
+[interval 4] t= 150.0s msgs=4500055 thr=   150002 msg/s avg=  4.55 p50=4 p99=18 p999=33 max=108 ms rss=839.5MB
+[interval 5] t= 180.0s msgs=4500279 thr=   150009 msg/s avg=  5.06 p50=4 p99=27 p999=89 max=149 ms rss=839.5MB
+[interval 6] t= 210.0s msgs=4500244 thr=   150008 msg/s avg=  4.32 p50=4 p99=16 p999=32 max=73 ms rss=839.8MB
+[interval 7] t= 240.0s msgs=4499887 thr=   149996 msg/s avg=  4.75 p50=4 p99=21 p999=42 max=155 ms rss=840.3MB
+[interval 8] t= 270.0s msgs=4500349 thr=   150012 msg/s avg=  4.39 p50=4 p99=17 p999=34 max=226 ms rss=840.5MB
+[interval 9] t= 300.0s msgs=4500055 thr=   150002 msg/s avg=  4.93 p50=4 p99=22 p999=61 max=153 ms rss=841.4MB
+[interval 10] t= 330.0s msgs=4500216 thr=   150007 msg/s avg=  4.57 p50=4 p99=17 p999=34 max=107 ms rss=841.9MB
+[interval 11] t= 360.0s msgs=4500069 thr=   150002 msg/s avg=  5.09 p50=4 p99=24 p999=55 max=131 ms rss=842.3MB
+[interval 12] t= 390.0s msgs=4500223 thr=   150007 msg/s avg=  4.66 p50=4 p99=18 p999=34 max=120 ms rss=842.5MB
+[interval 13] t= 420.0s msgs=4500167 thr=   150006 msg/s avg=  5.19 p50=4 p99=24 p999=95 max=247 ms rss=842.6MB
+[interval 14] t= 450.0s msgs=4500174 thr=   150006 msg/s avg=  4.62 p50=4 p99=18 p999=35 max=111 ms rss=842.6MB
+[interval 15] t= 480.0s msgs=4500125 thr=   150004 msg/s avg=  5.16 p50=4 p99=26 p999=90 max=205 ms rss=842.8MB
+[interval 16] t= 510.0s msgs=4500160 thr=   150005 msg/s avg=  4.58 p50=4 p99=18 p999=34 max=72 ms rss=842.8MB
+[interval 17] t= 540.0s msgs=4500097 thr=   150003 msg/s avg=  4.70 p50=4 p99=18 p999=34 max=71 ms rss=842.8MB
+[interval 18] t= 570.0s msgs=4500146 thr=   150005 msg/s avg=  4.59 p50=4 p99=18 p999=34 max=118 ms rss=843.1MB
+[interval 19] t= 600.0s msgs=4500146 thr=   150005 msg/s avg=  4.91 p50=4 p99=22 p999=51 max=115 ms rss=843.3MB
+[interval 20] t= 630.0s msgs=4500013 thr=   150000 msg/s avg=  4.72 p50=4 p99=18 p999=36 max=120 ms rss=843.8MB
+[interval 21] t= 660.0s msgs=4500237 thr=   150008 msg/s avg=  4.65 p50=4 p99=20 p999=41 max=219 ms rss=843.8MB
+[interval 22] t= 690.0s msgs=4499656 thr=   149989 msg/s avg=  4.44 p50=4 p99=18 p999=32 max=84 ms rss=844.2MB
+[interval 23] t= 720.0s msgs=4500440 thr=   150015 msg/s avg=  4.98 p50=4 p99=25 p999=81 max=157 ms rss=844.5MB
+[interval 24] t= 750.0s msgs=4500174 thr=   150006 msg/s avg=  4.60 p50=4 p99=19 p999=38 max=118 ms rss=845.0MB
+[interval 25] t= 780.0s msgs=4499957 thr=   149999 msg/s avg=  5.09 p50=4 p99=24 p999=68 max=137 ms rss=845.3MB
+[interval 26] t= 810.0s msgs=4500132 thr=   150004 msg/s avg=  4.76 p50=4 p99=20 p999=41 max=89 ms rss=845.4MB
+[interval 27] t= 840.0s msgs=4500118 thr=   150004 msg/s avg=  5.36 p50=4 p99=26 p999=111 max=235 ms rss=845.6MB
+[interval 28] t= 870.0s msgs=4500090 thr=   150003 msg/s avg=  4.57 p50=4 p99=18 p999=33 max=122 ms rss=845.9MB
+[interval 29] t= 900.0s msgs=4500377 thr=   150013 msg/s avg=  5.12 p50=4 p99=25 p999=71 max=146 ms rss=845.9MB
+[interval 30] t= 930.0s msgs=4499978 thr=   149999 msg/s avg=  4.64 p50=4 p99=19 p999=35 max=114 ms rss=846.4MB
+[interval 31] t= 960.0s msgs=4500132 thr=   150004 msg/s avg=  4.72 p50=4 p99=19 p999=36 max=109 ms rss=846.4MB
+[interval 32] t= 990.0s msgs=4500083 thr=   150003 msg/s avg=  4.70 p50=4 p99=20 p999=35 max=217 ms rss=846.5MB
+[interval 33] t=1020.0s msgs=4499817 thr=   149994 msg/s avg=  6.01 p50=4 p99=31 p999=109 max=243 ms rss=846.9MB
+[interval 34] t=1050.0s msgs=4500209 thr=   150007 msg/s avg=  5.31 p50=4 p99=25 p999=46 max=103 ms rss=847.1MB
+[interval 35] t=1080.0s msgs=4500230 thr=   150008 msg/s avg=  5.29 p50=4 p99=25 p999=69 max=142 ms rss=847.4MB
+[interval 36] t=1110.0s msgs=4500251 thr=   150008 msg/s avg=  5.15 p50=4 p99=24 p999=41 max=88 ms rss=847.9MB
+[interval 37] t=1140.0s msgs=4499887 thr=   149996 msg/s avg=  4.80 p50=4 p99=21 p999=42 max=91 ms rss=847.9MB
+[interval 38] t=1170.0s msgs=4500097 thr=   150003 msg/s avg=  4.69 p50=4 p99=19 p999=37 max=120 ms rss=847.9MB
+[interval 39] t=1200.0s msgs=4500146 thr=   150005 msg/s avg=  5.85 p50=4 p99=34 p999=182 max=326 ms rss=848.1MB
+[interval 40] t=1230.0s msgs=4499796 thr=   149993 msg/s avg=  4.85 p50=4 p99=20 p999=41 max=143 ms rss=848.8MB
+[interval 41] t=1260.0s msgs=4500391 thr=   150013 msg/s avg=  5.56 p50=4 p99=28 p999=65 max=214 ms rss=849.1MB
+[interval 42] t=1290.0s msgs=4500188 thr=   150006 msg/s avg=  5.36 p50=4 p99=26 p999=48 max=94 ms rss=850.1MB
+[interval 43] t=1320.0s msgs=4500188 thr=   150006 msg/s avg=  5.07 p50=4 p99=23 p999=43 max=111 ms rss=850.3MB
+[interval 44] t=1350.0s msgs=4500027 thr=   150001 msg/s avg=  4.74 p50=4 p99=19 p999=37 max=109 ms rss=850.6MB
+[interval 45] t=1380.0s msgs=4500062 thr=   150002 msg/s avg=  4.92 p50=4 p99=21 p999=53 max=139 ms rss=850.6MB
+[interval 46] t=1410.0s msgs=4499530 thr=   149984 msg/s avg=  4.69 p50=4 p99=19 p999=34 max=71 ms rss=850.8MB
+[interval 47] t=1440.0s msgs=4500664 thr=   150022 msg/s avg=  4.90 p50=4 p99=21 p999=36 max=78 ms rss=850.8MB
+[interval 48] t=1470.0s msgs=4499936 thr=   149998 msg/s avg=  4.51 p50=4 p99=18 p999=33 max=107 ms rss=851.1MB
+[interval 49] t=1500.0s msgs=4500272 thr=   150009 msg/s avg=  4.65 p50=4 p99=19 p999=36 max=108 ms rss=851.8MB
+[interval 50] t=1530.0s msgs=4500076 thr=   150003 msg/s avg=  4.57 p50=4 p99=19 p999=34 max=73 ms rss=852.1MB
+[interval 51] t=1560.0s msgs=4500258 thr=   150009 msg/s avg=  4.54 p50=4 p99=18 p999=32 max=111 ms rss=852.1MB
+[interval 52] t=1590.0s msgs=4499999 thr=   150000 msg/s avg=  4.47 p50=4 p99=18 p999=33 max=70 ms rss=852.1MB
+[interval 53] t=1620.0s msgs=4500146 thr=   150005 msg/s avg=  4.87 p50=4 p99=22 p999=42 max=106 ms rss=852.1MB
+[interval 54] t=1650.0s msgs=4500083 thr=   150003 msg/s avg=  4.48 p50=4 p99=17 p999=32 max=55 ms rss=852.5MB
+[interval 55] t=1680.0s msgs=4500055 thr=   150002 msg/s avg=  5.22 p50=4 p99=25 p999=97 max=182 ms rss=853.3MB
+[interval 56] t=1710.0s msgs=4500300 thr=   150010 msg/s avg=  4.65 p50=4 p99=19 p999=36 max=69 ms rss=853.3MB
+[interval 57] t=1740.0s msgs=4500090 thr=   150003 msg/s avg=  5.08 p50=4 p99=24 p999=53 max=113 ms rss=853.3MB
+[interval 58] t=1770.0s msgs=4500041 thr=   150001 msg/s avg=  4.64 p50=4 p99=18 p999=34 max=99 ms rss=853.3MB
+======================================================================
+SUMMARY - Java kafka-clients (KIP-848=consumer, warmup 36000000 excluded)
+Measured messages: 269999631
+Duration:          1800.03 s
+Throughput:        149997 msg/s  (292.96 MiB/s)
+E2E latency (ms):  min=1 avg=4.86 stddev=4.36 p50=4 p90=7 p95=10 p99=21 p99.9=51 max=326
+RSS (MB, current): avg=846.1 min=834.6 max=853.3 (59 samples)
+{"client":"java","protocol":"consumer","messages":269999631,"duration_s":1800.03,"throughput_msg_s":149997.46,"throughput_mib_s":292.96,"lat_min_ms":1,"lat_avg_ms":4.86,"lat_stddev_ms":4.36,"lat_p50_ms":4,"lat_p90_ms":7,"lat_p95_ms":10,"lat_p99_ms":21,"lat_p999_ms":51,"lat_max_ms":326,"rss_avg_mb":846.1,"rss_min_mb":834.6,"rss_max_mb":853.3}
