@@ -335,6 +335,7 @@ mod tests {
     use super::*;
     use crate::common::metrics::SystemTime;
     use crate::common::metrics::stats::{CumulativeCount, Value};
+    use crate::common::metrics::time::mock::MockTime;
     use std::collections::BTreeMap;
 
     fn level_id(level: RecordingLevel) -> i16 {
@@ -424,5 +425,58 @@ mod tests {
         assert!(sensor.has_metrics());
         sensor.add(name("name2", "group2"), Box::new(Value::new())).unwrap();
         assert!(sensor.has_metrics());
+    }
+
+    // SensorTest.testExpiredSensor
+    //
+    // Java uses `Avg`/`Meter` (M2 stats) as the *thing being added*, but the
+    // behavioral assertion is purely on the boolean returned by `add` — which is
+    // the same for any `MeasurableStat`. We substitute the M1 stats
+    // `CumulativeCount` / `Value` (the same substitution principle already
+    // applied to `testIdempotentAdd` / `testSimpleStats`). The Java test uses a
+    // `Metrics`-backed sensor; here we use a standalone sensor (registry `None`)
+    // driven by `MockTime`, which exercises the identical `has_expired()` /
+    // `add`-returns-`false` path without needing the registry.
+    #[test]
+    fn test_expired_sensor() {
+        let time = Arc::new(MockTime::new());
+        let inactive_sensor_expiration_time_seconds = 60i64;
+        let sensor = Sensor::new(
+            None,
+            "sensor",
+            Vec::new(),
+            Arc::new(MetricConfig::new()),
+            Arc::clone(&time) as Arc<dyn Time>,
+            inactive_sensor_expiration_time_seconds,
+            RecordingLevel::Info,
+        )
+        .unwrap();
+
+        // Before expiry, adds succeed.
+        assert!(sensor.add(name("test1", "grp1"), Box::new(CumulativeCount::new())).unwrap());
+        assert!(sensor.add(name("test2", "grp1"), Box::new(Value::new())).unwrap());
+        assert_eq!(2, sensor.metrics().len());
+        assert!(!sensor.has_expired());
+
+        // Advance past the inactivity window.
+        time.sleep((inactive_sensor_expiration_time_seconds + 1) * 1000);
+        assert!(sensor.has_expired());
+
+        // Adds to an expired sensor are a no-op returning `false`; the metric is
+        // NOT registered (count unchanged).
+        assert!(!sensor.add(name("test3", "grp1"), Box::new(CumulativeCount::new())).unwrap());
+        assert!(
+            !sensor
+                .add_with_config(name("test4", "grp1"), Box::new(Value::new()), None)
+                .unwrap()
+        );
+        assert_eq!(2, sensor.metrics().len());
+
+        // Java's `record` does not gate on expiry; recording resets
+        // `last_record_time`, so the sensor is no longer expired afterwards and
+        // the metric count remains unchanged.
+        sensor.record(1.0);
+        assert!(!sensor.has_expired());
+        assert_eq!(2, sensor.metrics().len());
     }
 }
