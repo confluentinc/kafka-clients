@@ -64,6 +64,20 @@ pub trait Selectable: Send {
     /// Wakeup this selector if it is blocked on I/O.
     fn wakeup(&self);
 
+    /// Returns a lock-free handle to this selector's wakeup primitive.
+    ///
+    /// Not present in Java: there, `Selector.wakeup()` is called directly
+    /// across threads because `nioSelector.wakeup()` is itself thread-safe.
+    /// In Rust the selector lives behind the `NetworkClientDelegate`'s async
+    /// `Mutex`, which is held for the whole duration of a `poll()`. To wake an
+    /// in-progress poll from another task *without* taking that lock (and
+    /// without cancelling the poll — see the join-stall root cause in
+    /// `design/current/consumer-join-stall-rootcause.md`), callers grab this
+    /// `Arc<Notify>` once and fire `notify_one()` on it. It is the same
+    /// `Notify` the selector's own `poll()` awaits, so firing it makes the
+    /// blocking wait return at a safe boundary.
+    fn wakeup_handle(&self) -> Arc<Notify>;
+
     /// Returns the [`Notify`] handle used by the selector's poll loop.
     ///
     /// Callers can use this to share the selector's wakeup mechanism,
@@ -102,6 +116,19 @@ pub trait Selectable: Send {
 
     /// The collection of receives that completed on the last `poll()` call.
     fn completed_receives(&self) -> Vec<&NetworkReceive>;
+
+    /// Drains the receives that completed on the last `poll()` call, returning
+    /// each receive's source id and payload buffer **by move** — the payload
+    /// `Vec<u8>` is taken out of the selector without copying (§27 receive-path
+    /// zero-copy, Phase 20 Fix #3).
+    ///
+    /// After this call the internal `completed_receives` list is empty, so the
+    /// next `poll()`'s clear is a no-op. Callers must therefore drain exactly
+    /// once per poll cycle (the network client does so in
+    /// `handle_completed_receives`). Unlike [`Self::completed_receives`], which
+    /// borrows and forces a `to_vec()` copy of each payload, this avoids the
+    /// per-fetch payload copy entirely.
+    fn drain_completed_receives(&mut self) -> Vec<(String, Option<Vec<u8>>)>;
 
     /// The connections that finished disconnecting on the last `poll()` call.
     /// Channel state indicates the local channel state at the time of disconnection.

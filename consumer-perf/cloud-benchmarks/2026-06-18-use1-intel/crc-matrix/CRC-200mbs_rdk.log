@@ -1,0 +1,68 @@
+======================================================================
+Consumer E2E Latency Benchmark - librdkafka (native C)
+======================================================================
+Bootstrap:   pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Topic:       cmp-bench-36p
+Group:       CRC-200mbs-rdk-1781826016
+Throughput:  300000 msg/s
+Duration:    900 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      24000000 messages
+Interval:    30 s
+rdkafka ver: 2.13.0
+======================================================================
+
+>>> Subscribed; waiting for partition assignment (group.protocol=consumer)...
+%6|1781826016.659|GETSUBSCRIPTIONS|librdkafka-perf-c#consumer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to /nL0W6bCTq6f2TMn/YHwFQ
+    assigned 36 partition(s)
+    assigned after 1.0s
+>>> Settling to the live edge (polling until empty) before producer...
+    at live edge; starting producer now.
+
+>>> Measuring (warmup 24000000 msgs, then 900 s)...
+
+>>> first records arrived 44.3s after producer start
+    warmup complete (24000000 msgs); measuring now
+[interval 0] t=  30.0s msgs=2999939 thr=    99998 msg/s  avg=  3.71 p50=3 p99=15 p999=27 max=47 ms  cpu= 61.0% rss=  26.9MB
+[interval 1] t=  60.0s msgs=2999990 thr=    99999 msg/s  avg=  3.69 p50=3 p99=14 p999=29 max=61 ms  cpu= 71.0% rss=  31.3MB
+[interval 2] t=  90.0s msgs=3000214 thr=   100007 msg/s  avg=  3.70 p50=3 p99=15 p999=26 max=48 ms  cpu= 71.5% rss=  31.3MB
+[interval 3] t= 120.0s msgs=2999934 thr=    99998 msg/s  avg=  3.78 p50=3 p99=15 p999=36 max=123 ms  cpu= 70.8% rss=  33.0MB
+[interval 4] t= 150.0s msgs=2999993 thr=   100000 msg/s  avg=  3.71 p50=3 p99=15 p999=29 max=55 ms  cpu= 71.0% rss=  33.0MB
+[interval 5] t= 180.0s msgs=3000001 thr=   100000 msg/s  avg=  3.67 p50=3 p99=14 p999=28 max=97 ms  cpu= 71.0% rss=  33.2MB
+[interval 6] t= 210.0s msgs=3000130 thr=   100004 msg/s  avg=  3.67 p50=3 p99=14 p999=27 max=49 ms  cpu= 70.9% rss=  33.2MB
+[interval 7] t= 240.0s msgs=2999934 thr=    99998 msg/s  avg=  3.69 p50=3 p99=14 p999=27 max=47 ms  cpu= 70.9% rss=  33.2MB
+[interval 8] t= 270.0s msgs=3000137 thr=   100004 msg/s  avg=  3.70 p50=3 p99=15 p999=29 max=49 ms  cpu= 71.1% rss=  33.2MB
+[interval 9] t= 300.0s msgs=3000025 thr=   100001 msg/s  avg=  3.68 p50=3 p99=14 p999=28 max=56 ms  cpu= 70.7% rss=  33.2MB
+[interval 10] t= 330.0s msgs=2999941 thr=    99998 msg/s  avg=  3.70 p50=3 p99=14 p999=26 max=47 ms  cpu= 71.0% rss=  33.5MB
+[interval 11] t= 360.0s msgs=2999983 thr=    99999 msg/s  avg=  3.67 p50=3 p99=14 p999=26 max=102 ms  cpu= 71.1% rss=  33.7MB
+[interval 12] t= 390.0s msgs=3000081 thr=   100001 msg/s  avg=  3.69 p50=3 p99=14 p999=27 max=56 ms  cpu= 71.2% rss=  33.7MB
+[interval 13] t= 420.0s msgs=3000067 thr=   100002 msg/s  avg=  3.73 p50=3 p99=15 p999=34 max=123 ms  cpu= 71.1% rss=  34.8MB
+[interval 14] t= 450.0s msgs=2999990 thr=   100000 msg/s  avg=  3.71 p50=3 p99=15 p999=29 max=52 ms  cpu= 70.9% rss=  34.8MB
+[interval 15] t= 480.0s msgs=2999960 thr=    99999 msg/s  avg=  3.68 p50=3 p99=14 p999=26 max=54 ms  cpu= 71.0% rss=  34.8MB
+[interval 16] t= 510.0s msgs=3000209 thr=   100006 msg/s  avg=  3.69 p50=3 p99=15 p999=29 max=53 ms  cpu= 71.2% rss=  35.0MB
+[interval 17] t= 540.0s msgs=2999885 thr=    99996 msg/s  avg=  3.69 p50=3 p99=15 p999=27 max=105 ms  cpu= 71.2% rss=  35.3MB
+[interval 18] t= 570.0s msgs=2999794 thr=    99993 msg/s  avg=  3.70 p50=3 p99=15 p999=29 max=102 ms  cpu= 71.0% rss=  35.3MB
+[interval 19] t= 600.0s msgs=3000207 thr=   100007 msg/s  avg=  3.67 p50=3 p99=14 p999=27 max=45 ms  cpu= 71.2% rss=  35.3MB
+[interval 20] t= 630.0s msgs=3000154 thr=   100005 msg/s  avg=  3.69 p50=3 p99=14 p999=27 max=104 ms  cpu= 71.0% rss=  35.6MB
+[interval 21] t= 660.0s msgs=2999959 thr=    99997 msg/s  avg=  3.69 p50=3 p99=14 p999=25 max=108 ms  cpu= 71.2% rss=  35.6MB
+[interval 22] t= 690.0s msgs=3000088 thr=   100003 msg/s  avg=  3.74 p50=3 p99=15 p999=31 max=53 ms  cpu= 71.4% rss=  35.6MB
+[interval 23] t= 720.0s msgs=2999955 thr=    99998 msg/s  avg=  3.76 p50=3 p99=15 p999=41 max=126 ms  cpu= 71.8% rss=  36.5MB
+[interval 24] t= 750.0s msgs=3000193 thr=   100006 msg/s  avg=  3.66 p50=3 p99=14 p999=27 max=62 ms  cpu= 71.6% rss=  36.5MB
+[interval 25] t= 780.0s msgs=2999906 thr=    99997 msg/s  avg=  3.66 p50=3 p99=14 p999=27 max=124 ms  cpu= 71.2% rss=  36.5MB
+[interval 26] t= 810.0s msgs=2999948 thr=    99998 msg/s  avg=  3.69 p50=3 p99=15 p999=27 max=54 ms  cpu= 71.8% rss=  36.5MB
+[interval 27] t= 840.0s msgs=3000186 thr=   100006 msg/s  avg=  3.69 p50=3 p99=14 p999=28 max=54 ms  cpu= 71.3% rss=  36.5MB
+[interval 28] t= 870.0s msgs=3000102 thr=   100003 msg/s  avg=  3.68 p50=3 p99=14 p999=26 max=43 ms  cpu= 71.6% rss=  36.5MB
+
+======================================================================
+SUMMARY - librdkafka-c (warmup 24000000 excluded, group.protocol=consumer)
+======================================================================
+Measured messages: 89999992
+Duration:          900.00 s
+Throughput:        100000 msg/s  (97.66 MiB/s)
+Batch consume:     max_poll_records=500, 113999992 non-empty batches, 113999992 records, avg 1.0 records/batch
+Records/batch dist (post-warmup): n=89999992 min=1 mean=1.0 p50=1 p99=1 max=1
+E2E latency (ms):  min=1 avg=3.70 stddev=2.46 p50=3 p90=5 p95=7 p99=14 p99.9=28 max=126
+RSS (MB, current):  avg=34.3 min=26.9 max=36.5 (29 samples)
+======================================================================
+
+Results written to: /home/ec2-user/bench/crcbatch/CRC-200mbs_rdk_res/CRC-200mbs-rdk-1781826016

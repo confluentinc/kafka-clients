@@ -202,6 +202,19 @@ impl GroupAuthorizationError {
         }
     }
 
+    /// Create a group authorization error carrying a custom message.
+    ///
+    /// Mirrors Java's `GroupAuthorizationException(String message)` /
+    /// `forGroupId(...)`, where the exception message is caller-supplied
+    /// rather than the default error text. Used when the coordinator manager
+    /// surfaces a fatal `GroupAuthorizationException("...")`.
+    pub fn with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kafka_error: KafkaGenericError::with_message(Errors::GroupAuthorizationFailed, message),
+            group_id: group_id.into(),
+        }
+    }
+
     /// Access the base error.
     pub fn kafka_error(&self) -> &KafkaGenericError {
         &self.kafka_error
@@ -259,6 +272,12 @@ pub enum KafkaError {
     ///
     /// Corresponds to Java's `SerializationException`.
     Serialization(String),
+    /// Wakeup error — a blocking operation was preempted by `wakeup()`.
+    ///
+    /// Corresponds to Java's `WakeupException` (extends `KafkaException`,
+    /// carries no error code). Used by `Consumer::wakeup()` to break out
+    /// of a `poll()` / `commit_sync()` / etc. call.
+    Wakeup(String),
 }
 
 impl KafkaError {
@@ -292,6 +311,22 @@ impl KafkaError {
     /// Create a group authorization error.
     pub fn group_authorization(group_id: impl Into<String>) -> Self {
         Self::GroupAuthorization(GroupAuthorizationError::new(group_id))
+    }
+
+    /// Create a group authorization error carrying a custom message
+    /// (Java: `new GroupAuthorizationException(message)`).
+    pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::GroupAuthorization(GroupAuthorizationError::with_message(group_id, message))
+    }
+
+    /// Create an invalid group ID error.
+    ///
+    /// Corresponds to Java's `InvalidGroupIdException` (an `ApiException`
+    /// subclass carrying error code [`Errors::InvalidGroupId`]). Thrown
+    /// by group-management / offset-commit APIs when the consumer was
+    /// constructed without a valid `group.id`.
+    pub fn invalid_group_id(message: impl Into<String>) -> Self {
+        Self::Generic(KafkaGenericError::with_message(Errors::InvalidGroupId, message))
     }
 
     /// Create a buffer exhausted error.
@@ -341,6 +376,15 @@ impl KafkaError {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
     }
 
+    /// Create a wakeup error.
+    ///
+    /// Corresponds to Java's `WakeupException`. Returned from blocking
+    /// `Consumer` operations (`poll`, `commit_sync`, `position`, etc.)
+    /// when `wakeup()` is invoked from another task.
+    pub fn wakeup(message: impl Into<String>) -> Self {
+        Self::Wakeup(message.into())
+    }
+
     /// Create a record batch too large error.
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
@@ -364,7 +408,8 @@ impl KafkaError {
             | Self::IllegalState(_)
             | Self::Timeout(_)
             | Self::RecordTooLarge(_)
-            | Self::Serialization(_) => None,
+            | Self::Serialization(_)
+            | Self::Wakeup(_) => None,
         }
     }
 
@@ -393,7 +438,8 @@ impl KafkaError {
             | Self::IllegalState(msg)
             | Self::Timeout(msg)
             | Self::RecordTooLarge(msg)
-            | Self::Serialization(msg) => msg,
+            | Self::Serialization(msg)
+            | Self::Wakeup(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
     }
@@ -402,8 +448,13 @@ impl KafkaError {
     ///
     /// [`IllegalArgument`](Self::IllegalArgument) and
     /// [`IllegalState`](Self::IllegalState) are never retriable.
+    ///
+    /// [`Timeout`](Self::Timeout) is retriable: Java's `TimeoutException`
+    /// extends `RetriableException` extends `ApiException`, so timeouts are
+    /// transient by definition. Special-cased here because `Timeout` has no
+    /// embedded `Errors` code and would otherwise fall through to `false`.
     pub fn is_retriable(&self) -> bool {
-        self.kafka_error().is_some_and(|e| e.is_retriable())
+        matches!(self, Self::Timeout(_)) || self.kafka_error().is_some_and(|e| e.is_retriable())
     }
 
     /// Whether this error is fatal.
@@ -440,7 +491,33 @@ impl KafkaError {
     /// - `IllegalState` (IllegalStateException extends RuntimeException)
     /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
     pub fn is_api_exception(&self) -> bool {
-        !matches!(self, Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_))
+        !matches!(
+            self,
+            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_) | Self::Wakeup(_)
+        )
+    }
+
+    /// Whether this error corresponds to a Java `KafkaException` (or a
+    /// subclass of it).
+    ///
+    /// This mirrors Java's `t instanceof KafkaException` test, used by
+    /// `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
+    /// (`ConsumerUtils.java:256`): a `KafkaException` passes through
+    /// unchanged, while a non-`KafkaException` `Throwable` gets wrapped in
+    /// a new `KafkaException(message, t)`.
+    ///
+    /// In Java the only error variants modelled here that are NOT
+    /// `KafkaException` are the `RuntimeException` subclasses
+    /// `IllegalArgumentException` and `IllegalStateException`. Everything
+    /// else — `ApiException` subtypes, `SerializationException`,
+    /// `WakeupException`, the bare `KafkaException` — extends
+    /// `KafkaException`.
+    ///
+    /// (`WakeupException` IS a `KafkaException`, hence it differs from
+    /// [`is_api_exception`](Self::is_api_exception), which excludes it
+    /// because `WakeupException` is not an `ApiException`.)
+    pub fn is_kafka_exception(&self) -> bool {
+        !matches!(self, Self::IllegalArgument(_) | Self::IllegalState(_))
     }
 }
 
@@ -462,6 +539,7 @@ impl fmt::Display for KafkaError {
             Self::Timeout(msg) => write!(f, "TimeoutError: {msg}"),
             Self::RecordTooLarge(msg) => write!(f, "RecordTooLargeError: {msg}"),
             Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
+            Self::Wakeup(msg) => write!(f, "WakeupError: {msg}"),
         }
     }
 }

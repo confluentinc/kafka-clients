@@ -15,7 +15,14 @@
 //! Internal types (org.apache.kafka.common.internals)
 
 pub(crate) mod cluster_resource_listeners;
+pub(crate) mod partition_states;
 pub(crate) mod topic;
 
 pub(crate) use cluster_resource_listeners::ClusterResourceListeners;
+// Re-exported per CLAUDE.md §2: internal imports of the struct must reach it
+// via the parent module re-export, not the file module path. Phase 4's
+// `SubscriptionState` is the first user; until later phases land, an
+// `#[allow(unused_imports)]` keeps `cargo build` clean.
+#[allow(unused_imports)]
+pub(crate) use partition_states::PartitionStates;
 pub(crate) use topic::Topic;

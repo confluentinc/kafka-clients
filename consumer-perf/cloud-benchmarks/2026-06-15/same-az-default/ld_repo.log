@@ -1,0 +1,98 @@
+======================================================================
+Consumer E2E Latency Benchmark - librdkafka (native C)
+======================================================================
+Bootstrap:   pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Topic:       cmp-bench-200p
+Group:       ld-repo-1781552078
+Throughput:  300000 msg/s
+Duration:    1800 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      300000 messages
+Interval:    30 s
+rdkafka ver: 2.13.0
+======================================================================
+
+>>> Subscribed; waiting for partition assignment (group.protocol=consumer)...
+%6|1781552078.928|GETSUBSCRIPTIONS|librdkafka-perf-c#consumer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to IwKng1aLTaGk4SuHJQywAQ
+    assigned 200 partition(s)
+    assigned after 1.0s
+>>> Settling to the live edge (polling until empty) before producer...
+    at live edge; starting producer now.
+
+>>> Measuring (warmup 300000 msgs, then 1800 s)...
+
+>>> first records arrived 44.3s after producer start
+    warmup complete (300000 msgs); measuring now
+[interval 0] t=  30.0s msgs=4500007 thr=   150000 msg/s  avg=  5.13 p50=4 p99=23 p999=39 max=72 ms  cpu= 50.7% rss=  65.4MB
+[interval 1] t=  60.0s msgs=4500179 thr=   150006 msg/s  avg=  4.93 p50=4 p99=20 p999=47 max=149 ms  cpu=122.3% rss=  71.6MB
+[interval 2] t=  90.0s msgs=4499818 thr=   149994 msg/s  avg=  4.98 p50=4 p99=20 p999=34 max=75 ms  cpu=122.2% rss=  71.6MB
+[interval 3] t= 120.0s msgs=4500285 thr=   150009 msg/s  avg=  4.94 p50=4 p99=20 p999=32 max=57 ms  cpu=121.8% rss=  71.6MB
+[interval 4] t= 150.0s msgs=4500054 thr=   150001 msg/s  avg=  4.77 p50=4 p99=18 p999=31 max=77 ms  cpu=123.2% rss=  71.6MB
+[interval 5] t= 180.0s msgs=4500043 thr=   150001 msg/s  avg=  5.01 p50=4 p99=20 p999=37 max=78 ms  cpu=121.4% rss=  71.6MB
+[interval 6] t= 210.0s msgs=4500087 thr=   150003 msg/s  avg=  4.85 p50=4 p99=19 p999=32 max=102 ms  cpu=123.0% rss=  71.6MB
+[interval 7] t= 240.0s msgs=4499973 thr=   149999 msg/s  avg=  5.03 p50=4 p99=21 p999=36 max=110 ms  cpu=120.7% rss=  71.6MB
+[interval 8] t= 270.0s msgs=4499927 thr=   149996 msg/s  avg=  4.78 p50=4 p99=18 p999=32 max=123 ms  cpu=123.3% rss=  72.1MB
+[interval 9] t= 300.0s msgs=4500197 thr=   150006 msg/s  avg=  4.98 p50=4 p99=20 p999=34 max=59 ms  cpu=122.0% rss=  72.1MB
+[interval 10] t= 330.0s msgs=4499574 thr=   149986 msg/s  avg=  4.88 p50=4 p99=19 p999=33 max=112 ms  cpu=122.1% rss=  72.1MB
+[interval 11] t= 360.0s msgs=4500394 thr=   150012 msg/s  avg=  5.06 p50=4 p99=21 p999=54 max=178 ms  cpu=121.0% rss=  74.2MB
+[interval 12] t= 390.0s msgs=4499947 thr=   149998 msg/s  avg=  4.97 p50=4 p99=20 p999=34 max=73 ms  cpu=122.0% rss=  74.2MB
+[interval 13] t= 420.0s msgs=4500162 thr=   150005 msg/s  avg=  4.79 p50=4 p99=19 p999=31 max=111 ms  cpu=122.7% rss=  74.2MB
+[interval 14] t= 450.0s msgs=4500180 thr=   150006 msg/s  avg=  5.06 p50=4 p99=20 p999=34 max=60 ms  cpu=122.2% rss=  74.2MB
+[interval 15] t= 480.0s msgs=4499976 thr=   149999 msg/s  avg=  4.79 p50=4 p99=19 p999=32 max=98 ms  cpu=122.8% rss=  74.2MB
+[interval 16] t= 510.0s msgs=4500074 thr=   150002 msg/s  avg=  5.03 p50=4 p99=21 p999=34 max=77 ms  cpu=122.2% rss=  74.2MB
+[interval 17] t= 540.0s msgs=4499927 thr=   149998 msg/s  avg=  4.77 p50=4 p99=18 p999=31 max=119 ms  cpu=122.5% rss=  74.2MB
+[interval 18] t= 570.0s msgs=4499997 thr=   150000 msg/s  avg=  5.08 p50=4 p99=21 p999=37 max=62 ms  cpu=121.4% rss=  74.2MB
+[interval 19] t= 600.0s msgs=4500008 thr=   150000 msg/s  avg=  4.95 p50=4 p99=20 p999=38 max=247 ms  cpu=122.0% rss=  78.3MB
+[interval 20] t= 630.0s msgs=4500130 thr=   150004 msg/s  avg=  4.91 p50=4 p99=20 p999=35 max=92 ms  cpu=121.9% rss=  78.3MB
+[interval 21] t= 660.0s msgs=4499879 thr=   149996 msg/s  avg=  5.09 p50=4 p99=21 p999=45 max=149 ms  cpu=121.4% rss=  78.3MB
+[interval 22] t= 690.0s msgs=4500243 thr=   150008 msg/s  avg=  4.90 p50=4 p99=20 p999=33 max=57 ms  cpu=122.2% rss=  78.3MB
+[interval 23] t= 720.0s msgs=4499832 thr=   149994 msg/s  avg=  5.00 p50=4 p99=20 p999=34 max=92 ms  cpu=121.6% rss=  78.3MB
+[interval 24] t= 750.0s msgs=4500026 thr=   150001 msg/s  avg=  4.80 p50=4 p99=19 p999=33 max=61 ms  cpu=122.9% rss=  78.3MB
+[interval 25] t= 780.0s msgs=4499951 thr=   149998 msg/s  avg=  5.07 p50=4 p99=21 p999=33 max=122 ms  cpu=121.5% rss=  78.3MB
+[interval 26] t= 810.0s msgs=4500176 thr=   150005 msg/s  avg=  4.84 p50=4 p99=19 p999=32 max=58 ms  cpu=122.8% rss=  78.3MB
+[interval 27] t= 840.0s msgs=4500021 thr=   150000 msg/s  avg=  4.98 p50=4 p99=20 p999=33 max=139 ms  cpu=121.6% rss=  78.3MB
+[interval 28] t= 870.0s msgs=4500044 thr=   150001 msg/s  avg=  4.91 p50=4 p99=20 p999=33 max=111 ms  cpu=121.7% rss=  78.3MB
+[interval 29] t= 900.0s msgs=4499819 thr=   149992 msg/s  avg=  4.91 p50=4 p99=20 p999=34 max=108 ms  cpu=122.3% rss=  78.3MB
+[interval 30] t= 930.0s msgs=4500286 thr=   150010 msg/s  avg=  5.00 p50=4 p99=20 p999=34 max=128 ms  cpu=121.7% rss=  78.3MB
+[interval 31] t= 960.0s msgs=4499978 thr=   149999 msg/s  avg=  4.91 p50=4 p99=19 p999=65 max=154 ms  cpu=122.8% rss=  80.1MB
+[interval 32] t= 990.0s msgs=4500037 thr=   150001 msg/s  avg=  5.00 p50=4 p99=20 p999=33 max=54 ms  cpu=122.2% rss=  80.1MB
+[interval 33] t=1020.0s msgs=4500070 thr=   150002 msg/s  avg=  4.82 p50=4 p99=19 p999=33 max=120 ms  cpu=122.0% rss=  80.1MB
+[interval 34] t=1050.0s msgs=4499909 thr=   149997 msg/s  avg=  5.08 p50=4 p99=21 p999=35 max=67 ms  cpu=122.0% rss=  80.1MB
+[interval 35] t=1080.0s msgs=4500176 thr=   150006 msg/s  avg=  4.80 p50=4 p99=19 p999=32 max=104 ms  cpu=123.2% rss=  80.1MB
+[interval 36] t=1110.0s msgs=4500069 thr=   150002 msg/s  avg=  4.91 p50=4 p99=20 p999=33 max=71 ms  cpu=122.2% rss=  80.1MB
+[interval 37] t=1140.0s msgs=4499844 thr=   149995 msg/s  avg=  4.88 p50=4 p99=20 p999=34 max=123 ms  cpu=122.2% rss=  80.1MB
+[interval 38] t=1170.0s msgs=4500238 thr=   150008 msg/s  avg=  4.87 p50=4 p99=19 p999=32 max=56 ms  cpu=122.5% rss=  80.1MB
+[interval 39] t=1200.0s msgs=4499937 thr=   149998 msg/s  avg=  4.98 p50=4 p99=20 p999=33 max=66 ms  cpu=121.5% rss=  80.1MB
+[interval 40] t=1230.0s msgs=4499925 thr=   149997 msg/s  avg=  4.80 p50=4 p99=19 p999=32 max=61 ms  cpu=122.8% rss=  80.1MB
+[interval 41] t=1260.0s msgs=4500140 thr=   150005 msg/s  avg=  5.06 p50=4 p99=21 p999=48 max=153 ms  cpu=121.4% rss=  80.1MB
+[interval 42] t=1290.0s msgs=4500102 thr=   150003 msg/s  avg=  4.81 p50=4 p99=19 p999=32 max=64 ms  cpu=123.4% rss=  80.1MB
+[interval 43] t=1320.0s msgs=4499895 thr=   149996 msg/s  avg=  4.99 p50=4 p99=20 p999=35 max=219 ms  cpu=121.7% rss=  80.6MB
+[interval 44] t=1350.0s msgs=4499883 thr=   149996 msg/s  avg=  4.82 p50=4 p99=19 p999=32 max=50 ms  cpu=122.7% rss=  80.6MB
+[interval 45] t=1380.0s msgs=4500251 thr=   150008 msg/s  avg=  4.94 p50=4 p99=20 p999=34 max=120 ms  cpu=121.7% rss=  80.6MB
+[interval 46] t=1410.0s msgs=4499927 thr=   149997 msg/s  avg=  4.85 p50=4 p99=19 p999=31 max=61 ms  cpu=122.5% rss=  80.6MB
+[interval 47] t=1440.0s msgs=4499605 thr=   149987 msg/s  avg=  4.84 p50=4 p99=19 p999=33 max=211 ms  cpu=122.6% rss=  80.6MB
+[interval 48] t=1470.0s msgs=4500513 thr=   150015 msg/s  avg=  4.96 p50=4 p99=20 p999=33 max=96 ms  cpu=122.4% rss=  80.6MB
+[interval 49] t=1500.0s msgs=4500206 thr=   150007 msg/s  avg=  4.85 p50=4 p99=19 p999=34 max=67 ms  cpu=122.6% rss=  80.6MB
+[interval 50] t=1530.0s msgs=4499869 thr=   149995 msg/s  avg=  5.08 p50=4 p99=21 p999=34 max=83 ms  cpu=122.5% rss=  80.6MB
+[interval 51] t=1560.0s msgs=4499867 thr=   149995 msg/s  avg=  4.87 p50=4 p99=19 p999=44 max=140 ms  cpu=122.1% rss=  80.6MB
+[interval 52] t=1590.0s msgs=4500184 thr=   150006 msg/s  avg=  5.07 p50=4 p99=21 p999=35 max=65 ms  cpu=121.6% rss=  80.6MB
+[interval 53] t=1620.0s msgs=4500151 thr=   150005 msg/s  avg=  4.84 p50=4 p99=19 p999=33 max=75 ms  cpu=122.8% rss=  80.6MB
+[interval 54] t=1650.0s msgs=4499865 thr=   149995 msg/s  avg=  5.04 p50=4 p99=20 p999=33 max=142 ms  cpu=122.2% rss=  80.6MB
+[interval 55] t=1680.0s msgs=4500093 thr=   150002 msg/s  avg=  4.99 p50=4 p99=20 p999=33 max=84 ms  cpu=122.1% rss=  80.6MB
+[interval 56] t=1710.0s msgs=4499967 thr=   149999 msg/s  avg=  4.94 p50=4 p99=19 p999=33 max=120 ms  cpu=122.0% rss=  80.6MB
+[interval 57] t=1740.0s msgs=4500195 thr=   150006 msg/s  avg=  5.09 p50=4 p99=21 p999=36 max=77 ms  cpu=121.3% rss=  80.6MB
+[interval 58] t=1770.0s msgs=4499939 thr=   149998 msg/s  avg=  5.01 p50=4 p99=20 p999=34 max=64 ms  cpu=121.5% rss=  80.6MB
+
+======================================================================
+SUMMARY - librdkafka-c (warmup 300000 excluded, group.protocol=consumer)
+======================================================================
+Measured messages: 270000063
+Duration:          1800.00 s
+Throughput:        150000 msg/s  (146.48 MiB/s)
+Batch consume:     max_poll_records=500, 270300063 non-empty batches, 270300063 records, avg 1.0 records/batch
+Records/batch dist (post-warmup): n=270000063 min=1 mean=1.0 p50=1 p99=1 max=1
+E2E latency (ms):  min=1 avg=4.94 stddev=3.60 p50=4 p90=8 p95=11 p99=20 p99.9=34 max=247
+RSS (MB, current):  avg=77.4 min=65.4 max=80.6 (59 samples)
+======================================================================
+
+Results written to: /home/ec2-user/bench/ld_repo/ld-repo-1781552078

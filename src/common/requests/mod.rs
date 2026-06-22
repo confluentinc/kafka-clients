@@ -22,8 +22,23 @@ pub mod abstract_request;
 pub mod abstract_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
+pub mod consumer_group_heartbeat_request;
+pub mod consumer_group_heartbeat_response;
+pub mod fetch_metadata;
+pub mod fetch_request;
+pub mod fetch_response;
+pub mod find_coordinator_request;
+pub mod find_coordinator_response;
+pub mod list_offsets_request;
+pub mod list_offsets_response;
 pub mod metadata_request;
 pub mod metadata_response;
+pub mod offset_commit_request;
+pub mod offset_commit_response;
+pub mod offset_fetch_request;
+pub mod offset_fetch_response;
+pub mod offsets_for_leader_epoch_request;
+pub mod offsets_for_leader_epoch_response;
 pub mod produce_request;
 pub mod produce_response;
 pub mod request_and_size;
@@ -41,8 +56,28 @@ pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
+pub use consumer_group_heartbeat_request::{
+    CONSUMER_GENERATED_MEMBER_ID_REQUIRED_VERSION, ConsumerGroupHeartbeatRequest, ConsumerGroupHeartbeatRequestBuilder,
+    JOIN_GROUP_MEMBER_EPOCH, LEAVE_GROUP_MEMBER_EPOCH, LEAVE_GROUP_STATIC_MEMBER_EPOCH,
+    REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
+};
+pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use fetch_request::{FetchRequest, FetchRequestBuilder};
+pub use fetch_response::FetchResponse;
+pub use find_coordinator_request::{
+    CoordinatorType, FindCoordinatorRequest, FindCoordinatorRequestBuilder, MIN_BATCHED_VERSION,
+};
+pub use find_coordinator_response::FindCoordinatorResponse;
+pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
+pub use list_offsets_response::ListOffsetsResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
+pub use offset_commit_request::{OffsetCommitRequest, OffsetCommitRequestBuilder};
+pub use offset_commit_response::OffsetCommitResponse;
+pub use offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestBuilder};
+pub use offset_fetch_response::{OffsetFetchResponse, OffsetFetchResponseBuilder};
+pub use offsets_for_leader_epoch_request::{OffsetsForLeaderEpochRequest, OffsetsForLeaderEpochRequestBuilder};
+pub use offsets_for_leader_epoch_response::OffsetsForLeaderEpochResponse;
 pub use produce_request::{ProduceRequest, ProduceRequestBuilder};
 pub use produce_response::{PartitionResponse, ProduceResponse, RecordError};
 pub use request_and_size::RequestAndSize;

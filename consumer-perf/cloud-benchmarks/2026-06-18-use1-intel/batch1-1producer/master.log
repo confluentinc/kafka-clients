@@ -1,0 +1,14 @@
+[11:42:11] BATCH START
+[11:42:11] START A-200p client=rust topic=cmp-bench-200p rate=150000 dur=1800s warmup=36000000(~240s) nprod=1
+[12:17:00] END   A-200p client=rust
+[12:17:00] START A-200p client=rdk topic=cmp-bench-200p rate=150000 dur=1800s warmup=36000000(~240s) nprod=1
+[12:51:50] END   A-200p client=rdk
+[12:51:50] START A-200p client=java topic=cmp-bench-200p rate=150000 dur=1800s warmup=36000000(~240s) nprod=1
+[13:26:40] END   A-200p client=java
+[13:26:40] START A-36p client=rust topic=cmp-bench-36p rate=150000 dur=1800s warmup=36000000(~240s) nprod=1
+[14:01:30] END   A-36p client=rust
+[14:01:30] START A-36p client=rdk topic=cmp-bench-36p rate=150000 dur=1800s warmup=36000000(~240s) nprod=1
+[14:36:19] END   A-36p client=rdk
+[14:36:19] START A-36p client=java topic=cmp-bench-36p rate=150000 dur=1800s warmup=36000000(~240s) nprod=1
+[15:11:09] END   A-36p client=java
+[15:11:09] BATCH DONE

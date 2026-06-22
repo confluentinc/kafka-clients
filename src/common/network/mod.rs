@@ -17,6 +17,7 @@
 //! This module provides the low-level TCP I/O and Kafka protocol framing.
 //! It sits between the wire protocol and the higher-level channel abstraction.
 
+pub mod authentication_error;
 pub mod authenticator;
 pub mod byte_buffer_send;
 pub mod channel_builder;
@@ -43,6 +44,7 @@ pub mod ssl_channel_builder;
 pub mod ssl_transport_layer;
 pub mod transport_layer;
 
+pub use authentication_error::{AuthenticationError, auth_io_error, is_authentication_error};
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
 pub use channel_builder::ChannelBuilder;

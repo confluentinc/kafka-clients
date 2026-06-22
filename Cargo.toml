@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "generator", "xtask", "multilanguage-test-server"]
+members = [".", "generator", "xtask", "consumer-perf", "multilanguage-test-server"]
 
 [package]
 name = "confluent-kafka-rust"
@@ -25,11 +25,18 @@ serde_json = "1.0"
 generator = { path = "generator" }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
-tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "signal"] }
+tokio-util = "0.7"
+tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["logging", "std", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 indexmap = "2"
+# Fast, non-cryptographic hasher (FxHash) for the Selector's internal per-poll
+# channel-id maps/sets. The keys are internal connection ids, not attacker-
+# controlled, so SipHash's DoS resistance buys nothing while its per-lookup cost
+# dominates the high-frequency poll loop (see Phase 22 / TLS CPU profile).
+rustc-hash = "2"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
 flate2 = "1"
@@ -39,6 +46,7 @@ zstd = "0.13"
 crc32c = "0.6"
 dashmap = "6"
 futures-util = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 testcontainers = "0.27"
@@ -61,9 +69,21 @@ path = "tests/main.rs"
 name = "producer"
 path = "tests/producer/main.rs"
 
+[[test]]
+name = "consumer"
+path = "tests/consumer/main.rs"
+
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.0"
 generator = { path = "generator" }
 cbindgen = { version = "0.29", optional = true }
+
+# Release-build optimizations (Tier 1, zero behavior change): fat LTO + a single
+# codegen unit let the optimizer inline across crate boundaries (trait dispatch,
+# the per-poll hot path), Rust's AOT counterpart to Java's JIT. NOT panic=abort —
+# std Mutex poisoning (consumer-threading.md §16) relies on unwinding.
+[profile.release]
+lto = "fat"
+codegen-units = 1

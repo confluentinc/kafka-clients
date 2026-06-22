@@ -36,7 +36,7 @@ use std::pin::Pin;
 /// the Java interface are omitted because they require `KafkaPrincipal` and
 /// `KafkaPrincipalBuilder` which are server-side constructs not needed for the
 /// client-only PLAINTEXT path.
-pub trait Authenticator: Send {
+pub trait Authenticator: Send + Sync {
     /// Implements any authentication mechanism.
     ///
     /// For security protocols PLAINTEXT and SSL, this is a no-op.
