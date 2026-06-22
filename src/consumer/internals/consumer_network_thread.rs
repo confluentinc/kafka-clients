@@ -65,12 +65,15 @@
 //!
 //! # Metrics
 //!
-//! `AsyncConsumerMetrics` is not yet translated into Rust. Java's
-//! `recordTimeBetweenNetworkThreadPoll`, `recordApplicationEventQueueSize`,
-//! and `recordApplicationEventExpiredSize` call sites are replaced with
-//! log-only equivalents. The Java metric tests are intentionally NOT
-//! translated here — they will be added alongside the metrics framework
-//! in a future milestone.
+//! `AsyncConsumerMetrics` (Phase M6) is wired into the bg loop via the
+//! optional [`ConsumerNetworkThread::set_async_consumer_metrics`] setter
+//! (M4/M5 precedent). `recordTimeBetweenNetworkThreadPoll` fires per
+//! `run_once`, `recordApplicationEventQueueSize`/`...QueueTime`/
+//! `...QueueProcessingTime` in `process_application_events`, and
+//! `recordApplicationEventExpiredSize` at both reap sites (run_once +
+//! cleanup). When the metrics are not wired (tests that don't care), these
+//! sites are no-ops. The `AsyncConsumerMetrics` value-parity tests live in
+//! `async_consumer_metrics.rs`.
 //!
 //! # Metadata-error notification on uncompleted events
 //!
@@ -228,9 +231,9 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Close timeout (millis). Set by [`Self::set_close_timeout_ms`]
     /// before `close()`.
     close_timeout_ms: AtomicI64,
-    /// Wall-clock timestamp of the last `run_once` call. Used by Java's
-    /// `recordTimeBetweenNetworkThreadPoll` metric — kept here as a
-    /// log-only equivalent.
+    /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
+    /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
+    /// metric (wired in `run_once` when `async_consumer_metrics` is set).
     last_poll_time_ms: i64,
     /// Time source — `SystemThreadTime` in production, mock in tests.
     time: Arc<dyn ThreadTime>,
@@ -270,10 +273,10 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
-    /// Java constructor. Drops `LogContext` (Rust uses `log`),
-    /// `AsyncConsumerMetrics` (no metrics yet — see module docstring),
-    /// and the three `Supplier<...>` indirections (Rust takes the
-    /// already-constructed values directly).
+    /// Java constructor. Drops `LogContext` (Rust uses `log`) and the three
+    /// `Supplier<...>` indirections (Rust takes the already-constructed
+    /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
+    /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         time: Arc<dyn ThreadTime>,

@@ -5423,7 +5423,13 @@ mod tests {
     //     `issue_10_commit_sync_drains_listener_callback_while_waiting`
     //     (inline above) AND the §31 regression pair in commit 11/N.
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
-    //     PLAN deferral #1 (AsyncConsumerMetrics deferred past Phase 12).
+    //     the bg-event queue size/time/processing-time recording is now WIRED
+    //     in `process_background_events` (Phase M6) and verified by the
+    //     handler-side smoke tests in `background_event_handler.rs`. The
+    //     end-to-end value assertion (drain under a mock clock, then read
+    //     `metrics.metric("background-event-queue-time-avg")`) needs both the
+    //     public `metrics()` accessor and a MockTime-injectable consumer
+    //     fixture, which land in Phase M7 — translated there.
     //   - testEmptyStreamRebalanceData, testStreamRebalanceData,
     //     testCloseInvokesStreamsRebalanceListenerOnTasksRevokedWhenMemberEpochPositive,
     //     testCloseInvokesStreamsRebalanceListenerOnAllTasksLostWhenMemberEpochZeroOrNegative,
@@ -6365,7 +6371,10 @@ mod tests {
     //
     // Skipped Java tests for this commit (each carries a one-line rationale):
     //   - `testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime` —
-    //     `AsyncConsumerMetrics` deferred to a separate cross-cutting commit.
+    //     `AsyncConsumerMetrics` is now WIRED (Phase M6) and verified by the
+    //     handler-side smoke tests; the end-to-end value assertion under a
+    //     mock clock awaits the M7 public `metrics()` accessor + MockTime
+    //     fixture (see the matching skip note in the commit-8 batch above).
     //   - `testReaperInvokedInPoll` — depends on the metrics observers that
     //     would observe the reaper invocations. The `reap` call itself is
     //     wired and unit-tested via the bg-events drain test in commit 3.

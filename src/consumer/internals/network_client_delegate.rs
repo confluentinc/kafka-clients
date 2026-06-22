@@ -483,8 +483,9 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     ///
     /// Java: `NetworkClientDelegate(Time, ConsumerConfig, LogContext,
     /// KafkaClient, Metadata, BackgroundEventHandler, boolean,
-    /// AsyncConsumerMetrics)`. The `AsyncConsumerMetrics` parameter is
-    /// dropped per the Phase-6 plan ("Out of scope: metrics").
+    /// AsyncConsumerMetrics)`. The `AsyncConsumerMetrics` is wired
+    /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6,
+    /// M4/M5 setter precedent) rather than passed to the constructor.
     pub(crate) fn new(
         config: &ConsumerConfig,
         client: K,
