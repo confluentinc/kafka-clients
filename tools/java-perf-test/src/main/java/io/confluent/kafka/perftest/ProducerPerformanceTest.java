@@ -179,6 +179,8 @@ public class ProducerPerformanceTest {
                 Math.max(1, (int) ((1L << 31) - 1) / Math.max(1, MESSAGE_SIZE / 4)));
 
             AtomicBoolean recording = new AtomicBoolean(true);
+            // Sample the handoff-queue depth each measured window (Little's Law check).
+            metrics.setQueueSizeSupplier(pending::size);
             Thread recorder = startRecorder(pending, recording, metrics, messageSize);
 
             long beforeMs = System.currentTimeMillis();
@@ -256,6 +258,8 @@ public class ProducerPerformanceTest {
                 rate / (avgCpu > 0 ? avgCpu : 1.0)));
             System.out.println("Memory efficiency: " + String.format("%.2f msg/(s * KB RSS)",
                 rate / (avgRssKib > 0 ? avgRssKib : 1.0)));
+            System.out.println("Average future queue size: " + String.format("%.2f", metrics.getAverageQueueSize()));
+            System.out.println("Max future queue size: " + metrics.getMaxQueueSize());
             System.out.println("Average rate msg/s: " + String.format("%.2f msg/s", rate));
             System.out.println("Average rate MiB/s: " + String.format("%.2f MiB/s", mibRate));
             System.out.println("Average latency: " + String.format("%.2f ms", avgLatencyMs));

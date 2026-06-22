@@ -201,7 +201,27 @@ public class Metrics {
     public int totalExternalMetrics = 0;
     public double totalCpu = 0;
     public double totalRss = 0;
+    // Future-queue (handoff) depth, sampled once per measured window. By Little's
+    // Law the average should sit at throughput × latency (λ·W); a depth that
+    // grows over time signals the completion side lagging. Sampled via a
+    // supplier so Metrics need not know the queue's concrete type.
+    public long totalQueue = 0;
+    public long maxQueue = 0;
+    private java.util.function.IntSupplier queueSizeSupplier = null;
     public Map<String, Object> lastMetrics = null;
+
+    /** Register a source for the handoff-queue depth, sampled each measured window. */
+    public void setQueueSizeSupplier(java.util.function.IntSupplier supplier) {
+        this.queueSizeSupplier = supplier;
+    }
+
+    public double getAverageQueueSize() {
+        return totalExternalMetrics > 0 ? (double) totalQueue / totalExternalMetrics : 0.0;
+    }
+
+    public long getMaxQueueSize() {
+        return maxQueue;
+    }
 
     public Metrics() throws IOException {
         // Hard-coded filename to match the Python harness.
@@ -249,6 +269,13 @@ public class Metrics {
                         totalCpu += Double.parseDouble(cpuMap.get("average"));
                         totalRss += Double.parseDouble(rssMap.get("average"));
                         totalExternalMetrics++;
+                        if (queueSizeSupplier != null) {
+                            long q = queueSizeSupplier.getAsInt();
+                            totalQueue += q;
+                            if (q > maxQueue) {
+                                maxQueue = q;
+                            }
+                        }
                     }
                     String json = mapper.writeValueAsString(snapshot);
                     synchronized (writer) {

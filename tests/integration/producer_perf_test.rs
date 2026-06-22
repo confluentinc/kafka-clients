@@ -445,6 +445,11 @@ struct CumulativeStats {
     total_cpu: AtomicU64, // cpu% × 100, summed across samples
     total_rss: AtomicU64,
     sample_count: AtomicU64,
+    // Future-queue (in-flight) depth, sampled once per measured window. By
+    // Little's Law the average should sit at throughput × latency (λ·W); a
+    // depth that grows over time signals the completion side lagging.
+    total_queue: AtomicU64,
+    max_queue: AtomicU64,
 }
 
 impl CumulativeStats {
@@ -453,13 +458,17 @@ impl CumulativeStats {
             total_cpu: AtomicU64::new(0),
             total_rss: AtomicU64::new(0),
             sample_count: AtomicU64::new(0),
+            total_queue: AtomicU64::new(0),
+            max_queue: AtomicU64::new(0),
         }
     }
 
-    fn accumulate(&self, cpu: f64, rss: u64) {
+    fn accumulate(&self, cpu: f64, rss: u64, queue_depth: u64) {
         self.total_cpu.fetch_add((cpu * 100.0) as u64, Ordering::Relaxed);
         self.total_rss.fetch_add(rss, Ordering::Relaxed);
         self.sample_count.fetch_add(1, Ordering::Relaxed);
+        self.total_queue.fetch_add(queue_depth, Ordering::Relaxed);
+        self.max_queue.fetch_max(queue_depth, Ordering::Relaxed);
     }
 }
 
@@ -679,6 +688,7 @@ async fn producer_perf_test() {
     let meas_end = Arc::new(AtomicU64::new(0));
     let metrics_for_collector = Arc::clone(&metrics);
     let metrics_cumul = Arc::clone(&cumulative);
+    let in_flight_for_collector = Arc::clone(&in_flight);
     let metrics_stop = Arc::clone(&should_stop);
     let meas_start_collector = Arc::clone(&meas_start);
     let meas_end_collector = Arc::clone(&meas_end);
@@ -704,7 +714,8 @@ async fn producer_perf_test() {
             // and measurement_end is not (between meas_start and the last
             // response). Warmup and cooldown windows are excluded.
             if start != 0 && end == 0 {
-                metrics_cumul.accumulate(cpu, rss);
+                let queue_depth = in_flight_for_collector.load(Ordering::Relaxed);
+                metrics_cumul.accumulate(cpu, rss, queue_depth);
             }
 
             let line = rollover_line(
@@ -943,6 +954,10 @@ async fn producer_perf_test() {
             "Memory Efficiency: {:.2} msg/(s * KB RSS)",
             msg_rate / if avg_rss_kib > 0.0 { avg_rss_kib } else { 1.0 }
         );
+        let avg_queue = cumulative.total_queue.load(Ordering::Relaxed) as f64 / samples as f64;
+        let max_queue = cumulative.max_queue.load(Ordering::Relaxed);
+        println!("Average future queue size: {avg_queue:.2}");
+        println!("Max future queue size: {max_queue}");
     } else {
         println!("No external metrics collected");
     }

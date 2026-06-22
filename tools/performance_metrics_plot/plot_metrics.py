@@ -5,6 +5,7 @@ Outputs a markdown file with base64 embedded graph.
 """
 
 import json
+import math
 import sys
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -21,6 +22,20 @@ def _to_float(v):
     if v is None or v == '-inf' or v == 0 or v == '0':
         return 0.0
     return float(v)
+
+
+def _percentile(values, p):
+    """Nearest-rank p-th percentile (p in 0..1) of a list of per-window values.
+
+    Computed over the window series (one sample per window), since the JSONL
+    buckets expose only average/max/total/count, not raw samples. Uses the same
+    ceil(n*p) nearest-rank convention as the per-window latency histograms so
+    the two agree. Returns 0 for an empty list."""
+    if not values:
+        return 0
+    s = sorted(values)
+    idx = max(0, min(len(s) - 1, math.ceil(p * len(s)) - 1))
+    return s[idx]
 
 def read_metrics(jsonl_file):
     """Read JSONL file and extract RSS max, CPU max, latency, throughput, and timestamp data."""
@@ -373,16 +388,22 @@ def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_bas
         max_rss = max(rss_max_values) / (1024 * 1024)
         min_rss = min([r for r in rss_max_values if r > 0]) / (1024 * 1024) if any(r > 0 for r in rss_max_values) else 0
         avg_rss = sum(rss_max_values) / len(rss_max_values) / (1024 * 1024)
+        p50_rss = _percentile(rss_max_values, 0.50) / (1024 * 1024)
+        p90_rss = _percentile(rss_max_values, 0.90) / (1024 * 1024)
+        p99_rss = _percentile(rss_max_values, 0.99) / (1024 * 1024)
     else:
-        max_rss = min_rss = avg_rss = 0
-    
+        max_rss = min_rss = avg_rss = p50_rss = p90_rss = p99_rss = 0
+
     # Calculate CPU statistics
     if cpu_max_values:
         max_cpu = max(cpu_max_values)
         min_cpu = min([c for c in cpu_max_values if c > 0]) if any(c > 0 for c in cpu_max_values) else 0
         avg_cpu = sum(cpu_max_values) / len(cpu_max_values)
+        p50_cpu = _percentile(cpu_max_values, 0.50)
+        p90_cpu = _percentile(cpu_max_values, 0.90)
+        p99_cpu = _percentile(cpu_max_values, 0.99)
     else:
-        max_cpu = min_cpu = avg_cpu = 0
+        max_cpu = min_cpu = avg_cpu = p50_cpu = p90_cpu = p99_cpu = 0
     
     # Calculate latency statistics
     if latency_avg_values:
@@ -424,32 +445,44 @@ def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_bas
         max_throughput = max(throughput_values)
         min_throughput = min([t for t in throughput_values if t > 0]) if any(t > 0 for t in throughput_values) else 0
         avg_throughput = sum(throughput_values) / len(throughput_values)
+        p50_throughput = _percentile(throughput_values, 0.50)
+        p90_throughput = _percentile(throughput_values, 0.90)
+        p99_throughput = _percentile(throughput_values, 0.99)
     else:
-        max_throughput = min_throughput = avg_throughput = 0
-    
+        max_throughput = min_throughput = avg_throughput = p50_throughput = p90_throughput = p99_throughput = 0
+
     # Calculate message rate statistics
     if msg_rate_values:
         max_msg_rate = max(msg_rate_values)
         min_msg_rate = min([m for m in msg_rate_values if m > 0]) if any(m > 0 for m in msg_rate_values) else 0
         avg_msg_rate = sum(msg_rate_values) / len(msg_rate_values)
+        p50_msg_rate = _percentile(msg_rate_values, 0.50)
+        p90_msg_rate = _percentile(msg_rate_values, 0.90)
+        p99_msg_rate = _percentile(msg_rate_values, 0.99)
     else:
-        max_msg_rate = min_msg_rate = avg_msg_rate = 0
-    
+        max_msg_rate = min_msg_rate = avg_msg_rate = p50_msg_rate = p90_msg_rate = p99_msg_rate = 0
+
     # Calculate CPU efficiency statistics
     if cpu_efficiency_values:
         max_cpu_eff = max(cpu_efficiency_values)
         min_cpu_eff = min([c for c in cpu_efficiency_values if c > 0]) if any(c > 0 for c in cpu_efficiency_values) else 0
         avg_cpu_eff = sum(cpu_efficiency_values) / len(cpu_efficiency_values)
+        p50_cpu_eff = _percentile(cpu_efficiency_values, 0.50)
+        p90_cpu_eff = _percentile(cpu_efficiency_values, 0.90)
+        p99_cpu_eff = _percentile(cpu_efficiency_values, 0.99)
     else:
-        max_cpu_eff = min_cpu_eff = avg_cpu_eff = 0
-    
+        max_cpu_eff = min_cpu_eff = avg_cpu_eff = p50_cpu_eff = p90_cpu_eff = p99_cpu_eff = 0
+
     # Calculate memory efficiency statistics
     if memory_efficiency_values:
         max_mem_eff = max(memory_efficiency_values)
         min_mem_eff = min([m for m in memory_efficiency_values if m > 0]) if any(m > 0 for m in memory_efficiency_values) else 0
         avg_mem_eff = sum(memory_efficiency_values) / len(memory_efficiency_values)
+        p50_mem_eff = _percentile(memory_efficiency_values, 0.50)
+        p90_mem_eff = _percentile(memory_efficiency_values, 0.90)
+        p99_mem_eff = _percentile(memory_efficiency_values, 0.99)
     else:
-        max_mem_eff = min_mem_eff = avg_mem_eff = 0
+        max_mem_eff = min_mem_eff = avg_mem_eff = p50_mem_eff = p90_mem_eff = p99_mem_eff = 0
     
     markdown_content = f"""# Performance Metrics Report
 
@@ -466,6 +499,9 @@ Performance test metrics over time.
 - **Maximum RSS**: {max_rss:.2f} MB
 - **Minimum RSS**: {min_rss:.2f} MB
 - **Average RSS**: {avg_rss:.2f} MB
+- **P50 RSS**: {p50_rss:.2f} MB
+- **P90 RSS**: {p90_rss:.2f} MB
+- **P99 RSS**: {p99_rss:.2f} MB
 - **Total Data Points**: {len(rss_max_values)}
 
 ## CPU Usage
@@ -477,6 +513,9 @@ Performance test metrics over time.
 - **Maximum CPU**: {max_cpu:.2f}%
 - **Minimum CPU**: {min_cpu:.2f}%
 - **Average CPU**: {avg_cpu:.2f}%
+- **P50 CPU**: {p50_cpu:.2f}%
+- **P90 CPU**: {p90_cpu:.2f}%
+- **P99 CPU**: {p99_cpu:.2f}%
 - **Total Data Points**: {len(cpu_max_values)}
 
 ## Latency
@@ -506,6 +545,9 @@ Performance test metrics over time.
 - **Maximum**: {max_throughput:.2f} MB/s
 - **Minimum**: {min_throughput:.2f} MB/s
 - **Average**: {avg_throughput:.2f} MB/s
+- **P50**: {p50_throughput:.2f} MB/s
+- **P90**: {p90_throughput:.2f} MB/s
+- **P99**: {p99_throughput:.2f} MB/s
 - **Total Data Points**: {len(throughput_values)}
 
 ## Message Rate
@@ -517,6 +559,9 @@ Performance test metrics over time.
 - **Maximum**: {max_msg_rate:.2f} msg/s
 - **Minimum**: {min_msg_rate:.2f} msg/s
 - **Average**: {avg_msg_rate:.2f} msg/s
+- **P50**: {p50_msg_rate:.2f} msg/s
+- **P90**: {p90_msg_rate:.2f} msg/s
+- **P99**: {p99_msg_rate:.2f} msg/s
 - **Total Data Points**: {len(msg_rate_values)}
 
 ## CPU Efficiency
@@ -528,6 +573,9 @@ Performance test metrics over time.
 - **Maximum**: {max_cpu_eff:.2f} msg/(s*1% CPU)
 - **Minimum**: {min_cpu_eff:.2f} msg/(s*1% CPU)
 - **Average**: {avg_cpu_eff:.2f} msg/(s*1% CPU)
+- **P50**: {p50_cpu_eff:.2f} msg/(s*1% CPU)
+- **P90**: {p90_cpu_eff:.2f} msg/(s*1% CPU)
+- **P99**: {p99_cpu_eff:.2f} msg/(s*1% CPU)
 - **Total Data Points**: {len(cpu_efficiency_values)}
 
 ## Memory Efficiency
@@ -539,6 +587,9 @@ Performance test metrics over time.
 - **Maximum**: {max_mem_eff:.2f} msg/(s*1KiB RSS)
 - **Minimum**: {min_mem_eff:.2f} msg/(s*1KiB RSS)
 - **Average**: {avg_mem_eff:.2f} msg/(s*1KiB RSS)
+- **P50**: {p50_mem_eff:.2f} msg/(s*1KiB RSS)
+- **P90**: {p90_mem_eff:.2f} msg/(s*1KiB RSS)
+- **P99**: {p99_mem_eff:.2f} msg/(s*1KiB RSS)
 - **Total Data Points**: {len(memory_efficiency_values)}
 
 ## Notes

@@ -166,6 +166,11 @@ typedef struct {
     long total_external_metrics;
     double total_cpu;
     double total_rss;
+    // Future-queue (handoff) depth, sampled once per window over the measured
+    // interval only — mirrors how total_cpu/total_rss are accumulated.
+    long total_queue_samples;
+    double total_queue_size;
+    size_t max_queue_size;
 } Metrics;
 
 static Metrics metrics;
@@ -326,6 +331,15 @@ static void queue_init(Queue* q, size_t capacity);
 static bool queue_push(Queue* q, void* item);
 static void queue_destroy(Queue* q);
 static bool queue_pop(Queue* q, void ** item, int timeout_ms);
+static size_t queue_size(Queue* q);
+
+// The producer-to-completion handoff queue ("future queue"), sampled by the
+// metrics thread to report its average/peak depth. By Little's Law the depth
+// should sit at throughput * latency (rate * W); a depth that instead grows
+// over time signals the completion side lagging — produced-but-unverified
+// futures (and their librdkafka payload copies) piling up — rather than steady
+// in-flight buffering. NULL until main() points it at the queue.
+static Queue* g_future_queue = NULL;
 
 static void test_v2_dr(rd_kafka_t *rk,
                       const rd_kafka_message_t *rkmessage,
@@ -518,6 +532,9 @@ static void metrics_init(Metrics* m) {
     m->last_rss = 0.0;
     m->total_cpu = 0.0;
     m->total_rss = 0.0;
+    m->total_queue_samples = 0;
+    m->total_queue_size = 0.0;
+    m->max_queue_size = 0;
     pthread_mutex_init(&m->mutex, NULL);
     // Establish the CPU/RSS sampling baseline so the first window measures a
     // ~1 s interval rather than the whole process lifetime.
@@ -605,6 +622,17 @@ static void metrics_rollover(Metrics* m) {
         m->total_external_metrics++;
         m->total_cpu += cpu;
         m->total_rss += (double)rss;
+        // Sample the handoff/future queue depth. Lock order is m->mutex then the
+        // queue mutex; no thread takes them in the opposite order, so this is
+        // deadlock-free.
+        if (g_future_queue != NULL) {
+            size_t qsz = queue_size(g_future_queue);
+            m->total_queue_size += (double)qsz;
+            m->total_queue_samples++;
+            if (qsz > m->max_queue_size) {
+                m->max_queue_size = qsz;
+            }
+        }
     }
 
     // Per-window latency percentiles, then reset the window histogram.
@@ -721,6 +749,14 @@ static void metrics_external_metrics_aggregations(Metrics* m, double *average_cp
     pthread_mutex_unlock(&m->mutex);
 }
 
+static void metrics_queue_aggregations(Metrics* m, double *average_queue_size, size_t *max_queue_size) {
+    pthread_mutex_lock(&m->mutex);
+    *average_queue_size = m->total_queue_samples > 0
+        ? m->total_queue_size / m->total_queue_samples : 0.0;
+    *max_queue_size = m->max_queue_size;
+    pthread_mutex_unlock(&m->mutex);
+}
+
 static void metrics_external_metrics_last_values(Metrics* m, double *last_cpu, double *last_rss) {
     pthread_mutex_lock(&m->mutex);
     *last_cpu = m->last_cpu;
@@ -806,6 +842,14 @@ static void queue_destroy(Queue* q) {
     pthread_cond_destroy(&q->not_empty);
     pthread_cond_destroy(&q->not_full);
     free(q->items);
+}
+
+// Current number of queued items (thread-safe snapshot).
+static size_t queue_size(Queue* q) {
+    pthread_mutex_lock(&q->mutex);
+    size_t n = q->cnt;
+    pthread_mutex_unlock(&q->mutex);
+    return n;
 }
 
 #define queue_full(q) (q->cnt > 0 && ((q)->tail + 1) % (q)->capacity == (q)->head)
@@ -1216,6 +1260,7 @@ static void run_test() {
     // Small initial capacity; queue_push grows it on demand, so the producer's
     // own buffer/queue size is the only backpressure (no test-imposed cap).
     queue_init(&produce_calls, 1024);
+    g_future_queue = &produce_calls;  // expose depth to the metrics sampler
     start_recording_completed_calls(&produce_calls);
     first_message_time = current_time_ns();
     long current_ms = current_time_ms();
@@ -1299,6 +1344,11 @@ static void run_test() {
             (double)message_rate / (average_cpu > 0.0 ? average_cpu : 1.0));
         printf("Memory efficiency: %.2f msg/(s * KB RSS)\n",
             (double)message_rate / (average_rss > 0.0 ? average_rss / 1024.0 : 1.0));
+        double average_queue_size;
+        size_t max_queue_size;
+        metrics_queue_aggregations(&metrics, &average_queue_size, &max_queue_size);
+        printf("Average future queue size: %.2f\n", average_queue_size);
+        printf("Max future queue size: %zu\n", max_queue_size);
         printf("Average time: %.2f ms\n",
             (double)total_time_ns / completed_messages / 1e6);
         printf("Average rate msg/s: %.2f msg/s\n",
@@ -1321,6 +1371,13 @@ static void run_test() {
         }
     }
 
+    // Stop sampling the queue before destroying it: the metrics thread runs
+    // until later, and the verification-failure branches above never set
+    // measurement_end_ms, so the measured-only guard alone would not prevent a
+    // sample after free. Clear under the metrics lock to avoid a data race.
+    pthread_mutex_lock(&metrics.mutex);
+    g_future_queue = NULL;
+    pthread_mutex_unlock(&metrics.mutex);
     queue_destroy(&produce_calls);
 end:
     if (CLIENT_VERSION == 3) {

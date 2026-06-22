@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # This script lives at <repo>/tools/deploy_and_run_perf/. The repo it deploys is
@@ -205,6 +206,22 @@ def ssh(host, remote_cmd, ssh_opts, tty=False, stdin=None, check=True):
     return subprocess.run(cmd, input=stdin, text=True, check=check)
 
 
+def wait_for_session(host, session, ssh_opts, poll_seconds=20):
+    """Block until the remote tmux `session` is gone, polling with a fresh
+    short-lived ssh each iteration. Long runs can outlast a single ssh
+    connection (a transient "server not responding" would otherwise kill the
+    whole wait), so we reconnect every poll and only stop on a *definitive*
+    "gone": ssh succeeded (exit 0) AND tmux reported the session absent. A
+    failed poll (ssh non-zero / empty output) is treated as "keep waiting"."""
+    probe = f"tmux has-session -t {shlex.quote(session)} 2>/dev/null && echo ALIVE || echo GONE"
+    while True:
+        r = subprocess.run(["ssh", *ssh_opts, host, probe],
+                           text=True, capture_output=True)
+        if r.returncode == 0 and r.stdout.strip() == "GONE":
+            return
+        time.sleep(poll_seconds)
+
+
 def scp(src, dst, ssh_opts, recursive=False, check=True):
     cmd = ["scp", *ssh_opts]
     if recursive:
@@ -355,9 +372,10 @@ Deployed and started. The '{args.test}' test is running in tmux on {host}.
   (pass --results-dir to auto-copy + plot when the run finishes.)""")
         return
 
-    # 6. Wait for the run to finish (single connection, remote sleep), then fetch.
+    # 6. Wait for the run to finish (resilient poll: reconnect each iteration so
+    #    a transient ssh drop doesn't abort a long run), then fetch.
     print(f"==> Waiting for the test run to finish on {host} ...")
-    ssh(host, "while tmux has-session -t perftest 2>/dev/null; do sleep 20; done", ssh_opts)
+    wait_for_session(host, "perftest", ssh_opts)
 
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     dest = os.path.join(args.results_dir, ts)
