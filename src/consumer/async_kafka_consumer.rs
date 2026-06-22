@@ -6038,30 +6038,59 @@ mod tests {
     }
 
     /// Phase M7: the public `metrics()` accessor returns the registry snapshot
-    /// that all the metrics managers populate. Mirrors the read contract of
+    /// that the metrics managers populate. Mirrors the read contract of
     /// Java's `AsyncKafkaConsumer.metrics()` (`Collections.unmodifiableMap`).
-    /// Verifies a representative metric from each manager family is present,
-    /// so the snapshot is the full Java set, not an empty/partial map.
+    ///
+    /// This proves that the three metrics families that register EAGERLY in
+    /// this fixture — fetch (`create_fetch_metrics_manager`), kafka-consumer
+    /// (`KafkaConsumerMetrics::new`), and async-consumer
+    /// (`AsyncConsumerMetrics::new`) — each surface a representative metric in
+    /// the public `metrics()` snapshot, i.e. the registry plumbing reaches the
+    /// public accessor and the snapshot is the live registry, not an
+    /// empty/partial map.
+    ///
+    /// The other four families (heartbeat / offset-commit / rebalance /
+    /// rebalance-callback) register against the shared `Metrics` only through
+    /// their request managers, which the production ctor builds but this
+    /// fixture does not (`RequestManagers::new(None × 7)`). Their registration
+    /// against the shared `Metrics` is covered by their own M4/M5 manager tests
+    /// (`heartbeat_metrics`, `offset_commit_metrics`, the
+    /// `ConsumerRebalanceMetricsManager` / `RebalanceCallbackMetricsManager`
+    /// tests). We deliberately do NOT force-register managers the fixture does
+    /// not build, so this test stays honest about what it constructs.
     #[tokio::test]
-    async fn metrics_returns_full_registry_snapshot() {
+    async fn metrics_snapshot_includes_eagerly_registered_families() {
+        use crate::common::metric::Metric;
         use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        // Group name built by `FetchMetricsRegistry::new` from the
+        // `"consumer"` prefix (`create_fetch_metrics_manager`).
+        const FETCH_MANAGER_METRIC_GROUP: &str = "consumer-fetch-manager-metrics";
+
         let consumer = make_test_consumer();
         let snapshot = consumer.metrics();
         assert!(!snapshot.is_empty(), "metrics() must not be empty");
 
-        // The async-consumer family (M6) registers under CONSUMER_METRIC_GROUP.
-        let mn = consumer
-            .metrics
-            .metric_name_group("background-event-queue-size", CONSUMER_METRIC_GROUP);
-        assert!(
-            snapshot.contains_key(&mn),
-            "metrics() snapshot must include the async-consumer metrics"
-        );
+        let assert_present = |name: &str, group: &str| {
+            let mn = consumer.metrics.metric_name_group(name, group);
+            assert!(
+                snapshot.contains_key(&mn),
+                "metrics() snapshot must include `{name}` (group `{group}`)"
+            );
+        };
+
+        // Fetch family (M3): a client-level fetch metric registered eagerly in
+        // `FetchMetricsManager::new`.
+        assert_present("records-consumed-total", FETCH_MANAGER_METRIC_GROUP);
+        // Kafka-consumer family (M4): registered eagerly in
+        // `KafkaConsumerMetrics::new` under the consumer-metrics group.
+        assert_present("last-poll-seconds-ago", CONSUMER_METRIC_GROUP);
+        // Async-consumer family (M6): registered eagerly in
+        // `AsyncConsumerMetrics::new` under the consumer-metrics group.
+        assert_present("background-event-queue-size", CONSUMER_METRIC_GROUP);
 
         // The snapshot is keyed by MetricName and the values impl `Metric`:
         // every entry's `metric_name()` matches its key (sanity of the snapshot).
         for (name, metric) in &snapshot {
-            use crate::common::metric::Metric;
             assert_eq!(metric.metric_name(), name);
         }
     }
