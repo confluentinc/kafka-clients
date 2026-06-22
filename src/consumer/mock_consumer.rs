@@ -34,7 +34,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 
-use crate::common::{KafkaError, PartitionInfo, TopicPartition};
+use crate::common::metrics::KafkaMetric;
+use crate::common::{KafkaError, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::internals::auto_offset_reset_strategy::StrategyType;
 use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
 use crate::consumer::{
@@ -411,6 +412,20 @@ where
 
     fn client_id(&self) -> &str {
         MOCK_CLIENT_ID
+    }
+
+    /// Translates Java's
+    /// `synchronized Map<MetricName, ? extends Metric> metrics()`
+    /// (`MockConsumer.java:496-499`).
+    ///
+    /// Java: `ensureNotClosed(); return Collections.emptyMap();`. The mock
+    /// has no metrics registry, so the Rust port returns an empty map,
+    /// matching Java. (The Rust mock's sync accessors do not panic on a
+    /// closed consumer — see the other accessors — so the `ensureNotClosed`
+    /// guard is not replicated here; the result is the same empty map either
+    /// way.)
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        HashMap::new()
     }
 
     /// Translates Java's

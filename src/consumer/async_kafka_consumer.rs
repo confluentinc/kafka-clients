@@ -63,9 +63,9 @@ use tokio::task::JoinHandle;
 
 use regex::Regex;
 
-use crate::common::metrics::{MetricConfig, Metrics, RecordingLevel};
+use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::LogContext;
-use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::common::{IsolationLevel, KafkaError, MetricName, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
@@ -1780,6 +1780,24 @@ where
     /// post-close is harmless.
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// Java: `Map<MetricName, ? extends Metric> metrics()`
+    /// (`AsyncKafkaConsumer.java:1200-1202`:
+    /// `return Collections.unmodifiableMap(metrics.metrics());`).
+    ///
+    /// Snapshots the consumer's owned `Arc<Metrics>` registry — the SAME
+    /// registry into which every metrics manager (fetch, kafka-consumer,
+    /// heartbeat, offset-commit, rebalance + rebalance-callback, async)
+    /// registers (M3–M6). The returned map is therefore the full Java metric
+    /// set. Cold path (monitoring frequency); the snapshot clones the
+    /// registry `HashMap` under its lock.
+    ///
+    /// Rust returns the owned `HashMap` (caller may not mutate the registry
+    /// through it — it is a clone of `Arc<KafkaMetric>` handles), the natural
+    /// analog of Java's `Collections.unmodifiableMap`.
+    pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        self.metrics.metrics()
     }
 
     /// Java: `ConsumerGroupMetadata groupMetadata()`.
@@ -4355,6 +4373,10 @@ where
 
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
         AsyncKafkaConsumer::current_lag(self, topic_partition)
+    }
+
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        AsyncKafkaConsumer::metrics(self)
     }
 
     fn wakeup(&self) {
