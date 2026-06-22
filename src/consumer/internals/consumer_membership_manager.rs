@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::common::metrics::Time;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::requests::consumer_group_heartbeat_request::{
@@ -42,6 +43,7 @@ use crate::consumer::internals::events::background_event_handler::BackgroundEven
 use super::abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
 use super::commit_request_manager::CommitRequestManager;
 use super::consumer_metadata::ConsumerMetadata;
+use super::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
 use super::member_state::MemberState;
 use super::network_client_delegate::PollResult;
 use super::request_manager::RequestManager;
@@ -85,8 +87,11 @@ pub(crate) struct ConsumerMembershipManager {
 
 impl ConsumerMembershipManager {
     /// Java constructor (the test-visible 13-arg variant). Drops
-    /// `Metrics` / `RebalanceMetricsManager` (no Rust metrics framework)
-    /// and the `LogContext` (we use `log`).
+    /// `LogContext` is dropped (we use `log`). The `Metrics` /
+    /// `RebalanceMetricsManager` are wired through as
+    /// `Option<Arc<ConsumerRebalanceMetricsManager>>` + a metrics `Time` clock
+    /// (M5): `None` in tests that don't exercise rebalance metrics; the live
+    /// consumer always supplies them.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         group_id: impl Into<String>,
@@ -99,6 +104,8 @@ impl ConsumerMembershipManager {
         metadata: Arc<ConsumerMetadata>,
         background_event_handler: Arc<BackgroundEventHandler>,
         auto_commit_enabled: bool,
+        metrics_manager: Option<Arc<ConsumerRebalanceMetricsManager>>,
+        time: Arc<dyn Time>,
     ) -> Self {
         let abstract_mm = AbstractMembershipManager::new(
             group_id,
@@ -106,6 +113,8 @@ impl ConsumerMembershipManager {
             metadata,
             background_event_handler,
             auto_commit_enabled,
+            metrics_manager,
+            time,
         );
         Self {
             abstract_mm,
@@ -1169,9 +1178,14 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 ///    leave_group tests via state assertions instead.
 ///
 /// 5. **Time / metric assertions** (~8 cases): tests using the Java
-///    `MockTime` advance + `RebalanceMetricsManager` verification.
-///    Rust has neither MockTime as a first-class fixture in this file
-///    (we pass `current_time_ms` directly), nor a metrics framework.
+///    `MockTime` advance + `RebalanceMetricsManager` verification. The
+///    metric VALUE behavior is now covered exhaustively by the dedicated
+///    `ConsumerRebalanceMetricsManagerTest` translation (8 cases) in
+///    `consumer_rebalance_metrics_manager.rs` (Phase M5). The membership
+///    *wiring* (that `transition_to` / `on_heartbeat_failure` actually drive
+///    those records) is covered here by
+///    `transition_to_reconciling_and_back_records_rebalance_metrics` and
+///    `non_retriable_heartbeat_failure_records_failed_rebalance`.
 ///
 /// 6. **Reconcile-with-real-metadata** (~3 cases):
 ///    `testReconcileNewAssignmentReplacesPreviousAssignmentWithEmptyResults`
@@ -1264,8 +1278,118 @@ mod tests {
             metadata,
             beh,
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         );
         (mgr, rx)
+    }
+
+    /// Build a membership manager wired with a REAL
+    /// `ConsumerRebalanceMetricsManager` over a metrics `MockTime`, returning
+    /// the manager, the metrics registry, the metrics manager (to read its
+    /// `#[cfg(test)]` MetricName fields), and the clock. Used by the M5 wiring
+    /// tests that assert `transition_to` / `on_heartbeat_failure` drive the
+    /// rebalance records.
+    fn make_with_rebalance_metrics() -> (
+        ConsumerMembershipManager,
+        Arc<crate::common::metrics::Metrics>,
+        Arc<ConsumerRebalanceMetricsManager>,
+        Arc<crate::common::metrics::time::mock::MockTime>,
+    ) {
+        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::metrics::{Metrics, Time as MetricsTime};
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
+        let metrics_manager = Arc::new(ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subs)));
+        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(tx));
+        let mgr = ConsumerMembershipManager::new(
+            "test-group",
+            None,
+            None,
+            100,
+            None,
+            subs,
+            None,
+            metadata,
+            beh,
+            true,
+            Some(Arc::clone(&metrics_manager)),
+            Arc::clone(&time) as Arc<dyn MetricsTime>,
+        );
+        (mgr, metrics, metrics_manager, time)
+    }
+
+    /// M5 wiring: a RECONCILING-and-back transition drives
+    /// `record_rebalance_started` / `record_rebalance_ended` through the
+    /// membership state machine (`AbstractMembershipManager.transitionTo`),
+    /// so the rebalance-latency/total metrics reflect the elapsed time.
+    #[test]
+    fn transition_to_reconciling_and_back_records_rebalance_metrics() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::Time as MetricsTime;
+
+        let (mgr, metrics, metrics_manager, time) = make_with_rebalance_metrics();
+        let value =
+            |name: &crate::common::MetricName| metrics.metric(name).unwrap().metric_value().as_double().unwrap();
+
+        // STABLE -> RECONCILING starts the rebalance; +25ms; -> STABLE ends it.
+        {
+            let mut inner = mgr.abstract_mm.inner.lock().unwrap();
+            inner.state = MemberState::Stable;
+            inner.transition_to(MemberState::Reconciling).unwrap();
+        }
+        assert!(metrics_manager.rebalance_started(), "rebalance recorded as started");
+        time.sleep(25);
+        {
+            let mut inner = mgr.abstract_mm.inner.lock().unwrap();
+            inner.transition_to(MemberState::Stable).unwrap();
+        }
+        assert!(!metrics_manager.rebalance_started(), "rebalance ended");
+
+        assert_eq!(25.0, value(&metrics_manager.rebalance_latency_avg));
+        assert_eq!(25.0, value(&metrics_manager.rebalance_latency_max));
+        assert_eq!(25.0, value(&metrics_manager.rebalance_latency_total));
+        assert_eq!(1.0, value(&metrics_manager.rebalance_total));
+        // No failures recorded on a clean cycle.
+        assert_eq!(0.0, value(&metrics_manager.failed_rebalance_total));
+        let _ = time.milliseconds(); // keep the clock import used
+    }
+
+    /// M5 wiring: a non-retriable heartbeat failure during an in-progress
+    /// rebalance records a failed rebalance
+    /// (`AbstractMembershipManager.onHeartbeatFailure`), while a retriable
+    /// failure does not.
+    #[test]
+    fn non_retriable_heartbeat_failure_records_failed_rebalance() {
+        use crate::common::metric::Metric;
+
+        let (mgr, metrics, metrics_manager, _time) = make_with_rebalance_metrics();
+        let value =
+            |name: &crate::common::MetricName| metrics.metric(name).unwrap().metric_value().as_double().unwrap();
+
+        // Start a rebalance (so a failure counts).
+        {
+            let mut inner = mgr.abstract_mm.inner.lock().unwrap();
+            inner.state = MemberState::Stable;
+            inner.transition_to(MemberState::Reconciling).unwrap();
+        }
+
+        // Retriable failure: NOT recorded.
+        mgr.abstract_mm.on_heartbeat_failure(true);
+        assert_eq!(0.0, value(&metrics_manager.failed_rebalance_total), "retriable not recorded");
+
+        // Non-retriable failure with a rebalance in progress: recorded.
+        mgr.abstract_mm.on_heartbeat_failure(false);
+        assert_eq!(1.0, value(&metrics_manager.failed_rebalance_total), "non-retriable recorded");
     }
 
     /// Helper that constructs a manager carrying a real
@@ -1312,6 +1436,8 @@ mod tests {
             metadata,
             beh,
             true, // auto_commit_enabled
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         );
         (mgr, rx)
     }

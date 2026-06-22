@@ -1130,6 +1130,17 @@ where
                 Arc::clone(&metadata),
                 Arc::clone(&background_event_handler),
                 auto_commit_enabled,
+                // M5: rebalance latency/rate/failure metrics, registered against
+                // the consumer's shared Arc<Metrics> (M3 field). Java builds the
+                // ConsumerRebalanceMetricsManager inside the membership-manager
+                // constructor; we build it here and pass it in.
+                Some(Arc::new(
+                    crate::consumer::internals::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager::new(
+                        &metrics,
+                        Arc::clone(&subscriptions),
+                    ),
+                )),
+                Arc::new(crate::common::metrics::time::SystemTime),
             ))),
             _ => None,
         };

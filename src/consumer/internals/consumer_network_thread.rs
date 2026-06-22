@@ -1511,6 +1511,8 @@ mod tests {
             metadata.clone(),
             beh,
             false,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
 
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(

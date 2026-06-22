@@ -57,8 +57,10 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::common::metrics::Time;
 use crate::common::{KafkaError, TopicPartition, Uuid};
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
 use crate::consumer::internals::events::background_event::BackgroundEvent;
 use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 
@@ -169,6 +171,15 @@ pub(crate) struct MembershipInner {
     /// changes. Phase 8 partial introduced this trait; Phase 8b uses
     /// it.
     pub(crate) state_updates_listeners: Vec<Arc<dyn MemberStateListener>>,
+    /// Java: `RebalanceMetricsManager metricsManager`. Records rebalance
+    /// start/end/failure. `None` in tests that build the membership manager
+    /// without a metrics registry; the live consumer always wires it
+    /// (M5). Folded `ConsumerRebalanceMetricsManager` (single concrete impl).
+    pub(crate) metrics_manager: Option<Arc<ConsumerRebalanceMetricsManager>>,
+    /// Java: `Time time`. Clock used to stamp rebalance start/end. Defaults to
+    /// the metrics `SystemTime`; the consumer overrides it to share the
+    /// metrics clock when it wires `metrics_manager` (M5).
+    pub(crate) time: Arc<dyn Time>,
 }
 
 impl MembershipInner {
@@ -183,6 +194,18 @@ impl MembershipInner {
                 self.state, next_state
             )));
         }
+
+        // Java: record rebalance end/start when crossing the RECONCILING
+        // boundary (`AbstractMembershipManager.transitionTo`).
+        if let Some(metrics) = &self.metrics_manager {
+            if Self::is_completing_rebalance(self.state, next_state) {
+                metrics.record_rebalance_ended(self.time.milliseconds());
+            }
+            if Self::is_starting_rebalance(self.state, next_state) {
+                metrics.record_rebalance_started(self.time.milliseconds());
+            }
+        }
+
         log::info!(
             "Member {} with epoch {} transitioned from {} to {}.",
             self.member_id,
@@ -192,6 +215,17 @@ impl MembershipInner {
         );
         self.state = next_state;
         Ok(())
+    }
+
+    /// Java: `isCompletingRebalance(currentState, nextState)`.
+    fn is_completing_rebalance(current_state: MemberState, next_state: MemberState) -> bool {
+        current_state == MemberState::Reconciling
+            && (next_state == MemberState::Stable || next_state == MemberState::Acknowledging)
+    }
+
+    /// Java: `isStartingRebalance(currentState, nextState)`.
+    fn is_starting_rebalance(current_state: MemberState, next_state: MemberState) -> bool {
+        current_state != MemberState::Reconciling && next_state == MemberState::Reconciling
     }
 
     /// Java: `notifyEpochChange(Optional<Integer> epoch)`.
@@ -292,6 +326,8 @@ impl AbstractMembershipManager {
         metadata: Arc<ConsumerMetadata>,
         background_event_handler: Arc<BackgroundEventHandler>,
         auto_commit_enabled: bool,
+        metrics_manager: Option<Arc<ConsumerRebalanceMetricsManager>>,
+        time: Arc<dyn Time>,
     ) -> Self {
         // Java: `Uuid.randomUuid().toString()`. We use the same Uuid
         // helper (base64 URL encoding) so wire-level traces match Java.
@@ -312,6 +348,8 @@ impl AbstractMembershipManager {
             subscription_updated: false,
             auto_commit_enabled,
             state_updates_listeners: Vec::new(),
+            metrics_manager,
+            time,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -763,13 +801,18 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `onHeartbeatFailure(boolean retriable)` shared bookkeeping.
-    /// Returns `true` when there was a pending leave operation; caller
-    /// (the Consumer subclass) should log a warning.
-    pub(crate) fn on_heartbeat_failure(&self, _retriable: bool) -> bool {
+    /// On a non-retriable failure, records a failed rebalance (if one was in
+    /// progress). Returns `true` when the member is UNSUBSCRIBED with a
+    /// pending leave; caller (the Consumer subclass) should log a warning.
+    pub(crate) fn on_heartbeat_failure(&self, retriable: bool) -> bool {
         let guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        // Java: `if (!retriable) metricsManager.maybeRecordRebalanceFailed();`.
+        if !retriable && let Some(metrics) = &guard.metrics_manager {
+            metrics.maybe_record_rebalance_failed();
+        }
         guard.state == MemberState::Unsubscribed
     }
 
@@ -902,7 +945,15 @@ mod tests {
     #[test]
     fn new_starts_unsubscribed_with_random_member_id() {
         let (subs, metadata, beh, _rx) = setup();
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
         let inner = mgr.inner.lock().unwrap();
         assert_eq!(inner.state, MemberState::Unsubscribed);
         assert_eq!(inner.member_epoch, 0);
@@ -913,7 +964,15 @@ mod tests {
     #[test]
     fn invalid_transition_returns_error() {
         let (subs, metadata, beh, _rx) = setup();
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
         let err = inner.transition_to(MemberState::Stable).unwrap_err();
@@ -923,7 +982,15 @@ mod tests {
     #[test]
     fn valid_transition_succeeds() {
         let (subs, metadata, beh, _rx) = setup();
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → PREPARE_LEAVING valid.
         inner.transition_to(MemberState::PrepareLeaving).unwrap();
@@ -962,7 +1029,15 @@ mod tests {
     #[tokio::test]
     async fn invoke_rebalance_callback_ack_ok() {
         let (subs, metadata, beh, mut rx) = setup();
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         // Spawn the bg-side invocation.
         let mgr_for_bg = Arc::new(mgr);
@@ -996,7 +1071,15 @@ mod tests {
     #[tokio::test]
     async fn invoke_rebalance_callback_ack_dropped() {
         let (subs, metadata, beh, mut rx) = setup();
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         let mgr_for_bg = Arc::new(mgr);
         let mgr_clone = mgr_for_bg.clone();
@@ -1035,7 +1118,15 @@ mod tests {
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         // Without a listener, the handshake must complete immediately
         // and emit no event — otherwise the bg task would hang in
@@ -1057,7 +1148,15 @@ mod tests {
     #[tokio::test]
     async fn invoke_rebalance_callback_app_returns_err() {
         let (subs, metadata, beh, mut rx) = setup();
-        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+        let mgr = AbstractMembershipManager::new(
+            "g",
+            subs,
+            metadata,
+            beh,
+            true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         let mgr_for_bg = Arc::new(mgr);
         let mgr_clone = mgr_for_bg.clone();

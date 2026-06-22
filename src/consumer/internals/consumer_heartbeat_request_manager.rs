@@ -1160,6 +1160,8 @@ mod tests {
             metadata,
             beh.clone(),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1227,6 +1229,8 @@ mod tests {
             metadata,
             beh.clone(),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {

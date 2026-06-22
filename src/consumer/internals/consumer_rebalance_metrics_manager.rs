@@ -30,10 +30,6 @@
 //! `RebalanceMetricsManager` trait can be extracted with no API change if/when
 //! Share/Streams are translated.
 
-// Wired into the membership state machine in the M5 wiring commit; the
-// manager lands first (mirrors the invoker's `#![allow(dead_code)]` staging).
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -283,7 +279,11 @@ impl ConsumerRebalanceMetricsManager {
         self.failed_rebalance_sensor.record_occurrence();
     }
 
-    /// Java: `rebalanceStarted()`.
+    /// Java: `rebalanceStarted()`. Part of the manager's public surface but,
+    /// as in Java, not called from the membership state machine — only the
+    /// `ConsumerRebalanceMetricsManagerTest` cases exercise it. Kept (not
+    /// `#[cfg(test)]`) to preserve the Java API.
+    #[allow(dead_code)]
     pub(crate) fn rebalance_started(&self) -> bool {
         self.last_rebalance_start_ms.load(Ordering::SeqCst) > self.last_rebalance_end_ms.load(Ordering::SeqCst)
     }

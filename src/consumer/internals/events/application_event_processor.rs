@@ -1732,6 +1732,8 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&bg_handler),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         ConsumerHeartbeatRequestManager::new(0, config, hb_coordinator, subscriptions, mm, bg_handler)
     }
