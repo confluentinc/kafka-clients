@@ -65,15 +65,15 @@ impl FetchMetricsManager {
     /// commonly-monitored `records-lag-max` / `records-lead-min` metrics exactly
     /// as Java does.
     ///
-    /// **Deviation from Java (documented, per consumer perf constraint):** only
-    /// the DETAILED per-partition lag/lead sensors (`{tp}.records-lag`,
+    /// The DETAILED per-partition lag/lead sensors (`{tp}.records-lag`,
     /// `-lag-avg`, `-lag-max`, `{tp}.records-lead`, `-lead-min`, `-lead-avg`)
-    /// are gated to DEBUG, so a default consumer pays nothing for the
-    /// per-partition detail. The client-level INFO max/min above are still
-    /// recorded on the per-partition-per-poll path (Java's accepted per-fetch
-    /// cost), only the per-partition sensor registration is DEBUG-gated. The
-    /// metric VALUES are Java-identical when the per-partition detail is
-    /// enabled (DEBUG).
+    /// are ALSO registered at INFO — full Java parity. Java's `SensorBuilder`
+    /// creates every sensor (including these per-partition detail sensors,
+    /// `FetchMetricsManager.java:133,148`) via `metrics.sensor(name)`, which
+    /// defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
+    /// fetch metrics, so we record the full per-partition metric set per
+    /// partition per poll at the default INFO level — the accepted Java-parity
+    /// cost (to be measured in M8). The metric VALUES are Java-identical.
     pub(crate) fn new(metrics: Arc<Metrics>, metrics_registry: FetchMetricsRegistry) -> Self {
         // Each `build_*` closure registers one sensor and returns it (or the
         // registration error). Sensor registration only fails on a duplicate
@@ -113,8 +113,8 @@ impl FetchMetricsManager {
                 .build())
         };
         // INFO, matching Java: the client-level `records-lag-max` /
-        // `records-lead-min` are on by default. Only the per-partition DETAIL
-        // sensors are DEBUG-gated (see ctor doc + `record_partition_lag/lead`).
+        // `records-lead-min` are on by default, as are the per-partition DETAIL
+        // sensors (full Java parity, see ctor doc + `record_partition_lag/lead`).
         let build_lag = || -> Result<Arc<Sensor>, KafkaError> {
             Ok(SensorBuilder::new(&metrics, "records-lag", RecordingLevel::Info)?
                 .with_max(&metrics_registry.records_lag_max)?
@@ -189,20 +189,6 @@ impl FetchMetricsManager {
         Arc::clone(&self.throttle_time)
     }
 
-    /// Whether the DETAILED per-partition lag/lead sensors should be registered
-    /// and recorded at the current recording level. False at the default INFO
-    /// level — those sensors are DEBUG (our documented perf deviation, see
-    /// [`Self::new`]) — so `record_partition_lag` / `record_partition_lead`
-    /// still record the client-level INFO `records-lag-max` / `records-lead-min`
-    /// but skip the per-partition detail.
-    ///
-    /// This intentionally checks the DEBUG level against the metrics config, NOT
-    /// `self.records_lag.should_record()` (which is now INFO and would be true
-    /// at the default level).
-    fn should_record_partition_metrics(&self) -> bool {
-        RecordingLevel::Debug.should_record(self.metrics.config().record_level().id())
-    }
-
     /// Records the latency of a fetch request against the client-level sensor
     /// and, if present, the per-node latency sensor.
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
@@ -266,25 +252,20 @@ impl FetchMetricsManager {
 
     /// Records the lag for a single partition.
     ///
-    /// The client-level `records-lag-max` sensor is INFO and recorded
-    /// unconditionally, exactly as Java does (matching a default consumer's
-    /// observability). The DETAILED per-partition lag sensors are DEBUG-gated
-    /// (our documented perf deviation, see ctor doc): at the default INFO level
-    /// we skip their registration/recording entirely. When DEBUG is enabled the
-    /// per-partition recording matches Java exactly.
+    /// Both the client-level `records-lag-max` sensor and the DETAILED
+    /// per-partition lag sensors are INFO and recorded unconditionally, exactly
+    /// as Java does (`FetchMetricsManager.recordPartitionLag`). There is no
+    /// DEBUG gating: a default (INFO) consumer records the full per-partition
+    /// metric set per partition per poll — the accepted Java-parity cost.
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
         self.records_lag.record(lag as f64);
-
-        if !self.should_record_partition_metrics() {
-            return;
-        }
 
         let name = partition_records_lag_metric_name(tp);
         self.maybe_record_deprecated_partition_lag(&name, tp, lag);
 
         let tags = topic_partition_tags_raw(tp);
         let records_lag = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Debug, tags)?
+            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, tags)?
                 .with_value(&self.metrics_registry.partition_records_lag)?
                 .with_max(&self.metrics_registry.partition_records_lag_max)?
                 .with_avg(&self.metrics_registry.partition_records_lag_avg)?
@@ -296,22 +277,18 @@ impl FetchMetricsManager {
 
     /// Records the lead for a single partition.
     ///
-    /// The client-level `records-lead-min` sensor is INFO and recorded
-    /// unconditionally; the DETAILED per-partition lead sensors are DEBUG-gated
-    /// (see [`Self::record_partition_lag`]).
+    /// Both the client-level `records-lead-min` sensor and the DETAILED
+    /// per-partition lead sensors are INFO and recorded unconditionally, exactly
+    /// as Java does (see [`Self::record_partition_lag`]).
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
         self.records_lead.record(lead as f64);
-
-        if !self.should_record_partition_metrics() {
-            return;
-        }
 
         let name = partition_records_lead_metric_name(tp);
         self.maybe_record_deprecated_partition_lead(&name, tp, lead as f64);
 
         let tags = topic_partition_tags_raw(tp);
         let records_lead = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Debug, tags)?
+            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, tags)?
                 .with_value(&self.metrics_registry.partition_records_lead)?
                 .with_min(&self.metrics_registry.partition_records_lead_min)?
                 .with_avg(&self.metrics_registry.partition_records_lead_avg)?
@@ -452,7 +429,7 @@ impl FetchMetricsManager {
             Ok(SensorBuilder::with_tags(
                 &self.metrics,
                 &deprecated_metric_name(name),
-                RecordingLevel::Debug,
+                RecordingLevel::Info,
                 topic_partition_tags(tp),
             )?
             .with_value(&self.metrics_registry.partition_records_lag)?
@@ -473,7 +450,7 @@ impl FetchMetricsManager {
             Ok(SensorBuilder::with_tags(
                 &self.metrics,
                 &deprecated_metric_name(name),
-                RecordingLevel::Debug,
+                RecordingLevel::Info,
                 topic_partition_tags(tp),
             )?
             .with_value(&self.metrics_registry.partition_records_lead)?
@@ -602,8 +579,8 @@ mod tests {
     /// `new MockTime(1, 0, 0)` (1ms auto-tick) + `new Metrics(time)`; the Rust
     /// MockTime is fixed (no auto-tick), which is value-equivalent for the
     /// avg/max/total assertions and keeps rate assertions `> 0` (elapsed =
-    /// window+1 ms). `recording_level` lets the partition lag/lead tests run at
-    /// DEBUG (our gating deviation) while the rest run at the default INFO.
+    /// window+1 ms). Like Java, every test runs at the default INFO recording
+    /// level — there is no DEBUG gating in the fetch metrics (full Java parity).
     struct Fixture {
         time: Arc<MockTime>,
         metrics: Arc<Metrics>,
@@ -612,12 +589,8 @@ mod tests {
     }
 
     fn setup() -> Fixture {
-        setup_with_level(RecordingLevel::Info)
-    }
-
-    fn setup_with_level(recording_level: RecordingLevel) -> Fixture {
         let time = Arc::new(MockTime::new());
-        let config = Arc::new(MetricConfig::new().with_record_level(recording_level));
+        let config = Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info));
         let metrics = Arc::new(Metrics::with_config_reporters_time(config, Vec::new(), time.clone() as Arc<_>));
         // Java: `new FetchMetricsRegistry(metrics.config().tags().keySet(), "test")`.
         // Default config has no tags, so the registry tag set is empty.
@@ -817,13 +790,12 @@ mod tests {
         );
     }
 
-    /// `FetchMetricsManagerTest.testPartitionLag`. Runs at DEBUG so the
-    /// DEBUG-gated partition sensors register (Java records them at the default
-    /// level; our gating deviation requires DEBUG — see `FetchMetricsManager`
-    /// ctor doc).
+    /// `FetchMetricsManagerTest.testPartitionLag`. Runs at the default INFO
+    /// level, exactly like the Java test: the per-partition lag sensors are INFO
+    /// (full Java parity, no DEBUG gating — see `FetchMetricsManager` ctor doc).
     #[test]
     fn test_partition_lag() {
-        let f = setup_with_level(RecordingLevel::Debug);
+        let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);
         let tp2 = TopicPartition::new("another.topic", 0);
 
@@ -870,10 +842,10 @@ mod tests {
         assert!((metric_value_tags(&f, &f.registry.partition_records_lag_avg, &deprecated_tags) - 4.0).abs() < EPSILON);
     }
 
-    /// `FetchMetricsManagerTest.testPartitionLead` (DEBUG, see `test_partition_lag`).
+    /// `FetchMetricsManagerTest.testPartitionLead` (default INFO, see `test_partition_lag`).
     #[test]
     fn test_partition_lead() {
-        let f = setup_with_level(RecordingLevel::Debug);
+        let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);
         let tp2 = TopicPartition::new("another.topic", 0);
 
@@ -997,7 +969,7 @@ mod tests {
     /// Runs at DEBUG so the per-partition lag/lead sensors register.
     #[test]
     fn test_maybe_update_assignment_with_additional_registered_metrics() {
-        let f = setup_with_level(RecordingLevel::Debug);
+        let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);
         let tp2 = TopicPartition::new("another.topic", 0);
         let tp3 = TopicPartition::new("another.topic", 1);
@@ -1040,16 +1012,14 @@ mod tests {
         assert_eq!(initial, f.metrics.metrics().len());
     }
 
-    /// Rust-specific recording-level guard (no direct Java analogue): pins the
-    /// partial-match decision. At the default INFO level the client-level
-    /// `records-lag-max` / `records-lead-min` ARE recorded (matching Java), but
-    /// the DETAILED per-partition lag/lead sensors are NOT registered (our
-    /// documented perf deviation). At DEBUG the per-partition detail registers.
+    /// Full Java parity: at the default INFO level both the client-level
+    /// `records-lag-max` / `records-lead-min` AND the DETAILED per-partition
+    /// lag/lead sensors are recorded — there is NO DEBUG gating (Java's
+    /// `SensorBuilder` defaults every fetch sensor to `RecordingLevel.INFO`,
+    /// including the per-partition detail at `FetchMetricsManager.java:133,148`).
     #[test]
     fn test_partition_metrics_recording_level() {
         let f = setup();
-        // The per-partition detail gate is closed at INFO ...
-        assert!(!f.manager.should_record_partition_metrics());
 
         let tp = TopicPartition::new(TOPIC_NAME, 0);
         let initial = f.metrics.metrics().len();
@@ -1061,19 +1031,15 @@ mod tests {
         assert!((metric_value_template(&f, &f.registry.records_lag_max) - 14.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.records_lead_min) - 11.0).abs() < EPSILON);
 
-        // (b) NO per-partition detail sensors / metrics registered at INFO
-        // (the records-lag-max / -lead-min client metrics already exist from
-        // the ctor, so no NEW metrics are added by recording at INFO).
-        assert_eq!(initial, f.metrics.metrics().len());
+        // (b) the DETAILED per-partition sensors ALSO register at INFO (full
+        // Java parity, no DEBUG gating): lag (value/max/avg) + lead
+        // (value/min/avg) = 6 new metrics for this non-deprecated topic.
+        assert_eq!(6, f.metrics.metrics().len() - initial);
 
-        // At DEBUG the per-partition detail gate opens and the detail sensors
-        // register: lag (value/max/avg) + lead (value/min/avg) = 6 metrics.
-        let d = setup_with_level(RecordingLevel::Debug);
-        assert!(d.manager.should_record_partition_metrics());
-        let d_initial = d.metrics.metrics().len();
-        d.manager.record_partition_lag(&tp, 14);
-        d.manager.record_partition_lead(&tp, 11);
-        assert_eq!(6, d.metrics.metrics().len() - d_initial);
+        let p = tp.partition().to_string();
+        let tags = ["topic", tp.topic(), "partition", p.as_str()];
+        assert!((metric_value_tags(&f, &f.registry.partition_records_lag, &tags) - 14.0).abs() < EPSILON);
+        assert!((metric_value_tags(&f, &f.registry.partition_records_lead, &tags) - 11.0).abs() < EPSILON);
     }
 
     /// Exercises the throttle-time sensor (registered + recordable). Java has no

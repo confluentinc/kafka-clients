@@ -529,12 +529,12 @@ where
                 // Record per-partition lag / lead, mirroring Java's
                 // `FetchCollector` (`subscriptions.partitionLag` /
                 // `partitionLead` → `metricsManager.recordPartitionLag/Lead`).
-                // The record methods always update the client-level INFO
-                // `records-lag-max` / `records-lead-min` sensors (Java's default
-                // observability) and only register the DETAILED per-partition
-                // sensors when recording is at DEBUG (our documented perf
-                // deviation — see `FetchMetricsManager`). This is per-partition
-                // per-poll, not per-record (Java's accepted per-fetch cost).
+                // The record methods update the client-level INFO
+                // `records-lag-max` / `records-lead-min` sensors AND register +
+                // record the DETAILED per-partition sensors at INFO — full Java
+                // parity, no DEBUG gating (see `FetchMetricsManager`). This is
+                // per-partition per-poll, not per-record (Java's accepted
+                // per-fetch cost, to be measured in M8).
                 let (partition_lag, partition_lead) = {
                     let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
                     (

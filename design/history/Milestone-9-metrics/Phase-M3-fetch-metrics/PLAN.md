@@ -203,3 +203,28 @@ once-per-response contract.
 
 After each: `cargo build` / `cargo test --lib` / `cargo xtask lint` /
 `cargo xtask format-check` green.
+
+---
+
+## Final decision (user, 2026-06-22): FULL Java parity, no DEBUG gating
+
+Superseding the "perf self-check" notes above: there is NO DEBUG gating in the
+fetch metrics. Java's `SensorBuilder` (SensorBuilder.java:61) defaults every
+`FetchMetricsManager` sensor — including the per-partition `records-lag` /
+`records-lead` DETAIL sensors (FetchMetricsManager.java:133,148) — to
+`RecordingLevel.INFO`. We match exactly:
+
+- All fetch sensors are INFO (client-level AND per-partition detail AND their
+  deprecated variants).
+- The `should_record_partition_metrics()` DEBUG gate is removed;
+  `record_partition_lag` / `record_partition_lead` register + record the
+  per-partition detail unconditionally.
+- Per-partition recording stays per-partition-per-poll (in
+  `FetchCollector::fetch_records_from_partition`), NOT per-record; the
+  per-record loop in `completed_fetch.rs` remains pure `i32`. The §27 budget
+  test `test_collect_fetch_per_record_allocation_budget` is unchanged.
+- Accepted cost: a default (INFO) consumer records the full per-partition metric
+  set per partition per poll — the Java-parity cost, to be measured in M8.
+- Tests run at default INFO (matching Java); the recording-level test now
+  asserts the per-partition detail IS present at INFO (full parity), and the
+  Issue-1 lazy-clone perf fix in `maybe_update_assignment` is preserved.
