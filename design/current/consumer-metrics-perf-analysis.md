@@ -6,8 +6,10 @@ concern: *the tuned KIP-848 Rust consumer used to be "metrics-free" (every
 framework. Did that regress the hot path?*
 
 **Short answer:** No per-record cost was added. The per-record receive loop
-stays pure i32 counter accumulation (`records_read += 1; bytes_read += size`),
-proven by an automated allocation-budget guard. All `Sensor.record(...)` calls
+stays pure i32 counter accumulation (`records_read += 1; bytes_read += size`) —
+verified by code inspection of the loop body and backed by an automated
+allocation-budget guard against *allocating* per-record regressions (§3). All
+`Sensor.record(...)` calls
 fire **per-fetch / per-partition-per-poll / per-poll / per-bg-poll /
 per-commit / per-heartbeat / per-rebalance / per-callback** — never per record.
 The consumer now pays **exactly Java's metrics cost** (all sensors at INFO,
@@ -78,11 +80,19 @@ run in CI (`cargo test --lib`) on every change:
 
 1. **`fetch_collector::tests::test_collect_fetch_per_record_allocation_budget`**
    — builds the `FetchCollector` WITH `FetchMetricsManager::for_test()` and
-   asserts `collect_fetch` over 100 records stays at ≤ 4 allocs/record
-   (measured ~3.43/record = the user deserializer's key+value `String`, the
-   ONLY §27-sanctioned per-record allocation). A per-record `Sensor.record` /
-   byte copy would blow this budget. **Passes unchanged after all metrics
-   wiring: 343 allocs / 100 records (3.43/record, budget 500).**
+   asserts `collect_fetch` over 100 records stays within
+   `budget = 100 overhead + 4 × 100 records = 500` total allocations. A
+   per-record `Sensor.record` / byte copy would blow this budget. **Passes
+   unchanged after all metrics wiring: 343 allocs / 100 records, budget 500.**
+
+   On the "3.43/record" figure: that is the **total** alloc count (343) divided
+   by record count (100), so it folds the ~22 one-time per-fetch overhead
+   (amortized over the 100-record fixture) into a "/record" number. The **true
+   marginal per-record allocation is ~2.2/record** — the user deserializer's
+   key + value `String::from_utf8`, the ONLY §27-sanctioned per-record
+   allocation. The fixed per-fetch overhead does not scale with record count,
+   so at larger batch sizes the total/record figure tends toward the ~2.2
+   marginal cost.
 
 2. **`abstract_fetch::tests::test_handle_fetch_success_does_not_copy_payload`**
    — builds `AbstractFetch` WITH `FetchMetricsManager::for_test()` and asserts
@@ -101,8 +111,22 @@ run in CI (`cargo test --lib`) on every change:
    = 0.04/record** (just the `Vec` doubling reallocations — effectively zero
    per record). It then calls `drain()` once and confirms that is where the
    per-partition sensor record fires — explicitly outside the per-record
-   window. If a `Sensor.record` or windowed-stat ring-buffer push ever leaks
-   into the per-record loop, this test fails immediately.
+   window.
+
+   **What this guard catches, precisely** (it is an *allocation-count* guard,
+   not a "no per-record sensor call" guard): it trips on an **allocating**
+   per-record metric regression — the realistic one — namely moving
+   `FetchMetricsAggregator::record` (which allocates a `String` + a `Vec`) into
+   the per-record loop, or a windowed-stat **sample rotation** (a new `Sample`
+   pushed when a window rolls over). It would **NOT** catch a bare steady-state
+   `Sensor::record(value)` inserted per record: a windowed `SampledStat`
+   preallocates its sample `Vec` (`Vec::with_capacity(DEFAULT_NUM_SAMPLES + 1)`),
+   so steady-state `record_internal` is pure mutex + arithmetic with **zero
+   allocation**, which an alloc-count budget cannot see. The stronger
+   invariant — *no `Sensor::record` per record at all* — is established by
+   **code inspection** of the verified-pure `fetch_records` loop body
+   (`records_read += 1; bytes_read += size;`, no sensor call) plus the
+   **loop-head comment**, NOT by this allocation test.
 
 A documenting comment at the per-record loop site (`completed_fetch.rs`
 `fetch_records`) states the invariant and points at this test.
@@ -129,6 +153,19 @@ window rollover:**
 
 Re-run on your target hardware for the authoritative figure; the release number
 is the one to use.
+
+**Caveat (conservative direction).** The micro-bench calls `Sensor::record_at`
+with a precomputed `MockTime` timestamp, so it excludes the one live
+`Time::milliseconds()` system-clock read that the *production* call path
+(`Sensor::record(value)` → `record_internal(value, self.time.milliseconds())`)
+performs per call. The production recording sites (e.g. `record_partition_lag`,
+the aggregator → manager → `sensor.record(...)`) all go through `record()` and
+DO read the live clock. So ~46 ns/call is a slight **under**-count of the real
+per-call cost — by roughly one clock read (tens of ns on some platforms) — i.e.
+the true figure is marginally higher. The direction is the conservative one for
+a "metrics are cheap" claim, the clock read is amortized per-fetch /
+per-partition (not per record), and the figure remains negligible. Still
+illustrative, not a measured end-to-end figure — see §5.
 
 **How to use this number:** multiply by the per-poll record frequency from §2.
 Per fetch response there are roughly a dozen `Sensor.record` calls plus ~2 per

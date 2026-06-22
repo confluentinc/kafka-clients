@@ -1280,24 +1280,39 @@ mod tests {
     /// (`FetchMetricsAggregator::record` → `FetchMetricsManager` sensors)
     /// fires exactly once per partition in `drain()`.
     ///
-    /// This test proves both halves:
+    /// This is an ALLOCATION-COUNT guard. It catches an *allocating*
+    /// per-record metric regression, which is the realistic one:
     ///   1. With a metrics aggregator attached and a zero-alloc deserializer,
     ///      `fetch_records` allocates a small, FIXED count per record
-    ///      (`ConsumerRecord` + `Vec` growth only). If a `Sensor.record` (or a
-    ///      windowed-stat ring-buffer push) had leaked into the per-record
-    ///      loop, the per-record allocation count would rise above the tight
-    ///      budget.
+    ///      (`ConsumerRecord` + `Vec` growth only). If an *allocating* metric
+    ///      operation leaked into the per-record loop — e.g. moving
+    ///      `FetchMetricsAggregator::record` (which allocates a `String` +
+    ///      `Vec`) into it, or a windowed-stat sample ROTATION (a new `Sample`
+    ///      pushed when a window rolls over) — the per-record allocation count
+    ///      would rise above the tight budget and this test trips.
     ///   2. `drain()` — where the per-partition sensor record actually fires —
     ///      is called exactly once, OUTSIDE the per-record window.
+    ///
+    /// What this test does NOT prove: it would NOT catch a bare steady-state
+    /// `Sensor::record(value)` dropped into the per-record loop. A windowed
+    /// `SampledStat` preallocates its sample `Vec`
+    /// (`Vec::with_capacity(DEFAULT_NUM_SAMPLES + 1)`), so a steady-state
+    /// `record_internal` is pure mutex + arithmetic — zero allocation — and an
+    /// alloc-count budget cannot see it. The stronger invariant ("NO
+    /// `Sensor::record` per record at all") is established by code inspection
+    /// of the verified-pure `fetch_records` loop body plus the loop-head
+    /// comment, NOT by this allocation test.
     #[test]
     fn test_per_record_loop_is_pure_counter_no_sensor_record() {
         const RECORD_COUNT: i32 = 200;
-        // ConsumerRecord construction + Vec growth only. A per-record
-        // `Sensor.record` that pushed onto a windowed-stat ring buffer (or
-        // re-created a sample) would add at least one alloc/record, pushing
-        // this well past 3/record. The zero-alloc `LenDeserializer` removes
-        // the user-decode allocations so the budget isolates structural
-        // per-record cost.
+        // ConsumerRecord construction + Vec growth only. An *allocating*
+        // per-record metric operation — moving `FetchMetricsAggregator::record`
+        // into the loop, or a windowed-stat sample ROTATION (new `Sample`
+        // pushed on window rollover) — would add at least one alloc/record,
+        // pushing this well past 3/record. (A non-allocating steady-state
+        // `Sensor::record` would NOT be caught here — see the doc comment.)
+        // The zero-alloc `LenDeserializer` removes the user-decode allocations
+        // so the budget isolates structural per-record cost.
         const ALLOC_BUDGET_PER_RECORD: usize = 3;
         const OVERHEAD_BUDGET: usize = 64;
 
@@ -1331,8 +1346,8 @@ mod tests {
             alloc_count <= max_allowed,
             "Metrics regression on the per-record path: {alloc_count} allocs for {RECORD_COUNT} \
              records (budget {max_allowed}). The per-record loop must stay pure i32 counter \
-             accumulation — a `Sensor.record(...)` or windowed-stat push entered the loop \
-             (CLAUDE.md §11 / §27)."
+             accumulation — an *allocating* metric operation (e.g. `aggregator.record(...)` or a \
+             windowed-stat sample rotation) entered the loop (CLAUDE.md §11 / §27)."
         );
 
         // The per-partition sensor recording happens HERE — once — not in the
