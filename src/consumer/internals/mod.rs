@@ -54,6 +54,7 @@ pub(crate) mod offset_commit_metrics_manager;
 pub(crate) mod offset_fetcher_utils;
 pub(crate) mod offsets_for_leader_epoch_client;
 pub(crate) mod offsets_request_manager;
+pub(crate) mod rebalance_callback_metrics_manager;
 pub(crate) mod request_manager;
 pub(crate) mod request_managers;
 pub(crate) mod request_state;

@@ -1363,8 +1363,19 @@ where
         let application_event_handler =
             Arc::new(ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify)));
 
-        // Java lines 482-487 — `rebalanceListenerInvoker`.
-        let rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+        // Java lines 482-487 — `rebalanceListenerInvoker`. Java passes a
+        // `RebalanceCallbackMetricsManager` + `Time` into the constructor; we
+        // wire them post-construction so the no-arg `new` stays usable in
+        // tests. The metrics manager registers against the consumer's shared
+        // `Arc<Metrics>` (M3 field); the clock is `SystemTime` (the same clock
+        // the metrics registry uses), so the recorded latency durations match.
+        let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+        rebalance_listener_invoker.set_metrics(
+            crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager::new(
+                &metrics,
+            ),
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
         // `CompletableEventReaper` as the application reaper since the
