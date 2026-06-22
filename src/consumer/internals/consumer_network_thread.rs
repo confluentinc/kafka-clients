@@ -1903,12 +1903,10 @@ mod tests {
     //   so the initialize-error path lives at the call site (Phase 11
     //   consumer constructor). Mirrors commit 7's deferral.
     //
-    // - `testRunOnceRecordTimeBetweenNetworkThreadPoll` and
-    //   `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`:
-    //   assert against `AsyncConsumerMetrics` histogram values. That
-    //   class is not yet translated. The bg-task currently emits
-    //   `log::trace!` equivalents at the same call sites. When the
-    //   metrics framework lands these tests will be added alongside it.
+    // (`testRunOnceRecordTimeBetweenNetworkThreadPoll` and
+    //  `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`
+    //  are translated below — see `run_once_records_time_between_network_thread_poll`
+    //  and `run_once_records_application_event_queue_size_and_time`.)
 
     /// Drain-events path: an enqueued completable event is registered
     /// with the reaper during `process_application_events`. We call
@@ -2163,6 +2161,117 @@ mod tests {
         thread.process_application_events();
         let r = reaper.lock().unwrap();
         assert!(r.contains(&erased_external), "LeaveGroupOnClose must be tracked");
+    }
+
+    // ─── Java `ConsumerNetworkThreadTest` metric tests (Phase M6) ───
+
+    use crate::common::metric::Metric;
+    use crate::common::metrics::Metrics;
+    use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+    use crate::consumer::internals::consumer_utils::{CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP};
+    use crate::consumer::internals::events::application_event::AsyncPollState;
+
+    /// Java parameterizes both metric tests over
+    /// `AsyncConsumerMetricsTest#groupNameProvider`; we loop the same two groups.
+    fn metric_group_name_provider() -> [&'static str; 2] {
+        [CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP]
+    }
+
+    /// Read a registered metric's value as `f64`.
+    fn read_metric(metrics: &Metrics, name: &str, group: &str) -> f64 {
+        let mn = metrics.metric_name_group(name, group);
+        metrics
+            .metric(&mn)
+            .expect("metric present")
+            .metric_value()
+            .as_double()
+            .expect("double-valued metric")
+    }
+
+    /// Java `ConsumerNetworkThreadTest#testRunOnceRecordTimeBetweenNetworkThreadPoll`.
+    /// Drives two `run_once` iterations 10ms apart on the mock clock and
+    /// asserts `time-between-network-thread-poll-{avg,max}` both equal 10.
+    /// `@ParameterizedTest` over the two metric groups is unrolled into a
+    /// loop (DoD §3). No public `metrics()` accessor is needed: the test
+    /// constructs the `Metrics` registry directly and reads via
+    /// `metrics.metric(metrics.metric_name_group(...))`, exactly like Java.
+    #[tokio::test]
+    async fn run_once_records_time_between_network_thread_poll() {
+        for group_name in metric_group_name_provider() {
+            let (mut thread, _tx, _reaper, time, _rm) = make_thread_no_membership();
+            let metrics = Arc::new(Metrics::new());
+            let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), group_name));
+            thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::new(AtomicI64::new(0)));
+
+            // First poll: Java's `lastPollTimeMs == 0` guard skips the
+            // record; it only stamps `last_poll_time_ms`.
+            thread.run_once().await;
+            time.sleep(10);
+            // Second poll, 10ms later: records the 10ms gap.
+            thread.run_once().await;
+
+            assert_eq!(
+                read_metric(&metrics, "time-between-network-thread-poll-avg", group_name),
+                10.0,
+                "time-between-network-thread-poll-avg must be 10 ({group_name})"
+            );
+            assert_eq!(
+                read_metric(&metrics, "time-between-network-thread-poll-max", group_name),
+                10.0,
+                "time-between-network-thread-poll-max must be 10 ({group_name})"
+            );
+        }
+    }
+
+    /// Java
+    /// `ConsumerNetworkThreadTest#testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`.
+    /// Enqueues one application event stamped at the current mock time,
+    /// pre-bumps the queue-size gauge to 1, advances the clock 10ms, then
+    /// runs one iteration. `run_once` drains the queue (resetting size to 0)
+    /// and records the per-event queue time (`now - enqueued_ms == 10`).
+    /// `@ParameterizedTest` over the two groups is unrolled into a loop.
+    #[tokio::test]
+    async fn run_once_records_application_event_queue_size_and_time() {
+        for group_name in metric_group_name_provider() {
+            let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
+            let metrics = Arc::new(Metrics::new());
+            let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), group_name));
+            let queue_size = Arc::new(AtomicI64::new(0));
+            thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::clone(&queue_size));
+
+            // Java: `AsyncPollEvent` enqueued with `setEnqueuedMs(time.milliseconds())`.
+            let enqueued_ms = time.milliseconds();
+            let event = ApplicationEvent::AsyncPoll {
+                deadline_ms: enqueued_ms + 60_000,
+                poll_time_ms: enqueued_ms,
+                state: Arc::new(AsyncPollState::new()),
+            };
+            tx.send(ApplicationEventEnvelope { event, enqueued_ms }).expect("send ok");
+            // Java: `asyncConsumerMetrics.recordApplicationEventQueueSize(1)`.
+            async_metrics.record_application_event_queue_size(1);
+
+            // Advance 10ms, then drain the queue in one iteration.
+            time.sleep(10);
+            thread.run_once().await;
+
+            // Drain resets the size gauge to 0 (Java CNT:253).
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-size", group_name),
+                0.0,
+                "application-event-queue-size must reset to 0 after drain ({group_name})"
+            );
+            // The event spent 10ms in the queue (`now - enqueued_ms`).
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-time-avg", group_name),
+                10.0,
+                "application-event-queue-time-avg must be 10 ({group_name})"
+            );
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-time-max", group_name),
+                10.0,
+                "application-event-queue-time-max must be 10 ({group_name})"
+            );
+        }
     }
 
     /// Phase-12 Issue 1 regression: `run_once` drives
