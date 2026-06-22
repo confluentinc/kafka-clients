@@ -526,26 +526,27 @@ where
                     position_advanced = true;
                 }
 
-                // Record per-partition lag / lead. The lag/lead sensors are
-                // DEBUG-gated; at the default INFO level this whole block is
-                // skipped after a single cheap `should_record_partition_metrics`
-                // check — NO SubscriptionState lock, no lag/lead computation, no
-                // sensor work. When DEBUG is enabled the recording matches Java
-                // (`subscriptions.partitionLag` / `partitionLead`).
-                if self.metrics_manager.should_record_partition_metrics() {
-                    let (partition_lag, partition_lead) = {
-                        let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-                        (
-                            guard.partition_lag(&tp, self.fetch_config.isolation_level).ok().flatten(),
-                            guard.partition_lead(&tp).ok().flatten(),
-                        )
-                    };
-                    if let Some(lag) = partition_lag {
-                        self.metrics_manager.record_partition_lag(&tp, lag);
-                    }
-                    if let Some(lead) = partition_lead {
-                        self.metrics_manager.record_partition_lead(&tp, lead);
-                    }
+                // Record per-partition lag / lead, mirroring Java's
+                // `FetchCollector` (`subscriptions.partitionLag` /
+                // `partitionLead` → `metricsManager.recordPartitionLag/Lead`).
+                // The record methods always update the client-level INFO
+                // `records-lag-max` / `records-lead-min` sensors (Java's default
+                // observability) and only register the DETAILED per-partition
+                // sensors when recording is at DEBUG (our documented perf
+                // deviation — see `FetchMetricsManager`). This is per-partition
+                // per-poll, not per-record (Java's accepted per-fetch cost).
+                let (partition_lag, partition_lead) = {
+                    let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                    (
+                        guard.partition_lag(&tp, self.fetch_config.isolation_level).ok().flatten(),
+                        guard.partition_lead(&tp).ok().flatten(),
+                    )
+                };
+                if let Some(lag) = partition_lag {
+                    self.metrics_manager.record_partition_lag(&tp, lag);
+                }
+                if let Some(lead) = partition_lead {
+                    self.metrics_manager.record_partition_lead(&tp, lead);
                 }
 
                 let metadata = match OffsetAndMetadata::with_leader_epoch(cf.next_fetch_offset(), cf.last_epoch(), "") {
