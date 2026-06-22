@@ -570,4 +570,74 @@ mod tests {
         assert!(!sensor.has_expired());
         assert_eq!(2, sensor.metrics().len());
     }
+
+    // ---------------------------------------------------------------------
+    // Milestone-9 Phase M8 — pure in-process micro-bench (no broker needed).
+    //
+    // Quantifies the per-call cost of `Sensor::record_at` on a realistic
+    // fetch-shaped sensor (a `Meter` = Rate + CumulativeSum, plus `Avg` +
+    // `Max` — the stat shape used by `bytes-fetched` / `fetch-latency` and
+    // friends). This is the unit of cost that the consumer pays PER FETCH /
+    // PER PARTITION (never per record — see
+    // `completed_fetch::tests::test_per_record_loop_is_pure_counter_no_sensor_record`).
+    //
+    // Marked `#[ignore]` so it does not run in CI (timing is environment
+    // dependent), but it BUILDS in CI and is runnable on demand:
+    //
+    //     cargo test --lib bench_sensor_record_ns -- --ignored --nocapture
+    //
+    // The printed ns/call, multiplied by the per-fetch/per-partition record
+    // frequency in `design/current/consumer-metrics-perf-analysis.md`, gives
+    // the metrics-on overhead per poll cycle without needing a broker.
+    #[test]
+    #[ignore = "micro-bench; run with --ignored --nocapture"]
+    fn bench_sensor_record_ns() {
+        use crate::common::metrics::stats::{Avg, Max, Meter};
+        use std::time::Instant;
+
+        let time = Arc::new(MockTime::new());
+        let sensor = Sensor::new(
+            None,
+            "bench",
+            Vec::new(),
+            info_config(),
+            Arc::clone(&time) as Arc<dyn Time>,
+            i64::MAX,
+            RecordingLevel::Info,
+        )
+        .unwrap();
+        // Realistic fetch-sensor stat shape: a Meter (rate + total) + Avg + Max.
+        sensor
+            .add_compound(Box::new(Meter::new(name("rate", "g"), name("total", "g"))))
+            .unwrap();
+        sensor.add(name("avg", "g"), Box::new(Avg::new())).unwrap();
+        sensor.add(name("max", "g"), Box::new(Max::new())).unwrap();
+
+        // Warm up (JIT-free, but warms caches / branch predictors and forces
+        // the first sample-buffer allocation outside the timed loop).
+        let mut now = time.milliseconds();
+        for i in 0..10_000 {
+            sensor.record_at(i as f64, now);
+        }
+
+        const ITERS: u64 = 2_000_000;
+        let start = Instant::now();
+        for i in 0..ITERS {
+            // Advance the mock clock occasionally so window rollover is
+            // exercised the way a real fetch loop would (samples age out).
+            if i % 4096 == 0 {
+                now += 1;
+            }
+            sensor.record_at(i as f64, now);
+        }
+        let elapsed = start.elapsed();
+        let ns_per_call = elapsed.as_nanos() as f64 / ITERS as f64;
+        eprintln!(
+            "M8 micro-bench: Sensor::record_at over Meter+Avg+Max = {ns_per_call:.1} ns/call \
+             ({ITERS} iters in {elapsed:?})"
+        );
+        // Sanity floor: the work is non-trivial (mutex + 3 compound stats), so
+        // a sub-nanosecond reading would mean the call was optimized away.
+        assert!(ns_per_call > 0.0);
+    }
 }

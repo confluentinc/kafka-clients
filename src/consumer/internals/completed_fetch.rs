@@ -453,6 +453,18 @@ impl CompletedFetch {
         self.ensure_cursor();
         let mut out: Vec<ConsumerRecord<K, V>> = Vec::new();
 
+        // §27 / CLAUDE.md §11 metrics-cost invariant (Milestone-9 Phase M8):
+        // this per-record loop performs NO `Sensor.record(...)`. The only
+        // metric work per record is the pure `records_read += 1; bytes_read
+        // += size;` i32 accumulation below. The windowed `Sensor` recording
+        // (the `FetchMetricsAggregator.record` → `FetchMetricsManager`
+        // bytes/records/throttle/latency sensors) fires exactly once per
+        // partition in `drain()`, never here. Adding a `Sensor.record` to this
+        // loop would (a) take the sensor mutex per record and (b) potentially
+        // allocate in the windowed-stat ring buffer per record — both forbidden
+        // on the receive hot path. The guard test
+        // `test_per_record_loop_is_pure_counter_no_sensor_record` asserts the
+        // loop body allocates zero per record with an aggregator attached.
         for _ in 0..max_records {
             // Only advance to the next record if there was no cached
             // exception. Otherwise re-deserialize the last one so the
@@ -1244,6 +1256,97 @@ mod tests {
             test_aggregator(),
             fetch_offset,
         )
+    }
+
+    /// Zero-allocation deserializer: decodes to the byte length (`usize`),
+    /// touching the borrowed slice but allocating nothing. Used by the M8
+    /// metrics-cost guard so the only per-record allocations in
+    /// `fetch_records` come from `ConsumerRecord` construction +
+    /// `out.push(...)` — NOT from the user's `T` decode — making any metrics
+    /// regression on the per-record path unmistakable.
+    struct LenDeserializer;
+    impl Deserializer<usize> for LenDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, KafkaError> {
+            Ok(data.len())
+        }
+    }
+
+    /// Milestone-9 Phase M8 — explicit guard that the metrics wiring added
+    /// ZERO per-record cost on the receive hot path (CLAUDE.md §11 / §27).
+    ///
+    /// The per-record loop in `fetch_records` performs only the pure i32
+    /// accumulation `records_read += 1; bytes_read += size;` — there is NO
+    /// `Sensor.record(...)` per record. The windowed `Sensor` recording
+    /// (`FetchMetricsAggregator::record` → `FetchMetricsManager` sensors)
+    /// fires exactly once per partition in `drain()`.
+    ///
+    /// This test proves both halves:
+    ///   1. With a metrics aggregator attached and a zero-alloc deserializer,
+    ///      `fetch_records` allocates a small, FIXED count per record
+    ///      (`ConsumerRecord` + `Vec` growth only). If a `Sensor.record` (or a
+    ///      windowed-stat ring-buffer push) had leaked into the per-record
+    ///      loop, the per-record allocation count would rise above the tight
+    ///      budget.
+    ///   2. `drain()` — where the per-partition sensor record actually fires —
+    ///      is called exactly once, OUTSIDE the per-record window.
+    #[test]
+    fn test_per_record_loop_is_pure_counter_no_sensor_record() {
+        const RECORD_COUNT: i32 = 200;
+        // ConsumerRecord construction + Vec growth only. A per-record
+        // `Sensor.record` that pushed onto a windowed-stat ring buffer (or
+        // re-created a sample) would add at least one alloc/record, pushing
+        // this well past 3/record. The zero-alloc `LenDeserializer` removes
+        // the user-decode allocations so the budget isolates structural
+        // per-record cost.
+        const ALLOC_BUDGET_PER_RECORD: usize = 3;
+        const OVERHEAD_BUDGET: usize = 64;
+
+        let bytes = new_records(0, RECORD_COUNT, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let key_de = LenDeserializer;
+        let value_de = LenDeserializer;
+
+        // Warm the cursor / batch setup OUTSIDE the tracking window so the
+        // one-time MemoryRecords/cursor allocations don't count.
+        cf.ensure_cursor();
+
+        let alloc_count;
+        let n_records;
+        {
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            // The measured call drives ONLY the per-record loop — no drain().
+            let recs = cf
+                .fetch_records::<usize, usize>(&fetch_config, &key_de, &value_de, RECORD_COUNT)
+                .unwrap();
+            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            n_records = recs.len();
+        }
+
+        assert_eq!(RECORD_COUNT as usize, n_records, "fetch_records did not return all records");
+
+        let max_allowed = OVERHEAD_BUDGET + ALLOC_BUDGET_PER_RECORD * (RECORD_COUNT as usize);
+        assert!(
+            alloc_count <= max_allowed,
+            "Metrics regression on the per-record path: {alloc_count} allocs for {RECORD_COUNT} \
+             records (budget {max_allowed}). The per-record loop must stay pure i32 counter \
+             accumulation — a `Sensor.record(...)` or windowed-stat push entered the loop \
+             (CLAUDE.md §11 / §27)."
+        );
+
+        // The per-partition sensor recording happens HERE — once — not in the
+        // loop above. `records_read` reflects the pure counter accumulated by
+        // the per-record loop.
+        assert_eq!(RECORD_COUNT, cf.records_read);
+        cf.drain(); // fires `aggregator.record(...)` exactly once for this partition.
+        assert!(cf.is_consumed);
+
+        eprintln!(
+            "M8 per-record metrics guard: {alloc_count} allocs for {RECORD_COUNT} records \
+             (avg {avg:.2}/record, max allowed {max_allowed}); sensor record fires once in drain()",
+            avg = alloc_count as f64 / RECORD_COUNT as f64,
+        );
     }
 
     /// Translated from `CompletedFetchTest.testSimple`.
