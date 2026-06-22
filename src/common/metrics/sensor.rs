@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::metrics::MetricsShared;
-use crate::common::metrics::{KafkaMetric, MeasurableStat, MetricConfig, MetricValueProvider, Stat, Time};
+use crate::common::metrics::{
+    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, Stat, Time,
+};
 use crate::common::{KafkaError, MetricName};
 
 /// The recording level of a sensor or metric config.
@@ -100,17 +102,35 @@ impl RecordingLevel {
 ///
 /// Java's `StatAndConfig` holds the stat plus a `Supplier<MetricConfig>`. For the
 /// `add(MetricName, MeasurableStat, config)` path the supplier is `metric::config`
-/// so the stat always reads the backing metric's (possibly updated) config. M1
-/// implements only that path; the `add(CompoundStat, config)` path (a constant
-/// `statConfig` supplier) arrives with the compound/windowed stats in M2.
+/// so the stat always reads the backing metric's (possibly updated) config; for
+/// the `add(CompoundStat, config)` path it is a constant `statConfig` supplier.
+/// Both are modelled by [`StatConfigSource`].
 struct StatAndConfig {
     stat: Box<dyn Stat>,
-    metric: Arc<KafkaMetric>,
+    config: StatConfigSource,
+}
+
+/// Where a `StatAndConfig` reads its config from, mirroring Java's
+/// `Supplier<MetricConfig>`:
+///
+/// - `FromMetric` — the supplier is `metric::config`, so the stat always reads
+///   the backing metric's (possibly updated) config. Used by
+///   `add(MetricName, MeasurableStat, config)`.
+/// - `Constant` — a fixed `statConfig` supplier (`() -> statConfig`). Used by
+///   `add(CompoundStat, config)`, whose single recordable stat is not coupled to
+///   any one child metric.
+enum StatConfigSource {
+    FromMetric(Arc<KafkaMetric>),
+    Constant(Arc<MetricConfig>),
 }
 
 impl StatAndConfig {
     fn record(&self, value: f64, time_ms: i64) {
-        self.stat.record(&self.metric.config(), value, time_ms);
+        let config = match &self.config {
+            StatConfigSource::FromMetric(metric) => metric.config(),
+            StatConfigSource::Constant(config) => Arc::clone(config),
+        };
+        self.stat.record(&config, value, time_ms);
     }
 }
 
@@ -268,9 +288,10 @@ impl Sensor {
         // record is reflected in the measured value. We hold it behind an `Arc`
         // and expose both views.
         let stat: Arc<dyn MeasurableStat> = Arc::from(stat);
+        let measurable_view: Arc<dyn Measurable> = Arc::clone(&stat) as Arc<dyn Measurable>;
         let metric = Arc::new(KafkaMetric::new(
             metric_name.clone(),
-            MetricValueProvider::Measurable(Box::new(MeasurableArc(Arc::clone(&stat)))),
+            MetricValueProvider::Measurable(Box::new(MeasurableArc(measurable_view))),
             Arc::clone(&stat_config),
             Arc::clone(&self.time),
         ));
@@ -284,7 +305,66 @@ impl Sensor {
             }
         }
         inner.metrics.insert(metric_name, Arc::clone(&metric));
-        inner.stats.push(StatAndConfig { stat: Box::new(StatArc(stat)), metric });
+        inner
+            .stats
+            .push(StatAndConfig { stat: Box::new(StatArc(stat)), config: StatConfigSource::FromMetric(metric) });
+        Ok(true)
+    }
+
+    /// Register a compound statistic with this sensor with no config override
+    /// (Java `Sensor.add(CompoundStat)`).
+    pub fn add_compound(&self, stat: Box<dyn CompoundStat>) -> Result<bool, KafkaError> {
+        self.add_compound_with_config(stat, None)
+    }
+
+    /// Register a compound statistic with this sensor which yields multiple
+    /// measurable quantities (like a histogram) (Java
+    /// `Sensor.add(CompoundStat, config)`).
+    ///
+    /// The compound stat is recorded once per `record`; each `NamedMeasurable`
+    /// child gets its own `KafkaMetric` reading the (constant) `statConfig`. The
+    /// child measurables share state with the compound stat, so a record is
+    /// reflected in every child's measured value.
+    pub fn add_compound_with_config(
+        &self,
+        stat: Box<dyn CompoundStat>,
+        config: Option<Arc<MetricConfig>>,
+    ) -> Result<bool, KafkaError> {
+        if self.has_expired() {
+            return Ok(false);
+        }
+        let mut inner = self.inner.lock().expect("sensor mutex poisoned");
+        let stat_config = config.unwrap_or_else(|| Arc::clone(&self.config));
+
+        // Snapshot the child measurables before moving the compound stat into the
+        // recordable stats list.
+        let children = stat.stats();
+
+        inner.stats.push(StatAndConfig {
+            stat: Box::new(CompoundStatBox(stat)),
+            config: StatConfigSource::Constant(Arc::clone(&stat_config)),
+        });
+
+        for child in children {
+            let metric = Arc::new(KafkaMetric::new(
+                child.name().clone(),
+                MetricValueProvider::Measurable(Box::new(MeasurableArc(child.stat()))),
+                Arc::clone(&stat_config),
+                Arc::clone(&self.time),
+            ));
+            if !inner.metrics.contains_key(child.name()) {
+                if let Some(registry) = &self.registry {
+                    let existing = registry.register_metric(Arc::clone(&metric));
+                    if existing.is_some() {
+                        return Err(KafkaError::illegal_argument(format!(
+                            "A metric named '{}' already exists, can't register another one.",
+                            child.name()
+                        )));
+                    }
+                }
+                inner.metrics.insert(child.name().clone(), metric);
+            }
+        }
         Ok(true)
     }
 
@@ -321,12 +401,23 @@ impl Stat for StatArc {
     }
 }
 
-/// A `Measurable` view over an `Arc<dyn MeasurableStat>`.
-struct MeasurableArc(Arc<dyn MeasurableStat>);
+/// A `Measurable` view over a shared `Arc<dyn Measurable>` (used both for the
+/// `MeasurableStat` `add` path and the `CompoundStat` child measurables).
+struct MeasurableArc(Arc<dyn Measurable>);
 
-impl crate::common::metrics::Measurable for MeasurableArc {
+impl Measurable for MeasurableArc {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         self.0.measure(config, now)
+    }
+}
+
+/// A `Stat` view over a `Box<dyn CompoundStat>` so the compound stat can sit in
+/// the sensor's recordable stats list.
+struct CompoundStatBox(Box<dyn CompoundStat>);
+
+impl Stat for CompoundStatBox {
+    fn record(&self, config: &MetricConfig, value: f64, time_ms: i64) {
+        self.0.record(config, value, time_ms);
     }
 }
 

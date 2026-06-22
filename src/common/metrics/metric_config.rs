@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::common::metrics::internals::metrics_utils::TimeUnit;
 use crate::common::metrics::{Quota, RecordingLevel};
 
 /// Default number of samples for a windowed stat.
@@ -84,6 +85,13 @@ impl MetricConfig {
     /// Set the time window in milliseconds.
     pub fn with_time_window_ms(mut self, window_ms: i64) -> Self {
         self.time_window_ms = window_ms;
+        self
+    }
+
+    /// Set the time window expressed in the given unit, mirroring Java's
+    /// `MetricConfig.timeWindow(long window, TimeUnit unit)`.
+    pub fn with_time_window(mut self, window: i64, unit: TimeUnit) -> Self {
+        self.time_window_ms = unit.to_millis(window);
         self
     }
 

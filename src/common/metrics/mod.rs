@@ -20,6 +20,7 @@
 //! for pure-counter stats, `Mutex` where multi-field mutation needs it). JMX is
 //! replaced by the [`MetricsReporter`] trait seam.
 
+pub mod compound_stat;
 pub mod gauge;
 pub mod internals;
 pub mod kafka_metric;
@@ -36,6 +37,7 @@ pub mod stat;
 pub mod stats;
 pub mod time;
 
+pub use compound_stat::{CompoundStat, NamedMeasurable};
 pub use gauge::{ClosureGauge, Gauge};
 pub use kafka_metric::KafkaMetric;
 pub use measurable::Measurable;
