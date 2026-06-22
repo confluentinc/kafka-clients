@@ -63,7 +63,6 @@
 //! - SKIP: `testClassicAssignAndConsumeFromCommittedOffsets` — classic-protocol-only
 //! - SKIP: `testClassicAssignAndRetrievingCommittedOffsetsMultipleTimes` — classic-protocol-only
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -89,7 +88,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
@@ -117,18 +116,9 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// `tests/common/cluster_pool.rs` materializes one 3-broker cluster
 /// and amortizes its 30–60s startup across the suite.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
-        "classic,consumer".to_string(),
-    );
-    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
-    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
-    props.insert("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string());
-    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
-    let mut cfg = ClusterConfig::with_brokers(3);
-    cfg.server_properties = props;
-    cfg
+    // Manual-assignment tests auto-create single-partition topics (no admin
+    // client); the canonical helper supplies the shared KIP-848 broker tuning.
+    kip848_3_broker(1)
 }
 
 // ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
@@ -232,6 +222,34 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
         f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
     }
     producer.close().await.expect("producer close should succeed");
+}
+
+/// Pre-create an EMPTY topic, mirroring Java's
+/// `PlaintextConsumerAssignTest.setup()` which does
+/// `clusterInstance.createTopic(topic, partitions, replicationFactor)` in
+/// `@BeforeEach` — i.e. the topic is created with no records BEFORE any
+/// records are produced.
+///
+/// The Rust harness has no admin client, but `partitions_for` over the
+/// METADATA path triggers broker auto-create (`auto.create.topics.enable`
+/// is on by default) — exactly an empty topic, matching Java. Producing
+/// into a non-existent topic and relying on produce-triggered auto-create
+/// leaves a window where consumer-side metadata for the topic is not yet
+/// settled, which intermittently mis-reads offset 0 during the
+/// exact-offset/timestamp verification. Creating the topic empty up front
+/// closes that race.
+async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let parts = consumer.partitions_for(topic).await.expect("partitions_for");
+        if parts.len() >= partitions {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("topic {topic} not auto-created with >= {partitions} partitions within 30s");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 // ── Consumer test helpers (mirror ClientsTestUtils.poll/consume) ──────
@@ -473,6 +491,10 @@ async fn test_async_assign_and_commit_async_not_committed() {
     )
     .expect("new_consumer should succeed");
 
+    // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+    // records are produced; mirror that here to close the consumer-side
+    // metadata race during produce-triggered auto-create.
+    create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -532,6 +554,10 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     )
     .expect("new_consumer should succeed");
 
+    // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+    // records are produced; mirror that here to close the consumer-side
+    // metadata race during produce-triggered auto-create.
+    create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.commit_sync().await.expect("commit_sync should succeed");
@@ -572,6 +598,10 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     .expect("new_consumer should succeed");
 
     let starting_timestamp = current_time_ms();
+    // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+    // records are produced; mirror that here to close the consumer-side
+    // metadata race during produce-triggered auto-create.
+    create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
@@ -611,6 +641,10 @@ async fn test_async_assign_and_consume() {
     .expect("new_consumer should succeed");
 
     let starting_timestamp = current_time_ms();
+    // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+    // records are produced; mirror that here to close the consumer-side
+    // metadata race during produce-triggered auto-create.
+    create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
@@ -644,6 +678,10 @@ async fn test_async_assign_and_consume_skipping_position() {
     .expect("new_consumer should succeed");
 
     let starting_timestamp = current_time_ms();
+    // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+    // records are produced; mirror that here to close the consumer-side
+    // metadata race during produce-triggered auto-create.
+    create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     let offset: i64 = 1;
@@ -691,6 +729,10 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         )
         .expect("new_consumer should succeed (consumer 1)");
 
+        // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+        // records are produced; mirror that here to close the consumer-side
+        // metadata race during produce-triggered auto-create.
+        create_topic(consumer.as_mut(), &topic, 1).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
         consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
@@ -746,6 +788,10 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
         )
         .expect("new_consumer should succeed (consumer 1)");
 
+        // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+        // records are produced; mirror that here to close the consumer-side
+        // metadata race during produce-triggered auto-create.
+        create_topic(consumer.as_mut(), &topic, 1).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -819,6 +865,10 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     )
     .expect("new_consumer should succeed");
 
+    // Java's `@BeforeEach setup()` pre-creates the topic empty before any
+    // records are produced; mirror that here to close the consumer-side
+    // metadata race during produce-triggered auto-create.
+    create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 

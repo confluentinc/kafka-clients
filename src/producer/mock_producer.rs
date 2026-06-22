@@ -43,7 +43,7 @@ use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::record::RecordBatch;
 
-use super::internals::Callback;
+use super::Callback;
 
 /// A mock of the producer interface for testing code that uses Kafka.
 ///

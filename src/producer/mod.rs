@@ -14,6 +14,7 @@
 
 //! Producer types (org.apache.kafka.clients.producer)
 
+pub mod callback;
 pub(crate) mod internals;
 pub mod kafka_producer;
 pub mod mock_producer;
@@ -22,6 +23,7 @@ pub mod producer_record;
 pub mod producer_trait;
 pub mod record_metadata;
 
+pub use callback::Callback;
 pub use kafka_producer::KafkaProducer;
 pub use mock_producer::MockProducer;
 pub use producer_config::ProducerConfig;

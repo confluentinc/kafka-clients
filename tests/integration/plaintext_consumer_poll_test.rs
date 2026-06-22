@@ -118,7 +118,6 @@
 //! - SKIP: `runCloseAsyncConsumerMultiConsumerSessionTimeoutTest` — multi-consumer harness deferred (Phase 13b)
 //! - SKIP: `runAsyncConsumerMultiConsumerSessionTimeoutTest` — multi-consumer harness deferred (Phase 13b)
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -143,7 +142,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
@@ -173,28 +172,13 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// 2 partitions — matching Java's `@BeforeEach`
 /// `cluster.createTopic(topic, 2, BROKER_COUNT)`.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
-        "classic,consumer".to_string(),
-    );
-    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
-    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
-    props.insert("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string());
-    // Per Java `@ClusterConfigProperty` annotations on
-    // `PlaintextConsumerPollTest.java:78-80`. These knobs make the
-    // KIP-848 heartbeat round-trip fast enough that the
-    // `max.poll.interval.ms` tests can observe the broker-side fence
-    // within their wall-clock budgets.
-    props.insert("KAFKA_GROUP_CONSUMER_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
-    props.insert("KAFKA_GROUP_CONSUMER_MIN_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
-    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
-    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`.
-    // Auto-creating with 2 partitions matches that contract.
-    props.insert("KAFKA_NUM_PARTITIONS".to_string(), "2".to_string());
-    let mut cfg = ClusterConfig::with_brokers(3);
-    cfg.server_properties = props;
-    cfg
+    // The canonical helper supplies the shared KIP-848 broker tuning,
+    // including the fast heartbeat knobs (per Java `@ClusterConfigProperty`
+    // on `PlaintextConsumerPollTest.java:78-80`) that let the
+    // `max.poll.interval.ms` tests observe the broker-side fence within
+    // their wall-clock budgets. Java parity: `@BeforeEach` auto-creates
+    // 2-partition topics.
+    kip848_3_broker(2)
 }
 
 // ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────

@@ -94,7 +94,6 @@
 //!   `testAsyncConsumerCloseLeavesGroupOnInterrupt`,
 //!   `testAsyncConsumerClusterResourceListener`.
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -117,7 +116,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned by
@@ -132,20 +131,10 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// `cluster.createTopic(name, 2, BROKER_COUNT)` for auto-created topics
 /// (the Rust harness has no admin client).
 fn cluster_config_kip848() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
-        "classic,consumer".to_string(),
-    );
-    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
-    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
-    props.insert("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string());
-    props.insert("KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS".to_string(), "60000".to_string());
-    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
-    props.insert("KAFKA_NUM_PARTITIONS".to_string(), "2".to_string());
-    let mut cfg = ClusterConfig::with_brokers(3);
-    cfg.server_properties = props;
-    cfg
+    // `num.partitions=2` reproduces Java's `cluster.createTopic(name, 2, ...)`
+    // for auto-created topics; the canonical helper supplies the shared
+    // KIP-848 broker tuning.
+    kip848_3_broker(2)
 }
 
 /// Like [`cluster_config_kip848`] but with `LogAppendTime` as the
@@ -155,7 +144,7 @@ fn cluster_config_kip848() -> ClusterConfig {
 /// every topic in this (dedicated, pool-keyed) cluster gets LogAppendTime,
 /// which is exactly what the LogAppendTime test needs.
 fn cluster_config_log_append_time() -> ClusterConfig {
-    let mut cfg = cluster_config_kip848();
+    let mut cfg = kip848_3_broker(2);
     cfg.server_properties
         .insert("KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE".to_string(), "LogAppendTime".to_string());
     cfg
@@ -274,26 +263,28 @@ async fn send_records(
     }
 }
 
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)` —
-/// provisions a 2-partition topic by producing one no-op record per
-/// partition (the broker auto-creates with `num.partitions=2`).
-async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    for partition in 0..2 {
-        let record = ProducerRecord::with_partition(
-            topic.to_string(),
-            Some(partition),
-            Some(b"__provisioner__".to_vec()),
-            Some(b"__provisioner__".to_vec()),
-        )
-        .expect("ProducerRecord::with_partition should succeed");
-        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
-            .await
-            .expect("provisioner send should succeed");
-        fut.get_timeout(Duration::from_secs(30))
-            .await
-            .expect("provisioner send should ack");
+/// Creates `topic` EMPTY by triggering broker metadata auto-creation and
+/// waiting until it materializes with the expected partition count. Mirrors
+/// Java's `cluster.createTopic(name, partitions, replicationFactor)` (no data
+/// records, so the first produced record lands at offset 0).
+///
+/// The Rust harness has no admin client, but `partitions_for` over the
+/// METADATA path triggers broker auto-create (`auto.create.topics.enable` is
+/// on by default) with `num.partitions=2` — exactly an empty topic, matching
+/// Java. This replaces the earlier provisioner-record approach, which placed
+/// a record at offset 0 and shifted every real record by one.
+async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let parts = consumer.partitions_for(topic).await.expect("partitions_for");
+        if parts.len() >= partitions {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("topic {topic} not auto-created with >= {partitions} partitions within 30s");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    producer.flush().await.expect("producer.flush should succeed");
 }
 
 // ── Consumer helpers ──────────────────────────────────────────────────
@@ -304,10 +295,18 @@ async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8
 async fn consume_records(consumer: &mut BytesConsumer, num_records: usize) -> Vec<OwnedRecord> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut collected: Vec<OwnedRecord> = Vec::new();
-    while collected.len() < num_records && Instant::now() < deadline {
+    // Java's `consumeRecords` drives the poll through `TestUtils.waitForCondition`,
+    // which evaluates its lambda at least once — so even `num_records == 0`
+    // performs a single poll (mirrored by the post-rebalance "no records"
+    // verification in `test_async_consumer_pause_state_not_preserved_by_rebalance`).
+    // A plain `while len < num_records` would poll zero times for `num_records == 0`.
+    loop {
         let records = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
         for record in records {
             collected.push(OwnedRecord::from(&record));
+        }
+        if collected.len() >= num_records || Instant::now() >= deadline {
+            break;
         }
     }
     assert!(
@@ -426,14 +425,10 @@ async fn test_async_consumer_headers() {
     let group_id = ctx.group_id("g_headers");
 
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    // The provisioner wrote a header-less record at offset 0 on partition 0.
-    // The headers record lands at `base`; seek there (not a hard 0) and read
-    // it — otherwise we would read the provisioner, which has no headers.
-    let base = end_offset(consumer_for_probe(ctx.bootstrap_servers(), &group_id).as_mut(), &tp).await;
 
     // Java: `new ProducerRecord<>(TP.topic(), TP.partition(), null, "key", "value")`
-    // then `record.headers().add(...)` thrice.
+    // then `record.headers().add(...)` thrice. Java relies on producer-driven
+    // auto-create; the record lands at offset 0 (empty topic).
     let mut headers = RecordHeaders::new();
     headers.add_key_value("headerKey", Some(b"headerValue")).expect("add header");
     headers.add_key_value("headerKey2", Some(b"headerValue2")).expect("add header");
@@ -451,7 +446,7 @@ async fn test_async_consumer_headers() {
     assert_eq!(consumer.assignment().len(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(consumer.assignment().len(), 1);
-    consumer.seek(tp.clone(), base).await.expect("seek should succeed");
+    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
 
     let records = consume_records(consumer.as_mut(), 1).await;
     assert_eq!(records.len(), 1);
@@ -486,18 +481,16 @@ async fn test_async_consumer_partition_pause_and_resume() {
     let group_id = ctx.group_id("g_pause_resume");
 
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    // Account for the provisioner record at offset 0 on partition 0.
-    let base = end_offset(consumer_for_probe(ctx.bootstrap_servers(), &group_id).as_mut(), &tp).await;
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    // Empty topic so the first produced record lands at offset 0 (Java parity).
+    create_topic(consumer.as_mut(), &topic, 2).await;
 
     let num_records = 5usize;
     let mut starting_timestamp = current_time_ms();
     send_records(&producer, &tp, num_records, starting_timestamp).await;
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
-    consumer.seek(tp.clone(), base).await.expect("seek to start of test records");
-    consume_and_verify_records(consumer.as_mut(), &tp, num_records, base, 0, starting_timestamp).await;
+    consume_and_verify_records(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
 
     consumer.pause(std::slice::from_ref(&tp)).await.expect("pause");
     starting_timestamp = current_time_ms();
@@ -507,15 +500,7 @@ async fn test_async_consumer_partition_pause_and_resume() {
     assert!(polled.is_empty(), "poll should be empty while partition is paused");
 
     consumer.resume(std::slice::from_ref(&tp)).await.expect("resume");
-    consume_and_verify_records(
-        consumer.as_mut(),
-        &tp,
-        num_records,
-        base + num_records as i64,
-        0,
-        starting_timestamp,
-    )
-    .await;
+    consume_and_verify_records(consumer.as_mut(), &tp, num_records, 5, 0, starting_timestamp).await;
 
     producer.close().await.expect("producer close");
     consumer.close().await.expect("consumer close");
@@ -533,46 +518,28 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     let group_id = ctx.group_id("g_pause_rebalance");
 
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
-
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
-    await_assignment(
-        consumer.as_mut(),
-        &HashSet::from([tp.clone(), TopicPartition::new(topic.clone(), 1)]),
-        Duration::from_secs(90),
-    )
-    .await;
+    // Empty topics so the first produced record lands at offset 0 (Java parity).
+    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_topic(consumer.as_mut(), &topic2, 2).await;
 
-    let base = end_offset(consumer.as_mut(), &tp).await;
     let starting_timestamp = current_time_ms();
     send_records(&producer, &tp, 5, starting_timestamp).await;
     producer.close().await.expect("producer close");
 
-    consume_and_verify_records(consumer.as_mut(), &tp, 5, base, 0, starting_timestamp).await;
+    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consume_and_verify_records(consumer.as_mut(), &tp, 5, 0, 0, starting_timestamp).await;
     consumer.pause(std::slice::from_ref(&tp)).await.expect("pause");
 
     // Subscribe to a new topic to trigger a rebalance (Java subscribes to
-    // "topic2").
+    // "topic2"). After the rebalance our position is reset and the pause
+    // state is lost, so we should be able to consume from the beginning —
+    // Java asserts this via `consumeAndVerifyRecords(consumer, TP, 0, 5, ...)`,
+    // which `waitForCondition`-polls exactly once and verifies that 0 records
+    // come back from the now-revoked partition. `consume_records` mirrors that
+    // single poll for `num_records == 0` (see its comment).
     consumer.subscribe(vec![topic2.clone()]).await.expect("subscribe topic2");
-
-    // After rebalance the pause state for `tp` is lost. `tp` is no longer
-    // assigned (we subscribed away from `topic`), so the observable is that
-    // `tp` drops out of the assignment — the same end-state Java's
-    // "consume 0 records, pause lost" assertion captures. We assert the
-    // assignment no longer contains `tp`.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < deadline {
-        let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll");
-        if !consumer.assignment().contains(&tp) {
-            break;
-        }
-    }
-    assert!(
-        !consumer.assignment().contains(&tp),
-        "after rebalancing away from the topic, tp should no longer be assigned (pause state discarded)"
-    );
+    consume_and_verify_records(consumer.as_mut(), &tp, 0, 5, 0, starting_timestamp).await;
 
     consumer.close().await.expect("consumer close");
 }
@@ -583,10 +550,6 @@ async fn test_async_consumer_partitions_for() {
     let mut ctx = TestContext::new(cluster_config_kip848()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_partitions_for");
-
-    let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close");
 
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     // The topic may take a moment to appear in fresh metadata; poll a few
@@ -660,13 +623,13 @@ async fn test_async_consumer_list_topics() {
     let group_id = ctx.group_id("g_list_topics");
 
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic1).await;
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
-    ensure_topic_with_2_partitions(&producer, &topic3).await;
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    create_topic(consumer.as_mut(), &topic1, 2).await;
+    create_topic(consumer.as_mut(), &topic2, 2).await;
+    create_topic(consumer.as_mut(), &topic3, 2).await;
     send_records(&producer, &TopicPartition::new(topic1.clone(), 0), 1, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     consumer.subscribe(vec![topic1.clone()]).await.expect("subscribe");
     let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll");
 
@@ -717,21 +680,18 @@ async fn test_async_consumer_seek() {
     let mid: usize = total_records / 2;
 
     let producer = build_producer(ctx.bootstrap_servers());
-    // Java uses `startingTimestamp = 0`. We provision the topic (offset 0
-    // is the provisioner) then seek relative to that base so per-record
-    // assertions stay aligned with Java's offset==index expectation.
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    let base = end_offset(make_consumer(ctx.bootstrap_servers(), &group_id, &[]).as_mut(), &tp).await;
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    // Java uses `startingTimestamp = 0`. Empty topic so records start at
+    // offset 0, matching Java's offset==index expectation.
+    create_topic(consumer.as_mut(), &topic, 2).await;
     let starting_timestamp: i64 = 0;
     send_records(&producer, &tp, total_records, starting_timestamp).await;
     producer.close().await.expect("producer close");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     consumer.seek_to_end(std::slice::from_ref(&tp)).await.expect("seek_to_end");
-    let end = base + total_records as i64;
-    assert_eq!(consumer.position(&tp).await.expect("position"), end);
+    assert_eq!(consumer.position(&tp).await.expect("position"), total_records as i64);
     assert!(consumer.poll(Duration::from_millis(50)).await.expect("poll").is_empty());
 
     consumer
@@ -739,13 +699,12 @@ async fn test_async_consumer_seek() {
         .await
         .expect("seek_to_beginning");
     assert_eq!(consumer.position(&tp).await.expect("position"), 0);
-    // The first test record is at offset `base` (key/value index 0).
-    consume_and_verify_records(consumer.as_mut(), &tp, 1, base, 0, starting_timestamp).await;
+    consume_and_verify_records(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp).await;
 
-    consumer.seek(tp.clone(), base + mid as i64).await.expect("seek mid");
-    assert_eq!(consumer.position(&tp).await.expect("position"), base + mid as i64);
-    // Record at offset base+mid has key/value index mid and timestamp mid.
-    consume_and_verify_records(consumer.as_mut(), &tp, 1, base + mid as i64, mid, mid as i64).await;
+    consumer.seek(tp.clone(), mid as i64).await.expect("seek mid");
+    assert_eq!(consumer.position(&tp).await.expect("position"), mid as i64);
+    // Record at offset mid has key/value index mid and timestamp mid.
+    consume_and_verify_records(consumer.as_mut(), &tp, 1, mid as i64, mid, mid as i64).await;
 
     consumer.close().await.expect("consumer close");
 }
@@ -761,11 +720,8 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_seek_illegal_state");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close");
-
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    create_topic(consumer.as_mut(), &topic, 2).await;
     let err = consumer
         .seek_to_end(std::slice::from_ref(&tp))
         .await
@@ -800,16 +756,15 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
     let num_records = 50usize;
 
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    let base = end_offset(make_consumer(ctx.bootstrap_servers(), &group_id, &[]).as_mut(), &tp).await;
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    // Empty topic so records start at offset 0 (Java parity).
+    create_topic(consumer.as_mut(), &topic, 2).await;
     // Producer-supplied timestamps are IGNORED by a LogAppendTime topic;
     // the broker stamps each record with its append time.
     send_records(&producer, &tp, num_records, start_time).await;
     producer.close().await.expect("producer close");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
-    consumer.seek(tp.clone(), base).await.expect("seek");
 
     let records = consume_records(consumer.as_mut(), num_records).await;
     let now = current_time_ms();
@@ -826,7 +781,7 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
             "timestamp {} should be within [{start_time}, {now}]",
             record.timestamp
         );
-        assert_eq!(record.offset, base + i as i64);
+        assert_eq!(record.offset, i as i64);
         let expected_key = format!("key {i}").into_bytes();
         let expected_value = format!("value {i}").into_bytes();
         assert_eq!(record.key.as_ref().expect("key"), &expected_key);
@@ -853,13 +808,12 @@ async fn test_async_consumer_end_offsets() {
 
     let num_records = 200usize;
     let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    // base offset after provisioner record.
-    let base = end_offset(make_consumer(ctx.bootstrap_servers(), &group_id, &[]).as_mut(), &tp).await;
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    // Empty topic so records start at offset 0 (Java parity).
+    create_topic(consumer.as_mut(), &topic, 2).await;
     send_records(&producer, &tp, num_records, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
     await_assignment(
         consumer.as_mut(),
@@ -871,8 +825,8 @@ async fn test_async_consumer_end_offsets() {
     let end_offsets = consumer.end_offsets(std::slice::from_ref(&tp)).await.expect("end_offsets");
     assert_eq!(
         end_offsets.get(&tp).copied(),
-        Some(base + num_records as i64),
-        "end_offsets for tp should equal base + num_records"
+        Some(num_records as i64),
+        "end_offsets for tp should equal num_records"
     );
 
     consumer.close().await.expect("consumer close");
@@ -956,18 +910,6 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let producer = build_producer(ctx.bootstrap_servers());
-    // Provision a single-partition topic and capture the base offset so the
-    // earliest/explicit counts stay aligned regardless of the provisioner.
-    {
-        let record =
-            ProducerRecord::with_partition(topic.clone(), Some(0), Some(b"prov".to_vec()), Some(b"prov".to_vec()))
-                .expect("provisioner");
-        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
-            .await
-            .expect("provisioner send");
-        fut.get_timeout(Duration::from_secs(30)).await.expect("ack");
-    }
-
     let bootstrap = ctx.bootstrap_servers().to_string();
     // consumer1: groupless, earliest. consumer2: groupless, latest.
     // consumer3: groupless, explicit seek.
@@ -990,10 +932,10 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     )
     .expect("consumer3");
 
-    // Java seeks consumer3 to offset 1 after the 3 records start at offset
-    // `base`. We compute `base` (provisioner count), produce 3 records, and
-    // seek consumer3 to `base + 1` to mirror "skip first of the 3".
-    let base = end_offset(consumer1.as_mut(), &tp).await;
+    // Java: createTopic(TOPIC, 1, 1) — an EMPTY topic, so the 3 records below
+    // land at offsets 0, 1, 2. Create it via metadata auto-create (the broker
+    // gives 2 partitions; only partition 0 is used).
+    create_topic(consumer1.as_mut(), &topic, 1).await;
     for i in 1..=3 {
         let record = ProducerRecord::with_partition(
             topic.clone(),
@@ -1012,7 +954,9 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     consumer1.assign(vec![tp.clone()]).await.expect("assign c1");
     consumer2.assign(vec![tp.clone()]).await.expect("assign c2");
     consumer3.assign(vec![tp.clone()]).await.expect("assign c3");
-    consumer3.seek(tp.clone(), base + 1).await.expect("seek c3");
+    // Java: `consumer3.seek(TP, 1)` — a literal offset, skipping the first of
+    // the 3 records (offsets 0, 1, 2).
+    consumer3.seek(tp.clone(), 1).await.expect("seek c3");
 
     let num_records1 = poll_count(consumer1.as_mut(), 3, Duration::from_secs(15)).await;
     // Java: commitSync / committed raise InvalidGroupId for groupless.
@@ -1040,7 +984,7 @@ async fn test_async_consumer_consuming_with_null_group_id() {
 
     assert_eq!(num_records1, 3, "consumer1 should consume from earliest (3 records)");
     assert_eq!(num_records2, 0, "consumer2 should consume from latest (0 records)");
-    assert_eq!(num_records3, 2, "consumer3 should consume from offset base+1 (2 records)");
+    assert_eq!(num_records3, 2, "consumer3 should consume from offset 1 (2 records)");
 }
 
 /// Translates Java's `testAsyncConsumerNullGroupIdNotSupportedIfCommitting`
@@ -1052,10 +996,6 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     let topic = ctx.topic("topic");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close");
-
     let bootstrap = ctx.bootstrap_servers().to_string();
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
@@ -1063,6 +1003,7 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
         Box::new(ByteArrayDeserializer),
     )
     .expect("new_consumer");
+    create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let err = consumer.commit_sync().await.expect_err("groupless commit_sync should fail");
@@ -1088,11 +1029,8 @@ async fn test_async_consumer_position_respects_timeout() {
     let tp = TopicPartition::new(topic.clone(), 15);
     let group_id = ctx.group_id("g_position_timeout");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close");
-
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let err = consumer
@@ -1113,11 +1051,8 @@ async fn test_async_consumer_position_respects_wakeup() {
     let tp = TopicPartition::new(topic.clone(), 15);
     let group_id = ctx.group_id("g_position_wakeup");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close");
-
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     // Java: `CompletableFuture.runAsync(() -> { sleep(1s); consumer.wakeup(); })`
@@ -1185,11 +1120,8 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_timeout_zero");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close");
-
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    create_topic(consumer.as_mut(), &topic, 2).await;
 
     let result1 = consumer
         .beginning_offsets_timeout(std::slice::from_ref(&tp), Duration::ZERO)
@@ -1238,24 +1170,4 @@ async fn poll_count(consumer: &mut BytesConsumer, at_least: usize, budget: Durat
         }
     }
     count
-}
-
-/// Probes a partition's high watermark via `end_offsets`, retrying through
-/// the brief metadata-propagation window after a fresh provision. Returns
-/// the resolved end offset (the offset the next produced record lands at).
-async fn end_offset(consumer: &mut BytesConsumer, tp: &TopicPartition) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        let map = consumer.end_offsets(std::slice::from_ref(tp)).await.expect("end_offsets");
-        if let Some(v) = map.get(tp).copied() {
-            return v;
-        }
-        let _ = consumer.poll(Duration::from_millis(100)).await;
-    }
-    panic!("end_offsets({tp}) never returned a value within 30s");
-}
-
-/// Builds a short-lived consumer used only to probe `end_offsets`.
-fn consumer_for_probe(bootstrap: &str, group_id: &str) -> Box<BytesConsumer> {
-    make_consumer(bootstrap, &format!("{group_id}_probe"), &[])
 }

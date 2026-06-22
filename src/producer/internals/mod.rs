@@ -29,7 +29,7 @@ pub(crate) use built_in_partitioner::BuiltInPartitioner;
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use produce_request_result::ProduceRequestResult;
-pub(crate) use producer_batch::{Callback, ProducerBatch};
+pub(crate) use producer_batch::ProducerBatch;
 pub(crate) use producer_metadata::ProducerMetadata;
 pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
 pub(crate) use sender::Sender;

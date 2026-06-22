@@ -73,7 +73,6 @@
 //! - SKIP: `testClassicConsumerFetchHonoursMaxPartitionFetchBytesIfLargeRecordNotFirst` — classic-protocol-only
 //! - SKIP: `testClassicConsumerLowMaxFetchSizeForRequestAndPartition` — classic-protocol-only
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -93,7 +92,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
@@ -129,21 +128,10 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// across the suite. The low-max-fetch-size test needs `num.partitions=30`
 /// for auto-created topics and therefore uses a distinct config.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
-        "classic,consumer".to_string(),
-    );
-    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
-    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
-    props.insert("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string());
-    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
-    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`.
-    // Auto-creating with 2 partitions matches that contract.
-    props.insert("KAFKA_NUM_PARTITIONS".to_string(), "2".to_string());
-    let mut cfg = ClusterConfig::with_brokers(3);
-    cfg.server_properties = props;
-    cfg
+    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`,
+    // so auto-created topics get 2 partitions; the canonical helper supplies
+    // the shared KIP-848 broker tuning.
+    kip848_3_broker(2)
 }
 
 /// Variant of [`cluster_config_with_kip848_3brokers`] with
@@ -152,10 +140,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 /// [`test_async_consumer_low_max_fetch_size_for_request_and_partition`]
 /// which exercises 30 partitions × 3 topics.
 fn cluster_config_with_kip848_3brokers_30parts() -> ClusterConfig {
-    let mut cfg = cluster_config_with_kip848_3brokers();
-    cfg.server_properties
-        .insert("KAFKA_NUM_PARTITIONS".to_string(), "30".to_string());
-    cfg
+    kip848_3_broker(30)
 }
 
 // ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────

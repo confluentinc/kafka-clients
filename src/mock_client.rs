@@ -162,6 +162,10 @@ pub struct MockClient {
     nodes: Vec<Node>,
     /// Whether the client is active.
     active: AtomicBool,
+    /// Wakeup handle shared with callers of [`wakeup_notify`](Self::wakeup_notify),
+    /// mirroring the real client's selector. `wakeup()` signals this same
+    /// handle so a producer that cached it is actually woken.
+    wakeup: Arc<Notify>,
 }
 
 impl MockClient {
@@ -176,6 +180,7 @@ impl MockClient {
             future_responses: VecDeque::new(),
             nodes,
             active: AtomicBool::new(true),
+            wakeup: Arc::new(Notify::new()),
         }
     }
 
@@ -544,7 +549,7 @@ impl KafkaClient for MockClient {
     }
 
     fn wakeup(&self) {
-        // No-op for mock
+        self.wakeup.notify_one();
     }
 
     fn wakeup_handle(&self) -> Arc<tokio::sync::Notify> {
@@ -553,8 +558,7 @@ impl KafkaClient for MockClient {
     }
 
     fn wakeup_notify(&self) -> Arc<Notify> {
-        // The mock client never blocks on I/O; return an unused handle.
-        Arc::new(Notify::new())
+        self.wakeup.clone()
     }
 
     fn new_client_request(

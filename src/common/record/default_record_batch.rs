@@ -1304,10 +1304,8 @@ mod tests {
         assert_eq!(1, batches.len());
         assert_eq!(last_offset, batches[0].last_offset());
 
-        let mut offset = first_offset;
-        for record in records2.records() {
+        for (offset, record) in (first_offset..).zip(records2.records()) {
             assert_eq!(offset, record.offset());
-            offset += 1;
         }
     }
 

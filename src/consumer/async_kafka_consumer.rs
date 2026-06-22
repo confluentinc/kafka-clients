@@ -2107,6 +2107,30 @@ where
     /// acquire the guard at all — the listener invoker reads paused
     /// partitions inside its own brief lock window.
     pub(crate) async fn process_background_events(&mut self) -> Result<bool, KafkaError> {
+        self.process_background_events_inner(false).await
+    }
+
+    /// Inner implementation of [`Self::process_background_events`].
+    ///
+    /// `skip_rebalance_callback` controls how a pending §31
+    /// `ConsumerRebalanceListenerCallbackNeeded` event is handled:
+    ///
+    ///   - `false` (normal blocking-style APIs — `poll`, `commit_sync`, …):
+    ///     invoke the user listener on the caller's task, send the result
+    ///     on the §31 ack, and record any error into `first_error` so it
+    ///     surfaces to the caller — matching Java's `processBackgroundEvents`
+    ///     which rethrows the wrapped callback error.
+    ///   - `true` (close path — `leave_group_on_close`): do NOT invoke the
+    ///     user listener at all; send `Ok(())` on the §31 ack so the bg
+    ///     task's parked `invoke_rebalance_callback` unblocks and
+    ///     reconciliation completes cleanly. Java never invokes
+    ///     `on_partitions_assigned` (or any reconcile-queued callback)
+    ///     during `close()` — close runs rebalance callbacks only via
+    ///     `runRebalanceCallbacksOnClose` (revoked/lost, Step 4). Acking is
+    ///     a Rust-only necessity because our bg task parks on the ack
+    ///     (Java's `CompletableFuture` chain does not). See
+    ///     `leave_group_on_close`.
+    async fn process_background_events_inner(&mut self, skip_rebalance_callback: bool) -> Result<bool, KafkaError> {
         let mut first_error: Option<KafkaError> = None;
         let mut had_events = false;
 
@@ -2128,6 +2152,37 @@ where
             match envelope.event {
                 BackgroundEvent::Error { error } => {
                     Self::record_first_error(&mut first_error, error);
+                },
+                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack }
+                    if skip_rebalance_callback =>
+                {
+                    // Close path: do NOT invoke the user listener. Java never
+                    // invokes `on_partitions_assigned` (or any §31 callback
+                    // enqueued by reconciliation) during `close()` — close
+                    // runs rebalance callbacks only via
+                    // `runRebalanceCallbacksOnClose` (revoked/lost, Step 4),
+                    // and uses plain `addAndGet` (no `processBackgroundEvents`)
+                    // for the rest of the close steps, so any callback the
+                    // membership manager queued is simply never run and is
+                    // discarded when the consumer closes.
+                    //
+                    // We still must send the §31 ack so the bg task's
+                    // `invoke_rebalance_callback` (parked on `ack_rx.await`)
+                    // unblocks and reconciliation completes cleanly — without
+                    // it the bg task never makes progress and
+                    // `network_thread_close.await_join()` (Step 8) hangs. Java
+                    // has no equivalent dependency because its KIP-848
+                    // reconcile chains via `CompletableFuture` and never parks
+                    // the bg thread on the ack.
+                    //
+                    // Ack with `Ok(())`: a benign success completes the
+                    // reconcile, so the membership stops re-enqueuing the
+                    // callback. This is observably equivalent to Java, where
+                    // the callback is never invoked and the broker drives the
+                    // member out via the in-flight LeaveGroup.
+                    let _ = method_name;
+                    let _ = partitions;
+                    let _ = ack.send(Ok(()));
                 },
                 BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
                     // Read the currently-registered listener and drop the
@@ -2257,6 +2312,31 @@ where
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
     ) -> Result<T, KafkaError> {
+        self.process_background_events_until_inner(
+            receiver,
+            deadline_ms,
+            ignore_error_predicate,
+            timeout_msg,
+            enable_wakeup,
+            /* skip_rebalance_callback = */ false,
+        )
+        .await
+    }
+
+    /// Inner implementation of [`Self::process_background_events_until`]
+    /// with the extra `skip_rebalance_callback` flag forwarded to
+    /// [`Self::process_background_events_inner`]. See that method for the
+    /// close-path rationale.
+    #[allow(clippy::too_many_arguments)]
+    async fn process_background_events_until_inner<T: Send + 'static>(
+        &mut self,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        deadline_ms: i64,
+        ignore_error_predicate: impl Fn(&KafkaError) -> bool,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+        skip_rebalance_callback: bool,
+    ) -> Result<T, KafkaError> {
         let mut receiver = receiver;
 
         loop {
@@ -2272,7 +2352,7 @@ where
                 return Err(err);
             }
 
-            let had_events = match self.process_background_events().await {
+            let had_events = match self.process_background_events_inner(skip_rebalance_callback).await {
                 Ok(had) => had,
                 Err(err) => {
                     if ignore_error_predicate(&err) {
@@ -2388,6 +2468,41 @@ where
         self.application_event_handler.add(event, now_ms)?;
         self.process_background_events_until::<T>(receiver, deadline_ms, |_| false, timeout_msg, enable_wakeup)
             .await
+    }
+
+    /// Close-path variant of [`Self::submit_and_drain`].
+    ///
+    /// Identical to `submit_and_drain` (enqueue the event, then drain the
+    /// background-event channel while awaiting the completion handle) with
+    /// two close-specific differences:
+    ///
+    ///   - `enable_wakeup` is always `false` — close has already disabled
+    ///     wakeups (`wakeup_trigger.disable()`).
+    ///   - Pending §31 rebalance-listener callbacks are NOT invoked while
+    ///     draining; the ack is answered with `Ok(())` so the bg task
+    ///     unblocks for shutdown (`skip_rebalance_callback = true`). Java
+    ///     never invokes `on_partitions_assigned` during `close()`.
+    ///
+    /// See `leave_group_on_close` for why the drain (and not a plain
+    /// event-result wait) is required here.
+    async fn submit_and_drain_for_close<T: Send + 'static>(
+        &mut self,
+        event: ApplicationEvent,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+    ) -> Result<T, KafkaError> {
+        let now_ms = self.time.milliseconds();
+        self.application_event_handler.add(event, now_ms)?;
+        self.process_background_events_until_inner::<T>(
+            receiver,
+            deadline_ms,
+            |_| false,
+            timeout_msg,
+            /* enable_wakeup = */ false,
+            /* skip_rebalance_callback = */ true,
+        )
+        .await
     }
 
     /// Returns the milliseconds remaining until the supplied deadline,
@@ -3046,39 +3161,87 @@ where
     /// `wakeupTrigger.setActiveTask(futureToAwait)` at line 1738 —
     /// `true` makes a concurrent `wakeup()` interrupt the wait.
     ///
-    /// Issue 10 / §31: the wait is routed through
-    /// [`Self::process_background_events_until`] so a bg-task
-    /// rebalance-listener callback enqueued mid-wait is delivered on
-    /// the caller's task. The `last_pending_async_commit` is a
-    /// `oneshot::Receiver<()>`; we adapt it to the typed-result form
-    /// expected by the helper via a fast bridge task.
+    /// The wait is a plain deadline-bounded await on the pending-commit
+    /// receiver — it does NOT drain or process background events. Java's
+    /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks` only waits on
+    /// the commit future via `ConsumerUtils.getResult(futureToAwait,
+    /// timer)` (line 1740) and never calls `processBackgroundEvents`, so
+    /// it never invokes rebalance-listener callbacks here. Routing this
+    /// wait through `process_background_events_until` (which drains the
+    /// background-event channel and invokes pending
+    /// `RebalanceListenerCallbackNeeded` callbacks) is NOT faithful: a
+    /// failing rebalance listener would propagate its error out of
+    /// `close()`, which Java never does (Java runs rebalance callbacks on
+    /// close only via `runRebalanceCallbacksOnClose`, revoked/lost only).
+    ///
+    /// The commit completion is delivered by the background task via the
+    /// `last_pending_async_commit` oneshot, so awaiting that receiver
+    /// alone is sufficient — no bg-event drain is required for
+    /// commit-completion delivery.
     async fn await_pending_async_commits_and_execute_commit_callbacks(
         &mut self,
         deadline_ms: i64,
         enable_wakeup: bool,
     ) -> Result<(), KafkaError> {
-        if let Some(rx) = self.last_pending_async_commit.take() {
-            // Bridge the `oneshot::Receiver<()>` to the
-            // `oneshot::Receiver<Result<(), KafkaError>>` shape the
-            // drain helper expects. Java's
-            // `awaitPendingAsyncCommits...` treats a dropped sender
-            // (RecvError) as "the commit already completed" (Java line
-            // 1740-1742 — `CompletableFuture.getOrThrow()` returns
-            // normally for already-completed futures), so we map both
-            // arms of the inner `rx` to `Ok(())`.
-            let (tx_typed, rx_typed) = tokio::sync::oneshot::channel::<Result<(), KafkaError>>();
-            tokio::spawn(async move {
-                let _ = rx.await;
-                let _ = tx_typed.send(Ok(()));
-            });
-            self.process_background_events_until::<()>(
-                rx_typed,
-                deadline_ms,
-                |_| false,
-                "Timed out waiting for last pending async commit to complete",
-                enable_wakeup,
-            )
-            .await?;
+        if let Some(mut rx) = self.last_pending_async_commit.take() {
+            // Mirror Java's plain `ConsumerUtils.getResult(futureToAwait,
+            // timer)` (line 1740): a deadline-bounded await on the
+            // receiver, with no background-event processing. Loop with
+            // short `tokio::time::timeout` slices so the deadline is
+            // driven by the mock-clock-safe `self.time` (via
+            // `remaining_ms`), matching the deadline pattern used by
+            // `process_background_events_until`.
+            loop {
+                // §11: observe a pending wakeup at the top of each
+                // iteration when wakeups are enabled. Java's pattern is
+                // `wakeupTrigger.setActiveTask(futureToAwait)` (line
+                // 1737-1739) before the wait; our rotating-token
+                // equivalent re-checks here so a concurrent `wakeup()`
+                // surfaces `KafkaError::Wakeup`.
+                if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                    self.wakeup_trigger.rotate();
+                    return Err(err);
+                }
+
+                let remaining = self.remaining_ms(deadline_ms);
+                if remaining <= 0 {
+                    return Err(KafkaError::timeout(
+                        "Timed out waiting for last pending async commit to complete".to_string(),
+                    ));
+                }
+                let wait = std::cmp::min(remaining, 100) as u64;
+
+                // §11: race the receiver against the wakeup token's
+                // cancellation so `wakeup()` from another task interrupts
+                // the wait immediately. Java treats a dropped sender
+                // (RecvError) as "the commit already completed" (line
+                // 1740-1742 — `CompletableFuture.getOrThrow()` returns
+                // normally for already-completed futures).
+                let recv_fut = &mut rx;
+                if enable_wakeup {
+                    let tok = self.wakeup_trigger.current_token();
+                    tokio::select! {
+                        biased;
+                        _ = tok.cancelled() => {
+                            // Loop top surfaces KafkaError::Wakeup via
+                            // maybe_trigger_wakeup + rotate.
+                        },
+                        res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
+                            match res {
+                                // Commit completed (or sender dropped) — done.
+                                Ok(_) => break,
+                                // Timeout slice elapsed — keep looping.
+                                Err(_elapsed) => {},
+                            }
+                        },
+                    }
+                } else {
+                    match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
+                        Ok(_) => break,
+                        Err(_elapsed) => {},
+                    }
+                }
+            }
         }
         // Java: `offsetCommitCallbackInvoker.executeCallbacks()`.
         self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
@@ -3998,16 +4161,30 @@ where
         // Java's `leaveGroupOnClose` does NOT call `setActiveTask` and
         // close has already called `wakeup_trigger.disable()`
         // (Java line 1545) so wakeup is inert in this path —
-        // `enable_wakeup=false`. Issue 10 / §31: still routes through
-        // the drain helper so a pending rebalance-listener callback is
-        // serviced on the caller's task.
+        // `enable_wakeup=false`. §31: still routes through the drain
+        // helper so the bg-task rebalance-listener handshake is serviced
+        // on the caller's task — without that, a bg task blocked awaiting
+        // a `RebalanceListenerCallbackNeeded` ack (see
+        // `AbstractMembershipManager::invoke_rebalance_callback`) would
+        // never unblock and `network_thread_close.await_join()` (Step 8)
+        // would hang forever. Java's KIP-848 reconcile chains via
+        // `CompletableFuture` and never parks the bg thread on the ack, so
+        // Java has no equivalent shutdown dependency on draining here.
+        //
+        // `submit_and_drain_for_close` runs the drain with
+        // `skip_rebalance_callback=true`: any pending §31
+        // `RebalanceListenerCallbackNeeded` is acked with `Ok(())` WITHOUT
+        // invoking the user listener (see `process_background_events_inner`).
+        // Java never invokes `on_partitions_assigned` during close (close
+        // runs rebalance callbacks only via `runRebalanceCallbacksOnClose`,
+        // revoked/lost only, at Step 4), so a failing assigned-listener must
+        // neither run nor surface as a `close()` error.
         let result = self
-            .submit_and_drain::<()>(
+            .submit_and_drain_for_close::<()>(
                 ApplicationEvent::LeaveGroupOnClose { handle, membership_operation },
                 receiver,
                 deadline_ms,
                 "Timeout expired while waiting for LeaveGroupOnClose",
-                false,
             )
             .await;
         match result {

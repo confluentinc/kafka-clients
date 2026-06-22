@@ -86,7 +86,6 @@
 //! - SKIP: `testClassicConsumerSubscribeAndCommitSync` — classic-protocol-only
 //! - SKIP: `testClassicConsumerPositionAndCommit` — classic-protocol-only
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -112,7 +111,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
@@ -139,23 +138,10 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// partitions — matching Java's `@BeforeEach`
 /// `cluster.createTopic(topic, 2, BROKER_COUNT)`.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
-        "classic,consumer".to_string(),
-    );
-    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
-    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
-    props.insert("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string());
-    // Speed the KIP-848 heartbeat round-trip so rebalances settle fast.
-    props.insert("KAFKA_GROUP_CONSUMER_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
-    props.insert("KAFKA_GROUP_CONSUMER_MIN_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
-    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
-    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`.
-    props.insert("KAFKA_NUM_PARTITIONS".to_string(), "2".to_string());
-    let mut cfg = ClusterConfig::with_brokers(3);
-    cfg.server_properties = props;
-    cfg
+    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`,
+    // so auto-created topics get 2 partitions; the canonical helper supplies
+    // the shared KIP-848 broker tuning.
+    kip848_3_broker(2)
 }
 
 // ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
@@ -262,27 +248,34 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
     producer.close().await.expect("producer close should succeed");
 }
 
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)`.
-/// The Rust harness has no admin client; produce one no-op record per
-/// partition with `num.partitions=2` on the broker to auto-create the
-/// topic with two partitions.
-async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    for partition in 0..2 {
-        let record = ProducerRecord::with_partition(
-            topic.to_string(),
-            Some(partition),
-            Some(b"__provisioner__".to_vec()),
-            Some(b"__provisioner__".to_vec()),
-        )
-        .expect("ProducerRecord::with_partition should succeed");
-        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
-            .await
-            .expect("provisioner send should succeed");
-        fut.get_timeout(Duration::from_secs(30))
-            .await
-            .expect("provisioner send should ack");
+/// Creates `topic` EMPTY by triggering broker metadata auto-creation and
+/// waiting until it materializes with the expected partition count. Mirrors
+/// Java's `cluster.createTopic(name, partitions, replicationFactor)` (no data
+/// records, so the first produced record lands at offset 0).
+///
+/// The Rust harness has no admin client, but `partitions_for` over the
+/// METADATA path triggers broker auto-create (`auto.create.topics.enable` is
+/// on by default) with `num.partitions=2` — exactly an empty topic, matching
+/// Java. This replaces the earlier provisioner-record approach, which placed
+/// a record at offset 0 and shifted every real record by one.
+async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let parts = consumer.partitions_for(topic).await.expect("partitions_for");
+        if parts.len() >= partitions {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("topic {topic} not auto-created with >= {partitions} partitions within 30s");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    producer.flush().await.expect("producer.flush should succeed");
+}
+
+/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)` — creates
+/// an EMPTY 2-partition topic via metadata auto-create (no records).
+async fn ensure_topic_with_2_partitions(consumer: &mut BytesConsumer, topic: &str) {
+    create_topic(consumer, topic, 2).await;
 }
 
 // ── Consumer test helpers ─────────────────────────────────────────────
@@ -493,15 +486,14 @@ async fn test_async_consumer_auto_commit_on_close() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
-    // tp1 must also exist for the seek; provision both partitions.
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+        // Empty topic (both partitions), so seeks define the committed
+        // positions deterministically; producing to tp also auto-creates it.
+        create_topic(consumer.as_mut(), &topic, 2).await;
+        send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
+
         consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
@@ -534,14 +526,13 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+        // Empty topic (both partitions); producing to tp also auto-creates it.
+        create_topic(consumer.as_mut(), &topic, 2).await;
+        send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
+
         consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
@@ -575,12 +566,9 @@ async fn test_async_consumer_commit_metadata() {
     let group_id = ctx.group_id("g_commit_metadata");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    // Ensure the topic exists so assign() resolves a real partition.
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    // Ensure the topic exists so assign() resolves a real partition.
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // Sync commit: offset 5, leaderEpoch 15, metadata "foo".
@@ -639,11 +627,8 @@ async fn test_async_consumer_async_commit() {
     let group_id = ctx.group_id("g_async_commit");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     let cb = CountConsumerCommitCallback::new();
@@ -689,14 +674,14 @@ async fn test_async_consumer_commit_specified_offsets() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, now).await;
     send_records_with_producer(&producer, &tp1, 7, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     consumer
         .assign(vec![tp.clone(), tp1.clone()])
         .await
@@ -741,25 +726,24 @@ async fn test_async_consumer_commit_specified_offsets() {
 /// Auto-commit fires on rebalance; after the rebalance, `committed()`
 /// reflects the seeks.
 ///
-/// **Deviation (Issue 8 / Issue 4):** Java's listener calls
+/// **Deviation (Issue 8):** Java's listener calls
 /// `consumer.pause(partitions)` inside `onPartitionsAssigned` so that the
 /// `awaitAssignment` poll loop does not advance `tp`'s fetch position past
 /// the test's explicit seek (300) before the rebalance auto-commits it
-/// (`tp` has 1000 records). A Rust rebalance listener holds only `&self`
-/// (as `Arc<dyn ConsumerRebalanceListener>`) and cannot call the
+/// (Java's `tp` has 1000 records). A Rust rebalance listener holds only
+/// `&self` (as `Arc<dyn ConsumerRebalanceListener>`) and cannot call the
 /// consumer's `&mut self` `pause()` (Issue 8 in the Phase-13 COMMENTS, the
 /// structural gap documented in this phase's PLAN.md and the same gap that
 /// `#[ignore]`s the poll-suite's commit-in-revocation test).
 ///
-/// To remove the resulting timing dependency entirely, we DO NOT produce
-/// any records to `tp` (Java's 1000-record `sendRecords` is dropped). The
-/// test never consumes those records — they existed only to make the seek
-/// meaningful, and a partition with no fetchable records satisfies the
-/// same purpose deterministically: the post-re-subscribe
-/// `await_assignment` poll loop has nothing to fetch, so the seeked
-/// positions (300/500) cannot be advanced before the rebalance auto-commit
-/// captures them. The auto-commit-on-rebalance + `committed()` readback
-/// (the actual contract) is preserved faithfully and is no longer racy.
+/// We make the seeks VALID instead of pausing: produce exactly 300 records
+/// to `tp` and 500 to `tp1`, so `seek(tp, 300)` and `seek(tp1, 500)` land at
+/// the log END. A fetch at the log end returns empty and does NOT advance or
+/// reset the position, so the seeked positions survive until the rebalance
+/// auto-commit captures them — deterministically, without a pause. (Java
+/// produces 1000 to `tp` only and pauses `tp1`; producing up to each seek
+/// target is the pause-free equivalent.) The auto-commit-on-rebalance +
+/// `committed()` readback (the actual contract) is preserved faithfully.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_auto_commit_on_rebalance() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -769,15 +753,20 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    // NOTE: unlike Java we do not produce records to `tp` — see the
-    // deviation note above. The seeks below set positions deterministically
-    // and no fetch can advance them.
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    // Empty topics so produced records start at offset 0 (Java parity).
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic2).await;
+
+    // Produce up to each seek target so the seeks below are in-range (log
+    // end), so no fetch advances or resets the position — see the
+    // pause-free deviation note above.
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
+    let now = current_time_ms();
+    send_records_with_producer(&producer, &tp, 300, now).await;
+    send_records_with_producer(&producer, &tp1, 500, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
     consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
@@ -826,11 +815,8 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     assert_eq!(consumer.assignment().len(), 0);
     consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
@@ -854,13 +840,14 @@ async fn test_async_consumer_position_and_commit() {
     let group_id = ctx.group_id("g_position_and_commit");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    let starting_timestamp = current_time_ms();
-    send_records_with_producer(&producer, &tp, 5, starting_timestamp).await;
-
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     let mut other = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+
+    // Empty topic so produced records start at offset 0 (Java parity).
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let starting_timestamp = current_time_ms();
+    send_records_with_producer(&producer, &tp, 5, starting_timestamp).await;
 
     // Partition 15 does not exist / is not assigned.
     let unassigned = TopicPartition::new(topic.clone(), 15);
@@ -940,21 +927,33 @@ async fn test_commit_async_completed_before_consumer_closes() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    let now = current_time_ms();
-    send_records_with_producer(&producer, &tp, 3, now).await;
-    send_records_with_producer(&producer, &tp1, 3, now).await;
-    producer.close().await.expect("producer close should succeed");
-
     let cb = CountConsumerCommitCallback::new();
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+        ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+
+        let producer = build_producer_bytes(ctx.bootstrap_servers());
+        let now = current_time_ms();
+        send_records_with_producer(&producer, &tp, 3, now).await;
+        send_records_with_producer(&producer, &tp1, 3, now).await;
+        producer.close().await.expect("producer close should succeed");
+
         consumer
             .assign(vec![tp.clone(), tp1.clone()])
             .await
             .expect("assign should succeed");
+
+        // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic so
+        // the coordinator is available during close
+        // (`PlaintextConsumerCommitTest.java:484-485`). The Rust harness has
+        // no admin client; the equivalent is to discover the coordinator and
+        // materialize the offsets topic up front via a `committed()` query, so
+        // the two async commits below can complete during the (bounded) close.
+        let _ = consumer
+            .committed(std::slice::from_ref(&tp))
+            .await
+            .expect("committed (coordinator readiness) should succeed");
 
         let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
         // Try without looking up the coordinator first.
@@ -990,14 +989,14 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 3, now).await;
     send_records_with_producer(&producer, &tp1, 3, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     consumer
         .assign(vec![tp.clone(), tp1.clone()])
         .await
@@ -1086,12 +1085,12 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let group_id = ctx.group_id("g_coordinator_unavailable_during_close");
     let tp = TopicPartition::new(topic.clone(), 0);
 
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
     send_records_with_producer(&producer, &tp, 3, current_time_ms()).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // NOTE: the Java step `cluster.brokerIds().forEach(cluster::shutdownBroker)`
