@@ -571,4 +571,21 @@ mod tests {
             "total successes only = 60"
         );
     }
+
+    /// The consumer registers BOTH this manager and the
+    /// `RebalanceCallbackMetricsManager` against the same shared `Arc<Metrics>`
+    /// (Java shares the consumer's `Metrics`). Their sensor and metric names are
+    /// disjoint, so co-registration must not conflict. This locks that in
+    /// without needing a broker (the live `AsyncKafkaConsumer::new` path).
+    #[test]
+    fn co_registration_with_callback_manager_does_not_conflict() {
+        use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
+
+        let (_time, metrics, _subs, rebalance) = setup();
+        let callback = RebalanceCallbackMetricsManager::new(&metrics);
+
+        // Both managers' metrics are present in the one registry.
+        assert!(metrics.metric(&rebalance.rebalance_latency_avg).is_some());
+        assert!(metrics.metric(&callback.partition_assign_latency_avg).is_some());
+    }
 }
