@@ -142,6 +142,17 @@ impl HeartbeatMetricsManager {
     pub(crate) fn record_request_latency(&self, request_latency_ms: i64) {
         self.heartbeat_sensor.record(request_latency_ms as f64);
     }
+
+    /// Test-only: read back the raw `last-heartbeat-sent` timestamp the
+    /// `last-heartbeat-seconds-ago` gauge closes over. `-1` means no heartbeat
+    /// has been recorded yet. Lets the heartbeat-request-manager tests assert
+    /// that a send site wired `record_heartbeat_sent_ms` without reaching into
+    /// the private metric registry (the gauge's value derivation is covered by
+    /// `test_heartbeat_metrics`).
+    #[cfg(test)]
+    pub(crate) fn last_heartbeat_ms_for_test(&self) -> i64 {
+        self.last_heartbeat_ms.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]

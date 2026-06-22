@@ -1003,15 +1003,25 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         make_heartbeat_poll_result(request, &mut self.inner, current_time_ms)
     }
 
-    fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+    fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
         // Drain any pending completions one last time so close paths
         // observe the post-completion state.
-        self.drain_pending_completions(_current_time_ms);
+        self.drain_pending_completions(current_time_ms);
         // Java: if (membershipManager().isLeavingGroup()) send the
         // leave heartbeat (ignoreResponse=true — pollOnClose drops
         // the response by Java's `logResponse(...)` semantics).
         if self.membership_manager.is_leaving_group() {
             let request = self.build_heartbeat_request(true);
+            // Java parity: `pollOnClose` routes its leave heartbeat through
+            // `makeHeartbeatRequest(currentTimeMs, true)`
+            // (`AbstractHeartbeatRequestManager.java:233`), which records the
+            // heartbeat-sent time (`:285`). This is the third of Java's three
+            // heartbeat send sites; record here so `last-heartbeat-seconds-ago`
+            // reflects the close-path leave heartbeat, matching the poll-timer
+            // leave path above and the normal path in `make_heartbeat_poll_result`.
+            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+            }
             return PollResult::new(self.inner.heartbeat_request_state.heartbeat_interval_ms(), vec![request]);
         }
         PollResult::empty()
@@ -2514,6 +2524,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Java parity: `pollOnClose` routes its leave heartbeat through
+    /// `makeHeartbeatRequest(currentTimeMs, true)`
+    /// (`AbstractHeartbeatRequestManager.java:233`), which records the
+    /// heartbeat-sent time (`:285`). The close-path leave heartbeat must update
+    /// `last-heartbeat-seconds-ago` like the other two send sites do.
+    #[tokio::test]
+    async fn poll_on_close_records_heartbeat_sent_ms() {
+        use crate::common::metrics::Metrics;
+        use crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager;
+
+        let (mut mgr, _coord, mm, _subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        let metrics = Arc::new(Metrics::new());
+        let metrics_manager = Arc::new(HeartbeatMetricsManager::new(&metrics));
+        mgr.set_metrics_manager(Arc::clone(&metrics_manager));
+
+        // No heartbeat recorded yet → sentinel.
+        assert_eq!(metrics_manager.last_heartbeat_ms_for_test(), -1);
+
+        // A member still leaving when the manager closes is in LEAVING.
+        force_state(&mm, MemberState::Leaving);
+
+        let current_time_ms = 12_345;
+        let result = mgr.poll_on_close(current_time_ms);
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "poll_on_close must generate a leave request while leaving"
+        );
+
+        // The close-path leave heartbeat recorded the send time, so
+        // `last-heartbeat-seconds-ago` is no longer stale.
+        assert_eq!(
+            metrics_manager.last_heartbeat_ms_for_test(),
+            current_time_ms,
+            "poll_on_close leave heartbeat must record record_heartbeat_sent_ms"
+        );
     }
 
     /// Translated from
