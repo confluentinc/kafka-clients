@@ -2307,6 +2307,16 @@ where
         let async_consumer_metrics = Arc::clone(&self.async_consumer_metrics);
         let start_ms = self.time.milliseconds();
 
+        // Java `BackgroundEventHandler.drainEvents` (lines 65-70) records
+        // `recordBackgroundEventQueueSize(0)` UNCONDITIONALLY on every drain —
+        // there is no `isEmpty()` early-return (unlike `processApplicationEvents`).
+        // Since `process_background_events` runs at the top of every blocking-style
+        // API, Java continuously refreshes this gauge to 0 while idle. Mirror that
+        // here so the gauge snaps back to 0 on an empty drain instead of lingering
+        // at the last post-`add` peak.
+        self.background_event_queue_size.store(0, Ordering::SeqCst);
+        async_consumer_metrics.record_background_event_queue_size(0);
+
         loop {
             let envelope = match self.background_event_rx.try_recv() {
                 Ok(env) => env,
@@ -2320,12 +2330,6 @@ where
                     break;
                 },
             };
-            if !had_events {
-                // First event of this drain — mirror Java's `drainEvents`
-                // resetting `recordBackgroundEventQueueSize(0)`.
-                self.background_event_queue_size.store(0, Ordering::SeqCst);
-                async_consumer_metrics.record_background_event_queue_size(0);
-            }
             had_events = true;
             // Java AKC:2206 — record the time this event spent in the queue.
             async_consumer_metrics.record_background_event_queue_time(self.time.milliseconds() - envelope.enqueued_ms);
@@ -5889,6 +5893,50 @@ mod tests {
     async fn process_background_events_on_empty_channel_is_ok() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.process_background_events().await.expect("ok");
+    }
+
+    /// Issue 2 regression (Phase M6): the `background-event-queue-size` gauge
+    /// must snap back to 0 on an *idle* (empty) drain, matching Java's
+    /// `BackgroundEventHandler.drainEvents` which records
+    /// `recordBackgroundEventQueueSize(0)` unconditionally. Pre-seed a stale
+    /// peak (as the bg task's `add` would leave it), then drain an empty
+    /// channel and assert both the shared `AtomicI64` and the registered
+    /// metric reset to 0.
+    #[tokio::test]
+    async fn idle_drain_resets_background_event_queue_size_to_zero() {
+        use crate::common::metric::Metric;
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+
+        // Simulate the bg task's `BackgroundEventHandler::add` having left the
+        // gauge at a peak of 2 (two events enqueued, not yet drained).
+        consumer.background_event_queue_size.store(2, Ordering::SeqCst);
+        consumer.async_consumer_metrics.record_background_event_queue_size(2);
+
+        // An idle (empty) drain — no events to pull.
+        consumer.process_background_events().await.expect("ok");
+
+        // The shared counter must be reset to 0.
+        assert_eq!(
+            consumer.background_event_queue_size.load(Ordering::SeqCst),
+            0,
+            "shared background_event_queue_size must reset to 0 on an empty drain"
+        );
+        // The registered gauge must read 0, not linger at the stale peak.
+        let mn = consumer.metrics.metric_name_group(
+            "background-event-queue-size",
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        );
+        let value = consumer
+            .metrics
+            .metric(&mn)
+            .expect("background-event-queue-size metric present")
+            .metric_value()
+            .as_double()
+            .expect("double-valued gauge");
+        assert_eq!(
+            value, 0.0,
+            "background-event-queue-size gauge must snap back to 0 on an idle drain"
+        );
     }
 
     /// Issue 11 regression: a blocking API with `enable_wakeup=true`
