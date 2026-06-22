@@ -5449,13 +5449,10 @@ mod tests {
     //     `issue_10_commit_sync_drains_listener_callback_while_waiting`
     //     (inline above) AND the §31 regression pair in commit 11/N.
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
-    //     the bg-event queue size/time/processing-time recording is now WIRED
-    //     in `process_background_events` (Phase M6) and verified by the
-    //     handler-side smoke tests in `background_event_handler.rs`. The
-    //     end-to-end value assertion (drain under a mock clock, then read
-    //     `metrics.metric("background-event-queue-time-avg")`) needs both the
-    //     public `metrics()` accessor and a MockTime-injectable consumer
-    //     fixture, which land in Phase M7 — translated there.
+    //     TRANSLATED (Phase M7) as
+    //     `test_record_background_event_queue_size_and_time` (inline below).
+    //     Drains a bg event under a mock `ThreadTime` advanced by 10 ms, then
+    //     reads the values via the public `metrics()` accessor (M7).
     //   - testEmptyStreamRebalanceData, testStreamRebalanceData,
     //     testCloseInvokesStreamsRebalanceListenerOnTasksRevokedWhenMemberEpochPositive,
     //     testCloseInvokesStreamsRebalanceListenerOnAllTasksLostWhenMemberEpochZeroOrNegative,
@@ -5959,6 +5956,114 @@ mod tests {
             value, 0.0,
             "background-event-queue-size gauge must snap back to 0 on an idle drain"
         );
+    }
+
+    /// Java `AsyncKafkaConsumerTest.testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime`
+    /// (line 1952). Deferred from Phase M6 (needed the public `metrics()`
+    /// accessor + a mock-clock-injectable consumer); translated here.
+    ///
+    /// Java enqueues a `ConsumerRebalanceListenerCallbackNeededEvent` stamped
+    /// with `time.milliseconds()`, records `recordBackgroundEventQueueSize(1)`,
+    /// sleeps the mock clock 10 ms, calls `processBackgroundEvents()`, then
+    /// asserts via the registry: `background-event-queue-size` == 0,
+    /// `background-event-queue-time-avg` == 10, `-time-max` == 10.
+    #[tokio::test]
+    async fn test_record_background_event_queue_size_and_time() {
+        use crate::common::metric::Metric;
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::consumer_network_thread::ThreadTime;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        use tokio::sync::oneshot;
+
+        // Mock clock so the recorded queue-time (now - enqueuedMs) is exactly
+        // 10 ms, deterministically. `self.time` drives both the enqueue stamp
+        // and the drain-time read in `process_background_events`.
+        struct MockThreadTime {
+            millis: std::sync::Mutex<i64>,
+        }
+        impl MockThreadTime {
+            fn sleep(&self, dur_ms: i64) {
+                *self.millis.lock().unwrap() += dur_ms;
+            }
+        }
+        impl ThreadTime for MockThreadTime {
+            fn milliseconds(&self) -> i64 {
+                *self.millis.lock().unwrap()
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        // Swap in the mock clock (start at an arbitrary non-zero epoch).
+        let mock_time = Arc::new(MockThreadTime { millis: std::sync::Mutex::new(1_000) });
+        consumer.time = Arc::clone(&mock_time) as Arc<dyn ThreadTime>;
+
+        // Java: `event.setEnqueuedMs(time.milliseconds()); backgroundEventQueue.add(event);`
+        // A no-listener callback-needed event acks Ok(()) — the time recording
+        // does not depend on the listener result.
+        let enqueued_ms = mock_time.milliseconds();
+        let (ack_tx, _ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                partitions: Vec::new(),
+                ack: ack_tx,
+            },
+            enqueued_ms,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+
+        // Java: `asyncConsumerMetrics.recordBackgroundEventQueueSize(1);`
+        consumer.async_consumer_metrics.record_background_event_queue_size(1);
+
+        // Java: `time.sleep(10); consumer.processBackgroundEvents();`
+        mock_time.sleep(10);
+        consumer.process_background_events().await.expect("drain ok");
+
+        // Read the values through the PUBLIC `metrics()` accessor (M7).
+        let snapshot = consumer.metrics();
+        let read = |name: &str| -> f64 {
+            let mn = consumer.metrics.metric_name_group(name, CONSUMER_METRIC_GROUP);
+            snapshot
+                .get(&mn)
+                .unwrap_or_else(|| panic!("metric {name} present"))
+                .metric_value()
+                .as_double()
+                .expect("double-valued metric")
+        };
+
+        assert_eq!(read("background-event-queue-size"), 0.0);
+        assert_eq!(read("background-event-queue-time-avg"), 10.0);
+        assert_eq!(read("background-event-queue-time-max"), 10.0);
+    }
+
+    /// Phase M7: the public `metrics()` accessor returns the registry snapshot
+    /// that all the metrics managers populate. Mirrors the read contract of
+    /// Java's `AsyncKafkaConsumer.metrics()` (`Collections.unmodifiableMap`).
+    /// Verifies a representative metric from each manager family is present,
+    /// so the snapshot is the full Java set, not an empty/partial map.
+    #[tokio::test]
+    async fn metrics_returns_full_registry_snapshot() {
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        let consumer = make_test_consumer();
+        let snapshot = consumer.metrics();
+        assert!(!snapshot.is_empty(), "metrics() must not be empty");
+
+        // The async-consumer family (M6) registers under CONSUMER_METRIC_GROUP.
+        let mn = consumer
+            .metrics
+            .metric_name_group("background-event-queue-size", CONSUMER_METRIC_GROUP);
+        assert!(
+            snapshot.contains_key(&mn),
+            "metrics() snapshot must include the async-consumer metrics"
+        );
+
+        // The snapshot is keyed by MetricName and the values impl `Metric`:
+        // every entry's `metric_name()` matches its key (sanity of the snapshot).
+        for (name, metric) in &snapshot {
+            use crate::common::metric::Metric;
+            assert_eq!(metric.metric_name(), name);
+        }
     }
 
     /// Issue 11 regression: a blocking API with `enable_wakeup=true`

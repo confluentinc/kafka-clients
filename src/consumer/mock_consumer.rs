@@ -1060,6 +1060,14 @@ mod tests {
         assert_eq!(c.max_poll_records, 1);
     }
 
+    /// Java `MockConsumer.metrics()` returns `Collections.emptyMap()`
+    /// (`MockConsumer.java:496-499`). The Rust port returns an empty map.
+    #[test]
+    fn test_metrics_returns_empty_map() {
+        let c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        assert!(Consumer::metrics(&c).is_empty());
+    }
+
     #[test]
     fn test_reset_should_rebalance() {
         let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
