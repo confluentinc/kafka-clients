@@ -423,6 +423,9 @@ mod tests {
     use crate::common::metrics::stats::{CumulativeCount, CumulativeSum, Value};
     use crate::common::metrics::time::mock::MockTime;
 
+    // Matches MetricsTest.EPS.
+    const EPS: f64 = 0.000001;
+
     fn metrics_with_mock() -> (Metrics, Arc<MockTime>) {
         let time = Arc::new(MockTime::new());
         let metrics = Metrics::with_config_reporters_time(
@@ -824,6 +827,189 @@ mod tests {
             double_value(&metrics.metric(&metrics.metric_name_group("test.count", "grp1")).unwrap()),
             "Count(0...9) = 10"
         );
+    }
+
+    // MetricsTest.testSimpleStats — the Avg/Max/Min/Rate/occurrences/count rows
+    // (M2). The CumulativeSum (s2.total) and count rows were already covered by
+    // `test_simple_stats_cumulative` (M1); they are re-asserted here for the full
+    // method. The Percentiles row is OUT OF SCOPE (consumer doesn't use them; see
+    // Phase M2 PLAN Skips) and is therefore omitted.
+    #[test]
+    fn test_simple_stats() {
+        use crate::common::metrics::internals::metrics_utils::TimeUnit;
+        use crate::common::metrics::stats::{Avg, Max, Meter, Min, WindowedCount};
+
+        let (metrics, time) = metrics_with_mock();
+        let config = metrics.config().clone();
+
+        let s = metrics.sensor("test.sensor").unwrap();
+        s.add(metrics.metric_name_group("test.avg", "grp1"), Box::new(Avg::new()))
+            .unwrap();
+        s.add(metrics.metric_name_group("test.max", "grp1"), Box::new(Max::new()))
+            .unwrap();
+        s.add(metrics.metric_name_group("test.min", "grp1"), Box::new(Min::new()))
+            .unwrap();
+        s.add_compound(Box::new(Meter::with_unit(
+            TimeUnit::Seconds,
+            metrics.metric_name_group("test.rate", "grp1"),
+            metrics.metric_name_group("test.total", "grp1"),
+        )))
+        .unwrap();
+        s.add_compound(Box::new(Meter::with_stat(
+            std::sync::Arc::new(WindowedCount::new().into_sampled_stat()),
+            metrics.metric_name_group("test.occurrences", "grp1"),
+            metrics.metric_name_group("test.occurrences.total", "grp1"),
+        )))
+        .unwrap();
+        s.add(metrics.metric_name_group("test.count", "grp1"), Box::new(WindowedCount::new()))
+            .unwrap();
+
+        let s2 = metrics.sensor("test.sensor2").unwrap();
+        s2.add(metrics.metric_name_group("s2.total", "grp1"), Box::new(CumulativeSum::new()))
+            .unwrap();
+        s2.record(5.0);
+
+        let mut sum = 0i64;
+        let count = 10i64;
+        for i in 0..count {
+            s.record(i as f64);
+            sum += i;
+        }
+
+        // prior to any time passing
+        let mut elapsed_secs = (config.time_window_ms() * (config.samples() as i64 - 1)) as f64 / 1000.0;
+        assert!(
+            (count as f64 / elapsed_secs
+                - double_value(&metrics.metric(&metrics.metric_name_group("test.occurrences", "grp1")).unwrap()))
+            .abs()
+                <= EPS,
+            "Occurrences(0...{count})"
+        );
+
+        // pretend 2 seconds passed...
+        let sleep_time_ms = 2i64;
+        time.sleep(sleep_time_ms * 1000);
+        elapsed_secs += sleep_time_ms as f64;
+
+        assert!(
+            (5.0 - double_value(&metrics.metric(&metrics.metric_name_group("s2.total", "grp1")).unwrap())).abs() <= EPS,
+            "s2 reflects the constant value"
+        );
+        assert!(
+            (4.5 - double_value(&metrics.metric(&metrics.metric_name_group("test.avg", "grp1")).unwrap())).abs() <= EPS,
+            "Avg(0...9) = 4.5"
+        );
+        assert!(
+            ((count - 1) as f64
+                - double_value(&metrics.metric(&metrics.metric_name_group("test.max", "grp1")).unwrap()))
+            .abs()
+                <= EPS,
+            "Max(0...9) = 9"
+        );
+        assert!(
+            (0.0 - double_value(&metrics.metric(&metrics.metric_name_group("test.min", "grp1")).unwrap())).abs() <= EPS,
+            "Min(0...9) = 0"
+        );
+        assert!(
+            (sum as f64 / elapsed_secs
+                - double_value(&metrics.metric(&metrics.metric_name_group("test.rate", "grp1")).unwrap()))
+            .abs()
+                <= EPS,
+            "Rate(0...9)"
+        );
+        assert!(
+            (count as f64 / elapsed_secs
+                - double_value(&metrics.metric(&metrics.metric_name_group("test.occurrences", "grp1")).unwrap()))
+            .abs()
+                <= EPS,
+            "Occurrences(0...{count})"
+        );
+        assert!(
+            (count as f64 - double_value(&metrics.metric(&metrics.metric_name_group("test.count", "grp1")).unwrap()))
+                .abs()
+                <= EPS,
+            "Count(0...9) = 10"
+        );
+    }
+
+    // MetricsTest.testRateWindowing
+    #[test]
+    fn test_rate_windowing() {
+        use crate::common::metrics::internals::metrics_utils::{TimeUnit, convert};
+        use crate::common::metrics::stats::{Meter, WindowedCount};
+
+        let time = Arc::new(MockTime::new());
+        // Use the default time window. Set 3 samples.
+        let cfg = Arc::new(MetricConfig::new().with_samples(3));
+        let metrics =
+            Metrics::with_config_reporters_time(Arc::clone(&cfg), Vec::new(), Arc::clone(&time) as Arc<dyn Time>);
+
+        let s = metrics
+            .sensor_full("test.sensor", Some(Arc::clone(&cfg)), i64::MAX, RecordingLevel::Info, &[])
+            .unwrap();
+        let rate_metric_name = metrics.metric_name_group("test.rate", "grp1");
+        let total_metric_name = metrics.metric_name_group("test.total", "grp1");
+        let count_rate_metric_name = metrics.metric_name_group("test.count.rate", "grp1");
+        let count_total_metric_name = metrics.metric_name_group("test.count.total", "grp1");
+        s.add_compound(Box::new(Meter::with_unit(
+            TimeUnit::Seconds,
+            rate_metric_name.clone(),
+            total_metric_name.clone(),
+        )))
+        .unwrap();
+        s.add_compound(Box::new(Meter::with_stat(
+            Arc::new(WindowedCount::new().into_sampled_stat()),
+            count_rate_metric_name.clone(),
+            count_total_metric_name.clone(),
+        )))
+        .unwrap();
+        let total_metric = metrics.metrics().get(&total_metric_name).unwrap().clone();
+        let count_total_metric = metrics.metrics().get(&count_total_metric_name).unwrap().clone();
+
+        let mut sum = 0i64;
+        let count = cfg.samples() as i64 - 1;
+        // Advance 1 window after every record.
+        for _ in 0..count {
+            s.record(100.0);
+            sum += 100;
+            time.sleep(cfg.time_window_ms());
+            assert!((sum as f64 - double_value(&total_metric)).abs() <= EPS);
+        }
+
+        // Sleep for half the window.
+        time.sleep(cfg.time_window_ms() / 2);
+
+        // elapsedSecs = sampleWindowSize * (total samples - half of final sample)
+        let elapsed_secs = convert(cfg.time_window_ms(), TimeUnit::Seconds) * (cfg.samples() as f64 - 0.5);
+
+        let rate_metric = metrics.metrics().get(&rate_metric_name).unwrap().clone();
+        let count_rate_metric = metrics.metrics().get(&count_rate_metric_name).unwrap().clone();
+        assert!(
+            (sum as f64 / elapsed_secs - double_value(&rate_metric)).abs() <= EPS,
+            "Rate(0...2)"
+        );
+        assert!(
+            (count as f64 / elapsed_secs - double_value(&count_rate_metric)).abs() <= EPS,
+            "Count rate(0...2)"
+        );
+        // Java additionally casts `rateMetric.measurable()` back to `Rate` and
+        // asserts `windowSize == 75s` (== `elapsed_secs` here). Our erased
+        // `MetricValueProvider` carries no `Any` downcast seam (adding one would
+        // touch every M1 `Measurable` impl), so that single line is not ported.
+        // It is fully covered indirectly: the `Rate(0...2)` value assertion above
+        // pins the window transitively (rate = sampledValue / windowSize, with
+        // sampledValue == `sum`, so a wrong windowSize fails that assertion), and
+        // `Rate::window_size` has dedicated bit-for-bit tests in
+        // `rate.rs::test_rate_with_no_prior_available_samples`.
+        assert!((sum as f64 - double_value(&total_metric)).abs() <= EPS);
+        assert!((count as f64 - double_value(&count_total_metric)).abs() <= EPS);
+
+        // Verify that rates are expired, but total is cumulative.
+        time.sleep(cfg.time_window_ms() * cfg.samples() as i64);
+        assert!((0.0 - double_value(&rate_metric)).abs() <= EPS);
+        assert!((0.0 - double_value(&count_rate_metric)).abs() <= EPS);
+        assert!((sum as f64 - double_value(&total_metric)).abs() <= EPS);
+        assert!((count as f64 - double_value(&count_total_metric)).abs() <= EPS);
     }
 
     // The kafka-metrics-count gauge is registered on construction.
