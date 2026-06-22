@@ -77,6 +77,7 @@ use super::coordinator_request_manager::CoordinatorRequestManager;
 use super::member_state_listener::MemberStateListener;
 use super::network_client_delegate::{PollResult, UnsentRequest};
 use super::offset_commit_callback_invoker::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
+use super::offset_commit_metrics_manager::OffsetCommitMetricsManager;
 use super::request_manager::RequestManager;
 use super::subscription_state::SubscriptionState;
 use super::timed_request_state::TimedRequestState;
@@ -442,6 +443,15 @@ struct CommitRequestManagerInner {
     /// [`AutoCommitInterceptorHook`]). Wired post-construction via
     /// [`CommitRequestManager::set_auto_commit_interceptor_hook`].
     auto_commit_interceptor_hook: Mutex<Option<Arc<dyn AutoCommitInterceptorHook>>>,
+    /// `OffsetCommitMetricsManager` recording per-commit-response latency.
+    /// Java constructs `new OffsetCommitMetricsManager(metrics)` in the
+    /// `CommitRequestManager` constructor (`CommitRequestManager.java:172`)
+    /// and records `recordRequestLatency(response.requestLatencyMs())` at the
+    /// top of the commit `onResponse` (`:767`). In Rust the manager registers
+    /// against the consumer's shared `Arc<Metrics>` and is wired
+    /// post-construction (like `coordinator`); `None` for tests that don't
+    /// exercise metrics (recording is then a no-op, value-neutral).
+    offset_commit_metrics_manager: Mutex<Option<Arc<OffsetCommitMetricsManager>>>,
 }
 
 /// Mutable runtime state. Held behind `Mutex<...>` so the BG-task `poll`
@@ -517,6 +527,7 @@ impl CommitRequestManager {
             state: Mutex::new(state),
             coordinator: Mutex::new(None),
             auto_commit_interceptor_hook: Mutex::new(None),
+            offset_commit_metrics_manager: Mutex::new(None),
         });
         Self { inner }
     }
@@ -548,6 +559,20 @@ impl CommitRequestManager {
             .lock()
             .expect("commit manager auto-commit interceptor hook poisoned");
         *guard = Some(hook);
+    }
+
+    /// Wire up the [`OffsetCommitMetricsManager`] so the commit-response
+    /// handler can record per-commit request latency. Java constructs the
+    /// metrics manager inside the `CommitRequestManager` constructor; in Rust
+    /// it shares the consumer's `Arc<Metrics>` registry and is wired
+    /// post-construction (the same reason as `set_coordinator`).
+    pub(crate) fn set_offset_commit_metrics_manager(&self, metrics_manager: Arc<OffsetCommitMetricsManager>) {
+        let mut guard = self
+            .inner
+            .offset_commit_metrics_manager
+            .lock()
+            .expect("commit manager offset-commit metrics slot poisoned");
+        *guard = Some(metrics_manager);
     }
 
     /// Returns a new `CommitRequestManager` handle that **shares** the
@@ -1580,7 +1605,16 @@ fn build_offset_commit_unsent_request(
     tokio::spawn(async move {
         match response_rx.await {
             Ok(Ok(mut client_response)) => {
-                handle_offset_commit_response(&inner_for_handler, request, client_response.take_response_body());
+                // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
+                // at the top of `onResponse` (`CommitRequestManager.java:767`),
+                // success path only. Capture before `take_response_body`.
+                let request_latency_ms = client_response.request_latency_ms();
+                handle_offset_commit_response(
+                    &inner_for_handler,
+                    request,
+                    client_response.take_response_body(),
+                    request_latency_ms,
+                );
             },
             Ok(Err(err)) => {
                 // Transport-level failure (e.g. disconnect). Java's shared
@@ -1708,7 +1742,20 @@ fn handle_offset_commit_response(
     inner: &Arc<CommitRequestManagerInner>,
     request: OffsetCommitRequestState,
     body: Option<crate::common::requests::ConcreteResponse>,
+    request_latency_ms: i64,
 ) {
+    // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
+    // at the top of `OffsetCommitRequestState.onResponse`
+    // (`CommitRequestManager.java:767`). No-op when no metrics manager was
+    // wired (tests that don't exercise metrics).
+    if let Some(metrics_manager) = inner
+        .offset_commit_metrics_manager
+        .lock()
+        .expect("offset-commit metrics slot poisoned")
+        .as_ref()
+    {
+        metrics_manager.record_request_latency(request_latency_ms);
+    }
     let response = match body {
         Some(crate::common::requests::ConcreteResponse::OffsetCommit(r)) => r,
         _ => {

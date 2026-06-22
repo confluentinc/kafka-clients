@@ -88,6 +88,7 @@ use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_collector::FetchCollector;
 use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
 use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
+use crate::consumer::internals::kafka_consumer_metrics::KafkaConsumerMetrics;
 use crate::consumer::internals::member_state_listener::MemberStateListener;
 use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
@@ -387,6 +388,13 @@ where
     /// `Arc<FetchMetricsManager>` clones that reference this same registry.
     #[allow(dead_code)]
     metrics: Arc<Metrics>,
+
+    /// Consumer-level poll/commit timing metrics (`KafkaConsumerMetrics`,
+    /// `AsyncKafkaConsumer.java:291`). Records `time-between-poll`,
+    /// `poll-idle-ratio-avg`, `last-poll-seconds-ago`,
+    /// `commit-sync-time-ns-total`, `committed-time-ns-total` into the same
+    /// `metrics` registry. Wired in `poll`/`commit_sync`/`committed`/`close`.
+    kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
 
     // ── App-side only ─────────────────────────────────────────────────
     /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
@@ -697,6 +705,9 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// The metrics registry. Owned here so Phase M7 can expose the public
     /// `metrics()` accessor over the same registry the fetch path records into.
     pub metrics: Arc<Metrics>,
+    /// Consumer-level poll/commit timing metrics
+    /// (`KafkaConsumerMetrics`), recording into the same `metrics` registry.
+    pub kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
@@ -899,6 +910,21 @@ where
         // M7 over THIS same registry — no re-plumb.
         let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config);
 
+        // M4: the consumer-level + heartbeat + offset-commit metrics managers
+        // all register against the SAME `Arc<Metrics>` registry. Java
+        // constructs each from `metrics` in the relevant constructor
+        // (`KafkaConsumerMetrics`/`HeartbeatMetricsManager`/
+        // `OffsetCommitMetricsManager`). The heartbeat/commit managers are
+        // wired into their bg-task request managers post-construction (the
+        // request managers are built below), mirroring the coordinator/
+        // interceptor-hook setter pattern.
+        let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
+        let offset_commit_metrics_manager = Arc::new(
+            crate::consumer::internals::offset_commit_metrics_manager::OffsetCommitMetricsManager::new(&metrics),
+        );
+        let heartbeat_metrics_manager =
+            Arc::new(crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager::new(&metrics));
+
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
         // `from_config` Selector / NetworkClient wiring at
@@ -1070,6 +1096,13 @@ where
                 as Arc<dyn crate::consumer::internals::offset_commit_callback_invoker::AutoCommitInterceptorHook>);
         }
 
+        // M4: wire the OffsetCommitMetricsManager into the commit manager so
+        // the commit-response handler records per-commit request latency
+        // (`CommitRequestManager.java:767`).
+        if let Some(commit_arc) = commit.as_ref() {
+            commit_arc.set_offset_commit_metrics_manager(Arc::clone(&offset_commit_metrics_manager));
+        }
+
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
         // groupProtocol == CONSUMER) config.ignore(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
         // Rust does not track "ignored" config keys (no `ConfigDef`
@@ -1106,14 +1139,21 @@ where
         // build heartbeat-request bodies).
         let consumer_heartbeat: Option<ConsumerHeartbeatRequestManager> =
             match (coordinator.as_ref(), membership_opt.as_ref()) {
-                (Some(coord_arc), Some(membership)) => Some(ConsumerHeartbeatRequestManager::new(
-                    current_time_ms,
-                    &config,
-                    Arc::clone(coord_arc),
-                    Arc::clone(&subscriptions),
-                    Arc::clone(membership),
-                    Arc::clone(&background_event_handler),
-                )),
+                (Some(coord_arc), Some(membership)) => {
+                    let mut hb = ConsumerHeartbeatRequestManager::new(
+                        current_time_ms,
+                        &config,
+                        Arc::clone(coord_arc),
+                        Arc::clone(&subscriptions),
+                        Arc::clone(membership),
+                        Arc::clone(&background_event_handler),
+                    );
+                    // M4: wire the HeartbeatMetricsManager so the send/response
+                    // paths record `last-heartbeat-seconds-ago` /
+                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
+                    hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    Some(hb)
+                },
                 _ => None,
             };
 
@@ -1478,6 +1518,7 @@ where
             fetch_buffer,
             fetch_collector,
             metrics,
+            kafka_consumer_metrics,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
             deserializers: _deserializers,
@@ -1558,6 +1599,7 @@ where
             fetch_buffer: components.fetch_buffer,
             fetch_collector: components.fetch_collector,
             metrics: components.metrics,
+            kafka_consumer_metrics: components.kafka_consumer_metrics,
             client_id: components.client_id,
             group_id: components.group_id,
             group_metadata: components.group_metadata,
@@ -2496,14 +2538,36 @@ where
     /// The translated body mirrors Java line-for-line; deviations are
     /// limited to:
     ///
-    ///   - `kafkaConsumerMetrics.record*` — NO-OPs (Phase 11 PLAN.md #1).
-    ///   - The `try/finally` in Java is a single function body in Rust;
-    ///     panic-safety is achieved via early returns instead.
+    ///   - The `try/finally` in Java is realized with an inner helper
+    ///     (`poll_inner`) so `kafkaConsumerMetrics.recordPollEnd` runs on
+    ///     every exit path (the `finally`), matching
+    ///     `AsyncKafkaConsumer.java:882`.
     ///   - `interceptors.onConsume(...)` mutates the records in place via
     ///     `Mutex<ConsumerInterceptors>`.
     pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, KafkaError> {
         self.ensure_open()?;
 
+        // Java: `kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs())`
+        // (`AsyncKafkaConsumer.java:841`) — recorded right after
+        // `acquireAndEnsureOpen`, before the subscription check. The timer is
+        // created at `poll()` entry, so `currentTimeMs()` is the entry time.
+        let start_ms = self.time.milliseconds();
+        self.kafka_consumer_metrics.record_poll_start(start_ms);
+
+        // Java's `try { … } finally { recordPollEnd(...) }`: run the body and
+        // record poll-end on every exit path (including errors).
+        let result = self.poll_inner(timeout, start_ms).await;
+
+        // Java: `kafkaConsumerMetrics.recordPollEnd(timer.currentTimeMs())`
+        // (`:882`).
+        self.kafka_consumer_metrics.record_poll_end(self.time.milliseconds());
+        result
+    }
+
+    /// The `try`-body of [`Self::poll`] (`AsyncKafkaConsumer.java:842-880`).
+    /// Separated so [`Self::poll`] can record `recordPollEnd` in a
+    /// `finally`-equivalent regardless of how this returns.
+    async fn poll_inner(&mut self, timeout: Duration, start_ms: i64) -> Result<ConsumerRecords<K, V>, KafkaError> {
         // Java: `subscriptions.hasNoSubscriptionOrUserAssignment()`.
         {
             let subs = self.subscriptions.lock().unwrap();
@@ -2514,7 +2578,6 @@ where
             }
         }
 
-        let start_ms = self.time.milliseconds();
         let poll_deadline_ms = calculate_deadline_ms(start_ms, timeout.as_millis() as i64);
         let mut first_pass = true;
 
@@ -2965,6 +3028,24 @@ where
         timeout: Duration,
     ) -> Result<(), KafkaError> {
         self.ensure_open()?;
+        // Java: `long commitStart = time.nanoseconds()` at the top of
+        // `commitSync` (`AsyncKafkaConsumer.java:1709`), recorded in `finally`
+        // as `recordCommitSync(time.nanoseconds() - commitStart)` (`:1721`).
+        let commit_start_ns = self.time.nanoseconds();
+        let result = self.commit_sync_inner(offsets, timeout).await;
+        self.kafka_consumer_metrics
+            .record_commit_sync(self.time.nanoseconds() - commit_start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::commit_sync_internal`]
+    /// (`AsyncKafkaConsumer.java:1710-1718`). Separated so the caller can
+    /// record `recordCommitSync` in a `finally`-equivalent.
+    async fn commit_sync_inner(
+        &mut self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        timeout: Duration,
+    ) -> Result<(), KafkaError> {
         let now_ms = self.time.milliseconds();
         let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
 
@@ -3339,6 +3420,24 @@ where
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
         self.ensure_open()?;
+        // Java: `long start = time.nanoseconds()` after `acquireAndEnsureOpen`
+        // (`AsyncKafkaConsumer.java:1166`), recorded in `finally` as
+        // `recordCommitted(time.nanoseconds() - start)` (`:1187`) — runs on
+        // every exit path (empty partitions, group-id errors, timeout).
+        let start_ns = self.time.nanoseconds();
+        let result = self.committed_inner(partitions, timeout).await;
+        self.kafka_consumer_metrics.record_committed(self.time.nanoseconds() - start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::committed_timeout`]
+    /// (`AsyncKafkaConsumer.java:1167-1185`). Separated so the caller can
+    /// record `recordCommitted` in a `finally`-equivalent.
+    async fn committed_inner(
+        &mut self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
         self.throw_if_group_id_not_defined()?;
         if partitions.is_empty() {
             return Ok(HashMap::new());
@@ -3938,6 +4037,12 @@ where
             reaper.reap(now_ms);
         }
 
+        // Java: `closeQuietly(kafkaConsumerMetrics, "kafka consumer metrics",
+        // firstException)` (`AsyncKafkaConsumer.java:1573`) — removes the
+        // consumer-level poll/commit metrics from the registry. `close()` is
+        // infallible here (no error to fold into `first_error`).
+        self.kafka_consumer_metrics.close();
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
@@ -4497,6 +4602,7 @@ mod tests {
         );
         let (metrics, fetch_metrics_manager) =
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
+        let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
             Arc::clone(&subs),
@@ -4538,6 +4644,7 @@ mod tests {
             fetch_buffer,
             fetch_collector,
             metrics,
+            kafka_consumer_metrics,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
             deserializers,

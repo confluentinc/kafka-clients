@@ -130,6 +130,16 @@ pub(crate) const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 30_000;
 /// `FetchCollectorTime` (`fetch_collector.rs`).
 pub(crate) trait ThreadTime: Send + Sync + 'static {
     fn milliseconds(&self) -> i64;
+
+    /// Wall-clock nanoseconds. Mirrors Java's `Time.nanoseconds()`, used by
+    /// `KafkaConsumerMetrics` for the `commit-sync-time-ns-total` /
+    /// `committed-time-ns-total` sensors. The default derives from
+    /// `milliseconds()` (sufficient for mock clocks in tests, which do not
+    /// assert nanosecond precision); `SystemThreadTime` overrides it with a
+    /// real monotonic nanosecond reading.
+    fn nanoseconds(&self) -> i64 {
+        self.milliseconds().saturating_mul(1_000_000)
+    }
 }
 
 /// Production implementation of [`ThreadTime`] — wraps
@@ -143,6 +153,14 @@ impl ThreadTime for SystemThreadTime {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    fn nanoseconds(&self) -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
             .unwrap_or(0)
     }
 }

@@ -40,7 +40,7 @@ pub mod time;
 pub use compound_stat::{CompoundStat, NamedMeasurable};
 pub use gauge::{ClosureGauge, Gauge};
 pub use kafka_metric::KafkaMetric;
-pub use measurable::Measurable;
+pub use measurable::{ClosureMeasurable, Measurable};
 pub use measurable_stat::MeasurableStat;
 // `Metric` and `MetricValue` live in `org.apache.kafka.common` (→ `common::metric`);
 // re-export `MetricValue` here for convenience since the stats/providers produce it.

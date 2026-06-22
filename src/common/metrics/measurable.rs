@@ -30,3 +30,30 @@ pub trait Measurable: Send + Sync {
     /// * `now` - The POSIX time in milliseconds the measurement is being taken
     fn measure(&self, config: &MetricConfig, now: i64) -> f64;
 }
+
+/// A [`Measurable`] backed by a closure, mirroring Java's functional-interface
+/// usage of `Measurable` (e.g. `(config, now) -> TimeUnit.SECONDS.convert(...)`
+/// in `KafkaConsumerMetrics` / `HeartbeatMetricsManager`). The symmetric
+/// counterpart of [`crate::common::metrics::ClosureGauge`].
+pub struct ClosureMeasurable<F>(F)
+where
+    F: Fn(&MetricConfig, i64) -> f64 + Send + Sync;
+
+impl<F> ClosureMeasurable<F>
+where
+    F: Fn(&MetricConfig, i64) -> f64 + Send + Sync,
+{
+    /// Wrap a closure as a measurable.
+    pub fn new(f: F) -> Self {
+        Self(f)
+    }
+}
+
+impl<F> Measurable for ClosureMeasurable<F>
+where
+    F: Fn(&MetricConfig, i64) -> f64 + Send + Sync,
+{
+    fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
+        (self.0)(config, now)
+    }
+}
