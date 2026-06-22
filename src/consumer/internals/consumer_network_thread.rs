@@ -257,6 +257,16 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     poll_results_before_scratch: Vec<super::network_client_delegate::PollResult>,
     poll_results_after_scratch: Vec<super::network_client_delegate::PollResult>,
     app_event_drain_scratch: Vec<ApplicationEventEnvelope>,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent);
+    /// tests leave it unset and the bg-loop record points are no-ops.
+    async_consumer_metrics: Option<Arc<super::async_consumer_metrics::AsyncConsumerMetrics>>,
+    /// Shared mirror of the application-event queue depth, written by
+    /// [`super::events::application_event_handler::ApplicationEventHandler::add`]
+    /// and reset to 0 by `process_application_events` (Java's
+    /// `recordApplicationEventQueueSize(0)` after `drainTo`). `None` when
+    /// metrics are not wired.
+    application_event_queue_size: Option<Arc<AtomicI64>>,
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
@@ -304,7 +314,22 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             poll_results_before_scratch: Vec::new(),
             poll_results_after_scratch: Vec::new(),
             app_event_drain_scratch: Vec::new(),
+            async_consumer_metrics: None,
+            application_event_queue_size: None,
         }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` and the shared application-event
+    /// queue-depth counter post-construction (M4/M5 setter precedent —
+    /// keeps the no-arg `new` and all existing test call sites untouched).
+    /// Java passes `AsyncConsumerMetrics` to the constructor.
+    pub(crate) fn set_async_consumer_metrics(
+        &mut self,
+        metrics: Arc<super::async_consumer_metrics::AsyncConsumerMetrics>,
+        application_event_queue_size: Arc<AtomicI64>,
+    ) {
+        self.async_consumer_metrics = Some(metrics);
+        self.application_event_queue_size = Some(application_event_queue_size);
     }
 
     /// Java: `isRunning()`.
@@ -383,11 +408,14 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let mut delegate_guard = delegate_arc.lock().await;
 
         let current_time_ms = self.time.milliseconds();
-        if self.last_poll_time_ms != 0 {
-            log::trace!(
-                "time-between-network-thread-poll: {} ms",
-                current_time_ms.saturating_sub(self.last_poll_time_ms)
-            );
+        // Java CNT:216 — record the time between network-thread polls. Only
+        // recorded once a prior poll has happened (Java's `lastPollTimeMs != 0`
+        // guard). `current_time_ms` is already computed for the iteration, so
+        // there is no extra clock read here.
+        if self.last_poll_time_ms != 0
+            && let Some(metrics) = &self.async_consumer_metrics
+        {
+            metrics.record_time_between_network_thread_poll(current_time_ms.saturating_sub(self.last_poll_time_ms));
         }
         self.last_poll_time_ms = current_time_ms;
 
@@ -678,6 +706,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.cached_max_time_to_wait_ms.store(max_time_to_wait_ms, Ordering::Release);
 
         // ──── Phase 6: reap expired application events ────
+        // Java CNT:282 — `recordApplicationEventExpiredSize(reaper.reap(now))`,
+        // recorded unconditionally (the Value stat tracks the latest count,
+        // which is 0 when nothing expired).
         let expired = {
             let mut reaper = match self.application_event_reaper.lock() {
                 Ok(g) => g,
@@ -685,8 +716,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap(current_time_ms)
         };
-        if expired > 0 {
-            log::trace!("application-event-expired-size: {}", expired);
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_application_event_expired_size(expired as i64);
         }
 
         // ──── Phase 7: maybeFailOnMetadataError(uncompletedEvents) ────
@@ -789,7 +820,25 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         }
 
+        // Java CNT:253 — reset the application-event queue size to 0 once the
+        // queue has been drained (the depth counter is bumped by
+        // `ApplicationEventHandler::add`). Clone the metrics `Arc` up front so
+        // `&mut self` stays available to the dispatch body below.
+        let metrics = self.async_consumer_metrics.clone();
+        if let Some(metrics) = &metrics {
+            if let Some(queue_size) = &self.application_event_queue_size {
+                queue_size.store(0, Ordering::SeqCst);
+            }
+            metrics.record_application_event_queue_size(0);
+        }
+        // Java CNT:273 — measure the time to process all available events.
+        let start_ms = self.time.milliseconds();
+
         for env in envelopes.drain(..) {
+            // Java CNT:256 — record the time this event spent in the queue.
+            if let Some(metrics) = &metrics {
+                metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
+            }
             // 1. Register with the reaper if completable. The Java
             // `CompletableEvent` interface check is replaced by the
             // `erased_handle()` accessor on [`ApplicationEvent`].
@@ -844,6 +893,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // event)`) — any panic would unwind the bg task. The
             // surrounding tokio::spawn entry point owns the catch.
             self.application_event_processor.process(env.event);
+        }
+        // Java CNT:273 — record the total processing time for the batch.
+        if let Some(metrics) = &metrics {
+            metrics.record_application_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
@@ -971,7 +1024,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap_on_close(&mut leftover_erased)
         };
-        log::trace!("application-event-expired-size (close): {}", expired);
+        // Java CNT:427 — record the expired count during close, same as
+        // run_once's reap site.
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_application_event_expired_size(expired as i64);
+        }
 
         // ──── 4. Close managers + delegate ────
         {

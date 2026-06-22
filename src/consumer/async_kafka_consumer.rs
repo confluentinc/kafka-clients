@@ -73,6 +73,7 @@ use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::consumer_network_thread::ThreadTime;
@@ -396,6 +397,20 @@ where
     /// `metrics` registry. Wired in `poll`/`commit_sync`/`committed`/`close`.
     kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
 
+    /// Async-consumer background-task / event-queue metrics
+    /// (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Records into the
+    /// same `metrics` registry; wired into the bg task, the event handlers,
+    /// and the network client delegate. Used app-side by
+    /// `process_background_events` (bg-event queue/processing time) and
+    /// removed in `close`.
+    async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+
+    /// Shared mirror of the background-event queue depth (Java reads
+    /// `backgroundEventQueue.size()`; tokio mpsc has no `len()`). Bumped by
+    /// `BackgroundEventHandler::add` on the bg task, reset to 0 by
+    /// `process_background_events` (Java's `drainEvents`).
+    background_event_queue_size: Arc<AtomicI64>,
+
     // ── App-side only ─────────────────────────────────────────────────
     /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
     client_id: Arc<str>,
@@ -708,6 +723,11 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// Consumer-level poll/commit timing metrics
     /// (`KafkaConsumerMetrics`), recording into the same `metrics` registry.
     pub kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
+    /// Async-consumer background-task / event-queue metrics
+    /// (`AsyncConsumerMetrics`), recording into the same `metrics` registry.
+    pub async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+    /// Shared mirror of the background-event queue depth.
+    pub background_event_queue_size: Arc<AtomicI64>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
@@ -895,8 +915,10 @@ where
         let api_versions = Arc::new(ApiVersions::new());
 
         // Java lines 425-429 — `backgroundEventHandler = new
-        // BackgroundEventHandler(...)`.
-        let background_event_handler = Arc::new(BackgroundEventHandler::new(bg_event_tx));
+        // BackgroundEventHandler(...)`. The `AsyncConsumerMetrics` and the
+        // shared background-event queue-depth counter are wired below (after
+        // the `metrics` registry exists) before the handler is shared.
+        let mut background_event_handler = BackgroundEventHandler::new(bg_event_tx);
 
         // Java line 432 — `fetchBuffer = new FetchBuffer(logContext)`.
         let fetch_buffer = Arc::new(FetchBuffer::new());
@@ -924,6 +946,28 @@ where
         );
         let heartbeat_metrics_manager =
             Arc::new(crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager::new(&metrics));
+
+        // M6: the async-consumer background-task / event-queue metrics
+        // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
+        // against the SAME `Arc<Metrics>` under `CONSUMER_METRIC_GROUP`
+        // (`consumer-metrics`). Wired into the bg task, the application/
+        // background event handlers, and the network client delegate (the
+        // record sites Java passes `asyncConsumerMetrics` to). The two
+        // `Arc<AtomicI64>` queue-depth counters mirror Java's O(1)
+        // `queue.size()` for the application/background event queues (the
+        // tokio mpsc sender exposes no `len()`).
+        let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        ));
+        let application_event_queue_size = Arc::new(AtomicI64::new(0));
+        let background_event_queue_size = Arc::new(AtomicI64::new(0));
+
+        // Wire the background-event handler's metrics + queue-depth counter
+        // before it is shared into the delegate (single owner here).
+        background_event_handler
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&background_event_queue_size));
+        let background_event_handler = Arc::new(background_event_handler);
 
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
@@ -977,7 +1021,7 @@ where
             MetadataRecoveryStrategy::None,
             log_context,
         );
-        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(NetworkClientDelegate::new(
+        let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,
             Arc::clone(&metadata).metadata_arc(),
@@ -985,7 +1029,11 @@ where
             false, // notify_metadata_errors_via_error_queue — Java
                    // passes `false` for the consumer ctor (Java
                    // `AsyncKafkaConsumer.java:443`).
-        )));
+        );
+        // M6: Java passes `asyncConsumerMetrics` to the delegate ctor; wire it
+        // here before the delegate is shared with the bg task.
+        network_client_delegate_inner.set_async_consumer_metrics(Arc::clone(&async_consumer_metrics));
+        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(network_client_delegate_inner));
 
         // Java line 446 — `offsetCommitCallbackInvoker = new
         // OffsetCommitCallbackInvoker(interceptors)`. The interceptor
@@ -1370,9 +1418,14 @@ where
             Arc::clone(&application_event_reaper),
         );
 
-        // Java lines 471-481 — `applicationEventHandler`.
-        let application_event_handler =
-            Arc::new(ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify)));
+        // Java lines 471-481 — `applicationEventHandler`. M6: wire the
+        // `AsyncConsumerMetrics` + shared application-event queue-depth
+        // counter before sharing the handler (Java passes
+        // `asyncConsumerMetrics` to the ctor).
+        let mut application_event_handler = ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify));
+        application_event_handler
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
+        let application_event_handler = Arc::new(application_event_handler);
 
         // Java lines 482-487 — `rebalanceListenerInvoker`. Java passes a
         // `RebalanceCallbackMetricsManager` + `Time` into the constructor; we
@@ -1428,7 +1481,7 @@ where
         // with the bg thread.
         let max_time_to_wait_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS));
 
-        let network_thread = ConsumerNetworkThread::new(
+        let mut network_thread = ConsumerNetworkThread::new(
             Arc::clone(&time),
             _app_event_rx,
             Arc::clone(&application_event_reaper),
@@ -1440,6 +1493,11 @@ where
             Arc::clone(&max_time_to_wait_ms),
             Arc::clone(&event_notify),
         );
+        // M6: Java passes `asyncConsumerMetrics` to the `ConsumerNetworkThread`
+        // ctor; wire it (plus the application-event queue-depth counter the bg
+        // task resets to 0 on drain) before spawning the bg task.
+        network_thread
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
 
         // Capture the running-flag + wakeup handles before moving
         // `network_thread` into `tokio::spawn`. The erased closures
@@ -1541,6 +1599,8 @@ where
             fetch_collector,
             metrics,
             kafka_consumer_metrics,
+            async_consumer_metrics,
+            background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
             deserializers: _deserializers,
@@ -1622,6 +1682,8 @@ where
             fetch_collector: components.fetch_collector,
             metrics: components.metrics,
             kafka_consumer_metrics: components.kafka_consumer_metrics,
+            async_consumer_metrics: components.async_consumer_metrics,
+            background_event_queue_size: components.background_event_queue_size,
             client_id: components.client_id,
             group_id: components.group_id,
             group_metadata: components.group_metadata,
@@ -2237,6 +2299,13 @@ where
     pub(crate) async fn process_background_events(&mut self) -> Result<bool, KafkaError> {
         let mut first_error: Option<KafkaError> = None;
         let mut had_events = false;
+        // Java records `recordBackgroundEventQueueProcessingTime(now - startMs)`
+        // for the whole drained batch (after `drainEvents`). The Rust drain is
+        // incremental (`try_recv` loop), so capture `start_ms` before the loop
+        // and record once after. Clone the metrics `Arc` up front so `&mut self`
+        // stays usable in the loop body.
+        let async_consumer_metrics = Arc::clone(&self.async_consumer_metrics);
+        let start_ms = self.time.milliseconds();
 
         loop {
             let envelope = match self.background_event_rx.try_recv() {
@@ -2251,7 +2320,15 @@ where
                     break;
                 },
             };
+            if !had_events {
+                // First event of this drain — mirror Java's `drainEvents`
+                // resetting `recordBackgroundEventQueueSize(0)`.
+                self.background_event_queue_size.store(0, Ordering::SeqCst);
+                async_consumer_metrics.record_background_event_queue_size(0);
+            }
             had_events = true;
+            // Java AKC:2206 — record the time this event spent in the queue.
+            async_consumer_metrics.record_background_event_queue_time(self.time.milliseconds() - envelope.enqueued_ms);
 
             match envelope.event {
                 BackgroundEvent::Error { error } => {
@@ -2326,6 +2403,13 @@ where
                     }
                 },
             }
+        }
+
+        // Java AKC:2219 — record the total processing time for the drained
+        // batch (only when at least one event was processed, matching Java's
+        // `if (!events.isEmpty())` guard).
+        if had_events {
+            async_consumer_metrics.record_background_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
 
         // Java line 2222: reap expired completable events regardless of
@@ -4065,6 +4149,12 @@ where
         // infallible here (no error to fold into `first_error`).
         self.kafka_consumer_metrics.close();
 
+        // Java: `closeQuietly(asyncConsumerMetrics, "async consumer metrics",
+        // firstException)` (`AsyncKafkaConsumer.java:1574`) — removes the
+        // async-consumer background-task / event-queue sensors from the
+        // registry. `close()` is infallible here.
+        self.async_consumer_metrics.close();
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
@@ -4625,6 +4715,11 @@ mod tests {
         let (metrics, fetch_metrics_manager) =
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
+        let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        ));
+        let background_event_queue_size = Arc::new(AtomicI64::new(0));
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
             Arc::clone(&subs),
@@ -4667,6 +4762,8 @@ mod tests {
             fetch_collector,
             metrics,
             kafka_consumer_metrics,
+            async_consumer_metrics,
+            background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
             deserializers,

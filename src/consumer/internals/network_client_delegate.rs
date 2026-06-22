@@ -31,6 +31,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{KafkaError, Node};
 use crate::consumer::ConsumerConfig;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 use crate::consumer::internals::events::background_event::BackgroundEvent;
 use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 use crate::kafka_client::KafkaClient;
@@ -471,6 +472,10 @@ pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
     unsent_requests: VecDeque<UnsentRequest>,
     metadata_error: Option<KafkaError>,
     notify_metadata_errors_via_error_queue: bool,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent);
+    /// tests leave it unset and the record points become no-ops.
+    async_consumer_metrics: Option<Arc<AsyncConsumerMetrics>>,
 }
 
 impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
@@ -497,7 +502,15 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             unsent_requests: VecDeque::new(),
             metadata_error: None,
             notify_metadata_errors_via_error_queue,
+            async_consumer_metrics: None,
         }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` post-construction (M4/M5 setter
+    /// precedent — keeps the existing `new` signature and test call sites
+    /// untouched). Java passes `AsyncConsumerMetrics` to the constructor.
+    pub(crate) fn set_async_consumer_metrics(&mut self, metrics: Arc<AsyncConsumerMetrics>) {
+        self.async_consumer_metrics = Some(metrics);
     }
 
     /// Visible-for-testing accessor for the unsent-requests queue.
@@ -675,6 +688,11 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         // `Time` source plumbed in; callers thread `current_time_ms`.
         self.maybe_propagate_metadata_error(current_time_ms);
         self.check_disconnects(current_time_ms, on_close);
+        // Java NCD:169 — record the unsent-requests queue size at the end of
+        // poll (per bg poll, not per-record).
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_unsent_requests_queue_size(self.unsent_requests.len() as i32, current_time_ms);
+        }
     }
 
     /// Convenience: `poll(timeout_ms, current_time_ms, false)`.
@@ -703,6 +721,11 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             // Java: `unsent.timer.update(currentTimeMs)` then `isExpired`.
             if unsent.deadline_ms() >= 0 && current_time_ms >= unsent.deadline_ms() {
                 let timeout_ms = unsent.deadline_ms().saturating_sub(unsent.enqueue_time_ms());
+                // Java NCD:203 — record the queue time when an expired request
+                // is removed. Java uses `time.milliseconds()`; the Rust
+                // delegate threads `current_time_ms` (its `updatedNow`
+                // approximation), so use that for the removal timestamp.
+                self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                 unsent.handler().on_failure(
                     current_time_ms,
                     KafkaError::timeout(format!("Failed to send request after {timeout_ms} ms.")),
@@ -712,9 +735,25 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             if !self.do_send(&mut unsent, current_time_ms).await {
                 // Not ready yet — re-queue and retry next poll.
                 requeue.push_back(unsent);
+            } else {
+                // Java NCD:214 — record the queue time when a request is
+                // successfully sent and removed from the queue.
+                self.record_unsent_requests_queue_time(&unsent, current_time_ms);
             }
         }
         self.unsent_requests = requeue;
+    }
+
+    /// Records the time a request spent in the unsent-requests queue, when
+    /// it is removed (sent, expired, or disconnected). Java computes
+    /// `time.milliseconds() - unsent.enqueueTimeMs()`. A request that was
+    /// never stamped (`enqueue_time_ms == -1`) is skipped.
+    fn record_unsent_requests_queue_time(&self, unsent: &UnsentRequest, current_time_ms: i64) {
+        if let Some(metrics) = &self.async_consumer_metrics
+            && unsent.enqueue_time_ms() >= 0
+        {
+            metrics.record_unsent_requests_queue_time(current_time_ms - unsent.enqueue_time_ms());
+        }
     }
 
     /// Attempt to dispatch one request. Returns `true` if the request was
@@ -785,10 +824,14 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
                         Some(msg) => KafkaError::with_message(Errors::SaslAuthenticationFailed, msg),
                         None => KafkaError::new(Errors::NetworkException),
                     };
+                    // Java NCD:242 — record queue time on disconnect removal.
+                    self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                     unsent.handler().on_failure(current_time_ms, err);
                 },
                 None if on_close => {
                     log::debug!("Removing unsent request because the client is closing: {unsent:?}");
+                    // Java NCD:248 — record queue time on close removal.
+                    self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                     unsent
                         .handler()
                         .on_failure(current_time_ms, KafkaError::new(Errors::NetworkException));
