@@ -90,6 +90,7 @@ use crate::common::record::{
 use crate::common::serialization::Deserializer;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::internals::fetch_config::FetchConfig;
+use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 use crate::fetch_response_data::{AbortedTransaction, PartitionData};
 
@@ -181,11 +182,18 @@ pub(crate) struct CompletedFetch {
     cached_record_exception: Option<KafkaError>,
     corrupt_last_record: bool,
 
-    /// Stats. Not surfaced through metrics in Milestone-8 (no metrics
-    /// framework yet) but retained because `drain()` consults
+    /// Stats. `drain()` reports these to the per-response
+    /// [`FetchMetricsAggregator`] (Java `recordAggregatedMetrics`) — once per
+    /// partition, NEVER per record. The per-record loop only increments these
+    /// `i32`s (no `Sensor.record`, no alloc). `drain()` also consults
     /// `bytes_read` to decide whether to nudge `move_partition_to_end`.
     records_read: i32,
     bytes_read: i32,
+
+    /// Per-response metric aggregator shared across this fetch's partitions.
+    /// `None` for the lightweight test / [`FetchBuffer`] constructor that has no
+    /// metrics wiring; `drain()` records the partition's totals exactly once.
+    metric_aggregator: Option<Arc<FetchMetricsAggregator>>,
 
     /// Offset the next fetch should start at.
     next_fetch_offset: i64,
@@ -257,13 +265,14 @@ impl CompletedFetch {
     /// Translates Java's
     /// `CompletedFetch(Logger, SubscriptionState, BufferSupplier,
     ///   TopicPartition, PartitionData, FetchMetricsAggregator, Long)` —
-    /// minus the logger (we use the `log` crate) and the metrics
-    /// aggregator (no Rust metrics framework yet).
+    /// minus the logger (we use the `log` crate). Phase M3 plumbs the
+    /// `FetchMetricsAggregator` (dropped by Phase 7a).
     pub(crate) fn new_full(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
         partition: TopicPartition,
         partition_data: PartitionData,
+        metric_aggregator: Arc<FetchMetricsAggregator>,
         fetch_offset: i64,
     ) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
@@ -281,6 +290,7 @@ impl CompletedFetch {
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
+            metric_aggregator: Some(metric_aggregator),
             next_fetch_offset: fetch_offset,
             last_epoch: None,
             is_consumed: false,
@@ -308,6 +318,7 @@ impl CompletedFetch {
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
+            metric_aggregator: None,
             next_fetch_offset: 0,
             last_epoch: None,
             is_consumed: false,
@@ -351,6 +362,12 @@ impl CompletedFetch {
         self.cursor = None;
         self.cached_record_exception = None;
         self.is_consumed = true;
+        // Report this partition's totals to the per-response aggregator
+        // exactly once (Java `recordAggregatedMetrics`). The aggregator writes
+        // the fetch-level / per-topic sensors once every partition has drained.
+        if let Some(aggregator) = &self.metric_aggregator {
+            aggregator.record(&self.partition, self.bytes_read, self.records_read);
+        }
         if self.bytes_read > 0
             && let Some(subscriptions) = &self.subscriptions
         {
@@ -1032,11 +1049,20 @@ mod tests {
     use crate::common::record::{MemoryRecords, SimpleRecord};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
     use crate::fetch_response_data::PartitionData;
     use std::sync::{Arc, Mutex};
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
+    }
+
+    /// Builds a throwaway per-response aggregator tracking only `tp("test", 0)`,
+    /// for tests that exercise `drain()` but don't assert metric values.
+    fn test_aggregator() -> Arc<FetchMetricsAggregator> {
+        let mut partitions = std::collections::HashSet::new();
+        partitions.insert(tp("test", 0));
+        Arc::new(FetchMetricsAggregator::new(FetchMetricsManager::for_test(), partitions))
     }
 
     /// String deserializer that decodes UTF-8 bytes.
@@ -1215,6 +1241,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             fetch_offset,
         )
     }
@@ -1559,6 +1586,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             0,
         );
         let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
@@ -1617,6 +1645,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             1,
         );
         let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
@@ -1787,6 +1816,7 @@ mod tests {
                 Arc::new(BufferSupplier::create()),
                 tp("test", 0),
                 partition_data,
+                test_aggregator(),
                 0,
             );
             let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
@@ -1807,6 +1837,7 @@ mod tests {
                 Arc::new(BufferSupplier::create()),
                 tp("test", 0),
                 partition_data,
+                test_aggregator(),
                 0,
             );
             let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
@@ -1848,6 +1879,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             0,
         );
         let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);

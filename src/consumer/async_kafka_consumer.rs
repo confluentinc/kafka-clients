@@ -63,6 +63,7 @@ use tokio::task::JoinHandle;
 
 use regex::Regex;
 
+use crate::common::metrics::{MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::LogContext;
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
@@ -85,6 +86,8 @@ use crate::consumer::internals::events::completable_event::{calculate_deadline_m
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_collector::FetchCollector;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
+use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
 use crate::consumer::internals::member_state_listener::MemberStateListener;
 use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
@@ -377,6 +380,13 @@ where
     /// App-side fetch decoder. Owned by `Arc` so the consumer can hand a
     /// shared reference to per-poll helpers without re-construction.
     fetch_collector: Arc<FetchCollector<K, V>>,
+
+    /// The metrics registry (Java `private final Metrics metrics`). Kept so
+    /// Phase M7 can expose the public `metrics()` accessor over the same
+    /// registry the fetch path records into. The fetch managers hold
+    /// `Arc<FetchMetricsManager>` clones that reference this same registry.
+    #[allow(dead_code)]
+    metrics: Arc<Metrics>,
 
     // ── App-side only ─────────────────────────────────────────────────
     /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
@@ -684,6 +694,9 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub network_thread_close: NetworkThreadCloseHandle,
     pub fetch_buffer: Arc<FetchBuffer>,
     pub fetch_collector: Arc<FetchCollector<K, V>>,
+    /// The metrics registry. Owned here so Phase M7 can expose the public
+    /// `metrics()` accessor over the same registry the fetch path records into.
+    pub metrics: Arc<Metrics>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
@@ -876,6 +889,15 @@ where
 
         // Java line 432 — `fetchBuffer = new FetchBuffer(logContext)`.
         let fetch_buffer = Arc::new(FetchBuffer::new());
+
+        // Java lines 402/419 — `metrics = createMetrics(config, time, reporters)`
+        // then `fetchMetricsManager = createFetchMetricsManager(metrics)`.
+        // The consumer owns the `Arc<Metrics>` (kept for Phase M7's public
+        // `metrics()` accessor); the `Arc<FetchMetricsManager>` is shared into
+        // the fetch path (FetchRequestManager / FetchCollector). The full
+        // Metrics-wiring (`consumer.metrics()`, reporter list) is finalized in
+        // M7 over THIS same registry — no re-plumb.
+        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config);
 
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
@@ -1171,6 +1193,7 @@ where
                 is_unavailable,
                 maybe_auth,
                 Arc::clone(&api_versions),
+                Arc::clone(&fetch_metrics_manager),
             );
             // Wake the bg task when a fetch response is ready so it is drained
             // into the FetchBuffer promptly, instead of waiting for the
@@ -1320,6 +1343,7 @@ where
             Arc::clone(&subscriptions),
             fetch_config,
             Arc::clone(&_deserializers),
+            Arc::clone(&fetch_metrics_manager),
             fetch_collector_time,
         ));
 
@@ -1453,6 +1477,7 @@ where
             network_thread_close,
             fetch_buffer,
             fetch_collector,
+            metrics,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
             deserializers: _deserializers,
@@ -1465,6 +1490,44 @@ where
         };
 
         Ok(Self::new_with_components(components))
+    }
+
+    /// Builds the consumer's `Metrics` registry and `FetchMetricsManager`.
+    ///
+    /// Translates Java's `ConsumerUtils.createMetrics(config, time, reporters)`
+    /// followed by `createFetchMetricsManager(metrics)`. The `MetricConfig`
+    /// carries the `metrics.num.samples`, `metrics.sample.window.ms`, and
+    /// `metrics.recording.level` settings and the single `client-id` tag; the
+    /// registry uses the `"consumer"` metric group prefix. The (no-op) reporter
+    /// list and the JMX context are deferred to Phase M7; for M3 the registry is
+    /// reporter-less but fully functional. Returns the owned `Arc<Metrics>`
+    /// (kept on the consumer for M7's public accessor) and the
+    /// `Arc<FetchMetricsManager>` shared into the fetch path.
+    fn create_fetch_metrics_manager(config: &ConsumerConfig) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
+        const CONSUMER_METRIC_GROUP_PREFIX: &str = "consumer";
+        const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(CONSUMER_CLIENT_ID_METRIC_TAG.to_string(), config.client_id().to_string());
+
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .with_samples(config.metrics_num_samples)
+            .with_time_window_ms(config.metrics_sample_window_ms)
+            .with_record_level(recording_level)
+            .with_tags(tags);
+
+        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+
+        // `client-id` is a default config tag, so it is added automatically to
+        // every metric name; the registry's template tag set therefore lists
+        // only `client-id` (matching Java's singleton tag set).
+        let mut registry_tags = indexmap::IndexSet::new();
+        registry_tags.insert(CONSUMER_CLIENT_ID_METRIC_TAG.to_string());
+        let registry = FetchMetricsRegistry::new(registry_tags, CONSUMER_METRIC_GROUP_PREFIX);
+
+        let manager = Arc::new(FetchMetricsManager::new(Arc::clone(&metrics), registry));
+        (metrics, manager)
     }
 
     pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
@@ -1494,6 +1557,7 @@ where
             network_thread_close: components.network_thread_close,
             fetch_buffer: components.fetch_buffer,
             fetch_collector: components.fetch_collector,
+            metrics: components.metrics,
             client_id: components.client_id,
             group_id: components.group_id,
             group_metadata: components.group_metadata,
@@ -4431,11 +4495,14 @@ mod tests {
             "",
             IsolationLevel::ReadUncommitted,
         );
+        let (metrics, fetch_metrics_manager) =
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
             Arc::clone(&subs),
             fetch_config,
             Arc::clone(&deserializers),
+            Arc::clone(&fetch_metrics_manager),
             Arc::new(crate::consumer::internals::fetch_collector::SystemFetchCollectorTime),
         ));
 
@@ -4470,6 +4537,7 @@ mod tests {
             network_thread_close: close_handle,
             fetch_buffer,
             fetch_collector,
+            metrics,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
             deserializers,

@@ -1676,6 +1676,7 @@ mod tests {
                 always_available(),
                 no_auth_failure(),
                 Arc::new(ApiVersions::new()),
+                crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager::for_test(),
             ))
         } else {
             None

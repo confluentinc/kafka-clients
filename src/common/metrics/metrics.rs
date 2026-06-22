@@ -315,6 +315,26 @@ impl Metrics {
         Ok(())
     }
 
+    /// Register a metric backed by a value provider only if it is not already
+    /// present. Returns the existing metric if one is already registered under
+    /// the same name, otherwise the newly registered metric. Translates Java's
+    /// `Metrics.addMetricIfAbsent(MetricName, MetricConfig, MetricValueProvider)`
+    /// — idempotent registration (the consumer's preferred-read-replica gauge
+    /// re-registers across assignment updates without error).
+    pub fn add_metric_if_absent(
+        &self,
+        metric_name: MetricName,
+        config: Option<Arc<MetricConfig>>,
+        provider: MetricValueProvider,
+    ) -> Arc<KafkaMetric> {
+        let metric_config = config.unwrap_or_else(|| Arc::clone(&self.config));
+        let metric = Arc::new(KafkaMetric::new(metric_name, provider, metric_config, Arc::clone(&self.time)));
+        match self.shared.register_metric(Arc::clone(&metric)) {
+            Some(existing) => existing,
+            None => metric,
+        }
+    }
+
     /// Remove a metric if it exists and return it. `metric_removal` is invoked
     /// on each reporter when a metric is removed.
     pub fn remove_metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
