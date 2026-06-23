@@ -21,5 +21,42 @@
 - [Milestone 4 Phase 1 patterns](review_milestone4_phase1.md) — Ownership-consuming async methods break Java retry patterns, panic vs Result
 - [MockProducer patterns](review_mockproducer_patterns.md) — Option::take() changes error injection from persistent to one-shot; Mutex reentrance
 - [FFI Producer patterns](review_ffi_producer_patterns.md) — Out-parameter null-init on error paths, batch partial-failure cleanup
+- [M8 Phase 1 patterns](review_m8_phase1_patterns.md) — Consumer foundation: ConfigDef `atLeast` validator gaps, ConsumerError flattening, public-class-in-internal-package re-export
+- [M8 Phase 2 patterns](review_m8_phase2_patterns.md) — Trait surface: Clone-on-panic leaks bounds into Consumer<K,V>; happy-path clones; weak PartialEq substitutes for assertEquals
+- [M8 Phase 4 patterns](review_m8_phase4_patterns.md) — debug_assert masks IllegalStateException in release; Display format divergence from Java toString; HashSet from BTreeSet loses ordering
+- [M8 Phase 3 patterns](review_m8_phase3_patterns.md) — MockConsumer: &self-vs-mutating-position shape mismatch; listener inline invocation; map+iter+mutate translation
+- [M8 Phase 5 patterns](review_m8_phase5_patterns.md) — Event-layer: CompletableApplicationEvent<T> must yield CompletableEventHandle<T>; AsyncPoll non-completable; Arc::ptr_eq vs Java identity; marker-interface translation
+- [M8 Phase 6 patterns](review_m8_phase6_patterns.md) — KafkaError::Timeout not retriable in Rust (RetriableException mismatch); NetworkClientDelegate expiry/onClose test gaps; trivial log-capture tests
+- [M8 Phase 6 fix-cycle](review_m8_phase6_fix_cycle.md) — Audit is_retriable side-effects by receiver type not textual matches; inline mod-tests sees private fields
+- [M8 Phase 7a patterns](review_m8_phase7a_patterns.md) — §27 receive-path: per-record Arc<str> alloc + DefaultRecord clone violate zero-copy; Notify race; transactional code path partially missing
+- [M8 Phase 7a fix-cycle](review_m8_phase7a_fix_cycle.md) — §27 fix verification grep patterns; Notify pin+enable; ControlRecordType fail-loud divergence
+- [M8 Phase 7b patterns](review_m8_phase7b_patterns.md) — CompletableFuture single-slot vs Rust queue; IllegalStateException scope; new-method-no-test pattern; §27 audit heuristics
+- [M8 Phase 8b patterns](review_m8_phase8b_patterns.md) — §31 listener-present check; Err swallow; unsafe impl Send smell; plan test-count inflation; Timer.update side effects
+- [M8 Phase 10 wire-prereq patterns](review_m8_phase10_wire_prereq_patterns.md) — outer hook + inner stub; isStaleEpochErrorAndValidEpochAvailable predicate; check-order parity; test name vs body
+- [M8 Phase 10 round-2 patterns](review_m8_phase10_round2.md) — phase-ordering invariant from RequestManagers.entries(); canCommit gate collapse; exception-cache scope; transient-topic leak
+- [M8 Phase 10 round-3 patterns](review_m8_phase10_round3.md) — `let _ = handle;` drop semantics vs Java's never-completed future; probe Arc clone can mask production drop behavior
+- [M8 Phase 11 batch-1 patterns](review_m8_phase11_batch1.md) — acquireAndEnsureOpen drops closed-check too; one-shot drain vs Java iterative loop; store-listener-before-await consistency
+- [M8 Phase 11 batch-2 patterns](review_m8_phase11_batch2.md) — bg-task ack blocks app-side add_and_get → deadlock; wakeup setActiveTask missing; groupAssignmentSnapshot + MemberStateListener gap; .await.ok() swallows fatal errors
+- [M8 Phase 11 batch-3 patterns](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision (commit_inner → commit_async); skip section must enumerate Java tests
+- [M8 Phase 12 patterns](review_m8_phase12_patterns.md) — production-ctor wire-up: entries-skip without driver, dual-notifier on shared-state, separated Arc<AtomicI64>, auth no-op framing
+- [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped when RM lacks `take_response_receiver`+spawn pattern; rustdoc claims ≠ code reality
+- [M8 Phase 12.5 patterns](review_m8_phase12_5.md) — Pre-branch whenComplete side effects (e.g. getAndClearFatalError) easy to miss in async forwarder translation; yield_now-based regression tests fragility
+- [M8 Phase 12.5 round-3](review_m8_phase12_5_round3.md) — Java switch `default:` arm fatal fallback omitted in Option::unwrap_or; Fenced arm spurious ErrorEvent diverges from Java
+- [M8 Phase 13a patterns](review_m8_phase13a.md) — single-root-cause fix audit; ctor-time setter wiring (Mutex<Option<Arc<...>>>); coordinator-unknown wire-up missing unit tests despite Java parameterized parity
+- [M8 Phase 14 patterns](review_m8_phase14.md) — dropped second-statement wakeup (Selector.wakeup→Notify); cancel-safety on tokio version; biased Notify non-starvation; poll_block test-teeth pattern
+- [Join-stall fix review](review_join_stall_fix.md) — cancel-safe poll fix; symmetric producer bug, rule contradiction, stale Notify permit, preserve-state test gap
+- [Latency pollForFetches review](review_m8_latency_pollforfetches.md) — dropped retryBackoffMs clamp (OffsetsRM lacks max_time_to_wait override); §31 drain bound is Java-parity; await_wakeup race-safe
+- [M8 Phase 16 zero-copy](review_m8_phase16_zerocopy.md) — header-count-as-loop-bound panics/silently-drops vs iter_records validation; stale-justification comment trap; move-not-clone take audit; batch-level tests go stale when caller drops API
 - [Data path copy analysis](review_data_path_copies.md) — Only 2 actual memcpy in zero-copy path: record write_all into batch, writev to kernel
 - [Logging infrastructure patterns](review_logging_patterns.md) — LogContext wiring gaps: NetworkClient, CCS, SaslChannelBuilder get empty context
+- [PR#10 merge audit](review_merge_pr10.md) — selector poke-not-cancel, &mut serialize Records take(), Arc<Cluster> + retain_with_id; wakeup_notify default footgun
+- [M8 Phase 17 security-wiring](review_m8_phase17.md) — clean; consumer mirrors producer client_channel_builder; security_protocol() uppercase is Java-faithful; producer send-shadowing API smell (from PR#10)
+- [M8 Phase 19 SSL try_read + Arc<str>](review_m8_phase19.md) — sync-never-await is cancel-safe by construction; try_read==async read body parity; has_bytes_buffered re-poll; Arc<str> intern checklist
+- [M8 Phase 20 recv-CPU copy elim](review_m8_phase20_recv_cpu.md) — into_response_data move parity; alloc-budget non-tautology check (events not bytes); selector drain lifecycle; retained-clone caller audit
+- [M8 Phase 30 per-channel wakers](review_m8_phase30_per_channel_wakers.md) — selectedKeys-on-tokio CLEAN; cancel-safety via persistent fired-queue, armed_count drift audit, dirty-site re-derivation, stale-fire structurally-no-spin
+- [io::ErrorKind vs typed exception](review_io_error_kind_vs_typed_exception.md) — TLS reset misclassified as fatal auth: prepare() stamps AuthenticationFailed for any error; ErrorKind heuristic lossy vs Java exception type
+- [M8 Phase 31 reset/validate parity](review_m8_phase31.md) — SKIP-collapse: "same guard" ≠ "same branch" (maybe_seek_unvalidated 3 discard triggers); prod-fix dual-copy drift of groupListOffsetRequests; mock-verify→observable-state under-assertion
+- [M8 Phase 32 offset-query parity](review_m8_phase32.md) — folded-skip drops partial-build-time-park branch; requestUpdate(bool) flag conflation (need_full_update set for both args); ORM fetch FAILS-not-reparks on disconnect
+- [M8 Phase 33 CRM test-parity + prod fixes](review_m8_phase33.md) — per-RPC≠hot-path perf audit; supplier-collapse `||UnknownServerError` escape hatch under-asserts subclass; by-ref-vs-clone in autoCommitCallback; send-time member-info re-sync (CRM.java:889)
+- [M8 Phase 34 membership-reconcile parity](review_m8_phase34.md) — "WithFailed*/Anyway" test reusing success helper never hits err-arm; sticky bool vs verify(times(N)); discard park-point collapse; on_consumer_poll CAS-then-state fix CLEAN/perf-neutral
+- [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)

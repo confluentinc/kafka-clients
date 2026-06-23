@@ -1,0 +1,48 @@
+======================================================================
+Consumer E2E Latency Benchmark — Rust Kafka Consumer
+======================================================================
+Bootstrap:   pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Topic:       cmp-bench-36p
+Group:       d36-rustc-1781721985
+Throughput:  50000 msg/s
+Duration:    300 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      600000 messages
+Interval:    30 s
+======================================================================
+Offset reset: latest
+Client config: loaded /home/ec2-user/cc.properties (SASL/SSL etc.)
+Fetch config: fetch.min.bytes=1 fetch.max.wait.ms=default max.partition.fetch.bytes=1048576 fetch.max.bytes=default max.poll.records=500
+
+>>> Subscribed; waiting for partition assignment (KIP-848 join)...
+    assigned 36 partition(s) after 1.0s
+>>> --no-produce: drive the producer externally now.
+
+>>> Measuring (warmup 600000 msgs, then 300 s)...
+
+>>> first records arrived 45.6s after producer start (after 91 polls)
+    warmup complete (600000 msgs); measuring now
+[interval 0] t=  30.0s msgs=4500011 thr=   150000 msg/s  avg=  4.73 p50=4 p99=24 p999=44 max=93 ms  cpu=  0.0% rss=  34.6MB
+[interval 1] t=  60.0s msgs=4500293 thr=   150009 msg/s  avg=  4.56 p50=4 p99=20 p999=45 max=129 ms  cpu=  0.0% rss=  34.6MB
+[interval 2] t=  90.0s msgs=4500132 thr=   150004 msg/s  avg=  4.40 p50=4 p99=18 p999=38 max=95 ms  cpu=  0.0% rss=  34.6MB
+[interval 3] t= 120.0s msgs=4499978 thr=   149999 msg/s  avg=  4.42 p50=4 p99=18 p999=36 max=89 ms  cpu=  0.0% rss=  34.6MB
+[interval 4] t= 150.0s msgs=4500363 thr=   150012 msg/s  avg=  4.35 p50=4 p99=17 p999=31 max=110 ms  cpu=  0.0% rss=  34.9MB
+[interval 5] t= 180.0s msgs=4500321 thr=   150010 msg/s  avg=  4.41 p50=4 p99=18 p999=35 max=70 ms  cpu=  0.0% rss=  39.1MB
+[interval 6] t= 210.0s msgs=4500328 thr=   150011 msg/s  avg=  4.35 p50=4 p99=17 p999=32 max=128 ms  cpu=  0.0% rss=  39.1MB
+[interval 7] t= 240.0s msgs=4499929 thr=   149997 msg/s  avg=  4.51 p50=4 p99=18 p999=39 max=95 ms  cpu=  0.0% rss=  39.1MB
+[interval 8] t= 270.0s msgs=4500664 thr=   150022 msg/s  avg=  4.47 p50=4 p99=18 p999=36 max=232 ms  cpu=  0.0% rss=  43.5MB
+
+Loop breakdown over 2476319 polls: poll().await=99.9%  per-record processing=0.1%  (avg 18 records/poll)
+Records/poll distribution (non-empty polls, post-warmup): n=2466442 min=7 mean=18.2 p50=14 p99=84 max=500
+
+======================================================================
+SUMMARY — Rust Kafka Consumer (warmup 600000 excluded)
+======================================================================
+Measured messages: 45000079
+Duration:          300.00 s
+Throughput:        150000 msg/s  (146.48 MiB/s)
+E2E latency (ms):  min=1 avg=4.47 stddev=3.42 p50=4 p90=6 p95=9 p99=19 p99.9=38 max=232
+RSS (MB, current): avg=37.1 min=34.6 max=43.5
+======================================================================
+
+Results written to: consumer-perf/results/d36-rustc-1781721985

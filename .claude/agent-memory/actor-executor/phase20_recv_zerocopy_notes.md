@@ -1,0 +1,18 @@
+---
+name: phase20-recv-zerocopy-notes
+description: Milestone-8 Phase 20: receive-path copy/clone elimination (ApiVersions clone, FetchResponse payload clone ×2, selector completed_receives to_vec); §27 zero-copy via move-not-clone
+metadata:
+  type: project
+---
+
+Phase 20 removed redundant deep copies on the consumer receive path (CPU vs librdkafka). Three fixes, each behavior-identical (move replaces copy). See [[phase16-batch-loading-notes]] for the upstream §27 decode path.
+
+**Fix #1 — ApiVersions clone per request.** `ApiVersions::get()` cloned `NodeApiVersions` (3 HashMaps + Vec) on every `network_client.rs do_send`. Added `ApiVersions::latest_usable_version_in_range(node_id, &ApiKeys, oldest, latest) -> Option<Result<i16, KafkaError>>` computing under the read lock. Outer `Option` preserves do_send's old `is_some()` discrimination (node known → intersect range; unknown → latest allowed). Kept `get()` for its other (non-hot) callers: subscription_state.rs:1045, offsets_request_manager.rs:892.
+
+**Fix #2 — FetchResponse::response_data() deep-cloned every PartitionData incl records: Option<Vec<u8>>, twice/fetch.**
+- 2a: `fetch_session_handler::handle_response` only needed the partition KEY set. Added `FetchResponse::response_partition_keys(topic_names, version) -> HashSet<TopicPartition>` (same version-gated topic-name resolution + unresolved-v13-skip as response_data, NO PartitionData clone).
+- 2b: `abstract_fetch::handle_fetch_success` now takes `FetchResponse` BY VALUE (was `&`). Added `FetchResponse::into_response_data(self, ...)` that MOVES partitions out (consumes self). Drain path `fetch_request_manager::drain_pending_completions` already owned the response in `PendingFetchCompletion::Response` → pass by value. Loop key `partition` (TopicPartition w/ Arc<str> topic) moved into `CompletedFetch::new_full` (dropped the prior `.clone()` Arc bump). Lookups `request_data.to_send.get(&partition)` use the &key, unaffected by moving values.
+
+**Fix #3 — handle_completed_receives `p.to_vec()` copied payload out of selector.** Added `Selectable::drain_completed_receives(&mut self) -> Vec<(String, Option<Vec<u8>>)>` (required method, impl on Selector + MockSelector) using `std::mem::take` + `NetworkReceive::into_source_and_payload(self)` to move source String + buffer Vec out. Both selectors clear completed_receives at next-poll start → drain empties it → next clear is no-op, no double-process. handle_completed_receives is the ONLY reader after the network poll in NetworkClient::poll. NetworkReceive.source is String (not Arc<str>), so source is a moved String — Arc<str> refactor of NetworkReceive deferred. Removed now-unused `use ...Receive` import (deny(warnings)).
+
+**Allocation-budget test technique (§27 proof for the move).** The existing `fetch_collector::test_collect_fetch_per_record_allocation_budget` covers collect_fetch (downstream of #2b). For #2b's handle_fetch_success path added `test_handle_fetch_success_does_not_copy_payload`: 8 partitions × 16KiB payloads, wrap the call in `AllocTrackingGuard`, assert count ≤ tight budget. KEY: the alloc tracker counts allocation COUNT not bytes — a `Vec<u8>` payload clone is exactly +1 alloc/partition regardless of size. Verified the guard by temporarily reverting into_response_data→response_data: move=55 allocs, clone=64 (8 partitions). Set budget `OVERHEAD(2)+PER_PARTITION(7)*8 = 58` so clone(64) breaks it, move(55) passes. Count is deterministic single-threaded (stable across runs). Lesson: a loose alloc-count budget does NOT catch a per-partition Vec clone — size the budget to the measured-move value with margin < per-partition-clone-delta.

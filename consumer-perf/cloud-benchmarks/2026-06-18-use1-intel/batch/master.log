@@ -1,0 +1,32 @@
+[19:44:39] BATCH START
+[19:44:39] START A-200p client=rust topic=cmp-bench-200p rate=150000 dur=1800s warmup=36000000(~240s) nprod=4
+[20:19:29] END   A-200p client=rust
+[20:19:29] START A-200p client=rdk topic=cmp-bench-200p rate=150000 dur=1800s warmup=36000000(~240s) nprod=4
+[20:54:18] END   A-200p client=rdk
+[20:54:18] START A-200p client=java topic=cmp-bench-200p rate=150000 dur=1800s warmup=36000000(~240s) nprod=4
+[21:29:08] END   A-200p client=java
+[21:29:08] START A-36p client=rust topic=cmp-bench-36p rate=150000 dur=1800s warmup=36000000(~240s) nprod=4
+[22:03:58] END   A-36p client=rust
+[22:03:58] START A-36p client=rdk topic=cmp-bench-36p rate=150000 dur=1800s warmup=36000000(~240s) nprod=4
+[22:38:48] END   A-36p client=rdk
+[22:38:48] START A-36p client=java topic=cmp-bench-36p rate=150000 dur=1800s warmup=36000000(~240s) nprod=4
+[23:13:38] END   A-36p client=java
+[23:13:38] START B-200mbs client=rust topic=cmp-bench-36p rate=100000 dur=900s warmup=24000000(~240s) nprod=3
+[23:33:28] END   B-200mbs client=rust
+[23:33:28] START B-200mbs client=rdk topic=cmp-bench-36p rate=100000 dur=900s warmup=24000000(~240s) nprod=3
+[23:53:18] END   B-200mbs client=rdk
+[23:53:18] START B-200mbs client=java topic=cmp-bench-36p rate=100000 dur=900s warmup=24000000(~240s) nprod=3
+[00:13:08] END   B-200mbs client=java
+[00:13:08] START B-100mbs client=rust topic=cmp-bench-36p rate=50000 dur=900s warmup=12000000(~240s) nprod=2
+[00:32:58] END   B-100mbs client=rust
+[00:32:58] START B-100mbs client=rdk topic=cmp-bench-36p rate=50000 dur=900s warmup=12000000(~240s) nprod=2
+[00:52:47] END   B-100mbs client=rdk
+[00:52:47] START B-100mbs client=java topic=cmp-bench-36p rate=50000 dur=900s warmup=12000000(~240s) nprod=2
+[01:12:37] END   B-100mbs client=java
+[01:12:37] START B-50mbs client=rust topic=cmp-bench-36p rate=25000 dur=900s warmup=6000000(~240s) nprod=1
+[01:32:27] END   B-50mbs client=rust
+[01:32:27] START B-50mbs client=rdk topic=cmp-bench-36p rate=25000 dur=900s warmup=6000000(~240s) nprod=1
+[01:52:17] END   B-50mbs client=rdk
+[01:52:17] START B-50mbs client=java topic=cmp-bench-36p rate=25000 dur=900s warmup=6000000(~240s) nprod=1
+[02:12:07] END   B-50mbs client=java
+[02:12:07] BATCH DONE

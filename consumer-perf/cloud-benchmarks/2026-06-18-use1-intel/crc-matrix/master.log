@@ -1,0 +1,26 @@
+[22:20:54] CRCBATCH START (Rust/Java CRC=off, librdkafka CRC=on)
+[22:20:54] START CRC-300mbs client=rust topic=cmp-bench-36p rate=150000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[22:40:45] END   CRC-300mbs client=rust
+[22:40:45] START CRC-300mbs client=rdk topic=cmp-bench-36p rate=150000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[23:00:35] END   CRC-300mbs client=rdk
+[23:00:35] START CRC-300mbs client=java topic=cmp-bench-36p rate=150000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[23:20:26] END   CRC-300mbs client=java
+[23:20:26] START CRC-200mbs client=rust topic=cmp-bench-36p rate=100000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[23:40:16] END   CRC-200mbs client=rust
+[23:40:16] START CRC-200mbs client=rdk topic=cmp-bench-36p rate=100000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[00:00:06] END   CRC-200mbs client=rdk
+[00:00:06] START CRC-200mbs client=java topic=cmp-bench-36p rate=100000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[00:19:56] END   CRC-200mbs client=java
+[00:19:56] START CRC-100mbs client=rust topic=cmp-bench-36p rate=50000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[00:39:45] END   CRC-100mbs client=rust
+[00:39:45] START CRC-100mbs client=rdk topic=cmp-bench-36p rate=50000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[00:59:35] END   CRC-100mbs client=rdk
+[00:59:35] START CRC-100mbs client=java topic=cmp-bench-36p rate=50000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[01:19:25] END   CRC-100mbs client=java
+[01:19:25] START CRC-50mbs client=rust topic=cmp-bench-36p rate=25000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[01:39:15] END   CRC-50mbs client=rust
+[01:39:15] START CRC-50mbs client=rdk topic=cmp-bench-36p rate=25000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[01:59:05] END   CRC-50mbs client=rdk
+[01:59:05] START CRC-50mbs client=java topic=cmp-bench-36p rate=25000 dur=900s nprod=1 (rust/java CRC=off, rdk CRC=on)
+[02:18:55] END   CRC-50mbs client=java
+[02:18:55] CRCBATCH DONE

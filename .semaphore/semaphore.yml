@@ -91,10 +91,19 @@ blocks:
                   --ak-repo-path "${AK_REPO_PATH}" \
                   --rust-branch "${MAIN_BRANCH}"
               elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
-                echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
-                translation-agent \
-                  --ak-repo-path "${AK_REPO_PATH}" \
-                  --pr "${SEMAPHORE_GIT_PR_NUMBER}"
+                # The prologue's `artifact pull ... || true` lands the DB at
+                # repo-root `translation_agent.db`. If the artifact does not
+                # exist yet (no DB), skip the translation-agent cascade and
+                # fall through to the `make verify` below -- a PR build with
+                # no orchestrator state to act on still validates the tree.
+                if [ -f translation_agent.db ]; then
+                  echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
+                  translation-agent \
+                    --ak-repo-path "${AK_REPO_PATH}" \
+                    --pr "${SEMAPHORE_GIT_PR_NUMBER}"
+                else
+                  echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade, running 'make verify' only"
+                fi
               else
                 echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
               fi

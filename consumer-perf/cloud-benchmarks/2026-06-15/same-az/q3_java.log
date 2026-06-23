@@ -1,0 +1,16 @@
+Java e2e: bootstrap=pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092 topic=cmp-librdkafka-bench proto=consumer maxPoll=2500 fetch.min=4MiB partFetch=4MiB crc=off dur=60s warmup=100000
+subscribed; waiting for assignment/records...
+warmup complete (100000 msgs); measuring 60s now
+[interval 0] t=  10.0s msgs=2106233 thr=   210434 msg/s avg=186.14 p50=175 p99=636 p999=831 max=890 ms rss=752.9MB
+[interval 1] t=  20.0s msgs=2009220 thr=   200321 msg/s avg=169.07 p50=168 p99=307 p999=342 max=477 ms rss=753.9MB
+[interval 2] t=  30.0s msgs=2002500 thr=   200170 msg/s avg=168.89 p50=168 p99=305 p999=334 max=372 ms rss=754.2MB
+[interval 3] t=  40.0s msgs=1997565 thr=   199737 msg/s avg=169.66 p50=168 p99=306 p999=329 max=344 ms rss=754.5MB
+[interval 4] t=  50.1s msgs=2005410 thr=   199504 msg/s avg=167.76 p50=167 p99=304 p999=325 max=360 ms rss=755.6MB
+======================================================================
+SUMMARY - Java kafka-clients (KIP-848=consumer, warmup 100000 excluded)
+Measured messages: 12103253
+Duration:          60.20 s
+Throughput:        201037 msg/s  (196.33 MiB/s)
+E2E latency (ms):  min=22 avg=171.80 stddev=78.46 p50=169 p90=268 p95=285 p99=326 p99.9=674 max=890
+RSS (MB, current): avg=754.2 min=752.9 max=755.6 (5 samples)
+{"client":"java","protocol":"consumer","messages":12103253,"duration_s":60.20,"throughput_msg_s":201037.36,"throughput_mib_s":196.33,"lat_min_ms":22,"lat_avg_ms":171.80,"lat_stddev_ms":78.46,"lat_p50_ms":169,"lat_p90_ms":268,"lat_p95_ms":285,"lat_p99_ms":326,"lat_p999_ms":674,"lat_max_ms":890,"rss_avg_mb":754.2,"rss_min_mb":752.9,"rss_max_mb":755.6}

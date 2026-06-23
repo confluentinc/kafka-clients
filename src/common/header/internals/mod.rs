@@ -17,5 +17,8 @@
 pub(crate) mod record_header;
 pub(crate) mod record_headers;
 
-pub(crate) use record_header::RecordHeader;
-pub(crate) use record_headers::RecordHeaders;
+// The concrete types are part of the public API surface (re-exported at
+// `common::header::{RecordHeader, RecordHeaders}`) so that external code can
+// construct headers. The `internals` module itself stays `pub(crate)`.
+pub use record_header::RecordHeader;
+pub use record_headers::RecordHeaders;

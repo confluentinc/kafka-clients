@@ -58,3 +58,49 @@ impl Default for ClusterConfig {
         Self { brokers: 1, server_properties: BTreeMap::new() }
     }
 }
+
+/// Canonical KIP-848 3-broker cluster config shared across the consumer
+/// integration suites.
+///
+/// The `server_properties` here are the *superset* of the broker tuning knobs
+/// that the individual `PlaintextConsumer*Test` suites used to set in their own
+/// private config helpers. All of these are harmless to apply universally:
+///
+/// - `GROUP_COORDINATOR_REBALANCE_PROTOCOLS=classic,consumer` enables KIP-848.
+/// - `OFFSETS_TOPIC_REPLICATION_FACTOR=3` / `OFFSETS_TOPIC_NUM_PARTITIONS=1`
+///   shape the internal offsets topic.
+/// - `GROUP_MIN_SESSION_TIMEOUT_MS=100` / `GROUP_MAX_SESSION_TIMEOUT_MS=60000`
+///   only *widen* the accepted session-timeout window.
+/// - `GROUP_CONSUMER_HEARTBEAT_INTERVAL_MS=500` /
+///   `GROUP_CONSUMER_MIN_HEARTBEAT_INTERVAL_MS=500` only *speed up* the
+///   KIP-848 heartbeat round-trip so rebalances settle fast.
+/// - `GROUP_INITIAL_REBALANCE_DELAY_MS=10` speeds the first rebalance.
+///
+/// The only behaviorally-observable difference between suites is
+/// `NUM_PARTITIONS` (auto-created topics get this many partitions, since the
+/// harness has no admin client — see [`super::test_context`]). It is therefore
+/// the single parameter: suites that mirror Java's `createTopic(name, 2, ...)`
+/// pass `2`, the single-partition suites pass `1`.
+///
+/// Routing every compatible suite through this one helper keeps the cluster
+/// pool ([`super::cluster_pool`]) keyed on a single `ClusterConfig` per distinct
+/// `num_partitions`, so they all share one container instead of each starting
+/// its own.
+pub fn kip848_3_broker(num_partitions: u16) -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert(
+        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
+        "classic,consumer".to_string(),
+    );
+    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
+    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
+    props.insert("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string());
+    props.insert("KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS".to_string(), "60000".to_string());
+    props.insert("KAFKA_GROUP_CONSUMER_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
+    props.insert("KAFKA_GROUP_CONSUMER_MIN_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
+    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
+    props.insert("KAFKA_NUM_PARTITIONS".to_string(), num_partitions.to_string());
+    let mut cfg = ClusterConfig::with_brokers(3);
+    cfg.server_properties = props;
+    cfg
+}

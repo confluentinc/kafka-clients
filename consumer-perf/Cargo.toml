@@ -1,0 +1,25 @@
+[package]
+name = "consumer-perf"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# End-to-end latency / CPU / memory benchmark for the Rust consumer, driven by
+# a live `kafka-producer-perf-test.sh` producer at a fixed throughput. Kept as a
+# separate workspace crate so the client crate's dependency tree stays clean
+# (sysinfo is a benchmark-only dependency).
+
+[[bin]]
+name = "consumer-perf"
+path = "src/main.rs"
+
+[dependencies]
+confluent-kafka-rust = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+# Cross-platform per-process CPU% and RSS sampling (no /proc on macOS).
+sysinfo = "0.32"
+# Logger backend for the `log` facade the client uses. The client emits rich
+# join/heartbeat/coordinator/fetch logs; without a backend installed they are
+# dropped. Control via RUST_LOG (see README "Debugging the client").
+env_logger = "0.11"
+log = "0.4"
