@@ -54,6 +54,7 @@ use crate::common::KafkaError;
 use crate::common::KafkaFuture;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
+use crate::producer::Callback;
 use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
 use crate::producer::Producer;
@@ -119,6 +120,10 @@ impl ProducerKind {
 struct FfiFuture {
     future: KafkaFuture<RecordMetadata>,
     runtime_handle: tokio::runtime::Handle,
+    /// Sender for the producer's completion-dispatch queue, so
+    /// [`kafka_producer_FutureRecordMetadata_get_async`] can deliver its
+    /// callback on the same dispatcher thread as every other completion.
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
 }
 
 /// Internal wrapper that pairs [`RecordMetadata`] with a [`CString`] for the
@@ -232,7 +237,18 @@ pub struct kafka_producer_ProducerRecord_t {
 /// The pointer must be non-null and must have been created by
 /// [`kafka_producer_MockProducer_new`] (or a future constructor).
 unsafe fn producer_ref(producer: *mut kafka_producer_Producer_t) -> &'static Mutex<ProducerKind> {
-    unsafe { &*(producer as *mut Mutex<ProducerKind>) }
+    &unsafe { producer_handle(producer) }.kind
+}
+
+/// Casts a `*mut kafka_producer_Producer_t` to a reference to the internal
+/// [`ProducerHandle`] (the producer plus its async delivery machinery).
+///
+/// # Safety
+///
+/// The pointer must be non-null and must have been created by
+/// [`build_producer_handle`] (via a producer constructor).
+unsafe fn producer_handle(producer: *mut kafka_producer_Producer_t) -> &'static ProducerHandle {
+    unsafe { &*(producer as *const ProducerHandle) }
 }
 
 /// Casts a `*mut kafka_producer_FutureRecordMetadata_t` to a reference to
@@ -331,8 +347,9 @@ unsafe fn properties_mut(props: *mut kafka_producer_ProducerProperties_t) -> &'s
 fn box_future(
     future: KafkaFuture<RecordMetadata>,
     runtime_handle: tokio::runtime::Handle,
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
 ) -> *mut kafka_producer_FutureRecordMetadata_t {
-    let ffi_future = FfiFuture { future, runtime_handle };
+    let ffi_future = FfiFuture { future, runtime_handle, completion_tx };
     Box::into_raw(Box::new(ffi_future)) as *mut kafka_producer_FutureRecordMetadata_t
 }
 
@@ -345,6 +362,303 @@ fn box_metadata(metadata: RecordMetadata) -> *mut kafka_producer_RecordMetadata_
     let topic_cstring = CString::new(metadata.topic()).unwrap_or_else(|_| CString::new("").unwrap());
     let inner = RecordMetadataInner { metadata, topic_cstring };
     Box::into_raw(Box::new(inner)) as *mut kafka_producer_RecordMetadata_t
+}
+
+// ---------------------------------------------------------------------------
+// Async (callback-based) delivery machinery
+// ---------------------------------------------------------------------------
+//
+// The async API mirrors the librdkafka delivery-report model: each operation
+// returns immediately and its result is delivered later through a C callback.
+// All callbacks are invoked from a single per-producer **dispatcher thread**
+// that drains a completion queue, so user callbacks run on one predictable
+// thread and never on a tokio worker (a slow callback cannot stall producer
+// I/O). The non-blocking send path funnels through one shared **submission
+// task** (not a per-message `tokio::spawn`, per CLAUDE.md §11).
+
+/// A unit of work executed by the dispatcher thread. Each async operation
+/// captures its own C callback, `user_data`, and owned result handles into the
+/// closure and bakes in the correct invocation, so the queue stays uniform
+/// (one element type) while every operation delivers exactly the outputs its
+/// sync counterpart produces.
+type CompletionJob = Box<dyn FnOnce() + Send>;
+
+// Internal canonical callback signatures (not exported). There are only three
+// distinct shapes; the public per-method typedefs below alias these.
+//
+// - Record:    `metadata` non-null on success / `error` non-null on failure.
+// - Batch:     parallel `metadata[i]`/`errors[i]` arrays valid only for the call.
+// - Operation: a null `error` means success.
+type RecordCallbackFn =
+    unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+type BatchCallbackFn = unsafe extern "C" fn(
+    *mut *mut kafka_producer_RecordMetadata_t,
+    *mut *mut kafka_common_KafkaError_t,
+    i32,
+    *mut std::ffi::c_void,
+);
+type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+
+// Public per-method callback typedefs. Per CLAUDE.md §3, an async callback type
+// is named after its C method plus a `_callback` suffix, so each async function
+// has its own typedef even when the underlying signature is shared. In every
+// case the caller owns any non-null handle delivered to the callback and frees
+// it with the matching `*_destroy`.
+
+/// Completion callback for [`kafka_producer_Producer_send_async`].
+pub type kafka_producer_Producer_send_callback_t =
+    unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].
+pub type kafka_producer_Producer_send_batch_callback_t =
+    unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_FutureRecordMetadata_get_async`].
+pub type kafka_producer_FutureRecordMetadata_get_callback_t =
+    unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Aggregate completion callback for [`kafka_producer_FutureRecordMetadata_get_all_async`].
+pub type kafka_producer_FutureRecordMetadata_get_all_callback_t = unsafe extern "C" fn(
+    *mut *mut kafka_producer_RecordMetadata_t,
+    *mut *mut kafka_common_KafkaError_t,
+    i32,
+    *mut std::ffi::c_void,
+);
+/// Completion callback for [`kafka_producer_Producer_flush_async`].
+pub type kafka_producer_Producer_flush_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_Producer_close_async`].
+pub type kafka_producer_Producer_close_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+
+/// Owned per-record completion payload, fired by the dispatcher thread.
+struct RecordCompletion {
+    callback: RecordCallbackFn,
+    user_data: *mut std::ffi::c_void,
+    metadata: *mut kafka_producer_RecordMetadata_t,
+    error: *mut kafka_common_KafkaError_t,
+}
+// SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
+// the C user is responsible for the thread-safety of `user_data`.
+unsafe impl Send for RecordCompletion {}
+impl RecordCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread.
+    unsafe fn fire(self) {
+        unsafe { (self.callback)(self.metadata, self.error, self.user_data) };
+    }
+}
+
+/// Owned aggregate completion payload (`get_all_async`).
+struct RecordBatchCompletion {
+    callback: BatchCallbackFn,
+    user_data: *mut std::ffi::c_void,
+    metadata: Vec<*mut kafka_producer_RecordMetadata_t>,
+    errors: Vec<*mut kafka_common_KafkaError_t>,
+}
+// SAFETY: see `RecordCompletion`.
+unsafe impl Send for RecordBatchCompletion {}
+impl RecordBatchCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread.
+    unsafe fn fire(mut self) {
+        let count = self.metadata.len() as i32;
+        unsafe { (self.callback)(self.metadata.as_mut_ptr(), self.errors.as_mut_ptr(), count, self.user_data) };
+        // The array storage (`Vec`s) is freed here when `self` drops; the
+        // individual handle pointers were handed to the caller, which owns them.
+    }
+}
+
+/// Owned operation completion payload (`flush_async` / `close_async`).
+struct OperationCompletion {
+    callback: OperationCallbackFn,
+    user_data: *mut std::ffi::c_void,
+    error: *mut kafka_common_KafkaError_t,
+}
+// SAFETY: see `RecordCompletion`.
+unsafe impl Send for OperationCompletion {}
+impl OperationCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread.
+    unsafe fn fire(self) {
+        unsafe { (self.callback)(self.error, self.user_data) };
+    }
+}
+
+/// A C callback target (function pointer + opaque `user_data`) captured by a
+/// Rust [`Callback`]. Wrapped so it can cross the tokio task / dispatcher
+/// thread boundary.
+#[derive(Clone, Copy)]
+struct RecordCallbackTarget {
+    callback: RecordCallbackFn,
+    user_data: *mut std::ffi::c_void,
+}
+// SAFETY: the C user owns the thread-safety of `user_data`; the function
+// pointer is trivially shareable.
+unsafe impl Send for RecordCallbackTarget {}
+unsafe impl Sync for RecordCallbackTarget {}
+
+/// Aggregate-callback target for `get_all_async`. See [`RecordCallbackTarget`].
+#[derive(Clone, Copy)]
+struct RecordBatchCallbackTarget {
+    callback: BatchCallbackFn,
+    user_data: *mut std::ffi::c_void,
+}
+// SAFETY: see `RecordCallbackTarget`.
+unsafe impl Send for RecordBatchCallbackTarget {}
+
+/// Operation-callback target for `flush_async` / `close_async`. See
+/// [`RecordCallbackTarget`].
+#[derive(Clone, Copy)]
+struct OperationCallbackTarget {
+    callback: OperationCallbackFn,
+    user_data: *mut std::ffi::c_void,
+}
+// SAFETY: see `RecordCallbackTarget`.
+unsafe impl Send for OperationCallbackTarget {}
+
+/// Builds a native producer [`Callback`] that, when fired on completion,
+/// converts the borrowed metadata/error into owned C handles and enqueues a
+/// [`CompletionJob`] for the dispatcher thread.
+fn make_record_callback(
+    target: RecordCallbackTarget,
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+) -> Callback {
+    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&KafkaError>| {
+        // Capture the whole `Send + Sync` wrapper (not its raw-pointer field,
+        // which disjoint closure capture would otherwise grab directly).
+        let target = target;
+        let metadata_ptr = metadata.map(|m| box_metadata(m.clone())).unwrap_or(std::ptr::null_mut());
+        let error_ptr = error.map(|e| box_error(e.clone())).unwrap_or(std::ptr::null_mut());
+        let completion = RecordCompletion {
+            callback: target.callback,
+            user_data: target.user_data,
+            metadata: metadata_ptr,
+            error: error_ptr,
+        };
+        let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
+        // If the dispatcher is gone (post-teardown), run inline to honor the
+        // callback obligation rather than leak the owned handles.
+        if let Err(returned) = completion_tx.send(job) {
+            (returned.0)();
+        }
+    })
+}
+
+/// A non-blocking send submitted to the per-producer submission task.
+///
+/// Holds a fully-built `ProducerRecord` (validated synchronously in
+/// `send_async` / `send_batch_async`) whose `key`/`value` borrow into the C
+/// caller's memory, lifetime-extended to `'static` under the documented
+/// contract that the caller keeps the buffers valid until the completion
+/// callback fires. (`ProducerRecord<&'static [u8], &'static [u8]>` is `Send`.)
+struct SendRequest {
+    record: ProducerRecord<&'static [u8], &'static [u8]>,
+    callback: Callback,
+}
+
+/// A lifetime-extended reference to the inner producer, obtained from the
+/// leaked producer handle. Sound while the handle is alive (teardown joins the
+/// submission/per-op tasks before dropping the producer).
+enum ProducerStaticRef {
+    Kafka(&'static KafkaProducer<Vec<u8>, Vec<u8>>),
+    Mock(&'static MockProducer<Vec<u8>, Vec<u8>>),
+}
+
+/// Obtains a [`ProducerStaticRef`] from a leaked producer handle pointer,
+/// holding the `kind` mutex only briefly (never across an `.await`).
+///
+/// # Safety
+/// `ptr` must be a live `*const ProducerHandle` (leaked, not yet destroyed).
+unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
+    let handle = unsafe { &*(ptr as *const ProducerHandle) };
+    let guard = handle.kind.lock().unwrap();
+    match &*guard {
+        ProducerKind::Kafka(k, _) => {
+            ProducerStaticRef::Kafka(unsafe { &*(k as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
+        },
+        ProducerKind::Mock(m, _) => {
+            ProducerStaticRef::Mock(unsafe { &*(m.as_ref() as *const MockProducer<Vec<u8>, Vec<u8>>) })
+        },
+    }
+}
+
+/// The shared submission task: drives non-blocking sends to enqueue off the
+/// caller's thread. One task per producer (not a per-message spawn, §11).
+async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceiver<SendRequest>) {
+    while let Some(SendRequest { record, callback }) = rx.recv().await {
+        // Brief lock to extend a reference to the inner producer; guard dropped
+        // before the `.await` below (CLAUDE.md §9.6).
+        match unsafe { producer_static_ref(ptr) } {
+            ProducerStaticRef::Kafka(kp) => {
+                // Hot path: the borrowed record is sent directly — no copy, no
+                // field reconstruction.
+                let _ = kp.send(record, Some(callback)).await;
+            },
+            ProducerStaticRef::Mock(mp) => {
+                // MockProducer takes an owned record; copy the borrowed bytes
+                // (test helper, not a hot path). Re-validation cannot fail since
+                // the record was already built in `send_async`.
+                let (topic, partition, timestamp, headers, key, value) = record.into_parts();
+                match ProducerRecord::new(
+                    topic,
+                    partition,
+                    timestamp,
+                    key.map(|k| k.to_vec()),
+                    value.map(|v| v.to_vec()),
+                    Some(headers),
+                ) {
+                    Ok(record) => {
+                        let _ = mp.send_with_callback(record, Some(callback)).await;
+                    },
+                    Err(e) => callback(None, Some(&KafkaError::illegal_argument(e.message()))),
+                }
+            },
+        }
+    }
+}
+
+/// Per-producer handle state: the producer behind its `Mutex`, plus the async
+/// delivery machinery (completion queue + dispatcher thread + submission task).
+struct ProducerHandle {
+    kind: Mutex<ProducerKind>,
+    /// Sender for the completion-dispatch queue (closures run by the dispatcher).
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+    /// Sender for the non-blocking send submission channel.
+    submit_tx: tokio::sync::mpsc::UnboundedSender<SendRequest>,
+    /// Dispatcher thread join handle; taken and joined on destroy.
+    dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// Builds a [`ProducerHandle`] around a [`ProducerKind`], spawning the
+/// dispatcher thread and the submission task, and returns the leaked C handle.
+fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
+    let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+    let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel::<SendRequest>();
+
+    let dispatcher = std::thread::Builder::new()
+        .name("kafka-producer-callback-dispatcher".to_string())
+        .spawn(move || {
+            // Run each completion closure; exits once all senders are dropped
+            // (after draining any queued jobs).
+            while let Ok(job) = completion_rx.recv() {
+                job();
+            }
+        })
+        .expect("failed to spawn producer callback dispatcher thread");
+
+    let rt_handle = kind.runtime().handle().clone();
+
+    let handle = Box::new(ProducerHandle {
+        kind: Mutex::new(kind),
+        completion_tx,
+        submit_tx,
+        dispatcher: Mutex::new(Some(dispatcher)),
+    });
+    let ptr = Box::into_raw(handle);
+
+    // Spawn the submission task on the producer's runtime, capturing the leaked
+    // handle pointer (as `usize` to cross the task boundary).
+    rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+
+    ptr as *mut kafka_producer_Producer_t
 }
 
 // ---------------------------------------------------------------------------
@@ -369,13 +683,16 @@ fn box_metadata(metadata: RecordMetadata) -> *mut kafka_producer_RecordMetadata_
 /// The returned handle must eventually be freed with [`kafka_producer_Producer_destroy`].
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut kafka_producer_Producer_t {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // A multi-thread runtime so the async submission task and completion
+    // callbacks are driven in the background (a current-thread runtime only
+    // makes progress inside `block_on`, which the non-blocking async API does
+    // not call, so the submission task would never be polled).
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to create tokio runtime for MockProducer");
     let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(auto_complete)), runtime);
-    let boxed = Box::new(Mutex::new(kind));
-    Box::into_raw(boxed) as *mut kafka_producer_Producer_t
+    build_producer_handle(kind)
 }
 
 // ---------------------------------------------------------------------------
@@ -579,11 +896,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     };
 
     let kind = ProducerKind::Kafka(producer, runtime);
-    let boxed = Box::new(Mutex::new(kind));
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }
-    Box::into_raw(boxed) as *mut kafka_producer_Producer_t
+    build_producer_handle(kind)
 }
 
 /// Destroys a producer handle, freeing all associated resources.
@@ -597,11 +913,31 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
 /// - After this call, the pointer is invalid and must not be used.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_producer_Producer_t) {
-    if !producer.is_null() {
-        unsafe {
-            drop(Box::from_raw(producer as *mut Mutex<ProducerKind>));
-        }
+    if producer.is_null() {
+        return;
     }
+    let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
+    let ProducerHandle { kind, completion_tx, submit_tx, dispatcher } = *handle;
+
+    // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
+    //    and the task ends.
+    drop(submit_tx);
+    // 2. Drop the producer and its runtime. The producer's `Drop` force-closes;
+    //    dropping the runtime waits for the submission and sender tasks. Any
+    //    in-flight record callbacks fire here and enqueue jobs onto the
+    //    still-open completion channel (the clones live inside those callbacks).
+    drop(kind);
+    // 3. Close the completion channel; the dispatcher drains remaining jobs
+    //    (firing their callbacks) and then exits. Join it.
+    //
+    // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
+    // a clone of `completion_tx`. The dispatcher exits only once all clones are
+    // gone, so joining here would hang if the caller destroys the producer
+    // while futures/callbacks are still outstanding (a contract violation, but
+    // we must not deadlock). We therefore detach the dispatcher: dropping our
+    // sender lets it exit as soon as the remaining clones are released.
+    drop(completion_tx);
+    drop(dispatcher.into_inner().unwrap_or(None));
 }
 
 // ---------------------------------------------------------------------------
@@ -694,15 +1030,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
         },
     };
 
-    let producer_mtx = unsafe { producer_ref(producer) };
-    let guard = producer_mtx.lock().unwrap();
+    let handle = unsafe { producer_handle(producer) };
+    let completion_tx = handle.completion_tx.clone();
+    let guard = handle.kind.lock().unwrap();
     let runtime_handle = guard.runtime().handle().clone();
     match producer_send(&guard, record) {
         Ok(future) => {
             if !out_error.is_null() {
                 unsafe { *out_error = std::ptr::null_mut() };
             }
-            box_future(future, runtime_handle)
+            box_future(future, runtime_handle, completion_tx)
         },
         Err(e) => {
             if !out_error.is_null() {
@@ -741,8 +1078,9 @@ unsafe fn send_batch_inner(
 
     let count = count as usize;
 
-    let producer_mtx = unsafe { producer_ref(producer) };
-    let guard = producer_mtx.lock().unwrap();
+    let handle = unsafe { producer_handle(producer) };
+    let completion_tx = handle.completion_tx.clone();
+    let guard = handle.kind.lock().unwrap();
     let runtime_handle = guard.runtime().handle().clone();
     let mut success_count: i32 = 0;
 
@@ -801,7 +1139,7 @@ unsafe fn send_batch_inner(
 
         match producer_send(&guard, record) {
             Ok(future) => unsafe {
-                *out_futures.add(i) = box_future(future, runtime_handle.clone());
+                *out_futures.add(i) = box_future(future, runtime_handle.clone(), completion_tx.clone());
                 *out_errors.add(i) = std::ptr::null_mut();
                 success_count += 1;
             },
@@ -859,6 +1197,205 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
     out_errors: *mut *mut kafka_common_KafkaError_t,
 ) -> i32 {
     unsafe { send_batch_inner(producer, records, count, out_futures, out_errors) }
+}
+
+/// Asynchronously sends a single record, invoking `callback` on completion.
+///
+/// Same input parameters as [`kafka_producer_Producer_send`], plus a completion
+/// `callback` + `user_data`. Unlike the sync send, this returns **without**
+/// blocking the caller (the enqueue / metadata wait runs on the producer's
+/// submission task) and delivers the result through `callback` instead of a
+/// future.
+///
+/// `callback` is invoked on the producer's dedicated dispatcher thread with a
+/// non-null [`kafka_producer_RecordMetadata_t`] on success or a non-null
+/// [`kafka_common_KafkaError_t`] on failure (the other argument is null). The
+/// caller owns whichever handle is non-null and must free it with the matching
+/// `*_destroy`. `out_error` reports only synchronous validation errors (null
+/// topic / bad key/value length), in which case `callback` is **not** invoked.
+///
+/// # Zero-copy / lifetime contract
+///
+/// The `key` and `value` buffers are **not** copied; they are borrowed by the
+/// submission task. The caller **must keep them valid until `callback` fires**.
+///
+/// # Safety
+///
+/// - `producer` must be a valid handle.
+/// - `topic` must be a valid C string.
+/// - `key`/`value` must be valid for `key_len`/`value_len` bytes when `>= 0`,
+///   and remain valid until `callback` is invoked.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_send_async(
+    producer: *mut kafka_producer_Producer_t,
+    topic: *const c_char,
+    partition: i32,
+    timestamp: i64,
+    key: *const u8,
+    key_len: i32,
+    value: *const u8,
+    value_len: i32,
+    callback: kafka_producer_Producer_send_callback_t,
+    user_data: *mut std::ffi::c_void,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) {
+    if producer.is_null() || topic.is_null() {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+        }
+        return;
+    }
+
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+
+    // Borrow key/value into caller memory, lifetime-extended to 'static under
+    // the documented contract (caller keeps buffers valid until the callback).
+    let key_slice: Option<&'static [u8]> = if key_len >= 0 {
+        if key.is_null() {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            }
+            return;
+        }
+        Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) })
+    } else {
+        None
+    };
+
+    let value_slice: Option<&'static [u8]> = if value_len >= 0 {
+        if value.is_null() {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            }
+            return;
+        }
+        Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) })
+    } else {
+        None
+    };
+
+    let partition_opt = if partition >= 0 { Some(partition) } else { None };
+    let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
+
+    // Build (and validate) the record once, here, so construction errors are
+    // reported synchronously via `out_error` rather than deferred to the task.
+    let record = match ProducerRecord::new(topic_str, partition_opt, timestamp_opt, key_slice, value_slice, None) {
+        Ok(r) => r,
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::illegal_argument(e.message())) };
+            }
+            return;
+        },
+    };
+
+    let handle = unsafe { producer_handle(producer) };
+    let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, handle.completion_tx.clone());
+    let request = SendRequest { record, callback: cb };
+
+    if handle.submit_tx.send(request).is_err() {
+        // Submission task gone (producer torn down): report synchronously. The
+        // unfired callback is dropped (no handles were allocated yet).
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::illegal_state("producer is closed")) };
+        }
+        return;
+    }
+
+    if !out_error.is_null() {
+        unsafe { *out_error = std::ptr::null_mut() };
+    }
+}
+
+/// Asynchronously sends a batch of records, invoking `callback` once per record
+/// on completion (librdkafka-style per-record delivery; correlate via the
+/// `RecordMetadata` topic/partition/offset and `user_data`).
+///
+/// `out_errors[i]` receives a non-null handle for records that fail synchronous
+/// validation (those do not produce a callback); null otherwise. Returns the
+/// number of records accepted for delivery.
+///
+/// The same zero-copy / lifetime contract as
+/// [`kafka_producer_Producer_send_async`] applies to every record's
+/// `key`/`value`.
+///
+/// # Panics
+///
+/// Panics if `producer`, `records`, or `out_errors` is null, or `count < 0`.
+///
+/// # Safety
+///
+/// - `records` must point to at least `count` valid records whose `key`/`value`
+///   remain valid until their callbacks fire.
+/// - `out_errors` must point to at least `count` writable pointer slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
+    producer: *mut kafka_producer_Producer_t,
+    records: *const kafka_producer_ProducerRecord_t,
+    count: i32,
+    callback: kafka_producer_Producer_send_batch_callback_t,
+    user_data: *mut std::ffi::c_void,
+    out_errors: *mut *mut kafka_common_KafkaError_t,
+) -> i32 {
+    assert!(!producer.is_null(), "producer must not be null");
+    assert!(!records.is_null(), "records must not be null");
+    assert!(!out_errors.is_null(), "out_errors must not be null");
+    assert!(count >= 0, "count must not be negative");
+
+    let handle = unsafe { producer_handle(producer) };
+    let mut accepted: i32 = 0;
+
+    for i in 0..count as usize {
+        let rec = unsafe { &*records.add(i) };
+
+        if rec.topic.is_null() {
+            unsafe { *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            continue;
+        }
+        let topic = unsafe { CStr::from_ptr(rec.topic) }.to_string_lossy().into_owned();
+
+        let key: Option<&'static [u8]> = if rec.key_len >= 0 {
+            if rec.key.is_null() {
+                unsafe { *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                continue;
+            }
+            Some(unsafe { std::slice::from_raw_parts(rec.key, rec.key_len as usize) })
+        } else {
+            None
+        };
+
+        let value: Option<&'static [u8]> = if rec.value_len >= 0 {
+            if rec.value.is_null() {
+                unsafe { *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                continue;
+            }
+            Some(unsafe { std::slice::from_raw_parts(rec.value, rec.value_len as usize) })
+        } else {
+            None
+        };
+
+        let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
+        let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
+
+        let record = match ProducerRecord::new(topic, partition, timestamp, key, value, None) {
+            Ok(r) => r,
+            Err(e) => {
+                unsafe { *out_errors.add(i) = box_error(KafkaError::illegal_argument(e.message())) };
+                continue;
+            },
+        };
+        let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, handle.completion_tx.clone());
+        let request = SendRequest { record, callback: cb };
+
+        if handle.submit_tx.send(request).is_err() {
+            unsafe { *out_errors.add(i) = box_error(KafkaError::illegal_state("producer is closed")) };
+            continue;
+        }
+        unsafe { *out_errors.add(i) = std::ptr::null_mut() };
+        accepted += 1;
+    }
+
+    accepted
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,6 +1547,154 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
             },
         }
     }
+}
+
+/// Asynchronously awaits a future, invoking `callback` on completion instead
+/// of blocking (the async counterpart of
+/// [`kafka_producer_FutureRecordMetadata_get`]).
+///
+/// `callback` fires on the producer's dispatcher thread with a non-null
+/// metadata handle on success or a non-null error handle on failure; the caller
+/// owns whichever is non-null. The future handle is **not** consumed — the
+/// caller still owns it and must destroy it (after the callback has fired).
+///
+/// # Safety
+///
+/// - `future` must be a valid handle from a send function, or null (null is
+///   reported as an error through `callback`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
+    future: *mut kafka_producer_FutureRecordMetadata_t,
+    callback: kafka_producer_FutureRecordMetadata_get_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    if future.is_null() {
+        // Programming error: deliver an error through the callback inline.
+        let error = box_error(KafkaError::new(Errors::InvalidRequest));
+        unsafe { callback(std::ptr::null_mut(), error, user_data) };
+        return;
+    }
+
+    let f = unsafe { future_ref(future) };
+    let fut = f.future.clone();
+    let tx = f.completion_tx.clone();
+    let target = RecordCallbackTarget { callback, user_data };
+
+    f.runtime_handle.spawn(async move {
+        let target = target;
+        // No `.await` follows the handle construction below, so the raw
+        // pointers never cross a suspension point.
+        let (metadata, error) = match fut.get().await {
+            Ok(m) => (box_metadata(m), std::ptr::null_mut()),
+            Err(e) => (std::ptr::null_mut(), box_error(e)),
+        };
+        let completion = RecordCompletion { callback: target.callback, user_data: target.user_data, metadata, error };
+        let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
+        if let Err(returned) = tx.send(job) {
+            (returned.0)();
+        }
+    });
+}
+
+/// Asynchronously awaits all futures, invoking `callback` once with parallel
+/// result arrays (the async counterpart of
+/// [`kafka_producer_FutureRecordMetadata_get_all`]).
+///
+/// `callback` fires on the dispatcher thread with `metadata[0..count]` /
+/// `errors[0..count]`: per index, exactly one is non-null (a null `futures[i]`
+/// yields an `InvalidRequest` error). The arrays are valid only for the
+/// duration of the call; the individual handles within are owned by the caller
+/// and must be freed with the matching `*_destroy`. The future handles are
+/// **not** consumed.
+///
+/// # Panics
+///
+/// Panics if `futures` is null or `count < 0`.
+///
+/// # Safety
+///
+/// - `futures` must point to at least `count` future handles (null entries
+///   allowed).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
+    futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+    count: i32,
+    callback: kafka_producer_FutureRecordMetadata_get_all_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    assert!(!futures.is_null(), "futures must not be null");
+    assert!(count >= 0, "count must not be negative");
+    let count = count as usize;
+
+    // Clone the futures and grab a runtime handle + completion sender from the
+    // first non-null future.
+    let mut futs: Vec<Option<KafkaFuture<RecordMetadata>>> = Vec::with_capacity(count);
+    let mut runtime: Option<tokio::runtime::Handle> = None;
+    let mut completion: Option<std::sync::mpsc::Sender<CompletionJob>> = None;
+    for i in 0..count {
+        let fp = unsafe { *futures.add(i) };
+        if fp.is_null() {
+            futs.push(None);
+        } else {
+            let f = unsafe { future_ref(fp) };
+            if runtime.is_none() {
+                runtime = Some(f.runtime_handle.clone());
+                completion = Some(f.completion_tx.clone());
+            }
+            futs.push(Some(f.future.clone()));
+        }
+    }
+
+    let (runtime, completion) = match (runtime, completion) {
+        (Some(rt), Some(tx)) => (rt, tx),
+        _ => {
+            // No non-null future (no runtime to drive): deliver inline, each an
+            // InvalidRequest error.
+            let mut metadata: Vec<*mut kafka_producer_RecordMetadata_t> = vec![std::ptr::null_mut(); count];
+            let mut errors: Vec<*mut kafka_common_KafkaError_t> =
+                (0..count).map(|_| box_error(KafkaError::new(Errors::InvalidRequest))).collect();
+            unsafe { callback(metadata.as_mut_ptr(), errors.as_mut_ptr(), count as i32, user_data) };
+            return;
+        },
+    };
+
+    let target = RecordBatchCallbackTarget { callback, user_data };
+    runtime.spawn(async move {
+        let target = target;
+        // Await all futures first, collecting owned (Send) results so no raw
+        // pointers are held across a suspension point.
+        let mut results: Vec<Option<Result<RecordMetadata, KafkaError>>> = Vec::with_capacity(count);
+        for f in futs {
+            match f {
+                None => results.push(None),
+                Some(fut) => results.push(Some(fut.get().await)),
+            }
+        }
+        // No more `.await`s: build the raw-pointer arrays.
+        let mut metadata = Vec::with_capacity(count);
+        let mut errors = Vec::with_capacity(count);
+        for r in results {
+            match r {
+                None => {
+                    metadata.push(std::ptr::null_mut());
+                    errors.push(box_error(KafkaError::new(Errors::InvalidRequest)));
+                },
+                Some(Ok(m)) => {
+                    metadata.push(box_metadata(m));
+                    errors.push(std::ptr::null_mut());
+                },
+                Some(Err(e)) => {
+                    metadata.push(std::ptr::null_mut());
+                    errors.push(box_error(e));
+                },
+            }
+        }
+        let batch = RecordBatchCompletion { callback: target.callback, user_data: target.user_data, metadata, errors };
+        let job: CompletionJob = Box::new(move || unsafe { batch.fire() });
+        if let Err(returned) = completion.send(job) {
+            (returned.0)();
+        }
+    });
 }
 
 /// Destroys a future handle, freeing all associated resources.
@@ -1322,6 +2007,102 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
     }
 }
 
+/// Shared implementation of [`kafka_producer_Producer_flush_async`] and
+/// [`kafka_producer_Producer_close_async`].
+fn flush_or_close_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: OperationCallbackFn,
+    user_data: *mut std::ffi::c_void,
+    is_close: bool,
+) {
+    if producer.is_null() {
+        // Match the sync APIs: flush(null) is an error, close(null) is success.
+        let error = if is_close {
+            std::ptr::null_mut()
+        } else {
+            box_error(KafkaError::new(Errors::InvalidRequest))
+        };
+        unsafe { callback(error, user_data) };
+        return;
+    }
+
+    let handle = unsafe { producer_handle(producer) };
+    let completion = handle.completion_tx.clone();
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+    let ptr = producer as usize;
+    let target = OperationCallbackTarget { callback, user_data };
+
+    runtime.spawn(async move {
+        let target = target;
+        // Brief lock to extend a reference to the inner producer; the guard is
+        // dropped before the `.await` (CLAUDE.md §9.6).
+        let prod = unsafe { producer_static_ref(ptr) };
+        let result = match prod {
+            ProducerStaticRef::Kafka(k) => {
+                if is_close {
+                    k.close().await
+                } else {
+                    k.flush().await
+                }
+            },
+            ProducerStaticRef::Mock(m) => {
+                if is_close {
+                    m.close().await
+                } else {
+                    m.flush().await
+                }
+            },
+        };
+        let error = match result {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => box_error(e),
+        };
+        let op = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
+        let job: CompletionJob = Box::new(move || unsafe { op.fire() });
+        if let Err(returned) = completion.send(job) {
+            (returned.0)();
+        }
+    });
+}
+
+/// Asynchronously flushes all pending records, invoking `callback` on
+/// completion (the async counterpart of [`kafka_producer_Producer_flush`]).
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread
+/// with a null error on success or a non-null [`kafka_common_KafkaError_t`] the
+/// caller must free on failure.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null (null reported via `callback`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_flush_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    flush_or_close_async(producer, callback, user_data, false);
+}
+
+/// Asynchronously closes the producer, invoking `callback` on completion (the
+/// async counterpart of [`kafka_producer_Producer_close`]).
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread
+/// with a null error on success or a non-null [`kafka_common_KafkaError_t`] the
+/// caller must free on failure.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null (null is a no-op success).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_close_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_close_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    flush_or_close_async(producer, callback, user_data, true);
+}
+
 // ---------------------------------------------------------------------------
 // Mock-specific operations
 // ---------------------------------------------------------------------------
@@ -1410,7 +2191,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history_count(producer: *co
         return 0;
     }
 
-    let producer_mtx = unsafe { &*(producer as *const Mutex<ProducerKind>) };
+    let producer_mtx = &unsafe { &*(producer as *const ProducerHandle) }.kind;
     let guard = producer_mtx.lock().unwrap();
     match &*guard {
         ProducerKind::Mock(mock, _) => {
