@@ -62,3 +62,33 @@ target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUS
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
+
+# ---------------------------------------------------------------------------
+# Producer performance test (opt-in; intentionally NOT registered with CTest).
+#
+# Mirrors tests/integration/producer_perf_test.rs. Drives two backends selected
+# by the CLIENT_VERSION env var: the Rust client C bindings (v3, default) and
+# librdkafka (v2, reference baseline). It needs a reachable broker and runs
+# long, so it builds but is launched manually, not under `ctest`/`make test-c`.
+#
+# librdkafka is an optional dependency: if it is not found the target is
+# skipped so the default `build-c` still succeeds on hosts without it.
+# ---------------------------------------------------------------------------
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(RDKAFKA QUIET rdkafka)
+endif()
+
+if(RDKAFKA_FOUND)
+    add_executable(producer_perf_test tests/producer_perf_test.c)
+    target_include_directories(producer_perf_test
+        PRIVATE ${RUST_INCLUDE_DIR} ${RDKAFKA_INCLUDE_DIRS})
+    target_link_directories(producer_perf_test PRIVATE ${RDKAFKA_LIBRARY_DIRS})
+    # pthread/m are needed by this test's own code (threads, isinf) regardless
+    # of LINK_TYPE, so link them explicitly in addition to ${SYSTEM_LIBS}.
+    target_link_libraries(producer_perf_test
+        ${CONFLUENT_KAFKA_RUST} ${RDKAFKA_LIBRARIES} ${SYSTEM_LIBS} pthread m)
+    message(STATUS "producer_perf_test enabled (librdkafka ${RDKAFKA_VERSION})")
+else()
+    message(STATUS "producer_perf_test skipped: librdkafka not found")
+endif()
