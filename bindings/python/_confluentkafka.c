@@ -15,6 +15,13 @@
 #define PRODUCER_RECORD_SLOT_THRESHOLD 1000
 #define PRODUCER_RECORD_SLOT_CAPACITY (PRODUCER_RECORD_SLOT_THRESHOLD + 100)
 
+// Backpressure bound: once this many records are accumulated but not yet taken
+// by the send task, the producer is "full" and further enqueuing should wait
+// until the send task drains a batch. One complete batch beyond the one being
+// filled — mirrors Java's send() blocking once buffer.memory is full, applied
+// here at batch granularity in front of the Rust accumulator.
+#define PRODUCER_MAX_ACCUMULATED_RECORDS PRODUCER_RECORD_SLOT_THRESHOLD
+
 // ProducerRecord C extension type
 typedef struct {
     PyObject_HEAD
@@ -240,6 +247,17 @@ typedef struct {
     mtx_t pending_batches_mutex;
     thrd_t send_thread;
     thrd_t poll_futures_thread;
+    // Backpressure: records accumulated but not yet taken by the send task,
+    // and the "space available" callbacks waiting for the next take. Both are
+    // guarded by record_batches_mutex.
+    int64_t accumulated_records;
+    PyObject** space_cbs;
+    int space_cbs_count;
+    int space_cbs_capacity;
+    // Test-only: when set, the send task stops draining accumulated batches so
+    // backpressure can be exercised deterministically (the mock otherwise
+    // accepts instantly and never fills). Always 0 in production.
+    int test_paused;
 } Producer;
 
 
@@ -287,6 +305,40 @@ static void Producer_complete_callbacks(
     PyGILState_Release(gstate);
 }
 
+
+// Invoke each pending "space available" callback (resolving the Python-side
+// space Future) and release the array. The caller must have detached the array
+// from the producer under record_batches_mutex first, so this runs without that
+// lock held. Acquires the GIL to call into Python.
+static void Producer_fire_and_free_space_cbs(PyObject** cbs, int count) {
+    if (cbs == NULL) {
+        return;
+    }
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    for (int i = 0; i < count; i++) {
+        PyObject* result = PyObject_CallFunctionObjArgs(cbs[i], NULL);
+        if (result) {
+            Py_DECREF(result);
+        } else {
+            PyErr_Print();
+        }
+        Py_DECREF(cbs[i]);
+    }
+    PyGILState_Release(gstate);
+    PyMem_RawFree(cbs);
+}
+
+// Detach the pending space-callback array under record_batches_mutex. Returns
+// the array (caller owns it) via out params and resets the producer's fields.
+// The mutex MUST be held by the caller.
+static void Producer_take_space_cbs_locked(Producer* producer,
+    PyObject*** out_cbs, int* out_count) {
+    *out_cbs = producer->space_cbs;
+    *out_count = producer->space_cbs_count;
+    producer->space_cbs = NULL;
+    producer->space_cbs_count = 0;
+    producer->space_cbs_capacity = 0;
+}
 
 static int Producer_poll_futures_thread(void* arg) {
     Producer* producer = (Producer*)arg;
@@ -361,6 +413,15 @@ static int Producer_send_thread(void* arg) {
             now = current_time_ns();
         }
 
+        // Test-only: while paused, do not drain — let accumulation build so
+        // backpressure (py_Producer_on_space_available) can be tested.
+        if (producer->test_paused) {
+            mtx_unlock(&producer->record_batches_mutex);
+            struct timespec pause_ts = {0, 5000000};  // 5ms
+            thrd_sleep(&pause_ts, NULL);
+            continue;
+        }
+
         if (producer->next_batches_to_send == NULL) {
             mtx_unlock(&producer->record_batches_mutex);
             continue;
@@ -370,7 +431,15 @@ static int Producer_send_thread(void* arg) {
         tail_batch_node = producer->last_accumulating_batch;
         producer->next_batches_to_send = NULL;
         producer->last_accumulating_batch = NULL;
+        // Accumulation has been taken: capacity is free again. Reset the
+        // backpressure counter and wake any senders waiting for space.
+        producer->accumulated_records = 0;
+        PyObject** space_cbs;
+        int space_cbs_count;
+        Producer_take_space_cbs_locked(producer, &space_cbs, &space_cbs_count);
         mtx_unlock(&producer->record_batches_mutex);
+
+        Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
 
         batch_node = head_batch_node;
 
@@ -594,6 +663,7 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     Py_INCREF(record);
     Py_INCREF(complete_cb);
 
+    int full = 0;
     Py_BEGIN_ALLOW_THREADS
     mtx_lock(&producer->record_batches_mutex);
     if (!producer->last_accumulating_batch || producer->last_accumulating_batch->count == PRODUCER_RECORD_SLOT_CAPACITY) {
@@ -613,12 +683,80 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
     producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
     producer->last_accumulating_batch->count++;
+    producer->accumulated_records++;
 
     if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
         cnd_signal(&producer->record_batches_new_record_cnd);
     }
+    // Report whether the producer is now over the backpressure bound, so the
+    // caller can wait for space (see py_Producer_on_space_available).
+    full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
     mtx_unlock(&producer->record_batches_mutex);
     Py_END_ALLOW_THREADS
+    return PyBool_FromLong(full ? 1 : 0);
+}
+
+// Register a "space available" callback to be invoked when the send task next
+// drains accumulated batches (freeing capacity). Returns True if space is
+// already available (the caller need not wait), False if `space_cb` was
+// registered and will be called later. The check-and-register is done under
+// record_batches_mutex — the same lock the send task holds when it takes
+// batches — so there is no lost-wakeup window. Called by the Python `send`
+// only after `Producer_send` reported the producer full.
+static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* space_cb;
+
+    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &space_cb)) {
+        return NULL;
+    }
+
+    Producer* producer = (Producer*)producer_ptr;
+
+    int available = 0;
+    Py_INCREF(space_cb);
+    Py_BEGIN_ALLOW_THREADS
+    mtx_lock(&producer->record_batches_mutex);
+    if (producer->closed
+        || producer->accumulated_records < PRODUCER_MAX_ACCUMULATED_RECORDS) {
+        // Space already freed (or producer closing): don't make the caller wait.
+        available = 1;
+    } else {
+        if (producer->space_cbs_count == producer->space_cbs_capacity) {
+            int new_capacity = producer->space_cbs_capacity
+                ? producer->space_cbs_capacity * 2 : 8;
+            producer->space_cbs = (PyObject**)PyMem_RawRealloc(
+                producer->space_cbs, new_capacity * sizeof(PyObject*));
+            producer->space_cbs_capacity = new_capacity;
+        }
+        producer->space_cbs[producer->space_cbs_count++] = space_cb;
+    }
+    mtx_unlock(&producer->record_batches_mutex);
+    Py_END_ALLOW_THREADS
+
+    if (available) {
+        Py_DECREF(space_cb);  // not stored
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+// Test-only: pause/resume the send task's draining so backpressure can be
+// exercised deterministically (the mock accepts instantly and would never
+// fill the buffer otherwise). Not part of the public API.
+static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    int paused;
+
+    if (!PyArg_ParseTuple(args, "Kp", &producer_ptr, &paused)) {
+        return NULL;
+    }
+
+    Producer* producer = (Producer*)producer_ptr;
+    mtx_lock(&producer->record_batches_mutex);
+    producer->test_paused = paused ? 1 : 0;
+    cnd_signal(&producer->record_batches_new_record_cnd);
+    mtx_unlock(&producer->record_batches_mutex);
     Py_RETURN_NONE;
 }
 
@@ -637,13 +775,21 @@ static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
 
     // Signal the send thread to stop, then join it (releasing the GIL
     // so the background threads can acquire it for callbacks).
+    PyObject** space_cbs = NULL;
+    int space_cbs_count = 0;
     Py_BEGIN_ALLOW_THREADS
     mtx_lock(&producer->record_batches_mutex);
     producer->closed = 1;
+    // Take any pending space waiters so blocked senders unblock on close
+    // instead of hanging (whoever wins the lock — here or the send task's
+    // final take — fires them once).
+    Producer_take_space_cbs_locked(producer, &space_cbs, &space_cbs_count);
     cnd_signal(&producer->record_batches_new_record_cnd);
     mtx_unlock(&producer->record_batches_mutex);
     thrd_join(producer->send_thread, NULL);
     Py_END_ALLOW_THREADS
+
+    Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
 
     // Clean up after threads have stopped
     cnd_destroy(&producer->record_batches_new_record_cnd);
@@ -810,6 +956,11 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
     {"Producer_send", py_Producer_send, METH_VARARGS, "Send record to batch"},
+    {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
+     "Register a callback fired when buffer space frees; returns True if "
+     "space is already available"},
+    {"Producer_test_set_paused", py_Producer_test_set_paused, METH_VARARGS,
+     "Test-only: pause/resume the send task to exercise backpressure"},
     {"Producer_close", py_Producer_close, METH_VARARGS, "Close batching producer"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
     {"MockProducer_complete_next", py_MockProducer_complete_next, METH_VARARGS,

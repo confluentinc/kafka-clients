@@ -746,10 +746,9 @@ async def async_main():
     Drives an async producer on a single asyncio event loop: a recorder task
     awaits each delivery future and a bounded ``asyncio.Queue`` applies
     backpressure. Supports both async clients — the v3 Rust
-    ``AsyncKafkaProducer`` (sync ``send`` returning an asyncio future) and the
-    v2 ``AsyncCompatibleProducer`` wrapping CKPy's ``AIOProducer`` (async
-    ``send`` returning the delivery future). ``_resolve_send`` normalises the
-    two shapes.
+    ``AsyncKafkaProducer`` and the v2 ``AsyncCompatibleProducer`` wrapping
+    CKPy's ``AIOProducer`` — whose ``send`` coroutines both return the delivery
+    future (``produce_call = await producer.send(record)``).
     """
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
     total_latency_ms = 0
@@ -778,14 +777,6 @@ async def async_main():
 
     producer = v2_async_producer(common_default_configuration) if v2 \
         else v3_async_producer(common_default_configuration)
-
-    async def _resolve_send(send_result):
-        # v3 AsyncKafkaProducer.send returns an asyncio future synchronously;
-        # the v2 AIOProducer wrapper's send is a coroutine returning the
-        # delivery future. Normalise both to an awaitable for the result.
-        if asyncio.iscoroutine(send_result):
-            return await send_result
-        return send_result
 
     def record_completed_call(r, start_time):
         nonlocal max_latency_ms, total_latency_ms, completed_messages
@@ -831,12 +822,11 @@ async def async_main():
                 while time.time_ns() < warmup_end_time:
                     message = generated_messages[i % generated_messages_len]
                     try:
-                        produce_call = await _resolve_send(producer.send(
-                            ProducerRecord(
-                                topic=topic_name,
-                                key=message[0],
-                                value=message[1]
-                            )))
+                        produce_call = await producer.send(ProducerRecord(
+                            topic=topic_name,
+                            key=message[0],
+                            value=message[1]
+                        ))
                         r = await produce_call
                         verification_function(r)
                         warmup_sent += 1
@@ -872,8 +862,7 @@ async def async_main():
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = await _resolve_send(
-                        producer.send(next_message))
+                    produce_call = await producer.send(next_message)
                     await produce_calls.put((produce_call, start_time))
                     messages_sent += 1
                     limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
