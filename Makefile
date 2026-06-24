@@ -45,7 +45,7 @@ devel-build-c: submodules devel-build-rust
 devel-build-python: submodules init-venv devel-build-rust
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
-.PHONY: all init build devel-build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python build-grpc-images test-multilanguage verify format-check lint clean
+.PHONY: all init build devel-build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python build-grpc-images test-multilanguage producer-perf-test producer-perf-test-c verify format-check lint clean
 
 build: build-rust build-c build-python
 
@@ -103,6 +103,20 @@ test-rust: build-rust
 
 test-integration: build-rust
 	cargo test --features integration-tests
+
+# Env-driven producer performance benchmark. Configure via environment
+# variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
+# COMPRESSION_TYPE, P99_LIMIT_MS, ...); writes metrics.jsonl for plot_metrics.py.
+# Keep in sync with the other producer performance tests in the project.
+producer-perf-test: build-rust
+	cargo xtask producer-perf-test
+
+# C producer performance benchmark (opt-in; needs a reachable broker). Same
+# env-var contract as `producer-perf-test`; select the backend with
+# CLIENT_VERSION (3 = Rust client C bindings, default; 2 = librdkafka baseline).
+# Built by `build-c` but intentionally not run under `make test-c`.
+producer-perf-test-c: build-c
+	./bindings/c/build/producer_perf_test
 
 test-c: build-c
 	cd bindings/c/build && ctest --output-on-failure
