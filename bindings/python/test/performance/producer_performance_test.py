@@ -11,7 +11,7 @@ import uuid
 from threading import Thread
 
 
-from performance_common import Metrics
+from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist
 from concurrent.futures import CancelledError, Future
 from producer import (KafkaProducer, AsyncKafkaProducer, ProducerRecord,
                       RecordMetadata)
@@ -66,16 +66,30 @@ if limit_rps is not None:
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
 run_async = os.getenv("ASYNC", "False") == "True"
 do_verify = os.getenv("DO_VERIFY", "True") == "True"
-warmup_s = os.getenv("WARMUP_SECONDS", None)
-if warmup_s is not None:
-    warmup_s = int(warmup_s)
-else:
-    warmup_s = 0
+warmup_s = int(os.getenv("WARMUP_SECONDS", "120"))
 test_duration_s = os.getenv("TEST_DURATION_SECONDS", None)
 if test_duration_s is not None:
     test_duration_s = int(test_duration_s)
 else:
     test_duration_s = 600
+
+# p99 latency budget (ms); 0 disables the assertion. Matches C/Rust/Java.
+p99_limit_ms = int(os.getenv("P99_LIMIT_MS", "0"))
+# Seconds to keep collecting metrics after the measured interval, so the
+# cooldown is captured in metrics.jsonl (but excluded from the averages).
+POST_TEST_AWAIT_SECONDS = 10
+
+# Cumulative latency histogram over the measured interval (1 ms buckets, plus
+# one overflow bucket), used for the final p50/p90/p99/p999 summary. Warmup
+# sends are awaited inline and never reach the recorder, so they are excluded.
+latency_hist = [0] * (MAX_LATENCY_MS + 2)
+# Set True when P99_LIMIT_MS > 0 and the measured p99 exceeds it.
+latency_budget_exceeded = False
+
+
+def record_latency(latency_ms):
+    idx = min(max(int(latency_ms), 0), MAX_LATENCY_MS + 1)
+    latency_hist[idx] += 1
 
 num_messages = 0
 if 'NUM_MESSAGES' in os.environ:
@@ -245,21 +259,26 @@ def sasl_config_from_env(v2=False):
         }
 
 def configuration_from_env(common_default_configuration, v2=False):
-    batch_size = 1000000
-    max_request_size = batch_size * 8
+    # Default 1024 KiB batch, matching the C/Rust/Java perf tests.
+    batch_size = 1024 * 1024
     conf = dict(common_default_configuration)
     conf.update(sasl_config_from_env(v2=v2))
+    # acks=all, hardcoded like the C and Java perf tests (the Rust test relies
+    # on the same client default).
+    conf['acks'] = 'all'
 
     if 'BOOTSTRAP_SERVERS' in os.environ:
         conf['bootstrap.servers'] = os.environ['BOOTSTRAP_SERVERS']
 
     if 'BATCH_SIZE' in os.environ:
-        conf['batch.size'] = int(os.environ['BATCH_SIZE']) * 1024  # Convert KB to bytes
-    else:
-        conf['batch.size'] = batch_size
+        batch_size = int(os.environ['BATCH_SIZE']) * 1024  # Convert KB to bytes
+    conf['batch.size'] = batch_size
 
     if 'MAX_REQUEST_SIZE' in os.environ:
         max_request_size = int(os.environ['MAX_REQUEST_SIZE']) * 1024  # Convert KB to bytes
+    else:
+        # batch.size * 64, capped at 8 MiB — matches C/Rust/Java.
+        max_request_size = min(batch_size * 64, 8 * 1024 * 1024)
     if not v2:
         conf['max.request.size'] = max_request_size
     else:
@@ -288,6 +307,8 @@ def configuration_from_env(common_default_configuration, v2=False):
 
     if 'LINGER_MS' in os.environ:
         conf['linger.ms'] = os.environ['LINGER_MS']
+    else:
+        conf['linger.ms'] = '5'  # default linger, matching C/Rust/Java
     return conf
 
 
@@ -530,6 +551,20 @@ def print_measurement_summary(completed_messages, total_latency_ms,
         f"{total_latency_ms / completed_messages:.2f} ms")
     print("Max latency: "
           f"{max_latency_ms:.2f} ms")
+    # Percentiles from the cumulative measured-interval histogram, matching the
+    # C/Rust/Java perf tests.
+    p50 = percentile_from_hist(latency_hist, 0.50)
+    p90 = percentile_from_hist(latency_hist, 0.90)
+    p99 = percentile_from_hist(latency_hist, 0.99)
+    p999 = percentile_from_hist(latency_hist, 0.999)
+    print(f"p50 latency: {p50} ms")
+    print(f"p90 latency: {p90} ms")
+    print(f"p99 latency: {p99} ms")
+    print(f"p999 latency: {p999} ms")
+    if p99_limit_ms > 0 and p99 > p99_limit_ms:
+        global latency_budget_exceeded
+        latency_budget_exceeded = True
+        print(f"p99 latency {p99} ms exceeds budget {p99_limit_ms} ms")
 
 def main(v2=False):
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
@@ -577,6 +612,7 @@ def main(v2=False):
             print(f"Completed messages: {completed_messages}. Rate so far: {completed_messages / ((time.time_ns() - first_message_time) / 1e9):.2f} msg/s", end='\r')  # noqa: E501
         current_latency = int(time.time() * 1000) - start_time
         metrics.latency.add_measurement(current_latency)
+        record_latency(current_latency)
         metrics.messages.add_measurement(1)
         metrics.bytes.add_measurement(message_size)
         max_latency_ms = max(max_latency_ms, current_latency)
@@ -762,6 +798,7 @@ async def async_main():
             print(f"Completed messages: {completed_messages}. Rate so far: {completed_messages / ((time.time_ns() - first_message_time) / 1e9):.2f} msg/s", end='\r')  # noqa: E501
         current_latency = int(time.time() * 1000) - start_time
         metrics.latency.add_measurement(current_latency)
+        record_latency(current_latency)
         metrics.messages.add_measurement(1)
         metrics.bytes.add_measurement(message_size)
         max_latency_ms = max(max_latency_ms, current_latency)
@@ -932,8 +969,11 @@ if __name__ == "__main__":
         print("Performing garbage collection...")
         gc.collect()
     print("Waiting for final metrics collection...")
-    # Wait some time to collect final metrics
-    #time.sleep(10)
+    # Keep collecting metrics through a short cooldown so the post-test window
+    # is captured in metrics.jsonl (excluded from the averages, since the
+    # measured interval has ended). Matches the C/Rust/Java perf tests.
+    if not terminating:
+        time.sleep(POST_TEST_AWAIT_SECONDS)
     last_metrics = metrics.external_metrics_last_values()
     print(f"Final CPU: {last_metrics['last_cpu']:.2f} %")
     print(f"Final RSS: {last_metrics['last_rss'] / 1024 :.2f} KiB")
@@ -961,5 +1001,9 @@ if __name__ == "__main__":
         print("Consumer verification skipped (terminated)")
     elif baseline_end_offsets is None:
         print("Consumer verification skipped (baseline capture failed)")
+
+    # Fail the run if the p99 latency budget was exceeded (matches C/Rust/Java).
+    if latency_budget_exceeded:
+        exit_code = 1
 
     sys.exit(exit_code)

@@ -5,6 +5,27 @@ import json
 from threading import Thread
 
 
+# Latency histogram resolution, matching the C/Rust/Java perf tests: 1 ms
+# buckets covering 0..MAX_LATENCY_MS, plus one overflow bucket.
+MAX_LATENCY_MS = 10000
+
+
+def percentile_from_hist(hist, p):
+    """Return the smallest latency-ms bucket whose cumulative count reaches the
+    p-th percentile (0 < p <= 1). Mirrors percentileFromHist in the C/Rust/Java
+    perf tests."""
+    total = sum(hist)
+    if total == 0:
+        return 0
+    target = p * total
+    cumulative = 0
+    for ms, count in enumerate(hist):
+        cumulative += count
+        if cumulative >= target:
+            return ms
+    return len(hist) - 1
+
+
 class Bucket:
     def __init__(self):
         self.total = 0
@@ -44,6 +65,29 @@ class Bucket:
         }
 
 
+class LatencyBucket(Bucket):
+    """Bucket that additionally tracks a 1 ms-resolution histogram so it can
+    report p50/p90/p99/p999 per window, matching the C/Rust/Java perf tests."""
+
+    def __init__(self):
+        super().__init__()
+        self.hist = [0] * (MAX_LATENCY_MS + 2)
+
+    def add_measurement(self, measurement):
+        super().add_measurement(measurement)
+        idx = min(max(int(measurement), 0), MAX_LATENCY_MS + 1)
+        self.hist[idx] += 1
+
+    def rollover(self):
+        ret = super().rollover()
+        ret["p50"] = str(percentile_from_hist(self.hist, 0.50))
+        ret["p90"] = str(percentile_from_hist(self.hist, 0.90))
+        ret["p99"] = str(percentile_from_hist(self.hist, 0.99))
+        ret["p999"] = str(percentile_from_hist(self.hist, 0.999))
+        self.hist = [0] * (MAX_LATENCY_MS + 2)
+        return ret
+
+
 class SingleMeasurementBucket(Bucket):
     def __init__(self):
         super().__init__()
@@ -80,7 +124,7 @@ class Metrics:
     def __init__(self):
         self.rss = MemoryBucket()
         self.cpu = CPUBucket()
-        self.latency = Bucket()
+        self.latency = LatencyBucket()
         self.bytes = Bucket()
         self.messages = Bucket()
         self.thread = None
@@ -97,7 +141,7 @@ class Metrics:
     def rollover(self):
         window_start_ms, self.window_start_ms = \
             self.window_start_ms, int(time.time() * 1000)
-        latency, self.latency = self.latency, Bucket()
+        latency, self.latency = self.latency, LatencyBucket()
         bytes, self.bytes = self.bytes, Bucket()
         messages, self.messages = self.messages, Bucket()
         return {
@@ -121,9 +165,15 @@ class Metrics:
             while self.running:
                 time.sleep(interval_s)
                 self.last_metrics = self.rollover()
-                self.total_external_metrics += 1
-                self.total_cpu += float(self.last_metrics["cpu"]["average"])
-                self.total_rss += float(self.last_metrics["rss"]["average"])
+                # Average CPU/RSS only over the measured interval — exclude
+                # warmup (measurement not started) and post-test cooldown
+                # (measurement ended) — matching the C/Rust/Java perf tests.
+                in_measured = (self.measurement_start_ms != -math.inf
+                               and self.measurement_end_ms == -math.inf)
+                if in_measured:
+                    self.total_external_metrics += 1
+                    self.total_cpu += float(self.last_metrics["cpu"]["average"])
+                    self.total_rss += float(self.last_metrics["rss"]["average"])
                 print(json.dumps(self.last_metrics), file=self._fd)
 
         self.thread = Thread(target=collector)
