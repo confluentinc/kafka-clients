@@ -291,8 +291,7 @@ impl Metrics {
 
     fn snapshot_and_reset(&self) -> MetricsSnapshot {
         // Read-and-reset the per-window latency histogram, then derive percentiles.
-        let counts: Vec<u64> =
-            self.latency_hist.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
+        let counts: Vec<u64> = self.latency_hist.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
         MetricsSnapshot {
             messages: self.messages_sent.swap(0, Ordering::Relaxed),
             bytes: self.bytes_sent.swap(0, Ordering::Relaxed),
