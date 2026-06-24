@@ -47,6 +47,7 @@
 //! Closed
 //! ```
 
+use super::authentication_error::auth_io_error;
 use super::{InterestOps, TransportLayer};
 
 use std::future::Future;
@@ -131,6 +132,23 @@ impl SslTransportLayer {
             write_buf: Vec::new(),
         }
     }
+
+    /// Logs the negotiated TLS protocol version, cipher suite, and key-exchange
+    /// group once per connection, right after the handshake completes.
+    ///
+    /// This is a diagnostic for performance investigation: the symmetric cipher
+    /// (AES-GCM vs ChaCha20-Poly1305) determines whether the bulk data path runs
+    /// on hardware AES (parity with OpenSSL) or in software (materially slower).
+    /// aws-lc-rs only prefers AES-GCM when hardware AES is detected, so confirming
+    /// the actually-negotiated suite rules in/out the cipher as a CPU-gap cause.
+    fn log_negotiated_params(conn: &rustls::ClientConnection) {
+        log::info!(
+            "TLS handshake complete: version={:?} cipher_suite={:?} kx_group={:?}",
+            conn.protocol_version(),
+            conn.negotiated_cipher_suite().map(|cs| cs.suite()),
+            conn.negotiated_key_exchange_group().map(|kx| kx.name()),
+        );
+    }
 }
 
 impl TransportLayer for SslTransportLayer {
@@ -209,6 +227,7 @@ impl TransportLayer for SslTransportLayer {
                 // returns false; if we exit here without flushing, the server
                 // will never see it and the session is wedged.
                 if !boxed.conn.is_handshaking() && !boxed.conn.wants_write() {
+                    Self::log_negotiated_params(&boxed.conn);
                     self.state = SslState::Ready(boxed);
                     return Ok(());
                 }
@@ -225,7 +244,13 @@ impl TransportLayer for SslTransportLayer {
                             Ok(0) => break,
                             Ok(_) => continue,
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(e) => return Err(io::Error::other(format!("TLS handshake failed: {e}"))),
+                            // Transport-level write failure (connection reset,
+                            // broken pipe, etc.) — this is a network disconnect,
+                            // NOT an authentication failure. Preserve the original
+                            // error kind so the selector / network client treat it
+                            // as a retriable disconnect (Java re-throws the
+                            // original `IOException` at SslTransportLayer.java:324).
+                            Err(e) => return Err(e),
                         }
                     }
                     continue;
@@ -247,16 +272,29 @@ impl TransportLayer for SslTransportLayer {
                         if boxed.conn.is_handshaking() || boxed.conn.wants_write() {
                             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TLS handshake EOF"));
                         }
+                        Self::log_negotiated_params(&boxed.conn);
                         self.state = SslState::Ready(boxed);
                         return Ok(());
                     },
                     Ok(_) => {},
                     // Spurious wake-ups can return WouldBlock — loop and re-await readable.
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                    Err(e) => return Err(io::Error::other(format!("TLS handshake failed: {e}"))),
+                    // Transport-level read failure (connection reset by peer,
+                    // unexpected EOF, etc.) — a network disconnect, NOT an
+                    // authentication failure. Preserve the original error kind so
+                    // it is treated as a retriable disconnect downstream (Java
+                    // re-throws the original `IOException` at
+                    // SslTransportLayer.java:324).
+                    Err(e) => return Err(e),
                 }
+                // A failure from `process_new_packets` is a genuine TLS
+                // negotiation/certificate/protocol rejection (the rustls
+                // analogue of Java's `SSLException`). Surface it as a typed
+                // authentication error so `prepare()` stamps the channel
+                // AUTHENTICATION_FAILED (fatal), mirroring Java's
+                // `maybeProcessHandshakeFailure` -> `SslAuthenticationException`.
                 if let Err(e) = boxed.conn.process_new_packets() {
-                    return Err(io::Error::other(format!("TLS handshake failed: {e}")));
+                    return Err(auth_io_error(format!("TLS handshake failed: {e}")));
                 }
             }
         })
@@ -363,6 +401,32 @@ impl TransportLayer for SslTransportLayer {
         })
     }
 
+    /// Poll-style read-readiness on the underlying TCP socket. Matches the
+    /// semantics of the async [`readable`](Self::readable) above: readiness is
+    /// always observed on the raw socket (fresh ciphertext), never short-
+    /// circuited on already-buffered plaintext — the selector handles buffered
+    /// plaintext via `has_bytes_buffered()`. `Closed` resolves with
+    /// `NotConnected`.
+    fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match &self.state {
+            SslState::Handshaking(c) | SslState::Ready(c) => c.tcp.poll_read_ready(cx),
+            SslState::Closed => {
+                std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")))
+            },
+        }
+    }
+
+    /// Poll-style write-readiness on the underlying TCP socket, mirroring the
+    /// async [`writable`](Self::writable) above.
+    fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match &self.state {
+            SslState::Handshaking(c) | SslState::Ready(c) => c.tcp.poll_write_ready(cx),
+            SslState::Closed => {
+                std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")))
+            },
+        }
+    }
+
     /// Reads decrypted plaintext from the TLS layer.
     ///
     /// Pulls fresh ciphertext from the TCP socket via `read_tls`, advances the
@@ -420,6 +484,156 @@ impl TransportLayer for SslTransportLayer {
                 Err(e) => Err(e),
             }
         })
+    }
+
+    /// Synchronous, non-blocking read of decrypted plaintext — no `Box::pin`,
+    /// no `.await`. This is the fast-path counterpart to [`read`](Self::read);
+    /// the selector's [`NetworkReceive`] drain loop calls this in a tight loop
+    /// (see `network_receive.rs` Phase 3) to drain all currently-available
+    /// plaintext in a single `read_from` call instead of allocating one boxed
+    /// future per chunk.
+    ///
+    /// The logic is identical to the async [`read`](Self::read), issued inline:
+    /// pull fresh ciphertext from the socket with a **non-blocking** `read_tls`
+    /// (via [`TryReadAdapter`], which calls `TcpStream::try_read`), advance the
+    /// rustls state machine with `process_new_packets`, then drain buffered
+    /// plaintext from `conn.reader()` into `dst`. Never awaits, never issues a
+    /// blocking socket read.
+    ///
+    /// Returns:
+    /// - `Ok(n)` (n > 0) when plaintext was drained.
+    /// - `Ok(0)` only on TLS EOF: the socket is closed AND no plaintext remains
+    ///   (matching the [`read`](Self::read) and Tokio `AsyncRead` contract; the
+    ///   receive layer turns this into `UnexpectedEof`). Partial plaintext is
+    ///   never lost — buffered plaintext is always drained before EOF surfaces.
+    /// - `Err(WouldBlock)` when no plaintext is available yet and the socket is
+    ///   still open (come back later). Any leftover buffered plaintext that did
+    ///   not fit in `dst` is still reported by [`has_bytes_buffered`], so the
+    ///   selector re-polls the channel via `channels_with_buffered_read`.
+    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+        let c = match &mut self.state {
+            SslState::Ready(c) => c,
+            SslState::Handshaking(_) => {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"));
+            },
+            SslState::Closed => {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed"));
+            },
+        };
+
+        // Step 1: pull fresh ciphertext from the socket (non-blocking).
+        let mut tcp_eof = false;
+        let mut adapter = TryReadAdapter(&c.tcp);
+        match c.conn.read_tls(&mut adapter) {
+            Ok(0) => tcp_eof = true,
+            Ok(_) => {},
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {},
+            Err(e) => return Err(e),
+        }
+
+        // Step 2: drive the TLS state machine.
+        if let Err(e) = c.conn.process_new_packets() {
+            return Err(io::Error::other(format!("TLS error: {e}")));
+        }
+
+        // Step 3: drain buffered plaintext.
+        match c.conn.reader().read(dst) {
+            Ok(n) => {
+                if n == 0 && tcp_eof {
+                    // Plaintext drained AND socket closed -> propagate EOF.
+                    Ok(0)
+                } else if n == 0 {
+                    // No plaintext yet; ask caller to come back later.
+                    Err(io::Error::from(io::ErrorKind::WouldBlock))
+                } else {
+                    Ok(n)
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if tcp_eof {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// SSL supports the synchronous non-blocking [`try_read`](Self::try_read),
+    /// so the selector / [`NetworkReceive`] receive path uses the tight sync
+    /// drain loop instead of one boxed `.await` per chunk.
+    fn supports_try_read(&self) -> bool {
+        true
+    }
+
+    /// Zero-free appending read (Phase 28): identical to
+    /// [`try_read`](Self::try_read) steps 1–2 (non-blocking `read_tls` +
+    /// `process_new_packets`), but step 3 appends the decrypted plaintext
+    /// onto `buf` via `Read::take(limit).read_to_end(...)` — `read_to_end`
+    /// writes into the `Vec`'s spare capacity without pre-zeroing it, so the
+    /// receive buffer never pays the `vec![0u8; n]` memset of the whole
+    /// payload. Error/EOF mapping matches `try_read` exactly:
+    /// - appended > 0 → `Ok(appended)` (progress; terminal conditions
+    ///   resurface on the next call),
+    /// - nothing appended + socket closed → `Ok(0)` (EOF),
+    /// - nothing appended + socket open → `Err(WouldBlock)`.
+    ///
+    /// (`read_to_end`'s documented contract: on error, all bytes read so far
+    /// have already been appended to `buf`.)
+    fn try_read_append(&mut self, buf: &mut Vec<u8>, limit: usize) -> io::Result<usize> {
+        let c = match &mut self.state {
+            SslState::Ready(c) => c,
+            SslState::Handshaking(_) => {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"));
+            },
+            SslState::Closed => {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed"));
+            },
+        };
+
+        // Step 1: pull fresh ciphertext from the socket (non-blocking).
+        let mut tcp_eof = false;
+        let mut adapter = TryReadAdapter(&c.tcp);
+        match c.conn.read_tls(&mut adapter) {
+            Ok(0) => tcp_eof = true,
+            Ok(_) => {},
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {},
+            Err(e) => return Err(e),
+        }
+
+        // Step 2: drive the TLS state machine.
+        if let Err(e) = c.conn.process_new_packets() {
+            return Err(io::Error::other(format!("TLS error: {e}")));
+        }
+
+        // Step 3: append buffered plaintext (no zeroing).
+        let start = buf.len();
+        match c.conn.reader().take(limit as u64).read_to_end(buf) {
+            Ok(_) => {
+                let appended = buf.len() - start;
+                if appended > 0 {
+                    Ok(appended)
+                } else if tcp_eof {
+                    // Plaintext drained AND socket closed -> propagate EOF.
+                    Ok(0)
+                } else {
+                    // No plaintext yet; ask caller to come back later.
+                    Err(io::Error::from(io::ErrorKind::WouldBlock))
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let appended = buf.len() - start;
+                if appended > 0 {
+                    Ok(appended)
+                } else if tcp_eof {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        }
     }
 
     /// Writes plaintext into the TLS layer (encrypted by rustls before being
@@ -592,6 +806,7 @@ impl io::Read for TryReadAdapter<'_> {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
+    use crate::common::network::authentication_error::is_authentication_error;
     use crate::common::security::SslFactory;
     use std::sync::Arc;
 
@@ -835,6 +1050,174 @@ mod tests {
         let _ = server_task.await;
     }
 
+    /// `try_read` before handshake completes returns `WouldBlock` (the data
+    /// path is gated on a finished handshake, mirroring the async `read`).
+    #[tokio::test]
+    async fn test_try_read_before_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let factory = create_test_factory();
+        let conn = make_client_conn(&factory);
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+
+        let mut transport = SslTransportLayer::new(stream, conn, domain);
+        let mut buf = [0u8; 16];
+        let result = transport.try_read(&mut buf);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// After a real handshake, the synchronous `try_read` fast path must:
+    /// (1) return buffered decrypted plaintext synchronously (no `.await`),
+    /// (2) return `WouldBlock` once the plaintext is drained but the socket is
+    ///     still open, and
+    /// (3) return `Ok(0)` (EOF) once the server has closed AND all plaintext
+    ///     has been drained — partial plaintext is never lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_try_read_buffered_plaintext_then_eof() {
+        let (factory, server_config) = build_paired_factory_and_server_config();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        // Server sends "hello-tls" then closes (clean TLS close-notify + FIN).
+        let server_task =
+            tokio::spawn(async move { drive_server_send(server_stream, server_config, b"hello-tls").await });
+
+        transport.handshake().await.expect("handshake failed");
+
+        // `supports_try_read()` must now advertise the sync fast path.
+        assert!(transport.supports_try_read());
+
+        // Wait for the server's encrypted record to arrive on the wire.
+        transport.readable().await.unwrap();
+
+        // (1) Drain plaintext via the synchronous `try_read` (no `.await`).
+        let mut buf = [0u8; 64];
+        let mut total = 0;
+        // The first try_read after readable() should yield plaintext; loop only
+        // to tolerate the ciphertext arriving in more than one TCP segment.
+        let mut attempts = 0;
+        while total < 9 && attempts < 100 {
+            match transport.try_read(&mut buf[total..]) {
+                Ok(0) => break, // EOF before all data (shouldn't happen here)
+                Ok(n) => total += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No plaintext yet — wait for more ciphertext on the socket.
+                    transport.readable().await.unwrap();
+                },
+                Err(e) => panic!("try_read failed: {e}"),
+            }
+            attempts += 1;
+        }
+        assert_eq!(
+            &buf[..total],
+            b"hello-tls",
+            "try_read must return decrypted plaintext synchronously"
+        );
+
+        // (2)+(3) Drain to EOF: once the server's close-notify + FIN have been
+        // processed and no plaintext remains, try_read returns Ok(0). Before
+        // that it may return WouldBlock (socket still open, no plaintext).
+        let mut saw_would_block = false;
+        let mut saw_eof = false;
+        for _ in 0..200 {
+            match transport.try_read(&mut buf) {
+                Ok(0) => {
+                    saw_eof = true;
+                    break;
+                },
+                Ok(_) => {
+                    // Any trailing plaintext is fine; keep draining.
+                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    saw_would_block = true;
+                    // Give the server time to send close-notify / close the TCP.
+                    transport.readable().await.unwrap();
+                },
+                Err(e) => panic!("try_read failed during drain-to-EOF: {e}"),
+            }
+        }
+        assert!(
+            saw_would_block,
+            "expected WouldBlock while plaintext drained and socket still open"
+        );
+        assert!(saw_eof, "expected Ok(0) (EOF) after server closed and plaintext drained");
+
+        let _ = transport.close().await;
+        let _ = server_task.await;
+    }
+
+    /// Phase 28: the zero-free appending read drains the same plaintext as
+    /// `try_read`, respects the `limit` cap (never appends past the message
+    /// boundary), maps "no plaintext + open socket" to `WouldBlock`, and
+    /// surfaces EOF as `Ok(0)` once the server closes and the plaintext is
+    /// drained.
+    #[tokio::test]
+    async fn test_try_read_append_limit_then_eof() {
+        let (factory, server_config) = build_paired_factory_and_server_config();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        let server_task =
+            tokio::spawn(async move { drive_server_send(server_stream, server_config, b"hello-tls").await });
+
+        transport.handshake().await.expect("handshake failed");
+        transport.readable().await.unwrap();
+
+        // Drain "hello-tls" (9 bytes) with a 4-byte limit per call: the
+        // append must never exceed the requested limit, and `buf` must
+        // accumulate the exact plaintext across calls.
+        let mut buf: Vec<u8> = Vec::with_capacity(9);
+        let mut attempts = 0;
+        while buf.len() < 9 && attempts < 100 {
+            let before = buf.len();
+            let limit = (9 - buf.len()).min(4);
+            match transport.try_read_append(&mut buf, limit) {
+                Ok(0) => break, // EOF before all data (shouldn't happen here)
+                Ok(n) => {
+                    assert!(n <= limit, "appended {n} > limit {limit}");
+                    assert_eq!(buf.len(), before + n, "Ok(n) must equal bytes appended");
+                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    assert_eq!(buf.len(), before, "WouldBlock must append nothing");
+                    transport.readable().await.unwrap();
+                },
+                Err(e) => panic!("try_read_append failed: {e}"),
+            }
+            attempts += 1;
+        }
+        assert_eq!(&buf[..], b"hello-tls", "appended plaintext must match");
+
+        // Drain to EOF: Ok(0) with nothing appended once the server's
+        // close-notify + FIN are processed; WouldBlock while still open.
+        let mut saw_eof = false;
+        for _ in 0..200 {
+            let before = buf.len();
+            match transport.try_read_append(&mut buf, 64) {
+                Ok(0) => {
+                    assert_eq!(buf.len(), before, "EOF must append nothing");
+                    saw_eof = true;
+                    break;
+                },
+                Ok(_) => {}, // trailing plaintext; keep draining
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    transport.readable().await.unwrap();
+                },
+                Err(e) => panic!("try_read_append failed during drain-to-EOF: {e}"),
+            }
+        }
+        assert!(saw_eof, "expected Ok(0) (EOF) after server closed and plaintext drained");
+
+        let _ = transport.close().await;
+        let _ = server_task.await;
+    }
+
     /// When the kernel TCP buffer is saturated, a write that can't be flushed
     /// must leave the remainder in rustls's output buffer (i.e.
     /// `has_pending_writes()` is true) and not error out.
@@ -935,6 +1318,84 @@ mod tests {
         // Server should have observed an orderly TLS close (not an error).
         let observed = server_task.await.expect("server task failed");
         assert!(observed, "server should observe clean close-notify from client");
+    }
+
+    /// Regression: a genuine TLS negotiation failure (here, the server presents
+    /// a self-signed cert the client does NOT trust) surfaces from
+    /// `process_new_packets` and must be reported as a typed authentication
+    /// error (`is_authentication_error` true) — the rustls analogue of Java's
+    /// `SSLException` -> `SslAuthenticationException`. This is what lets
+    /// `KafkaChannel::prepare()` stamp the channel AUTHENTICATION_FAILED.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_handshake_cert_failure_is_authentication_error() {
+        // Server uses a self-signed cert; client uses a DIFFERENT truststore
+        // (the default factory, which trusts only the webpki roots), so the
+        // client must reject the server certificate.
+        let (_factory_unused, server_config) = build_paired_factory_and_server_config();
+        let client_factory = create_test_factory();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&client_factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        let server_task = tokio::spawn(async move { drive_server(server_stream, server_config).await });
+
+        let err = transport
+            .handshake()
+            .await
+            .expect_err("handshake should fail on untrusted cert");
+        assert!(
+            is_authentication_error(&err),
+            "TLS cert validation failure must be a typed authentication error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("TLS handshake failed"),
+            "error message should carry the TLS handshake prefix, got: {err}"
+        );
+
+        let _ = transport.close().await;
+        let _ = server_task.await;
+    }
+
+    /// Regression: a transport-level connection reset mid-handshake (peer closes
+    /// the TCP connection before any TLS records are exchanged) must surface as
+    /// a plain transport error — NOT a typed authentication error. The original
+    /// I/O error kind is preserved so downstream treats it as a retriable
+    /// disconnect (mirrors Java re-throwing the original `IOException`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_handshake_reset_is_not_authentication_error() {
+        let factory = create_test_factory();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        // Server abruptly drops the TCP connection instead of speaking TLS:
+        // the client sees an EOF / connection-reset mid-handshake, which must be
+        // classified as a transport disconnect, not an auth failure.
+        drop(server_stream);
+
+        let err = transport.handshake().await.expect_err("handshake should fail on a reset/EOF");
+        assert!(
+            !is_authentication_error(&err),
+            "a transport reset/EOF must NOT be a typed authentication error, got: {err:?}"
+        );
+        // The original transport error kind is preserved (a disconnect-class kind),
+        // never rewrapped into an opaque auth error.
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::NotConnected
+            ),
+            "expected a transport disconnect-class error kind, got: {:?}",
+            err.kind()
+        );
+
+        let _ = transport.close().await;
     }
 
     // ---- Test helpers ---------------------------------------------------------

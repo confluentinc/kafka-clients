@@ -25,7 +25,7 @@ use super::ClientInformation;
 /// A registry for collecting channel metadata such as cipher and client information.
 ///
 /// Translated from the Java `ChannelMetadataRegistry` interface.
-pub trait ChannelMetadataRegistry: Send {
+pub trait ChannelMetadataRegistry: Send + Sync {
     /// Register information about the SSL cipher we are using.
     /// Re-registering the information will overwrite the previous one.
     fn register_cipher_information(&mut self, cipher_information: CipherInformation);

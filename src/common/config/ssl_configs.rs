@@ -194,6 +194,59 @@ impl Default for SslConfig {
     }
 }
 
+/// Applies a single `ssl.*` configuration key/value pair to `ssl`.
+///
+/// Shared by [`crate::producer::ProducerConfig`] and
+/// [`crate::consumer::ConsumerConfig`] so the `ssl.*` parsing logic lives in
+/// exactly one place. Unknown `ssl.*` keys are logged and ignored, matching
+/// Java's `AbstractConfig` behavior (unknown keys are accepted silently).
+///
+/// The caller is responsible for matching the `"ssl."` prefix before calling
+/// this; `key` is the full Java config key (e.g. `"ssl.truststore.location"`).
+pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfig, key: &str, value: &str) {
+    match key {
+        SSL_TRUSTSTORE_LOCATION_CONFIG => {
+            ssl.truststore_location = Some(value.to_string());
+        },
+        SSL_TRUSTSTORE_PASSWORD_CONFIG => {
+            ssl.truststore_password = Some(value.to_string());
+        },
+        SSL_TRUSTSTORE_CERTIFICATES_CONFIG => {
+            ssl.truststore_certificates = Some(value.to_string());
+        },
+        SSL_TRUSTSTORE_TYPE_CONFIG => {
+            ssl.truststore_type = value.to_string();
+        },
+        SSL_KEYSTORE_LOCATION_CONFIG => {
+            ssl.keystore_location = Some(value.to_string());
+        },
+        SSL_KEYSTORE_PASSWORD_CONFIG => {
+            ssl.keystore_password = Some(value.to_string());
+        },
+        SSL_KEYSTORE_KEY_CONFIG => {
+            ssl.keystore_key = Some(value.to_string());
+        },
+        SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => {
+            ssl.keystore_certificate_chain = Some(value.to_string());
+        },
+        SSL_KEYSTORE_TYPE_CONFIG => {
+            ssl.keystore_type = value.to_string();
+        },
+        SSL_KEY_PASSWORD_CONFIG => {
+            ssl.key_password = Some(value.to_string());
+        },
+        SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
+            ssl.endpoint_identification_algorithm = value.to_string();
+        },
+        SSL_ENABLED_PROTOCOLS_CONFIG => {
+            ssl.enabled_protocols = value.split(',').map(|s| s.trim().to_string()).collect();
+        },
+        _ => {
+            log::warn!("Unknown SSL configuration key: {}", key);
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +356,44 @@ mod tests {
         assert_eq!(DEFAULT_SSL_KEYSTORE_TYPE, "JKS");
         assert_eq!(DEFAULT_SSL_TRUSTSTORE_TYPE, "JKS");
         assert_eq!(DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM, "https");
+    }
+
+    #[test]
+    fn test_apply_ssl_config_key_sets_each_field() {
+        let mut ssl = SslConfig::default();
+        apply_ssl_config_key(&mut ssl, SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem");
+        apply_ssl_config_key(&mut ssl, SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass");
+        apply_ssl_config_key(&mut ssl, SSL_TRUSTSTORE_CERTIFICATES_CONFIG, "-----BEGIN CERTIFICATE-----");
+        apply_ssl_config_key(&mut ssl, SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12");
+        apply_ssl_config_key(&mut ssl, SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem");
+        apply_ssl_config_key(&mut ssl, SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass");
+        apply_ssl_config_key(&mut ssl, SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----");
+        apply_ssl_config_key(&mut ssl, SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG, "-----BEGIN CERTIFICATE-----");
+        apply_ssl_config_key(&mut ssl, SSL_KEYSTORE_TYPE_CONFIG, "JKS");
+        apply_ssl_config_key(&mut ssl, SSL_KEY_PASSWORD_CONFIG, "key-pass");
+        apply_ssl_config_key(&mut ssl, SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "");
+        apply_ssl_config_key(&mut ssl, SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3");
+
+        assert_eq!(ssl.truststore_location.as_deref(), Some("/ts.pem"));
+        assert_eq!(ssl.truststore_password.as_deref(), Some("ts-pass"));
+        assert_eq!(ssl.truststore_certificates.as_deref(), Some("-----BEGIN CERTIFICATE-----"));
+        assert_eq!(ssl.truststore_type, "PKCS12");
+        assert_eq!(ssl.keystore_location.as_deref(), Some("/ks.pem"));
+        assert_eq!(ssl.keystore_password.as_deref(), Some("ks-pass"));
+        assert_eq!(ssl.keystore_key.as_deref(), Some("-----BEGIN PRIVATE KEY-----"));
+        assert_eq!(ssl.keystore_certificate_chain.as_deref(), Some("-----BEGIN CERTIFICATE-----"));
+        assert_eq!(ssl.keystore_type, "JKS");
+        assert_eq!(ssl.key_password.as_deref(), Some("key-pass"));
+        assert_eq!(ssl.endpoint_identification_algorithm, "");
+        assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"]);
+    }
+
+    #[test]
+    fn test_apply_ssl_config_key_unknown_key_is_ignored() {
+        let mut ssl = SslConfig::default();
+        // Unknown key must not panic and must leave defaults untouched.
+        apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value");
+        assert_eq!(ssl.truststore_type, "PEM");
+        assert!(ssl.truststore_location.is_none());
     }
 }

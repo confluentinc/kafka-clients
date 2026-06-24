@@ -1,0 +1,46 @@
+======================================================================
+Consumer E2E Latency Benchmark — Rust Kafka Consumer
+======================================================================
+Bootstrap:   pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Topic:       cmp-librdkafka-bench
+Group:       q3-rust-1781529704
+Throughput:  50000 msg/s
+Duration:    60 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      100000 messages
+Interval:    10 s
+======================================================================
+>>> Ensuring topic 'cmp-librdkafka-bench' (8 partitions)...
+    WARN: could not run /home/ec2-user/dev/opensource/kafka/bin/kafka-topics.sh: No such file or directory (os error 2) (continuing)
+Offset reset: latest
+Client config: loaded /home/ec2-user/bench/cc_rust.properties (SASL/SSL etc.)
+Fetch config: fetch.min.bytes=4194304 fetch.max.wait.ms=default max.partition.fetch.bytes=4194304 fetch.max.bytes=default max.poll.records=2500
+
+>>> Subscribed; waiting for partition assignment (KIP-848 join)...
+    assigned 12 partition(s) after 0.5s
+>>> --no-produce: drive the producer externally now.
+
+>>> Measuring (warmup 100000 msgs, then 60 s)...
+
+>>> first records arrived 35.6s after producer start (after 72 polls)
+    warmup complete (100000 msgs); measuring now
+[interval 0] t=  10.0s msgs=2084120 thr=   208252 msg/s  avg=182.80 p50=177 p99=477 p999=594 max=673 ms  cpu=  0.0% rss=  53.3MB
+[interval 1] t=  20.0s msgs=1998690 thr=   199746 msg/s  avg=169.56 p50=168 p99=310 p999=384 max=511 ms  cpu=  0.0% rss=  53.3MB
+[interval 2] t=  30.0s msgs=1998690 thr=   199860 msg/s  avg=168.93 p50=168 p99=308 p999=332 max=350 ms  cpu=  0.0% rss=  53.4MB
+[interval 3] t=  40.0s msgs=2012130 thr=   200719 msg/s  avg=168.10 p50=167 p99=305 p999=385 max=515 ms  cpu=  0.0% rss=  53.4MB
+[interval 4] t=  50.0s msgs=2002725 thr=   200179 msg/s  avg=169.10 p50=168 p99=306 p999=327 max=353 ms  cpu=  0.0% rss=  57.8MB
+
+Loop breakdown over 6212 polls: poll().await=99.9%  per-record processing=0.1%  (avg 1946 records/poll)
+Records/poll distribution (non-empty polls, post-warmup): n=6087 min=165 mean=1985.4 p50=2500 p99=2500 max=2500
+
+======================================================================
+SUMMARY — Rust Kafka Consumer (warmup 100000 excluded)
+======================================================================
+Measured messages: 12086300
+Duration:          60.01 s
+Throughput:        201389 msg/s  (196.67 MiB/s)
+E2E latency (ms):  min=18 avg=171.21 stddev=75.12 p50=169 p90=268 p95=286 p99=321 p99.9=518 max=673
+RSS (MB, current): avg=54.2 min=53.3 max=57.8
+======================================================================
+
+Results written to: consumer-perf/results/q3-rust-1781529704

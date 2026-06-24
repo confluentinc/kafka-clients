@@ -30,7 +30,7 @@ use std::pin::Pin;
 /// [`write_to`](KafkaSend::write_to) before all data is fully written.
 ///
 /// All I/O is async per CLAUDE.md rule 8.
-pub trait KafkaSend: Send {
+pub trait KafkaSend: Send + Sync {
     /// Returns `true` if this send is complete.
     fn completed(&self) -> bool;
 

@@ -552,6 +552,11 @@ impl KafkaClient for MockClient {
         self.wakeup.notify_one();
     }
 
+    fn wakeup_handle(&self) -> Arc<tokio::sync::Notify> {
+        // The mock client never blocks on I/O; return an unused handle.
+        Arc::new(tokio::sync::Notify::new())
+    }
+
     fn wakeup_notify(&self) -> Arc<Notify> {
         self.wakeup.clone()
     }

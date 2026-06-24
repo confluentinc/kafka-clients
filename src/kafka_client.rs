@@ -178,6 +178,12 @@ pub trait KafkaClient {
     /// Wake up the client if it is currently blocked waiting for I/O.
     fn wakeup(&self);
 
+    /// Returns a lock-free handle to the underlying selector's wakeup
+    /// primitive (`Selectable::wakeup_handle`). Lets a caller wake an
+    /// in-progress `poll()` from another task without holding the
+    /// `NetworkClientDelegate` lock and without cancelling the poll.
+    fn wakeup_handle(&self) -> Arc<Notify>;
+
     /// Returns the [`Notify`] handle used by the underlying selector's poll loop.
     ///
     /// This allows the producer to share the selector's wakeup mechanism,

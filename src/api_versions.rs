@@ -23,6 +23,8 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use rustc_hash::FxHashMap;
+
 use super::NodeApiVersions;
 
 /// Information about finalized features and their epoch.
@@ -53,7 +55,10 @@ pub struct ApiVersions {
 
 #[derive(Debug)]
 struct ApiVersionsInner {
-    node_api_versions: HashMap<String, NodeApiVersions>,
+    /// Keyed by node-id string; looked up on every request build via
+    /// `latest_usable_version_in_range`. `FxHashMap` (Phase 27) — internal
+    /// only, never exposed.
+    node_api_versions: FxHashMap<String, NodeApiVersions>,
     /// The maximum finalized feature epoch of all the node api versions.
     max_finalized_features_epoch: i64,
     finalized_features: Option<HashMap<String, i16>>,
@@ -64,7 +69,7 @@ impl ApiVersions {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(ApiVersionsInner {
-                node_api_versions: HashMap::new(),
+                node_api_versions: FxHashMap::default(),
                 max_finalized_features_epoch: -1,
                 finalized_features: None,
             }),
@@ -96,6 +101,30 @@ impl ApiVersions {
     pub fn get(&self, node_id: &str) -> Option<NodeApiVersions> {
         let inner = self.inner.read().unwrap();
         inner.node_api_versions.get(node_id).cloned()
+    }
+
+    /// Returns the most recent version usable for the given API in the allowed range,
+    /// computed under the read lock without cloning the node's `NodeApiVersions`.
+    ///
+    /// The outer `Option` is `None` when the node is not known (no version information),
+    /// matching the `is_some()` discrimination used by callers that fall back to the
+    /// latest allowed version. When the node is known, the inner `Result` is the outcome
+    /// of [`NodeApiVersions::latest_usable_version_in_range`].
+    ///
+    /// This avoids the deep clone of `NodeApiVersions` (three `HashMap`s and a `Vec`)
+    /// that [`Self::get`] performs on every request build.
+    pub fn latest_usable_version_in_range(
+        &self,
+        node_id: &str,
+        api_key: &crate::common::protocol::ApiKeys,
+        oldest_allowed_version: i16,
+        latest_allowed_version: i16,
+    ) -> Option<Result<i16, crate::common::KafkaError>> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .node_api_versions
+            .get(node_id)
+            .map(|v| v.latest_usable_version_in_range(api_key, oldest_allowed_version, latest_allowed_version))
     }
 
     /// Returns the maximum finalized features epoch.

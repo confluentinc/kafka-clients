@@ -36,7 +36,7 @@ use tokio::net::TcpStream;
 /// of Java's `SelectionKey`. The builder wraps the stream in the appropriate transport
 /// layer (e.g., `PlaintextTransportLayer` or `SslTransportLayer`) and pairs it with
 /// an `Authenticator` inside a `KafkaChannel`.
-pub trait ChannelBuilder: Send {
+pub trait ChannelBuilder: Send + Sync {
     /// Returns a `KafkaChannel` with `TransportLayer` and `Authenticator` configured.
     ///
     /// # Arguments

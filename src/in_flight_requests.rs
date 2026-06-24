@@ -17,7 +17,9 @@
 //! Translated from `org.apache.kafka.clients.NetworkClient.InFlightRequest`
 //! (inner class) and `org.apache.kafka.clients.InFlightRequests`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -228,7 +230,12 @@ impl fmt::Display for InFlightRequest {
 /// from other threads without taking a lock.
 pub struct InFlightRequests {
     max_in_flight_requests_per_connection: usize,
-    requests: HashMap<String, VecDeque<InFlightRequest>>,
+    /// Keyed by node-id string. `FxHashMap` (Phase 27): this map is looked
+    /// up several times per network poll per node; Java's `String` caches
+    /// its hashCode so its `HashMap` lookups don't rehash, while Rust's
+    /// default SipHash rehashes the full key every time. FxHash matches
+    /// Java's effective cost. Internal only — never exposed.
+    requests: FxHashMap<String, VecDeque<InFlightRequest>>,
     /// Thread-safe total number of in-flight requests.
     in_flight_request_count: AtomicI32,
 }
@@ -238,7 +245,7 @@ impl InFlightRequests {
     pub fn new(max_in_flight_requests_per_connection: usize) -> Self {
         Self {
             max_in_flight_requests_per_connection,
-            requests: HashMap::new(),
+            requests: FxHashMap::default(),
             in_flight_request_count: AtomicI32::new(0),
         }
     }

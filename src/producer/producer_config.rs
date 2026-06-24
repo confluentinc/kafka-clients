@@ -426,7 +426,7 @@ impl ProducerConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    Self::parse_ssl_config(&mut config.ssl_config, key, value);
+                    ssl_configs::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);
@@ -471,50 +471,6 @@ impl ProducerConfig {
             trimmed
                 .parse::<i16>()
                 .map_err(|_| format!("Invalid configuration value for 'acks': {acks_string}"))
-        }
-    }
-
-    fn parse_ssl_config(ssl: &mut SslConfig, key: &str, value: &str) {
-        match key {
-            ssl_configs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
-                ssl.truststore_location = Some(value.to_string());
-            },
-            ssl_configs::SSL_TRUSTSTORE_PASSWORD_CONFIG => {
-                ssl.truststore_password = Some(value.to_string());
-            },
-            ssl_configs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG => {
-                ssl.truststore_certificates = Some(value.to_string());
-            },
-            ssl_configs::SSL_TRUSTSTORE_TYPE_CONFIG => {
-                ssl.truststore_type = value.to_string();
-            },
-            ssl_configs::SSL_KEYSTORE_LOCATION_CONFIG => {
-                ssl.keystore_location = Some(value.to_string());
-            },
-            ssl_configs::SSL_KEYSTORE_PASSWORD_CONFIG => {
-                ssl.keystore_password = Some(value.to_string());
-            },
-            ssl_configs::SSL_KEYSTORE_KEY_CONFIG => {
-                ssl.keystore_key = Some(value.to_string());
-            },
-            ssl_configs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => {
-                ssl.keystore_certificate_chain = Some(value.to_string());
-            },
-            ssl_configs::SSL_KEYSTORE_TYPE_CONFIG => {
-                ssl.keystore_type = value.to_string();
-            },
-            ssl_configs::SSL_KEY_PASSWORD_CONFIG => {
-                ssl.key_password = Some(value.to_string());
-            },
-            ssl_configs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
-                ssl.endpoint_identification_algorithm = value.to_string();
-            },
-            ssl_configs::SSL_ENABLED_PROTOCOLS_CONFIG => {
-                ssl.enabled_protocols = value.split(',').map(|s| s.trim().to_string()).collect();
-            },
-            _ => {
-                warn!("Unknown SSL configuration key: {}", key);
-            },
         }
     }
 }
