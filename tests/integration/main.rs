@@ -27,7 +27,6 @@ mod connection_test;
 mod consumer_test;
 mod consumer_topic_creation_test;
 mod metadata_test;
-mod performance_test;
 mod plaintext_consumer_assign_test;
 mod plaintext_consumer_callback_test;
 mod plaintext_consumer_commit_test;

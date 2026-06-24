@@ -5,11 +5,37 @@ Outputs a markdown file with base64 embedded graph.
 """
 
 import json
+import math
 import sys
 import matplotlib.pyplot as plt
 from datetime import datetime
 import base64
 from io import BytesIO
+
+# Optional per-window latency percentiles, plotted/reported when present in the
+# JSONL "latency" object, e.g. {"p50": "...", "p90": "...", "p99": "...", "p999": "..."}.
+LATENCY_PERCENTILES = ["p50", "p90", "p99", "p999"]
+
+
+def _to_float(v):
+    """Parse a metrics string value; treat missing / '-inf' / 0 as 0.0."""
+    if v is None or v == '-inf' or v == 0 or v == '0':
+        return 0.0
+    return float(v)
+
+
+def _percentile(values, p):
+    """Nearest-rank p-th percentile (p in 0..1) of a list of per-window values.
+
+    Computed over the window series (one sample per window), since the JSONL
+    buckets expose only average/max/total/count, not raw samples. Uses the same
+    ceil(n*p) nearest-rank convention as the per-window latency histograms so
+    the two agree. Returns 0 for an empty list."""
+    if not values:
+        return 0
+    s = sorted(values)
+    idx = max(0, min(len(s) - 1, math.ceil(p * len(s)) - 1))
+    return s[idx]
 
 def read_metrics(jsonl_file):
     """Read JSONL file and extract RSS max, CPU max, latency, throughput, and timestamp data."""
@@ -20,7 +46,14 @@ def read_metrics(jsonl_file):
     latency_max_values = []
     throughput_values = []  # MB/s
     msg_rate_values = []  # messages/s
-    
+    # Per-window flag: True only for windows inside the measured interval, i.e.
+    # measurement_start_ms is set (not "-inf") and measurement_end_ms is "-inf".
+    measured_flags = []
+    # Optional latency percentiles, collected per window for those present in the
+    # data; pruned after the loop to only the percentiles that actually appeared.
+    latency_pcts = {k: [] for k in LATENCY_PERCENTILES}
+    latency_pct_present = {k: False for k in LATENCY_PERCENTILES}
+
     # Store raw data for rolling window calculation
     raw_data = []
     
@@ -96,7 +129,19 @@ def read_metrics(jsonl_file):
         latency_max_values.append(latency_max)
         throughput_values.append(throughput_mbs)
         msg_rate_values.append(msg_rate)
-    
+        measured_flags.append(
+            measurement_start_data_ms != '-inf' and measurement_end_data_ms == '-inf'
+        )
+        # Optional latency percentiles, one entry per window (0.0 if absent).
+        lat_obj = data.get('latency', {})
+        for _k in LATENCY_PERCENTILES:
+            if _k in lat_obj:
+                latency_pct_present[_k] = True
+            latency_pcts[_k].append(_to_float(lat_obj.get(_k)))
+
+    # Keep only the percentiles that appeared in at least one window.
+    latency_pcts = {k: v for k, v in latency_pcts.items() if latency_pct_present[k]}
+
     # Calculate efficiency metrics
     cpu_efficiency_values = []
     memory_efficiency_values = []
@@ -117,7 +162,7 @@ def read_metrics(jsonl_file):
             mem_eff = 0
         memory_efficiency_values.append(mem_eff)
     
-    return timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values
+    return timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts
 
 def plot_rss_metrics(timestamps, rss_max_values):
     """Create a matplotlib plot of RSS max values over time."""
@@ -176,19 +221,25 @@ def plot_cpu_metrics(timestamps, cpu_max_values):
     
     return image_base64
 
-def plot_latency_metrics(timestamps, latency_avg_values, latency_max_values):
-    """Create a matplotlib plot of latency average and max values over time."""
+def plot_latency_metrics(timestamps, latency_avg_values, latency_max_values, latency_pcts=None):
+    """Create a matplotlib plot of latency average/max (and percentiles if present) over time."""
     # Convert timestamps to relative seconds for better readability
     if timestamps:
         start_time = timestamps[0]
         relative_times = [(ts - start_time) / 1000.0 for ts in timestamps]
     else:
         relative_times = []
-    
+
     # Create the plot
     plt.figure(figsize=(12, 6))
     plt.plot(relative_times, latency_avg_values, marker='o', linestyle='-', linewidth=1, markersize=3, color='green', label='Average Latency')
     plt.plot(relative_times, latency_max_values, marker='s', linestyle='-', linewidth=1, markersize=3, color='red', label='Max Latency')
+    # Optional per-window percentiles, drawn only for those present in the data.
+    pct_colors = {"p50": "tab:blue", "p90": "tab:orange", "p99": "tab:purple", "p999": "tab:brown"}
+    for k in LATENCY_PERCENTILES:
+        if latency_pcts and k in latency_pcts:
+            plt.plot(relative_times, latency_pcts[k], marker='.', linestyle='--', linewidth=1,
+                     markersize=2, color=pct_colors.get(k), label=k)
     plt.xlabel('Time (seconds)', fontsize=12)
     plt.ylabel('Latency (ms)', fontsize=12)
     plt.title('Latency Over Time', fontsize=14, fontweight='bold')
@@ -313,24 +364,46 @@ def plot_memory_efficiency_metrics(timestamps, memory_efficiency_values):
     
     return image_base64
 
-def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values):
+def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts=None):
     """Create a markdown report with embedded base64 image."""
+    # Restrict the overall statistics and data-point counts to the measured
+    # interval only: windows where measurement_start_ms is set (not "-inf") and
+    # measurement_end_ms is still "-inf". Warmup/pre-measurement windows and the
+    # closing marker (plus any trailing windows) are excluded. The plotted time
+    # series above still show every window.
+    def _measured(values):
+        return [v for v, keep in zip(values, measured_flags) if keep]
+    rss_max_values = _measured(rss_max_values)
+    cpu_max_values = _measured(cpu_max_values)
+    latency_avg_values = _measured(latency_avg_values)
+    latency_max_values = _measured(latency_max_values)
+    throughput_values = _measured(throughput_values)
+    msg_rate_values = _measured(msg_rate_values)
+    cpu_efficiency_values = _measured(cpu_efficiency_values)
+    memory_efficiency_values = _measured(memory_efficiency_values)
+
     # Calculate some statistics
     # Calculate RSS statistics
     if rss_max_values:
         max_rss = max(rss_max_values) / (1024 * 1024)
         min_rss = min([r for r in rss_max_values if r > 0]) / (1024 * 1024) if any(r > 0 for r in rss_max_values) else 0
         avg_rss = sum(rss_max_values) / len(rss_max_values) / (1024 * 1024)
+        p50_rss = _percentile(rss_max_values, 0.50) / (1024 * 1024)
+        p90_rss = _percentile(rss_max_values, 0.90) / (1024 * 1024)
+        p99_rss = _percentile(rss_max_values, 0.99) / (1024 * 1024)
     else:
-        max_rss = min_rss = avg_rss = 0
-    
+        max_rss = min_rss = avg_rss = p50_rss = p90_rss = p99_rss = 0
+
     # Calculate CPU statistics
     if cpu_max_values:
         max_cpu = max(cpu_max_values)
         min_cpu = min([c for c in cpu_max_values if c > 0]) if any(c > 0 for c in cpu_max_values) else 0
         avg_cpu = sum(cpu_max_values) / len(cpu_max_values)
+        p50_cpu = _percentile(cpu_max_values, 0.50)
+        p90_cpu = _percentile(cpu_max_values, 0.90)
+        p99_cpu = _percentile(cpu_max_values, 0.99)
     else:
-        max_cpu = min_cpu = avg_cpu = 0
+        max_cpu = min_cpu = avg_cpu = p50_cpu = p90_cpu = p99_cpu = 0
     
     # Calculate latency statistics
     if latency_avg_values:
@@ -346,38 +419,70 @@ def create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_bas
         avg_latency_max = sum(latency_max_values) / len(latency_max_values)
     else:
         max_latency_max = min_latency_max = avg_latency_max = 0
-    
+
+    # Latency percentile statistics (measured windows only), for whichever
+    # percentiles are present in the data. Rendered into the Latency section.
+    latency_pct_block = ""
+    for k in LATENCY_PERCENTILES:
+        if not latency_pcts or k not in latency_pcts:
+            continue
+        vals = _measured(latency_pcts[k])
+        if not vals:
+            continue
+        nz = [v for v in vals if v > 0]
+        pmax = max(vals)
+        pmin = min(nz) if nz else 0
+        pavg = sum(vals) / len(vals)
+        latency_pct_block += (
+            f"\n#### {k}\n"
+            f"- **Maximum**: {pmax:.2f} ms\n"
+            f"- **Minimum**: {pmin:.2f} ms\n"
+            f"- **Average**: {pavg:.2f} ms\n"
+        )
+
     # Calculate throughput statistics
     if throughput_values:
         max_throughput = max(throughput_values)
         min_throughput = min([t for t in throughput_values if t > 0]) if any(t > 0 for t in throughput_values) else 0
         avg_throughput = sum(throughput_values) / len(throughput_values)
+        p50_throughput = _percentile(throughput_values, 0.50)
+        p90_throughput = _percentile(throughput_values, 0.90)
+        p99_throughput = _percentile(throughput_values, 0.99)
     else:
-        max_throughput = min_throughput = avg_throughput = 0
-    
+        max_throughput = min_throughput = avg_throughput = p50_throughput = p90_throughput = p99_throughput = 0
+
     # Calculate message rate statistics
     if msg_rate_values:
         max_msg_rate = max(msg_rate_values)
         min_msg_rate = min([m for m in msg_rate_values if m > 0]) if any(m > 0 for m in msg_rate_values) else 0
         avg_msg_rate = sum(msg_rate_values) / len(msg_rate_values)
+        p50_msg_rate = _percentile(msg_rate_values, 0.50)
+        p90_msg_rate = _percentile(msg_rate_values, 0.90)
+        p99_msg_rate = _percentile(msg_rate_values, 0.99)
     else:
-        max_msg_rate = min_msg_rate = avg_msg_rate = 0
-    
+        max_msg_rate = min_msg_rate = avg_msg_rate = p50_msg_rate = p90_msg_rate = p99_msg_rate = 0
+
     # Calculate CPU efficiency statistics
     if cpu_efficiency_values:
         max_cpu_eff = max(cpu_efficiency_values)
         min_cpu_eff = min([c for c in cpu_efficiency_values if c > 0]) if any(c > 0 for c in cpu_efficiency_values) else 0
         avg_cpu_eff = sum(cpu_efficiency_values) / len(cpu_efficiency_values)
+        p50_cpu_eff = _percentile(cpu_efficiency_values, 0.50)
+        p90_cpu_eff = _percentile(cpu_efficiency_values, 0.90)
+        p99_cpu_eff = _percentile(cpu_efficiency_values, 0.99)
     else:
-        max_cpu_eff = min_cpu_eff = avg_cpu_eff = 0
-    
+        max_cpu_eff = min_cpu_eff = avg_cpu_eff = p50_cpu_eff = p90_cpu_eff = p99_cpu_eff = 0
+
     # Calculate memory efficiency statistics
     if memory_efficiency_values:
         max_mem_eff = max(memory_efficiency_values)
         min_mem_eff = min([m for m in memory_efficiency_values if m > 0]) if any(m > 0 for m in memory_efficiency_values) else 0
         avg_mem_eff = sum(memory_efficiency_values) / len(memory_efficiency_values)
+        p50_mem_eff = _percentile(memory_efficiency_values, 0.50)
+        p90_mem_eff = _percentile(memory_efficiency_values, 0.90)
+        p99_mem_eff = _percentile(memory_efficiency_values, 0.99)
     else:
-        max_mem_eff = min_mem_eff = avg_mem_eff = 0
+        max_mem_eff = min_mem_eff = avg_mem_eff = p50_mem_eff = p90_mem_eff = p99_mem_eff = 0
     
     markdown_content = f"""# Performance Metrics Report
 
@@ -394,6 +499,9 @@ Performance test metrics over time.
 - **Maximum RSS**: {max_rss:.2f} MB
 - **Minimum RSS**: {min_rss:.2f} MB
 - **Average RSS**: {avg_rss:.2f} MB
+- **P50 RSS**: {p50_rss:.2f} MB
+- **P90 RSS**: {p90_rss:.2f} MB
+- **P99 RSS**: {p99_rss:.2f} MB
 - **Total Data Points**: {len(rss_max_values)}
 
 ## CPU Usage
@@ -405,6 +513,9 @@ Performance test metrics over time.
 - **Maximum CPU**: {max_cpu:.2f}%
 - **Minimum CPU**: {min_cpu:.2f}%
 - **Average CPU**: {avg_cpu:.2f}%
+- **P50 CPU**: {p50_cpu:.2f}%
+- **P90 CPU**: {p90_cpu:.2f}%
+- **P99 CPU**: {p99_cpu:.2f}%
 - **Total Data Points**: {len(cpu_max_values)}
 
 ## Latency
@@ -422,7 +533,7 @@ Performance test metrics over time.
 - **Maximum**: {max_latency_max:.2f} ms
 - **Minimum**: {min_latency_max:.2f} ms
 - **Average**: {avg_latency_max:.2f} ms
-
+{latency_pct_block}
 - **Total Data Points**: {len(latency_avg_values)}
 
 ## Throughput
@@ -434,6 +545,9 @@ Performance test metrics over time.
 - **Maximum**: {max_throughput:.2f} MB/s
 - **Minimum**: {min_throughput:.2f} MB/s
 - **Average**: {avg_throughput:.2f} MB/s
+- **P50**: {p50_throughput:.2f} MB/s
+- **P90**: {p90_throughput:.2f} MB/s
+- **P99**: {p99_throughput:.2f} MB/s
 - **Total Data Points**: {len(throughput_values)}
 
 ## Message Rate
@@ -445,6 +559,9 @@ Performance test metrics over time.
 - **Maximum**: {max_msg_rate:.2f} msg/s
 - **Minimum**: {min_msg_rate:.2f} msg/s
 - **Average**: {avg_msg_rate:.2f} msg/s
+- **P50**: {p50_msg_rate:.2f} msg/s
+- **P90**: {p90_msg_rate:.2f} msg/s
+- **P99**: {p99_msg_rate:.2f} msg/s
 - **Total Data Points**: {len(msg_rate_values)}
 
 ## CPU Efficiency
@@ -456,6 +573,9 @@ Performance test metrics over time.
 - **Maximum**: {max_cpu_eff:.2f} msg/(s*1% CPU)
 - **Minimum**: {min_cpu_eff:.2f} msg/(s*1% CPU)
 - **Average**: {avg_cpu_eff:.2f} msg/(s*1% CPU)
+- **P50**: {p50_cpu_eff:.2f} msg/(s*1% CPU)
+- **P90**: {p90_cpu_eff:.2f} msg/(s*1% CPU)
+- **P99**: {p99_cpu_eff:.2f} msg/(s*1% CPU)
 - **Total Data Points**: {len(cpu_efficiency_values)}
 
 ## Memory Efficiency
@@ -467,6 +587,9 @@ Performance test metrics over time.
 - **Maximum**: {max_mem_eff:.2f} msg/(s*1KiB RSS)
 - **Minimum**: {min_mem_eff:.2f} msg/(s*1KiB RSS)
 - **Average**: {avg_mem_eff:.2f} msg/(s*1KiB RSS)
+- **P50**: {p50_mem_eff:.2f} msg/(s*1KiB RSS)
+- **P90**: {p90_mem_eff:.2f} msg/(s*1KiB RSS)
+- **P99**: {p99_mem_eff:.2f} msg/(s*1KiB RSS)
 - **Total Data Points**: {len(memory_efficiency_values)}
 
 ## Notes
@@ -492,7 +615,7 @@ def main():
         output_file = sys.argv[2]
     
     print(f"Reading metrics from {jsonl_file}...")
-    timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values = read_metrics(jsonl_file)
+    timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts = read_metrics(jsonl_file)
     
     print(f"Found {len(timestamps)} data points")
     print("Creating RSS plot...")
@@ -502,7 +625,7 @@ def main():
     cpu_image_base64 = plot_cpu_metrics(timestamps, cpu_max_values)
     
     print("Creating Latency plot...")
-    latency_image_base64 = plot_latency_metrics(timestamps, latency_avg_values, latency_max_values)
+    latency_image_base64 = plot_latency_metrics(timestamps, latency_avg_values, latency_max_values, latency_pcts)
     
     print("Creating Throughput plot...")
     throughput_image_base64 = plot_throughput_metrics(timestamps, throughput_values)
@@ -517,7 +640,7 @@ def main():
     memory_efficiency_image_base64 = plot_memory_efficiency_metrics(timestamps, memory_efficiency_values)
     
     print("Generating markdown report...")
-    markdown_content = create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values)
+    markdown_content = create_markdown_report(rss_image_base64, cpu_image_base64, latency_image_base64, throughput_image_base64, msg_rate_image_base64, cpu_efficiency_image_base64, memory_efficiency_image_base64, timestamps, rss_max_values, cpu_max_values, latency_avg_values, latency_max_values, throughput_values, msg_rate_values, cpu_efficiency_values, memory_efficiency_values, measured_flags, latency_pcts)
     
     with open(output_file, 'w') as f:
         f.write(markdown_content)
