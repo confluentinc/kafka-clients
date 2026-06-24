@@ -435,6 +435,14 @@ static int Producer_send_thread(void* arg) {
     producer->send_completed = 1;
     cnd_signal(&producer->pending_batches_available_cnd);
     mtx_unlock(&producer->pending_batches_mutex);
+    // Flush so every in-flight record resolves before we join the poll-futures
+    // task. Without this the poll task can block forever in
+    // FutureRecordMetadata_get_all on a record that never completes on its own
+    // (e.g. a MockProducer with auto_complete disabled), deadlocking the join
+    // below. Java's flush() likewise completes outstanding records. We hold no
+    // GIL here (background C task), so the blocking flush does not stall the
+    // event loop.
+    kafka_producer_Producer_flush(producer->producer, NULL);
     thrd_join(producer->poll_futures_thread, NULL);
 
     return thrd_success;
