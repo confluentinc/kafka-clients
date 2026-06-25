@@ -54,6 +54,15 @@ use crate::common::KafkaError;
 use crate::common::KafkaFuture;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
+use crate::ffi::common::{
+    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
+    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
+};
+#[cfg(test)]
+use crate::ffi::common::{
+    kafka_common_KafkaError_code, kafka_common_KafkaError_destroy, kafka_common_KafkaError_is_fatal,
+    kafka_common_KafkaError_is_retriable, kafka_common_KafkaError_message,
+};
 use crate::producer::Callback;
 use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
@@ -61,17 +70,6 @@ use crate::producer::Producer;
 use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
-
-/// Initialize the default stderr log backend if RUST_LOG is set.
-/// Idempotent: succeeds once, silently no-ops on subsequent calls.
-/// A custom log backend (e.g. Python logging bridge) can be set before
-/// the first producer is created to override this default.
-fn init_default_logger() {
-    #[cfg(feature = "ffi")]
-    {
-        let _ = env_logger::try_init();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -135,15 +133,6 @@ struct RecordMetadataInner {
     topic_cstring: CString,
 }
 
-/// Internal wrapper that pairs [`KafkaError`] with a [`CString`] for the
-/// error message, so that [`kafka_common_KafkaError_message`] can return a valid
-/// `*const c_char` that lives as long as the handle.
-struct KafkaErrorInner {
-    error: KafkaError,
-    /// Cached CString for the error message, created once at construction time.
-    message_cstring: CString,
-}
-
 // ---------------------------------------------------------------------------
 // Opaque handle types
 // ---------------------------------------------------------------------------
@@ -170,17 +159,6 @@ pub struct kafka_producer_FutureRecordMetadata_t {
 /// Internally wraps a `Box<RecordMetadataInner>`.
 #[repr(C)]
 pub struct kafka_producer_RecordMetadata_t {
-    _private: [u8; 0],
-}
-
-/// Opaque error handle returned by functions that can fail.
-///
-/// Internally wraps a `Box<KafkaErrorInner>` containing the [`KafkaError`]
-/// and a cached [`CString`] for the error message.
-///
-/// A null `kafka_common_KafkaError_t` pointer means success (no error).
-#[repr(C)]
-pub struct kafka_common_KafkaError_t {
     _private: [u8; 0],
 }
 
@@ -301,23 +279,6 @@ fn producer_send(
     }
 }
 
-/// Wraps a [`KafkaError`] into a heap-allocated opaque error pointer, including
-/// a cached [`CString`] for the error message.
-fn box_error(error: KafkaError) -> *mut kafka_common_KafkaError_t {
-    let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let inner = KafkaErrorInner { error, message_cstring };
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_KafkaError_t
-}
-
-/// Casts a `*const kafka_common_KafkaError_t` to a reference to `KafkaErrorInner`.
-///
-/// # Safety
-///
-/// The pointer must be non-null and must have been created by [`box_error`].
-unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'static KafkaErrorInner {
-    unsafe { &*(error as *const KafkaErrorInner) }
-}
-
 /// Casts a `*const kafka_producer_ProducerProperties_t` to a reference to
 /// `HashMap<String, String>`.
 ///
@@ -376,19 +337,13 @@ fn box_metadata(metadata: RecordMetadata) -> *mut kafka_producer_RecordMetadata_
 // I/O). The non-blocking send path funnels through one shared **submission
 // task** (not a per-message `tokio::spawn`, per CLAUDE.md §11).
 
-/// A unit of work executed by the dispatcher thread. Each async operation
-/// captures its own C callback, `user_data`, and owned result handles into the
-/// closure and bakes in the correct invocation, so the queue stays uniform
-/// (one element type) while every operation delivers exactly the outputs its
-/// sync counterpart produces.
-type CompletionJob = Box<dyn FnOnce() + Send>;
-
 // Internal canonical callback signatures (not exported). There are only three
-// distinct shapes; the public per-method typedefs below alias these.
+// distinct shapes; the public per-method typedefs below alias these. The
+// `OperationCallbackFn` shape (a null `error` means success) lives in
+// `crate::ffi::common` since it is reused by the consumer's void-returning ops.
 //
 // - Record:    `metadata` non-null on success / `error` non-null on failure.
 // - Batch:     parallel `metadata[i]`/`errors[i]` arrays valid only for the call.
-// - Operation: a null `error` means success.
 type RecordCallbackFn =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 type BatchCallbackFn = unsafe extern "C" fn(
@@ -397,7 +352,6 @@ type BatchCallbackFn = unsafe extern "C" fn(
     i32,
     *mut std::ffi::c_void,
 );
-type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 
 // Public per-method callback typedefs. Per CLAUDE.md §3, an async callback type
 // is named after its C method plus a `_callback` suffix, so each async function
@@ -466,22 +420,6 @@ impl RecordBatchCompletion {
     }
 }
 
-/// Owned operation completion payload (`flush_async` / `close_async`).
-struct OperationCompletion {
-    callback: OperationCallbackFn,
-    user_data: *mut std::ffi::c_void,
-    error: *mut kafka_common_KafkaError_t,
-}
-// SAFETY: see `RecordCompletion`.
-unsafe impl Send for OperationCompletion {}
-impl OperationCompletion {
-    /// # Safety
-    /// Must be called exactly once, on the dispatcher thread.
-    unsafe fn fire(self) {
-        unsafe { (self.callback)(self.error, self.user_data) };
-    }
-}
-
 /// A C callback target (function pointer + opaque `user_data`) captured by a
 /// Rust [`Callback`]. Wrapped so it can cross the tokio task / dispatcher
 /// thread boundary.
@@ -503,16 +441,6 @@ struct RecordBatchCallbackTarget {
 }
 // SAFETY: see `RecordCallbackTarget`.
 unsafe impl Send for RecordBatchCallbackTarget {}
-
-/// Operation-callback target for `flush_async` / `close_async`. See
-/// [`RecordCallbackTarget`].
-#[derive(Clone, Copy)]
-struct OperationCallbackTarget {
-    callback: OperationCallbackFn,
-    user_data: *mut std::ffi::c_void,
-}
-// SAFETY: see `RecordCallbackTarget`.
-unsafe impl Send for OperationCallbackTarget {}
 
 /// Builds a native producer [`Callback`] that, when fired on completion,
 /// converts the borrowed metadata/error into owned C handles and enqueues a
@@ -536,9 +464,7 @@ fn make_record_callback(
         let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
         // If the dispatcher is gone (post-teardown), run inline to honor the
         // callback obligation rather than leak the owned handles.
-        if let Err(returned) = completion_tx.send(job) {
-            (returned.0)();
-        }
+        enqueue_or_run_inline(&completion_tx, job);
     })
 }
 
@@ -630,19 +556,8 @@ struct ProducerHandle {
 /// Builds a [`ProducerHandle`] around a [`ProducerKind`], spawning the
 /// dispatcher thread and the submission task, and returns the leaked C handle.
 fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
-    let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+    let (completion_tx, dispatcher) = common::spawn_dispatcher("kafka-producer-callback-dispatcher");
     let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel::<SendRequest>();
-
-    let dispatcher = std::thread::Builder::new()
-        .name("kafka-producer-callback-dispatcher".to_string())
-        .spawn(move || {
-            // Run each completion closure; exits once all senders are dropped
-            // (after draining any queued jobs).
-            while let Ok(job) = completion_rx.recv() {
-                job();
-            }
-        })
-        .expect("failed to spawn producer callback dispatcher thread");
 
     let rt_handle = kind.runtime().handle().clone();
 
@@ -1590,9 +1505,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
         };
         let completion = RecordCompletion { callback: target.callback, user_data: target.user_data, metadata, error };
         let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
-        if let Err(returned) = tx.send(job) {
-            (returned.0)();
-        }
+        enqueue_or_run_inline(&tx, job);
     });
 }
 
@@ -1691,9 +1604,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
         }
         let batch = RecordBatchCompletion { callback: target.callback, user_data: target.user_data, metadata, errors };
         let job: CompletionJob = Box::new(move || unsafe { batch.fire() });
-        if let Err(returned) = completion.send(job) {
-            (returned.0)();
-        }
+        enqueue_or_run_inline(&completion, job);
     });
 }
 
@@ -2059,9 +1970,7 @@ fn flush_or_close_async(
         };
         let op = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
         let job: CompletionJob = Box::new(move || unsafe { op.fire() });
-        if let Err(returned) = completion.send(job) {
-            (returned.0)();
-        }
+        enqueue_or_run_inline(&completion, job);
     });
 }
 
@@ -2219,116 +2128,6 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_clear(producer: *mut kafka_
     match &*guard {
         ProducerKind::Mock(mock, _) => mock.clear(),
         ProducerKind::Kafka(..) => {},
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
-
-/// Returns the error code from a [`kafka_common_KafkaError_t`] handle.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// The numeric error code (i32), or `0` if the error handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common_KafkaError_t) -> i32 {
-    if error.is_null() {
-        return 0;
-    }
-    i32::from(unsafe { error_ref(error) }.error.code())
-}
-
-/// Returns the error message as a null-terminated C string.
-///
-/// The returned pointer is valid until [`kafka_common_KafkaError_destroy`] is called on
-/// the same handle.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// A `*const c_char` pointing to the error message, or null if the error
-/// handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-/// The returned pointer must not be used after the error is destroyed.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_message(error: *const kafka_common_KafkaError_t) -> *const c_char {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    unsafe { error_ref(error) }.message_cstring.as_ptr()
-}
-
-/// Returns whether the error is retriable.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error is retriable, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafka_common_KafkaError_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_retriable()
-}
-
-/// Returns whether the error is fatal (unrecoverable).
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error is fatal, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_common_KafkaError_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_fatal()
-}
-
-/// Destroys an error handle, freeing all associated resources.
-///
-/// Safe to call with a null pointer (no-op).
-///
-/// # Safety
-///
-/// - `error` must be null or a valid handle from a function that returned an error.
-/// - After this call, the pointer is invalid and must not be used.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_common_KafkaError_t) {
-    if !error.is_null() {
-        unsafe {
-            drop(Box::from_raw(error as *mut KafkaErrorInner));
-        }
     }
 }
 
