@@ -17,10 +17,12 @@
 //! Provides the [`Serializer`] and [`Deserializer`] traits and common
 //! implementations for strings and byte arrays.
 
+pub mod byte_array_deserializer;
 pub mod byte_array_serializer;
 pub mod deserializer;
 pub mod string_serializer;
 
+pub use byte_array_deserializer::ByteArrayDeserializer;
 pub use byte_array_serializer::ByteArraySerializer;
 pub use deserializer::Deserializer;
 pub use string_serializer::StringSerializer;

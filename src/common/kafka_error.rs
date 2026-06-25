@@ -278,6 +278,15 @@ pub enum KafkaError {
     /// carries no error code). Used by `Consumer::wakeup()` to break out
     /// of a `poll()` / `commit_sync()` / etc. call.
     Wakeup(String),
+    /// Concurrent modification error — the consumer was accessed from more
+    /// than one thread.
+    ///
+    /// Corresponds to Java's `java.util.ConcurrentModificationException`,
+    /// thrown by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
+    /// multi-threaded access"). Like `IllegalState`, it is a plain
+    /// `RuntimeException` — neither an `ApiException` nor a `KafkaException`
+    /// — so it is never retriable and never fatal.
+    ConcurrentModification(String),
 }
 
 impl KafkaError {
@@ -385,6 +394,15 @@ impl KafkaError {
         Self::Wakeup(message.into())
     }
 
+    /// Create a concurrent modification error.
+    ///
+    /// Corresponds to Java's `ConcurrentModificationException` thrown by
+    /// `KafkaConsumer.acquire()` when the consumer is accessed from more
+    /// than one thread.
+    pub fn concurrent_modification(message: impl Into<String>) -> Self {
+        Self::ConcurrentModification(message.into())
+    }
+
     /// Create a record batch too large error.
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
@@ -409,7 +427,8 @@ impl KafkaError {
             | Self::Timeout(_)
             | Self::RecordTooLarge(_)
             | Self::Serialization(_)
-            | Self::Wakeup(_) => None,
+            | Self::Wakeup(_)
+            | Self::ConcurrentModification(_) => None,
         }
     }
 
@@ -439,7 +458,8 @@ impl KafkaError {
             | Self::Timeout(msg)
             | Self::RecordTooLarge(msg)
             | Self::Serialization(msg)
-            | Self::Wakeup(msg) => msg,
+            | Self::Wakeup(msg)
+            | Self::ConcurrentModification(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
     }
@@ -493,7 +513,11 @@ impl KafkaError {
     pub fn is_api_exception(&self) -> bool {
         !matches!(
             self,
-            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_) | Self::Wakeup(_)
+            Self::IllegalArgument(_)
+                | Self::IllegalState(_)
+                | Self::Serialization(_)
+                | Self::Wakeup(_)
+                | Self::ConcurrentModification(_)
         )
     }
 
@@ -517,7 +541,10 @@ impl KafkaError {
     /// [`is_api_exception`](Self::is_api_exception), which excludes it
     /// because `WakeupException` is not an `ApiException`.)
     pub fn is_kafka_exception(&self) -> bool {
-        !matches!(self, Self::IllegalArgument(_) | Self::IllegalState(_))
+        !matches!(
+            self,
+            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::ConcurrentModification(_)
+        )
     }
 }
 
@@ -540,8 +567,43 @@ impl fmt::Display for KafkaError {
             Self::RecordTooLarge(msg) => write!(f, "RecordTooLargeError: {msg}"),
             Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
             Self::Wakeup(msg) => write!(f, "WakeupError: {msg}"),
+            Self::ConcurrentModification(msg) => write!(f, "ConcurrentModificationError: {msg}"),
         }
     }
 }
 
 impl std::error::Error for KafkaError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ConcurrentModification` mirrors `IllegalState`: a plain Java
+    /// `RuntimeException`, so it carries no protocol code, is never
+    /// retriable or fatal, and is neither an `ApiException` nor a
+    /// `KafkaException`.
+    #[test]
+    fn concurrent_modification_parity_with_illegal_state() {
+        let cme = KafkaError::concurrent_modification("KafkaConsumer is not safe for multi-threaded access.");
+        let ise = KafkaError::illegal_state("bad state");
+
+        assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
+        assert_eq!(cme.code(), ise.code());
+        assert_eq!(cme.error(), ise.error());
+        assert_eq!(cme.is_retriable(), ise.is_retriable());
+        assert!(!cme.is_retriable());
+        assert_eq!(cme.is_fatal(), ise.is_fatal());
+        assert!(!cme.is_fatal());
+        assert_eq!(cme.is_api_exception(), ise.is_api_exception());
+        assert!(!cme.is_api_exception());
+        assert_eq!(cme.is_kafka_exception(), ise.is_kafka_exception());
+        assert!(!cme.is_kafka_exception());
+        assert!(cme.kafka_error().is_none());
+    }
+
+    #[test]
+    fn concurrent_modification_display() {
+        let cme = KafkaError::concurrent_modification("oops");
+        assert_eq!(cme.to_string(), "ConcurrentModificationError: oops");
+    }
+}
