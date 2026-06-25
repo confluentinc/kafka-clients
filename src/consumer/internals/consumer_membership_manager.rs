@@ -99,9 +99,18 @@ pub(crate) struct ConsumerMembershipManager {
     /// the ack. The membership state stays `RECONCILING`
     /// (`reconciliation_in_progress = true`) until the callback completes.
     ///
-    /// `None` in steady state (no rebalance) — the only added per-iteration
-    /// cost is an `Option::is_some` check (Perf Contract item 1).
+    /// `None` in steady state (no rebalance). Guarded by
+    /// [`Self::pending_reconcile_flag`] so the steady-state `reconcile`
+    /// entry never locks this mutex (Perf Contract item 1).
     pending_reconcile: Mutex<Option<PendingReconcile>>,
+    /// Lock-free fast-path mirror of `pending_reconcile.is_some()`. The
+    /// steady-state `reconcile` entry does a single `Relaxed` load and, when
+    /// `false` (no rebalance in flight), skips the `pending_reconcile` lock
+    /// entirely — so the only added per-iteration cost in steady state is
+    /// this one atomic load (Perf Contract item 1: no new lock, no alloc, no
+    /// Arc clone). Set/cleared in lockstep with `pending_reconcile` under
+    /// its mutex.
+    pending_reconcile_flag: std::sync::atomic::AtomicBool,
 }
 
 /// Cross-iteration state for a reconcile callback awaiting its app-side
@@ -171,6 +180,7 @@ impl ConsumerMembershipManager {
             commit_request_manager,
             leave_group_operation: Mutex::new(GroupMembershipOperation::Default),
             pending_reconcile: Mutex::new(None),
+            pending_reconcile_flag: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -842,17 +852,23 @@ impl ConsumerMembershipManager {
     }
 
     /// `true` when a reconcile rebalance callback is awaiting its ack.
+    ///
+    /// Lock-free: reads the [`Self::pending_reconcile_flag`] atomic only.
+    /// This is the steady-state `reconcile` entry check — no mutex lock when
+    /// no rebalance is in flight (Perf Contract item 1).
     fn has_pending_reconcile(&self) -> bool {
-        self.pending_reconcile.lock().map(|g| g.is_some()).unwrap_or(false)
+        self.pending_reconcile_flag.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Stores the cross-iteration pending-callback state (Phase 41b).
+    /// Stores the cross-iteration pending-callback state (Phase 41b) and
+    /// sets the lock-free flag in lockstep.
     fn store_pending(&self, pending: PendingReconcile) {
         let mut guard = match self.pending_reconcile.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         *guard = Some(pending);
+        self.pending_reconcile_flag.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Drives a pending reconcile callback non-blockingly: `try_recv`s the
@@ -872,6 +888,9 @@ impl ConsumerMembershipManager {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            // Clear the flag in lockstep with taking the state. If the ack
+            // is not ready, `store_pending` below re-sets both.
+            self.pending_reconcile_flag.store(false, std::sync::atomic::Ordering::Release);
             guard.take()
         };
         let Some(pending) = pending else {
