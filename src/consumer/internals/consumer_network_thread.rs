@@ -604,11 +604,16 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             //
             // Once drained we process the whole batch (Java applies each
             // classification as its heartbeat response arrives — in steady
-            // state there is at most one). A later transition in the same
-            // batch overwriting an earlier transition's stored release is the
-            // correct terminal outcome (e.g. Fenced-then-Fatal ends FATAL and
-            // releases via the Fatal callback); the earlier callback event was
-            // already enqueued and its ack send becomes a harmless no-op.
+            // state there is at most one). A second release transition in the
+            // same batch cannot overwrite the first's stored release: once the
+            // first transition stores its `PendingRelease` the member is
+            // FENCED/FATAL/STALE, and the `MemberState` previous-valid-states
+            // guard rejects the second `transition_to_*` (FATAL excludes
+            // FENCED, FENCED excludes FATAL, STALE only accepts LEAVING, FATAL
+            // is terminal). The `?` returns `Err` BEFORE `store_pending_release`,
+            // so the member keeps the first transition's terminal state and we
+            // only log the rejected second transition — matching Java, where
+            // the second `transitionTo()` throws `IllegalStateException`.
             if !release_pending {
                 let pending = {
                     let mut rm_guard = match self.request_managers.lock() {

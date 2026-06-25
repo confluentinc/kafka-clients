@@ -201,3 +201,22 @@ Phase 41 Issue 2 extends the §31 non-blocking contract to the release-path
 
 Per `agent-roles.md`, this §31 wording change extends the rule mandated by the
 PLAN; flagged here, CLAUDE.md untouched.
+
+---
+
+## Issue 5 (Design Flaw — inaccurate rationale, doc-only) — RESOLVED
+
+Re-review finding. The Phase 2.4 comment in `consumer_network_thread.rs:607-611`
+claimed a later release transition in the same batch "overwrites" the earlier
+one's stored `PendingRelease` and yields the correct terminal state. That path
+is unreachable: once the first release transition stores its `PendingRelease`,
+the member is FENCED/FATAL/STALE and the `MemberState` previous-valid-states
+guard rejects the second `transition_to_*` (the `?` returns `Err` before
+`store_pending_release`). The member keeps the first transition's terminal state
+— matching Java (second `transitionTo()` throws `IllegalStateException`). The
+bounded edge is SAFE, but for the guard reason, not an overwrite.
+
+Resolution (Manager, comment-only): rewrote the comment to describe the
+state-guard rejection and the Java-equivalent behavior; removed the misleading
+"overwrite … harmless no-op" wording so the safety argument is not built on a
+dead path. No code-behavior change; `cargo build` clean.
