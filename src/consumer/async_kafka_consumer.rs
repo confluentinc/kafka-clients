@@ -5773,6 +5773,43 @@ mod tests {
         assert!(token.is_cancelled(), "handle().wakeup() must cancel the current token");
     }
 
+    /// Phase 41c / §31 deadlock regression (blocker b): a reentrant
+    /// `ConsumerHandle` op submitted from another task (standing in for a
+    /// rebalance-listener body) routes an `ApplicationEvent` through the bg
+    /// pipeline and completes — proving the handle's no-drain await is NOT
+    /// frozen. The op is `pause`, which (like every bg-routed handle op)
+    /// goes through `submit_and_await`. We act as the bg task by reading
+    /// the app-event channel and completing the event's handle; the handle
+    /// op must then return promptly.
+    #[tokio::test]
+    async fn handle_reentrant_op_completes_through_bg_pipeline() {
+        let (consumer, mut handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        // Submit the reentrant op from another task — exactly how a
+        // captured handle is used from inside a listener.
+        let op = tokio::spawn(async move { handle.pause(std::slice::from_ref(&tp)).await });
+
+        // Act as the bg task: pull the PausePartitions envelope and
+        // complete it. (The real bg loop keeps spinning during a callback
+        // after Phase 41b, so this event is serviced rather than stranded.)
+        let env = handles.app_event_rx.recv().await.expect("PausePartitions envelope must arrive");
+        match env.event {
+            ApplicationEvent::PausePartitions { handle, partitions } => {
+                assert_eq!(partitions.len(), 1);
+                handle.complete(());
+            },
+            other => panic!("expected PausePartitions, got {}", other.type_name()),
+        }
+
+        op.await
+            .expect("handle op task ok")
+            .expect("reentrant pause completes — no deadlock");
+        // The consumer must outlive the handle/op (shared Arc state).
+        drop(consumer);
+    }
+
     /// Phase 12.5 Issue 7 regression: the production ctor must register
     /// the `CommitRequestManager` as a `MemberStateListener` on the
     /// `ConsumerMembershipManager`, so heartbeat-driven member-epoch

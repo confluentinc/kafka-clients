@@ -1864,6 +1864,62 @@ mod tests {
         assert_eq!(mgr_arc.state(), MemberState::Acknowledging);
     }
 
+    /// Phase 41b / §31 required test #2 at the membership-state-machine
+    /// level: the rebalance does NOT advance out of `RECONCILING` until the
+    /// listener ack arrives, AND the bg-loop drive (`reconcile`) is NOT
+    /// frozen while the ack is pending — repeated `reconcile` calls return
+    /// promptly (each is a non-blocking `try_recv`), leaving the state in
+    /// `RECONCILING`, until the ack is delivered.
+    #[tokio::test]
+    async fn reconcile_does_not_advance_until_ack_and_loop_is_not_frozen() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+
+        let topic_id = Uuid::random_uuid();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.assigned_topic_names_cache.insert(topic_id, "t1".to_string());
+        }
+        let mut new_assignment = HashMap::new();
+        new_assignment.insert(topic_id, vec![0, 1]);
+        mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // First reconcile enqueues onPartitionsAssigned and stores the
+        // pending ack — it does NOT block.
+        mgr.reconcile(0, true).await.unwrap();
+        let env = rx.recv().await.expect("event");
+        let ack = match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                ack
+            },
+            other => panic!("unexpected event: {:?}", other),
+        };
+
+        // Drive the loop several more times while the ack is still
+        // pending: each call returns promptly (NOT frozen) and the state
+        // stays RECONCILING (does NOT advance).
+        for _ in 0..5 {
+            mgr.reconcile(0, true).await.unwrap();
+            assert_eq!(
+                mgr.state(),
+                MemberState::Reconciling,
+                "state must NOT advance before the listener ack arrives (§31)"
+            );
+        }
+
+        // Deliver the ack; the next reconcile drives the continuation and
+        // the state advances to ACKNOWLEDGING.
+        ack.send(Ok(())).unwrap();
+        mgr.reconcile(0, true).await.unwrap();
+        assert_eq!(
+            mgr.state(),
+            MemberState::Acknowledging,
+            "state must advance once the listener ack arrives"
+        );
+    }
+
     /// Regression for COMMENTS R2-2: `reconcile(now, can_commit=false)`
     /// is a no-op when auto-commit is enabled AND a commit manager is
     /// present, mirroring Java's
