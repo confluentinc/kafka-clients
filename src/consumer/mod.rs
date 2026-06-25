@@ -37,7 +37,7 @@ pub mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub use async_kafka_consumer::WakeupHandle;
+pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -446,18 +446,23 @@ where
     /// including signal handlers.
     fn wakeup(&self);
 
-    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
-    /// [`Consumer::wakeup`] from a task / thread other than the one that
-    /// owns the consumer.
+    /// Returns a `Clone + Send + Sync` [`ConsumerHandle`] exposing
+    /// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+    /// callable from a task / thread other than the one that owns the
+    /// consumer.
     ///
-    /// No Java method counterpart: Java's `Consumer` reference is itself
-    /// shareable across threads, so `consumer.wakeup()` can be called from
-    /// another thread while the owning thread blocks in `poll()` /
-    /// `position()`. Rust borrows the consumer as `&mut self` for the
-    /// duration of a blocking call, so a reference cannot cross the task
-    /// boundary; obtain a [`WakeupHandle`] beforehand instead. See
-    /// [`WakeupHandle`].
-    fn wakeup_handle(&self) -> WakeupHandle;
+    /// No Java method counterpart — it recovers a Java capability. Java's
+    /// `Consumer` reference is itself shareable across threads, so (1)
+    /// `consumer.wakeup()` can be called from another thread while the
+    /// owning thread blocks in `poll()` / `position()`, and (2) a
+    /// `ConsumerRebalanceListener` can call back into the consumer
+    /// (`assign`/`seek`/`pause`/`position`/...) from inside a callback by
+    /// capturing the `consumer` variable. Rust borrows the consumer as
+    /// `&mut self` for the duration of a blocking call and
+    /// `Box<dyn Consumer>` is not `Clone`, so neither is expressible with a
+    /// bare reference; capture a [`ConsumerHandle`] instead. See
+    /// [`ConsumerHandle`].
+    fn handle(&self) -> ConsumerHandle;
 }
 
 /// Constructs a new [`Consumer`] from a configuration and explicit

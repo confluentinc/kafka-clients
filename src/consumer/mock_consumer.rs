@@ -39,8 +39,8 @@ use crate::common::{KafkaError, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::internals::auto_offset_reset_strategy::StrategyType;
 use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
 use crate::consumer::{
-    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern, WakeupHandle,
+    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
+    ConsumerRecord, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 use crate::metadata::LeaderAndEpoch;
 
@@ -97,7 +97,7 @@ pub struct MockConsumer<K, V> {
     /// Atomic so [`Consumer::wakeup`] can
     /// take `&self` (callable from any task / signal handler). `SeqCst`
     /// because wakeup is rare and reorder reasoning is not worth the win.
-    /// `Arc` so [`Consumer::wakeup_handle`] can hand a shareable clone to
+    /// `Arc` so [`Consumer::handle`] can hand a shareable clone to
     /// another task.
     wakeup: Arc<AtomicBool>,
     records: HashMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
@@ -999,8 +999,8 @@ where
         self.wakeup.store(true, Ordering::SeqCst);
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        WakeupHandle::for_mock(Arc::clone(&self.wakeup))
+    fn handle(&self) -> ConsumerHandle {
+        ConsumerHandle::for_mock(Arc::clone(&self.wakeup))
     }
 }
 
@@ -1085,15 +1085,15 @@ mod tests {
         assert!(matches!(err, KafkaError::IllegalState(_)));
     }
 
-    /// A `WakeupHandle` obtained from the mock fires the SAME wakeup flag
-    /// as `wakeup()`: the next `poll` observes it and returns `Wakeup`.
+    /// A [`ConsumerHandle`] obtained from the mock fires the SAME wakeup
+    /// flag as `wakeup()`: the next `poll` observes it and returns `Wakeup`.
     #[tokio::test]
-    async fn wakeup_handle_wakes_next_poll() {
+    async fn handle_wakeup_wakes_next_poll() {
         let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
         // Handle is moved into another task — no reference to the consumer
         // crosses the boundary.
-        let handle = c.wakeup_handle();
+        let handle = c.handle();
         tokio::spawn(async move {
             handle.wakeup();
         })
