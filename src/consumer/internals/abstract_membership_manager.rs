@@ -840,6 +840,42 @@ impl AbstractMembershipManager {
     /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
     /// (defined on `ConsumerMembershipManager`, but the contract is
     /// shared across all subclasses).
+    /// Non-blocking sibling of [`Self::invoke_rebalance_callback`]
+    /// (Phase 41b). Enqueues the §31 `RebalanceListenerCallbackNeeded`
+    /// event and returns the ack [`oneshot::Receiver`] **without awaiting
+    /// it**, so the caller (the bg loop's `reconcile`) can store it and
+    /// return — leaving the loop free to keep spinning while the app side
+    /// runs the listener. Returns `Ok(None)` when no listener is
+    /// registered (the same short-circuit as the blocking variant — Java's
+    /// `subscriptions.rebalanceListener().isPresent()` guard), in which
+    /// case the caller proceeds as if the callback completed successfully.
+    ///
+    /// `MutexGuard`s are never held across an `.await` (this method does
+    /// not await at all).
+    pub(crate) fn enqueue_rebalance_callback(
+        &self,
+        method: ConsumerRebalanceListenerMethodName,
+        partitions: Vec<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<Option<oneshot::Receiver<Result<(), KafkaError>>>, KafkaError> {
+        let listener_present = {
+            let subs = match self.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.rebalance_listener().is_some()
+        };
+        if !listener_present {
+            return Ok(None);
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let event =
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name: method, partitions, ack: ack_tx };
+        self.background_event_handler.add(event, current_time_ms)?;
+        Ok(Some(ack_rx))
+    }
+
     pub(crate) async fn invoke_rebalance_callback(
         &self,
         method: ConsumerRebalanceListenerMethodName,

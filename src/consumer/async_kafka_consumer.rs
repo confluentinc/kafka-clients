@@ -3191,6 +3191,15 @@ where
                     let send_result = result.clone();
                     let _ = ack.send(send_result);
 
+                    // Phase 41b: poke the bg-task wakeup `Notify` so the
+                    // bg loop wakes promptly and `try_recv`s this ack on
+                    // its next `reconcile` entry — rather than waiting out
+                    // the selector poll timeout. This reuses the existing
+                    // wakeup primitive (Java's `Selector.wakeup()` analog);
+                    // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
+                    // Perf Contract item 2).
+                    self.network_thread_close.wakeup();
+
                     // Java throws if the result is an error — we propagate
                     // via `first_error` so subsequent events are still
                     // processed.
