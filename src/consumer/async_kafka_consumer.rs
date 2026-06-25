@@ -465,24 +465,20 @@ impl AsyncConsumerHandleState {
     /// Reentrant-safe [`AsyncKafkaConsumer::assign`].
     async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
         if partitions.is_empty() {
-            // Java `assign([])` acts as `unsubscribe()`. `unsubscribe` is a
-            // lifecycle op NOT exposed on the handle; mirror the behaviour
-            // by submitting an empty AssignmentChange (the bg task clears
-            // the assignment), matching the non-empty path so the handle
-            // never needs the unsubscribe pipeline.
-            let now_ms = self.time.milliseconds();
-            let deadline_ms = self.default_api_timeout_deadline_ms();
-            self.fetch_buffer.retain_all(&HashSet::new());
-            let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-            return self
-                .submit_and_await::<()>(
-                    ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: HashSet::new() },
-                    receiver,
-                    deadline_ms,
-                    "Timeout expired while waiting for the assignment-change event to complete",
-                    false,
-                )
-                .await;
+            // Phase 41 Issue 4: On the owning consumer, `assign([])` delegates
+            // to `unsubscribe()` (leave the group). The handle intentionally
+            // does NOT expose the unsubscribe / leave-group lifecycle pipeline
+            // (it owns neither `background_event_rx` nor the close path), so it
+            // cannot faithfully reproduce `assign([])`. Submitting an empty
+            // `AssignmentChange` would clear the assignment WITHOUT leaving the
+            // group — a silent divergence from Java's `KafkaConsumer.assign([])`
+            // for a group consumer. Reject it with a clear error pointing the
+            // caller at the owning consumer's `unsubscribe()`.
+            return Err(KafkaError::illegal_argument(
+                "ConsumerHandle::assign with an empty collection is not supported: on the owning \
+                 consumer assign([]) leaves the group (equivalent to unsubscribe()), which the \
+                 handle does not expose. Call unsubscribe() on the owning AsyncKafkaConsumer instead.",
+            ));
         }
 
         for tp in &partitions {
@@ -5448,6 +5444,11 @@ mod tests {
         /// Handle on the shared `SubscriptionState` so tests can inspect /
         /// pre-populate it.
         subscriptions: Arc<Mutex<SubscriptionState>>,
+        /// Set to `true` whenever the consumer's bg-task wakeup fn is invoked
+        /// (Phase 41 Issue 3 observability). Lets a `&mut self`-level component
+        /// test assert that the ack-send path in `process_background_events`
+        /// pokes the bg wakeup `Notify`.
+        bg_wakeup_called: Arc<AtomicBool>,
     }
 
     /// Builds a consumer along with the test-side channel handles needed
@@ -5585,7 +5586,7 @@ mod tests {
         };
         (
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
-            ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions: subs },
+            ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions: subs, bg_wakeup_called: wakeup_called },
         )
     }
 
@@ -5807,6 +5808,31 @@ mod tests {
             .expect("handle op task ok")
             .expect("reentrant pause completes — no deadlock");
         // The consumer must outlive the handle/op (shared Arc state).
+        drop(consumer);
+    }
+
+    /// Phase 41 Issue 4: `ConsumerHandle::assign([])` must REJECT the empty
+    /// collection (rather than silently clearing the assignment without
+    /// leaving the group). On the owning consumer `assign([])` delegates to
+    /// `unsubscribe()` (group leave), which the handle does not expose, so the
+    /// handle returns a clear error pointing the caller at the owning
+    /// consumer's `unsubscribe()`. A non-empty `assign` still routes through
+    /// the bg pipeline as before.
+    #[tokio::test]
+    async fn handle_assign_empty_is_rejected() {
+        let (consumer, _handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+
+        let err = handle.assign(Vec::new()).await.expect_err("empty assign must be rejected");
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "empty assign should be an illegal-argument error, got {err:?}",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsubscribe"),
+            "error must point the caller at unsubscribe(); got: {msg}",
+        );
         drop(consumer);
     }
 
@@ -6724,6 +6750,66 @@ mod tests {
         // test handles (used here so the helper struct stays
         // forward-compatible with future tests that need to inspect the
         // shared state).
+        drop(handles.subscriptions);
+    }
+
+    /// Phase 41 Issue 3: the ack-send path in `process_background_events`
+    /// must poke the bg-task wakeup `Notify` so the bg loop observes the ack
+    /// promptly (rather than waiting out the selector poll timeout). The
+    /// non-Docker component tests otherwise busy-drive the membership loop and
+    /// never exercise this poke — removing it (`network_thread_close.wakeup()`
+    /// after `ack.send(...)`) would fail no local test without this one. We
+    /// register a listener, enqueue a `ConsumerRebalanceListenerCallbackNeeded`
+    /// event, run `process_background_events`, and assert the test fixture's
+    /// `bg_wakeup_called` flag was set by the poke.
+    #[tokio::test]
+    async fn process_background_events_ack_pokes_bg_wakeup() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct NoopListener;
+        #[async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::new(NoopListener) as Arc<dyn ConsumerRebalanceListener>);
+
+        // The wakeup must not have fired before the callback is processed.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "bg wakeup must not be poked before the callback ack is sent",
+        );
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+        consumer.process_background_events().await.expect("ok");
+        assert!(ack_rx.await.expect("ack received").is_ok());
+
+        // The ack-send path must have poked the bg wakeup.
+        assert!(
+            handles.bg_wakeup_called.load(Ordering::Acquire),
+            "process_background_events must poke the bg wakeup after sending the listener ack",
+        );
         drop(handles.subscriptions);
     }
 
