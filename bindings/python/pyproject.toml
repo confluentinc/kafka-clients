@@ -19,6 +19,7 @@ dev = [
     "matplotlib",
     "pytest",
     "pytest-asyncio",
+    "testcontainers>=4.0",
 ]
 
 [tool.setuptools]

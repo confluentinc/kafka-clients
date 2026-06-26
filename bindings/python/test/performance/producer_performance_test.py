@@ -934,6 +934,44 @@ def signal_handler(sig, frame):
                  f"Exception during close: {e}".encode())
 
 
+def test_producer_e2e_latency(kafka_broker):
+    """Short producer-latency smoke run against a testcontainers Kafka broker.
+
+    Re-invokes this script as a subprocess with a short measurement window and a
+    p99 budget (its __main__ exits non-zero if the budget is exceeded), asserting
+    a clean run. Skips (via the fixture) when Docker/testcontainers is
+    unavailable. Mirrors the consumer perf test's in-suite entry."""
+    import subprocess as _sp
+
+    import conftest
+
+    topic = "producer-perf-smoke"
+    conftest.create_topic(kafka_broker, topic, partitions=4)
+
+    env = dict(os.environ)
+    env.update({
+        "BOOTSTRAP_SERVERS": kafka_broker.external_bootstrap,
+        "TOPIC_NAME": topic,
+        "CLIENT_VERSION": "3",
+        "ASYNC": "False",
+        "WARMUP_SECONDS": "0",
+        "TEST_DURATION_SECONDS": "8",
+        "LIMIT_RPS": "2000",
+        "VALUE_SIZE": "256",
+        "P99_LIMIT_MS": "5000",
+        "DO_VERIFY": "False",
+    })
+
+    proc = _sp.run(
+        [sys.executable, os.path.abspath(__file__)],
+        env=env, cwd=os.path.dirname(os.path.abspath(__file__)),
+        timeout=180, capture_output=True, text=True)
+    print(proc.stdout)
+    print(proc.stderr, file=sys.stderr)
+    assert proc.returncode == 0, (
+        f"producer perf run failed (rc={proc.returncode}); see output above")
+
+
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
