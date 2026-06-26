@@ -34,6 +34,8 @@ mod plaintext_consumer_fetch_test;
 mod plaintext_consumer_poll_test;
 mod plaintext_consumer_subscription_test;
 mod plaintext_consumer_test;
+#[cfg(feature = "multilanguage-tests")]
+mod multilanguage_consumer_test;
 mod producer_perf_test;
 mod producer_test;
 mod sasl_ssl_consumer_test;

@@ -1,0 +1,224 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Consumer integration tests run against all three backends (native Rust,
+//! Python, C) via [`multilanguage_consumer_test!`].
+//!
+//! Only the consumer is the system-under-test on the backend; setup records
+//! are produced with a native in-process Rust producer (the producer is
+//! incidental fixture). Scope is the supported consumer surface — no rebalance
+//! listeners, commit callbacks, or regex pattern subscription (those tests stay
+//! native-Rust-only; see plaintext_consumer_*.rs).
+//!
+//! Requires `--features multilanguage-tests`.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::serialization::ByteArraySerializer;
+use confluent_kafka::consumer::Consumer;
+use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
+
+use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::test_context::TestContext;
+use crate::multilanguage_consumer_test;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn b(s: &str) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+
+/// Consumer config for the backend under test. `bootstrap` must be reachable
+/// from the backend (container listener for python/c, host loopback for rust).
+fn consumer_config(bootstrap: &str, group_id: &str) -> HashMap<String, String> {
+    HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("group.id".to_string(), group_id.to_string()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+        ("client.id".to_string(), "multilang-consumer".to_string()),
+    ])
+}
+
+fn bootstrap_for<F: ConsumerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
+/// Produce `records` to `topic` with a native in-process Rust producer on the
+/// host-loopback bootstrap (the producer always runs in this process).
+async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("acks".to_string(), "all".to_string()),
+        ("linger.ms".to_string(), "0".to_string()),
+    ]);
+    let config = ProducerConfig::from_properties(&props).expect("producer config");
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
+        KafkaProducer::from_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+            .expect("create producer");
+    for &(k, v) in records {
+        let record = ProducerRecord::with_key(topic.to_string(), Some(b(k)), Some(b(v)));
+        // Fully-qualified trait call: KafkaProducer also has an inherent
+        // 2-arg send(record, callback) that would otherwise shadow this.
+        let fut = Producer::send(&producer, record).await.expect("send");
+        fut.get_timeout(Duration::from_secs(30)).await.expect("produce");
+    }
+    producer.close().await.expect("close producer");
+}
+
+/// Poll until at least `want` records are collected or `deadline` elapses.
+/// Returns the records as (key, value) byte pairs in receive order.
+async fn collect(
+    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    want: usize,
+    deadline: Duration,
+) -> Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+    let start = Instant::now();
+    let mut out = Vec::new();
+    while out.len() < want && start.elapsed() < deadline {
+        let records = consumer.poll(Duration::from_millis(500)).await.expect("poll");
+        for r in records {
+            out.push((r.key().map(|k| k.to_vec()), r.value().map(|v| v.to_vec())));
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Test bodies — generic over ConsumerBackendFactory
+// ---------------------------------------------------------------------------
+
+async fn assign_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_assign_consume");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    consumer.assign(vec![TopicPartition::new(topic.clone(), 0)]).await.expect("assign");
+
+    let got = collect(&mut consumer, 3, Duration::from_secs(20)).await;
+    let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
+    assert_eq!(values, vec![b("v0"), b("v1"), b("v2")], "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn subscribe_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_subscribe_consume");
+    produce(ctx, &topic, &[("k", "hello")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    assert_eq!(consumer.subscription(), [topic.clone()].into_iter().collect());
+
+    let got = collect(&mut consumer, 1, Duration::from_secs(20)).await;
+    assert_eq!(got.len(), 1, "{} backend", factory.name());
+    assert_eq!(got[0].1.clone().unwrap(), b("hello"));
+
+    consumer.close().await.expect("close");
+}
+
+async fn commit_and_committed<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_commit");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+    let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
+    assert_eq!(got.len(), 2, "{} backend", factory.name());
+
+    // Position advanced past the 2 records; commit it and read it back.
+    let position = consumer.position(&tp).await.expect("position");
+    assert_eq!(position, 2, "{} backend", factory.name());
+    consumer.commit_sync().await.expect("commit_sync");
+    let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
+    assert_eq!(committed.get(&tp).map(|o| o.offset()), Some(2), "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn seek_and_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_seek");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    // beginning/end offsets bracket the 3 produced records.
+    let begin = consumer.beginning_offsets(std::slice::from_ref(&tp)).await.expect("beginning");
+    let end = consumer.end_offsets(std::slice::from_ref(&tp)).await.expect("end");
+    assert_eq!(begin.get(&tp), Some(&0), "{} backend", factory.name());
+    assert_eq!(end.get(&tp), Some(&3), "{} backend", factory.name());
+
+    // Seek to offset 1 and consume from there.
+    consumer.seek(tp.clone(), 1).await.expect("seek");
+    let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
+    let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
+    assert_eq!(values, vec![b("v1"), b("v2")], "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn pause_resume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_pause");
+    produce(ctx, &topic, &[("k", "v")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    consumer.pause(std::slice::from_ref(&tp)).await.expect("pause");
+    assert!(consumer.paused().contains(&tp), "{} backend", factory.name());
+    // While paused, poll returns nothing.
+    let paused_poll = consumer.poll(Duration::from_millis(500)).await.expect("poll");
+    assert_eq!(paused_poll.count(), 0, "{} backend", factory.name());
+
+    consumer.resume(std::slice::from_ref(&tp)).await.expect("resume");
+    assert!(!consumer.paused().contains(&tp));
+    let got = collect(&mut consumer, 1, Duration::from_secs(20)).await;
+    assert_eq!(got.len(), 1, "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);
+multilanguage_consumer_test!(test_ml_subscribe_and_consume, subscribe_and_consume);
+multilanguage_consumer_test!(test_ml_commit_and_committed, commit_and_committed);
+multilanguage_consumer_test!(test_ml_seek_and_offsets, seek_and_offsets);
+multilanguage_consumer_test!(test_ml_pause_resume, pause_resume);
