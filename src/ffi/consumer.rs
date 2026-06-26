@@ -2165,7 +2165,7 @@ struct PartitionInfoListInner {
     items: Vec<PartitionInfoInner>,
 }
 
-fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_consumer_PartitionInfoList_t {
+pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_consumer_PartitionInfoList_t {
     let items = infos
         .into_iter()
         .map(|info| {

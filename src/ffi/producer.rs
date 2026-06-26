@@ -63,6 +63,9 @@ use crate::ffi::common::{
     kafka_common_KafkaError_code, kafka_common_KafkaError_destroy, kafka_common_KafkaError_is_fatal,
     kafka_common_KafkaError_is_retriable, kafka_common_KafkaError_message,
 };
+// PartitionInfoList handle + builder are shared with the consumer FFI so
+// kafka_producer_Producer_partitions_for can return the same opaque type.
+use crate::ffi::consumer::{box_partition_info_list, kafka_consumer_PartitionInfoList_t};
 use crate::producer::Callback;
 use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
@@ -1873,6 +1876,43 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
                 Err(e) => box_error(e),
             };
         }
+    }
+}
+
+/// Returns the partition metadata for a topic. On success writes a
+/// [`kafka_consumer_PartitionInfoList_t`] to `*out_list` (free it with
+/// [`kafka_consumer_PartitionInfoList_destroy`]) and returns null; on failure
+/// returns a non-null error and leaves `*out_list` untouched. The
+/// `PartitionInfoList` handle/accessors are shared with the consumer FFI.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle; `topic` a valid C string; `out_list` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
+    producer: *mut kafka_producer_Producer_t,
+    topic: *const c_char,
+    out_list: *mut *mut kafka_consumer_PartitionInfoList_t,
+) -> *mut kafka_common_KafkaError_t {
+    if producer.is_null() || topic.is_null() {
+        return box_error(KafkaError::new(Errors::InvalidRequest));
+    }
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let guard = producer_mtx.lock().unwrap();
+    let rt = guard.runtime();
+    let result = match &*guard {
+        ProducerKind::Mock(mock, _) => rt.block_on(mock.partitions_for(&topic_str)),
+        ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.partitions_for(&topic_str)),
+    };
+    match result {
+        Ok(infos) => {
+            if !out_list.is_null() {
+                unsafe { *out_list = box_partition_info_list(infos) };
+            }
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
     }
 }
 

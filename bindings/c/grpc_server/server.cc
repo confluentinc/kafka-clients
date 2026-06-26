@@ -165,6 +165,10 @@ extern "C" void metadata_copy_cb(int64_t offset, int32_t partition,
   out->timestamp = timestamp;
 }
 
+// Defined in the consumer section below; reused by the producer PartitionsFor.
+void node_to_proto(const kafka_common_Node_t* node, Node* dst);
+void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info, PartitionInfo* dst);
+
 class ProducerServiceImpl final : public ProducerService::Service {
  public:
   grpc::Status CreateProducer(grpc::ServerContext*,
@@ -288,11 +292,27 @@ class ProducerServiceImpl final : public ProducerService::Service {
   }
 
   grpc::Status PartitionsFor(grpc::ServerContext*,
-                             const PartitionsForRequest*,
+                             const PartitionsForRequest* req,
                              PartitionsForResponse* resp) override {
-    *resp->mutable_error() = make_synthetic_error(
-        VARIANT_ILLEGAL_STATE,
-        "PartitionsFor not yet exposed by the C FFI");
+    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE,
+          "unknown producer_id " + std::to_string(req->producer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_PartitionInfoList_t* list = nullptr;
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    int32_t n = kafka_consumer_PartitionInfoList_count(list);
+    for (int32_t i = 0; i < n; i++) {
+      partition_info_to_proto(kafka_consumer_PartitionInfoList_get(list, i), resp->add_partitions());
+    }
+    kafka_consumer_PartitionInfoList_destroy(list);
     return grpc::Status::OK;
   }
 

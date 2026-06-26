@@ -255,14 +255,19 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         return pb.StatusResponse()
 
     def PartitionsFor(self, request, context):
-        # producer.py doesn't expose partitions_for today (the C FFI does
-        # but the Python wrapper hasn't surfaced it). Return an empty
-        # list; tests that exercise this method should be skipped for
-        # the python backend until the wrapper grows the method.
-        return pb.PartitionsForResponse(error=pb.KafkaError(
-            variant=ILLEGAL_STATE, code=-1,
-            message="python: PartitionsFor not yet exposed by producer.py",
-            is_retriable=False, is_fatal=True))
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.PartitionsForResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            infos = producer.partitions_for(request.topic)
+        except kp.KafkaError as e:
+            return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
+        # _partition_info_to_proto is defined in the consumer section below and
+        # accepts the same PartitionInfo objects producer.partitions_for returns.
+        return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
 
     def Close(self, request, context):
         with self._lock:

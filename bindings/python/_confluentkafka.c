@@ -872,6 +872,22 @@ static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
     return PyLong_FromLong(0);
 }
 
+// Producer partitions_for: returns (list_handle_int, error_int). The list
+// handle is a kafka_consumer_PartitionInfoList_t (shared with the consumer FFI)
+// that Python drains via PartitionInfoList_drain.
+static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    const char* topic;
+    if (!PyArg_ParseTuple(args, "Ks", &producer_ptr, &topic)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    kafka_consumer_PartitionInfoList_t* list = NULL;
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_partitions_for(producer->producer, topic, &list);
+    return Py_BuildValue("KK",
+        (unsigned long long)(uintptr_t)list,
+        (unsigned long long)(uintptr_t)err);
+}
+
 // RecordMetadata destroy and copy functions
 static PyObject* py_RecordMetadata_destroy(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -1985,6 +2001,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Test-only: pause/resume the send task to exercise backpressure"},
     {"Producer_close", py_Producer_close, METH_VARARGS, "Close batching producer"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
+    {"Producer_partitions_for", py_Producer_partitions_for, METH_VARARGS,
+     "Partition metadata for a topic; returns (PartitionInfoList_handle, error)"},
     {"MockProducer_complete_next", py_MockProducer_complete_next, METH_VARARGS,
      "Complete the next pending send successfully"},
     {"MockProducer_error_next", py_MockProducer_error_next, METH_VARARGS,

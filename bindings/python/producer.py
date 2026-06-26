@@ -237,6 +237,18 @@ class Producer(_ProducerBase):
         if err != 0:
             raise KafkaError._from_c(err)
 
+    def partitions_for(self, topic):
+        """Return partition metadata for ``topic`` as a list of PartitionInfo.
+
+        Reuses the consumer binding's PartitionInfoList drain + conversion
+        (the FFI returns the same shared handle type)."""
+        import consumer as _kc
+        list_handle, err = _lib.Producer_partitions_for(self.c_producer, topic)
+        if err != 0:
+            raise KafkaError._from_c(err)
+        raw = _lib.PartitionInfoList_drain(list_handle)
+        return [_kc._to_partition_info(t) for t in raw]
+
     def close(self):
         if self.closed:
             return
