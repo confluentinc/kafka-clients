@@ -45,8 +45,11 @@ import grpc
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
+import consumer as kc  # noqa: E402  (KafkaConsumer / MockConsumer / TopicPartition / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
+import consumer_service_pb2 as cpb  # noqa: E402  (generated)
+import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 
 LOG = logging.getLogger("grpc_server")
 
@@ -280,6 +283,328 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         return self.Close(pb.CloseRequest(producer_id=request.producer_id), context)
 
 
+# ---------------------------------------------------------------------------
+# Consumer service
+# ---------------------------------------------------------------------------
+
+def _node_to_proto(node):
+    if node is None:
+        return None
+    return cpb.Node(id=node.id, host=node.host, port=node.port,
+                    rack=node.rack if node.rack is not None else None)
+
+
+def _partition_info_to_proto(info):
+    return cpb.PartitionInfo(
+        topic=info.topic,
+        partition=info.partition,
+        leader=_node_to_proto(info.leader),
+        replicas=[_node_to_proto(n) for n in info.replicas],
+        in_sync_replicas=[_node_to_proto(n) for n in info.in_sync_replicas],
+        offline_replicas=[_node_to_proto(n) for n in info.offline_replicas],
+    )
+
+
+def _tp(proto_tp):
+    return kc.TopicPartition(proto_tp.topic, proto_tp.partition)
+
+
+def _tp_to_proto(tp):
+    return cpb.TopicPartition(topic=tp.topic, partition=tp.partition)
+
+
+def _oam_to_proto(oam):
+    return cpb.OffsetAndMetadata(
+        offset=oam.offset,
+        metadata=oam.metadata or "",
+        leader_epoch=oam.leader_epoch if oam.leader_epoch is not None else None,
+    )
+
+
+def _record_to_proto(r):
+    key = bytes(r.key) if r.key is not None else None
+    value = bytes(r.value) if r.value is not None else None
+    headers = [cpb.Header(key=k, value=bytes(v) if v is not None else b"") for (k, v) in r.headers]
+    return cpb.ConsumerRecord(
+        topic=r.topic,
+        partition=r.partition,
+        offset=r.offset,
+        timestamp=r.timestamp,
+        timestamp_type=r.timestamp_type,
+        key=key,
+        value=value,
+        headers=headers,
+        leader_epoch=r.leader_epoch if r.leader_epoch is not None else None,
+    )
+
+
+class ConsumerService(cpb_grpc.ConsumerServiceServicer):
+    """Maps ConsumerService RPCs onto bindings/python/consumer.py. The sync
+    consumer API blocks the gRPC worker thread on its threading.Event, which
+    is fine in the thread-pool server."""
+
+    def __init__(self):
+        self._consumers = {}
+        self._next_id = 1
+        self._lock = threading.Lock()
+
+    def _get(self, consumer_id):
+        with self._lock:
+            return self._consumers.get(consumer_id)
+
+    def _status_err(self, e):
+        return cpb.StatusResponse(error=_kafka_error_to_proto(e))
+
+    def CreateConsumer(self, request, context):
+        config = dict(request.config)
+        try:
+            if not config or all(not v for v in config.values()):
+                consumer = kc.MockConsumer("earliest")
+            else:
+                consumer = kc.KafkaConsumer(config)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("CreateConsumer failed")
+            return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(e))
+        with self._lock:
+            consumer_id = self._next_id
+            self._next_id += 1
+            self._consumers[consumer_id] = consumer
+        LOG.info("created consumer %d", consumer_id)
+        return cpb.CreateConsumerResponse(consumer_id=consumer_id)
+
+    def _run_status(self, consumer_id, fn):
+        consumer = self._get(consumer_id)
+        if consumer is None:
+            return cpb.StatusResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            fn(consumer)
+            return cpb.StatusResponse()
+        except kc.KafkaError as e:
+            return self._status_err(e)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("consumer op raised")
+            return self._status_err(e)
+
+    def Subscribe(self, request, context):
+        return self._run_status(request.consumer_id, lambda c: c.subscribe(list(request.topics)))
+
+    def Unsubscribe(self, request, context):
+        return self._run_status(request.consumer_id, lambda c: c.unsubscribe())
+
+    def Assign(self, request, context):
+        parts = [_tp(p) for p in request.partitions]
+        return self._run_status(request.consumer_id, lambda c: c.assign(parts))
+
+    def Poll(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.PollResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            records = consumer.poll(request.timeout_ms / 1000.0)
+        except kc.KafkaError as e:
+            return cpb.PollResponse(error=_kafka_error_to_proto(e))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("poll raised")
+            return cpb.PollResponse(error=_kafka_error_to_proto(e))
+        proto_records = [_record_to_proto(r) for r in records]
+        return cpb.PollResponse(records=cpb.ConsumerRecordList(records=proto_records))
+
+    def CommitSync(self, request, context):
+        def do(c):
+            if request.offsets:
+                offsets = {
+                    _tp(e.partition): kc.OffsetAndMetadata(
+                        e.offset.offset, e.offset.metadata,
+                        e.offset.leader_epoch if e.offset.HasField("leader_epoch") else None)
+                    for e in request.offsets
+                }
+                c.commit(offsets)
+            else:
+                c.commit()
+        return self._run_status(request.consumer_id, do)
+
+    def Committed(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.CommittedResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            result = consumer.committed([_tp(p) for p in request.partitions])
+        except kc.KafkaError as e:
+            return cpb.CommittedResponse(error=_kafka_error_to_proto(e))
+        entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp), offset=_oam_to_proto(oam))
+                   for tp, oam in result.items()]
+        return cpb.CommittedResponse(offsets=cpb.OffsetMap(entries=entries))
+
+    def Position(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.PositionResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            offset = consumer.position(_tp(request.partition))
+        except kc.KafkaError as e:
+            return cpb.PositionResponse(error=_kafka_error_to_proto(e))
+        return cpb.PositionResponse(offset=offset)
+
+    def Seek(self, request, context):
+        def do(c):
+            tp = _tp(request.partition)
+            if request.HasField("metadata") or request.HasField("leader_epoch"):
+                oam = kc.OffsetAndMetadata(
+                    request.offset,
+                    request.metadata if request.HasField("metadata") else "",
+                    request.leader_epoch if request.HasField("leader_epoch") else None)
+                c.seek(tp, oam)
+            else:
+                c.seek(tp, request.offset)
+        return self._run_status(request.consumer_id, do)
+
+    def SeekToBeginning(self, request, context):
+        parts = [_tp(p) for p in request.partitions]
+        return self._run_status(request.consumer_id, lambda c: c.seek_to_beginning(parts))
+
+    def SeekToEnd(self, request, context):
+        parts = [_tp(p) for p in request.partitions]
+        return self._run_status(request.consumer_id, lambda c: c.seek_to_end(parts))
+
+    def Pause(self, request, context):
+        parts = [_tp(p) for p in request.partitions]
+        return self._run_status(request.consumer_id, lambda c: c.pause(parts))
+
+    def Resume(self, request, context):
+        parts = [_tp(p) for p in request.partitions]
+        return self._run_status(request.consumer_id, lambda c: c.resume(parts))
+
+    def _long_offsets(self, request, end):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.LongOffsetsResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        parts = [_tp(p) for p in request.partitions]
+        try:
+            result = consumer.end_offsets(parts) if end else consumer.beginning_offsets(parts)
+        except kc.KafkaError as e:
+            return cpb.LongOffsetsResponse(error=_kafka_error_to_proto(e))
+        entries = [cpb.LongOffsetMapEntry(partition=_tp_to_proto(tp), offset=off) for tp, off in result.items()]
+        return cpb.LongOffsetsResponse(offsets=cpb.LongOffsetMap(entries=entries))
+
+    def BeginningOffsets(self, request, context):
+        return self._long_offsets(request, end=False)
+
+    def EndOffsets(self, request, context):
+        return self._long_offsets(request, end=True)
+
+    def OffsetsForTimes(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.OffsetAndTimestampResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        spec = {_tp(e.partition): e.timestamp for e in request.timestamps}
+        try:
+            result = consumer.offsets_for_times(spec)
+        except kc.KafkaError as e:
+            return cpb.OffsetAndTimestampResponse(error=_kafka_error_to_proto(e))
+        entries = [
+            cpb.OffsetAndTimestampMapEntry(
+                partition=_tp_to_proto(tp),
+                offset=cpb.OffsetAndTimestamp(
+                    offset=oat.offset, timestamp=oat.timestamp,
+                    leader_epoch=oat.leader_epoch if oat.leader_epoch is not None else None))
+            for tp, oat in result.items()
+        ]
+        return cpb.OffsetAndTimestampResponse(offsets=cpb.OffsetAndTimestampMap(entries=entries))
+
+    def PartitionsFor(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return pb.PartitionsForResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            infos = consumer.partitions_for(request.topic)
+        except kc.KafkaError as e:
+            return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
+        return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
+
+    def ListTopics(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.ListTopicsResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            topics = consumer.list_topics()
+        except kc.KafkaError as e:
+            return cpb.ListTopicsResponse(error=_kafka_error_to_proto(e))
+        entries = [cpb.TopicPartitionInfoEntry(topic=t, partitions=[_partition_info_to_proto(i) for i in infos])
+                   for t, infos in topics.items()]
+        return cpb.ListTopicsResponse(topics=cpb.TopicListing(topics=entries))
+
+    def Assignment(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.TopicPartitionListResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            tps = consumer.assignment()
+        except Exception as e:  # noqa: BLE001
+            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
+        return cpb.TopicPartitionListResponse(
+            partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
+
+    def Subscription(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.SubscriptionResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            topics = consumer.subscription()
+        except Exception as e:  # noqa: BLE001
+            return cpb.SubscriptionResponse(error=_kafka_error_to_proto(e))
+        return cpb.SubscriptionResponse(topics=cpb.StringList(values=list(topics)))
+
+    def Paused(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.TopicPartitionListResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            tps = consumer.paused()
+        except Exception as e:  # noqa: BLE001
+            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
+        return cpb.TopicPartitionListResponse(
+            partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
+
+    def Wakeup(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is not None:
+            consumer.wakeup()
+        return cpb.StatusResponse()
+
+    def Close(self, request, context):
+        with self._lock:
+            consumer = self._consumers.pop(request.consumer_id, None)
+        if consumer is None:
+            return cpb.StatusResponse()
+        try:
+            consumer.close()
+        except kc.KafkaError as e:
+            return self._status_err(e)
+        return cpb.StatusResponse()
+
+
 def main():
     logging.basicConfig(
         level=os.environ.get("RUST_LOG", "INFO").upper(),
@@ -289,6 +614,7 @@ def main():
     port = int(os.environ.get("GRPC_PORT", "50051"))
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(), server)
+    cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(), server)
     server.add_insecure_port(f"0.0.0.0:{port}")
     server.start()
     # The Rust BackendPool waits for "listening" on stderr before
