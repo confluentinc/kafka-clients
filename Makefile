@@ -122,7 +122,9 @@ producer-perf-test-c: build-c
 # consumer-perf/compare/benchmark_e2e_latency.c. Needs a reachable broker via
 # BOOTSTRAP_SERVERS; set KAFKA_BIN to a Kafka bin dir to self-spawn load
 # (kafka-producer-perf-test.sh), otherwise runs consume-only. Select the backend
-# with CLIENT_VERSION (3 = Rust binding, default; 2 = librdkafka baseline).
+# with CLIENT_VERSION (3 = Rust binding, default; 2 = librdkafka baseline). Set
+# ASYNC=True to drive the asyncio-native consumer of the selected backend
+# (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer) instead of the sync one.
 consumer-perf-test-python: build-python
 	@(. venv/bin/activate && \
 	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/consumer_performance_test.py)
