@@ -273,6 +273,61 @@ async fn partitions_for_metadata<F: ConsumerBackendFactory>(ctx: &mut TestContex
     consumer.close().await.expect("close");
 }
 
+async fn offsets_for_times_lookup<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_offsets_for_times");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    // Timestamp 0 (epoch) resolves to the earliest offset, i.e. 0.
+    let spec = HashMap::from([(tp.clone(), 0i64)]);
+    let result = consumer.offsets_for_times(spec).await.expect("offsets_for_times");
+    assert_eq!(result.get(&tp).map(|o| o.offset()), Some(0), "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn list_topics_contains<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_list_topics");
+    produce(ctx, &topic, &[("k", "v")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let topics = consumer.list_topics().await.expect("list_topics");
+    assert!(topics.contains_key(&topic), "{} backend: {topic} missing from list_topics", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    use confluent_kafka::consumer::OffsetAndMetadata;
+    let topic = ctx.topic("ml_commit_explicit");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::with_metadata(1, "ck").expect("oam"))]);
+    consumer.commit_sync_offsets(offsets).await.expect("commit_sync_offsets");
+    let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
+    let entry = committed.get(&tp).expect("committed entry");
+    assert_eq!(entry.offset(), 1, "{} backend", factory.name());
+    assert_eq!(entry.metadata(), "ck", "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
 multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);
 multilanguage_consumer_test!(test_ml_subscribe_and_consume, subscribe_and_consume);
 multilanguage_consumer_test!(test_ml_commit_and_committed, commit_and_committed);
@@ -281,3 +336,6 @@ multilanguage_consumer_test!(test_ml_pause_resume, pause_resume);
 multilanguage_consumer_test!(test_ml_seek_to_beginning_end, seek_to_beginning_end);
 multilanguage_consumer_test!(test_ml_unsubscribe, unsubscribe_clears_subscription);
 multilanguage_consumer_test!(test_ml_partitions_for, partitions_for_metadata);
+multilanguage_consumer_test!(test_ml_offsets_for_times, offsets_for_times_lookup);
+multilanguage_consumer_test!(test_ml_list_topics, list_topics_contains);
+multilanguage_consumer_test!(test_ml_commit_explicit_offsets, commit_explicit_offsets);
