@@ -209,70 +209,41 @@ static void test_mock_consumer_async_poll(void) {
 // ---------------------------------------------------------------------------
 // Concurrency guard: a second op is rejected while one op is in flight
 //
-// The async poll holds the guard from submission until its callback fires.
-// We exploit this deterministically: from INSIDE the async callback (which
-// runs on the dispatcher thread before the guard is released), a concurrent
-// sync poll on the consumer must be rejected with ConcurrentModification.
-// This covers both (a) cross-thread rejection and (b) one-op-in-flight.
+// The guard is held from submission until the in-flight op completes (just
+// before its callback fires). We exploit this deterministically by submitting
+// two async polls back-to-back: when the second is submitted the first is
+// still in flight (its completion needs several thread hops through the runtime
+// and dispatcher), so the second is rejected inline with ConcurrentModification
+// — its callback fires synchronously before poll_async returns. This covers
+// both (a) cross-call rejection and (b) one-op-in-flight, without relying on
+// when the guard is released relative to the callback.
 // ---------------------------------------------------------------------------
-
-/* The consumer under test, shared with the nested-rejection callback. */
-static kafka_consumer_Consumer_t *g_guard_consumer = NULL;
-/* Outcome of the nested sync poll attempted from within the callback. */
-static atomic_int g_nested_rejected;       /* 1 if rejected as expected */
-static atomic_int g_nested_error_code;     /* the rejection's error code */
-
-static void on_poll_then_reenter(kafka_consumer_ConsumerRecords_t *records,
-                                 kafka_common_KafkaError_t *error,
-                                 void *user_data) {
-    async_poll_result_t *r = (async_poll_result_t *)user_data;
-    if (records != NULL) {
-        r->had_records = 1;
-        r->record_count = kafka_consumer_ConsumerRecords_count(records);
-        kafka_consumer_ConsumerRecords_destroy(records);
-    }
-    if (error != NULL) {
-        r->had_error = 1;
-        r->error_code = kafka_common_KafkaError_code(error);
-        kafka_common_KafkaError_destroy(error);
-    }
-    // The async op's guard is still held (release runs AFTER this callback),
-    // so a concurrent sync poll here must be rejected.
-    kafka_common_KafkaError_t *nested_err = NULL;
-    kafka_consumer_ConsumerRecords_t *nested =
-        kafka_consumer_Consumer_poll(g_guard_consumer, 0, &nested_err);
-    if (nested == NULL && nested_err != NULL) {
-        atomic_store(&g_nested_rejected, 1);
-        atomic_store(&g_nested_error_code, kafka_common_KafkaError_code(nested_err));
-        kafka_common_KafkaError_destroy(nested_err);
-    } else if (nested != NULL) {
-        kafka_consumer_ConsumerRecords_destroy(nested);
-    }
-    r->thread_id = pthread_self();
-    atomic_fetch_add(&r->fired, 1);
-}
 
 static void test_mock_consumer_concurrency_guard(void) {
     kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
     TEST_ASSERT_NULL(assign_one(c, "test", 0));
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "test", 0, 0));
 
-    g_guard_consumer = c;
-    atomic_init(&g_nested_rejected, 0);
-    atomic_init(&g_nested_error_code, 0);
+    async_poll_result_t first, second;
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    atomic_init(&first.fired, 0);
+    atomic_init(&second.fired, 0);
 
-    async_poll_result_t result;
-    memset(&result, 0, sizeof(result));
-    atomic_init(&result.fired, 0);
+    // First acquires the guard and spawns; second is submitted while the first
+    // is still in flight.
+    kafka_consumer_Consumer_poll_async(c, 50, on_poll, &first);
+    kafka_consumer_Consumer_poll_async(c, 50, on_poll, &second);
 
-    kafka_consumer_Consumer_poll_async(c, 50, on_poll_then_reenter, &result);
-    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    // The second was rejected inline (callback fired synchronously) with
+    // ConcurrentModification.
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
+    TEST_ASSERT_TRUE(second.had_error);
+    TEST_ASSERT_EQUAL_INT32(CONCURRENT_MODIFICATION_CODE, second.error_code);
 
-    // The nested sync poll, issued while the async op still owned the guard,
-    // was rejected with ConcurrentModification.
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&g_nested_rejected));
-    TEST_ASSERT_EQUAL_INT32(CONCURRENT_MODIFICATION_CODE,
-                            atomic_load(&g_nested_error_code));
+    // The first eventually completes successfully (empty batch).
+    TEST_ASSERT_TRUE(wait_for(&first.fired, 1));
+    TEST_ASSERT_TRUE(first.had_records);
 
     // After the in-flight op completed, a normal sync poll succeeds again.
     kafka_common_KafkaError_t *poll_err = NULL;
@@ -282,7 +253,6 @@ static void test_mock_consumer_concurrency_guard(void) {
     TEST_ASSERT_NOT_NULL(recs);
     kafka_consumer_ConsumerRecords_destroy(recs);
 
-    g_guard_consumer = NULL;
     kafka_consumer_Consumer_destroy(c);
 }
 

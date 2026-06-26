@@ -652,10 +652,17 @@ impl PollCompletion {
     /// # Safety
     /// Must be called exactly once, on the dispatcher thread.
     unsafe fn fire(self) {
-        unsafe { (self.target.callback)(self.records, self.error, self.target.user_data) };
-        // Release only after the callback fires, so `owner` stays held and
-        // rejects concurrent ops for the whole submit->callback window.
+        // Release BEFORE firing the callback. By the time this completion job
+        // runs, the awaited op has fully completed (`poll().await` returned), so
+        // the consumer is no longer borrowed and the guard's job is done. The
+        // guard is held for the whole submit -> op-complete window (rejecting
+        // genuinely concurrent ops); releasing before the callback avoids a
+        // release-vs-next-op race for embedders that resume work from the
+        // callback (e.g. an async runtime scheduling the awaiting task onto
+        // another thread). The callback only reads the already-built result
+        // handles; it does not touch the consumer.
         release(self.handle);
+        unsafe { (self.target.callback)(self.records, self.error, self.target.user_data) };
     }
 }
 
@@ -2528,8 +2535,11 @@ unsafe fn async_void_op<F, Fut>(
         let op = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
         let release_handle = hs;
         let job: CompletionJob = Box::new(move || {
-            unsafe { op.fire() };
+            // Release BEFORE firing the callback: the awaited op is complete, so
+            // the consumer is no longer borrowed. This avoids a release-vs-next-op
+            // race when the callback resumes embedder work on another thread.
             release(release_handle);
+            unsafe { op.fire() };
         });
         enqueue_or_run_inline(&tx, job);
     });
@@ -2591,10 +2601,11 @@ unsafe fn async_value_op<T, Fut, F, C>(
         let ud = ud;
         let result = op(unsafe { consumer_mut(hs) }).await;
         let job: CompletionJob = Box::new(move || {
-            complete(result, ud.into_ptr());
-            // Release only after the callback fires, so `owner` stays held for
-            // the whole submit->callback window.
+            // Release BEFORE firing the callback: the awaited op is complete, so
+            // the consumer is no longer borrowed. This avoids a release-vs-next-op
+            // race when the callback resumes embedder work on another thread.
             release(hs);
+            complete(result, ud.into_ptr());
         });
         enqueue_or_run_inline(&tx, job);
     });
