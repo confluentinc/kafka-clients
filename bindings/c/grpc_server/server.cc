@@ -43,6 +43,8 @@ extern "C" {
 
 #include "producer_service.grpc.pb.h"
 #include "producer_service.pb.h"
+#include "consumer_service.grpc.pb.h"
+#include "consumer_service.pb.h"
 
 using confluent::kafka::test::CloseRequest;
 using confluent::kafka::test::CloseTimeoutRequest;
@@ -57,6 +59,49 @@ using confluent::kafka::test::RecordMetadata;
 using confluent::kafka::test::SendRequest;
 using confluent::kafka::test::SendResponse;
 using confluent::kafka::test::StatusResponse;
+// ConsumerService messages (consumer_service.proto).
+using confluent::kafka::test::AssignRequest;
+using confluent::kafka::test::CommittedRequest;
+using confluent::kafka::test::CommittedResponse;
+using confluent::kafka::test::CommitSyncRequest;
+using confluent::kafka::test::ConsumerCloseRequest;
+using confluent::kafka::test::ConsumerIdRequest;
+using confluent::kafka::test::ConsumerPartitionsForRequest;
+using confluent::kafka::test::ConsumerRecordList;
+using confluent::kafka::test::ConsumerService;
+using confluent::kafka::test::CreateConsumerRequest;
+using confluent::kafka::test::CreateConsumerResponse;
+using confluent::kafka::test::ListTopicsResponse;
+using confluent::kafka::test::LongOffsetMap;
+using confluent::kafka::test::LongOffsetsResponse;
+using confluent::kafka::test::OffsetAndTimestampMap;
+using confluent::kafka::test::OffsetAndTimestampResponse;
+using confluent::kafka::test::OffsetMap;
+using confluent::kafka::test::OffsetsForTimesRequest;
+using confluent::kafka::test::PollRequest;
+using confluent::kafka::test::PollResponse;
+using confluent::kafka::test::PositionRequest;
+using confluent::kafka::test::PositionResponse;
+using confluent::kafka::test::SeekRequest;
+using confluent::kafka::test::SubscribeRequest;
+using confluent::kafka::test::SubscriptionResponse;
+using confluent::kafka::test::TopicListing;
+using confluent::kafka::test::TopicPartitionList;
+using confluent::kafka::test::TopicPartitionListRequest;
+using confluent::kafka::test::TopicPartitionListResponse;
+// Shared / payload messages.
+using confluent::kafka::test::ConsumerRecord;
+using confluent::kafka::test::Header;
+using confluent::kafka::test::LongOffsetMapEntry;
+using confluent::kafka::test::Node;
+using confluent::kafka::test::OffsetAndMetadata;
+using confluent::kafka::test::OffsetAndTimestamp;
+using confluent::kafka::test::OffsetAndTimestampMapEntry;
+using confluent::kafka::test::OffsetMapEntry;
+using confluent::kafka::test::PartitionInfo;
+using confluent::kafka::test::StringList;
+using confluent::kafka::test::TopicPartition;
+using confluent::kafka::test::TopicPartitionInfoEntry;
 
 namespace {
 
@@ -323,6 +368,550 @@ class ProducerServiceImpl final : public ProducerService::Service {
   std::atomic<uint64_t> next_id_{1};
 };
 
+// ---------------------------------------------------------------------------
+// Consumer service
+// ---------------------------------------------------------------------------
+
+// Build parallel (topics, partitions) C arrays from a repeated TopicPartition.
+// The char* point into the proto strings, which outlive the synchronous FFI
+// call, and the FFI copies them into owned Rust data before returning.
+struct TpArrays {
+  std::vector<const char*> topics;
+  std::vector<int32_t> partitions;
+  int32_t count() const { return static_cast<int32_t>(topics.size()); }
+};
+
+TpArrays tp_arrays(
+    const ::google::protobuf::RepeatedPtrField<TopicPartition>& tps) {
+  TpArrays a;
+  a.topics.reserve(tps.size());
+  a.partitions.reserve(tps.size());
+  for (const auto& tp : tps) {
+    a.topics.push_back(tp.topic().c_str());
+    a.partitions.push_back(tp.partition());
+  }
+  return a;
+}
+
+void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
+  dst->set_id(kafka_common_Node_id(node));
+  int32_t host_len = 0;
+  const char* host = kafka_common_Node_host(node, &host_len);
+  if (host != nullptr) dst->set_host(std::string(host, host_len));
+  dst->set_port(kafka_common_Node_port(node));
+  int32_t rack_len = 0;
+  const char* rack = kafka_common_Node_rack(node, &rack_len);
+  if (rack != nullptr) dst->set_rack(std::string(rack, rack_len));
+}
+
+void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info,
+                             PartitionInfo* dst) {
+  const char* topic = kafka_consumer_PartitionInfo_topic(info);  // NUL-terminated
+  dst->set_topic(topic ? topic : "");
+  dst->set_partition(kafka_consumer_PartitionInfo_partition(info));
+  const kafka_common_Node_t* leader = kafka_consumer_PartitionInfo_leader(info);
+  if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
+  int32_t n = kafka_consumer_PartitionInfo_replica_count(info);
+  for (int32_t i = 0; i < n; i++) {
+    node_to_proto(kafka_consumer_PartitionInfo_replica(info, i), dst->add_replicas());
+  }
+  n = kafka_consumer_PartitionInfo_in_sync_replica_count(info);
+  for (int32_t i = 0; i < n; i++) {
+    node_to_proto(kafka_consumer_PartitionInfo_in_sync_replica(info, i),
+                  dst->add_in_sync_replicas());
+  }
+  n = kafka_consumer_PartitionInfo_offline_replica_count(info);
+  for (int32_t i = 0; i < n; i++) {
+    node_to_proto(kafka_consumer_PartitionInfo_offline_replica(info, i),
+                  dst->add_offline_replicas());
+  }
+}
+
+void tp_to_proto(const kafka_consumer_TopicPartition_t* tp, TopicPartition* dst) {
+  const char* topic = kafka_consumer_TopicPartition_topic(tp);
+  dst->set_topic(topic ? topic : "");
+  dst->set_partition(kafka_consumer_TopicPartition_partition(tp));
+}
+
+class ConsumerServiceImpl final : public ConsumerService::Service {
+ public:
+  grpc::Status CreateConsumer(grpc::ServerContext*,
+                              const CreateConsumerRequest* req,
+                              CreateConsumerResponse* resp) override {
+    kafka_consumer_Consumer_t* consumer = nullptr;
+    if (req->config().empty()) {
+      consumer = kafka_consumer_MockConsumer_new("earliest");
+    } else {
+      kafka_consumer_ConsumerProperties_t* props =
+          kafka_consumer_ConsumerProperties_new();
+      for (const auto& kv : req->config()) {
+        kafka_consumer_ConsumerProperties_put(props, kv.first.c_str(), kv.second.c_str());
+      }
+      kafka_common_KafkaError_t* err = nullptr;
+      consumer = kafka_consumer_KafkaConsumer_new(props, &err);
+      kafka_consumer_ConsumerProperties_destroy(props);
+      if (consumer == nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+    }
+    const uint64_t id = next_id_.fetch_add(1);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      consumers_[id] = consumer;
+    }
+    resp->set_consumer_id(id);
+    std::cerr << "c server: created consumer " << id << std::endl;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Subscribe(grpc::ServerContext*, const SubscribeRequest* req,
+                         StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    std::vector<const char*> topics;
+    topics.reserve(req->topics_size());
+    for (const auto& t : req->topics()) topics.push_back(t.c_str());
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_subscribe(
+        c, topics.data(), static_cast<int32_t>(topics.size()));
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Unsubscribe(grpc::ServerContext*, const ConsumerIdRequest* req,
+                           StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_unsubscribe(c);
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Assign(grpc::ServerContext*, const AssignRequest* req,
+                      StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    TpArrays a = tp_arrays(req->partitions());
+    kafka_common_KafkaError_t* err =
+        kafka_consumer_Consumer_assign(c, a.topics.data(), a.partitions.data(), a.count());
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Poll(grpc::ServerContext*, const PollRequest* req,
+                    PollResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_common_KafkaError_t* err = nullptr;
+    kafka_consumer_ConsumerRecords_t* records =
+        kafka_consumer_Consumer_poll(c, req->timeout_ms(), &err);
+    if (records == nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    ConsumerRecordList* list = resp->mutable_records();
+    int32_t n = kafka_consumer_ConsumerRecords_count(records);
+    for (int32_t i = 0; i < n; i++) {
+      const kafka_consumer_ConsumerRecord_t* rec =
+          kafka_consumer_ConsumerRecords_get(records, i);
+      record_to_proto(rec, list->add_records());
+    }
+    kafka_consumer_ConsumerRecords_destroy(records);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status CommitSync(grpc::ServerContext*, const CommitSyncRequest* req,
+                          StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    kafka_common_KafkaError_t* err = nullptr;
+    if (req->offsets().empty()) {
+      err = kafka_consumer_Consumer_commit_sync(c);
+    } else {
+      std::vector<const char*> topics;
+      std::vector<int32_t> partitions;
+      std::vector<int64_t> offsets;
+      std::vector<int32_t> leader_epochs;
+      std::vector<const char*> metadata;
+      for (const auto& e : req->offsets()) {
+        topics.push_back(e.partition().topic().c_str());
+        partitions.push_back(e.partition().partition());
+        offsets.push_back(e.offset().offset());
+        leader_epochs.push_back(e.offset().has_leader_epoch() ? e.offset().leader_epoch() : -1);
+        metadata.push_back(e.offset().metadata().c_str());
+      }
+      err = kafka_consumer_Consumer_commit_sync_offsets(
+          c, topics.data(), partitions.data(), offsets.data(), leader_epochs.data(),
+          metadata.data(), static_cast<int32_t>(topics.size()));
+    }
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Committed(grpc::ServerContext*, const CommittedRequest* req,
+                         CommittedResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    TpArrays a = tp_arrays(req->partitions());
+    kafka_consumer_OffsetMap_t* map = nullptr;
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_committed(
+        c, a.topics.data(), a.partitions.data(), a.count(), &map);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    OffsetMap* out = resp->mutable_offsets();
+    int32_t n = kafka_consumer_OffsetMap_count(map);
+    for (int32_t i = 0; i < n; i++) {
+      OffsetMapEntry* entry = out->add_entries();
+      tp_to_proto(kafka_consumer_OffsetMap_get_key(map, i), entry->mutable_partition());
+      const kafka_consumer_OffsetAndMetadata_t* v = kafka_consumer_OffsetMap_get_value(map, i);
+      OffsetAndMetadata* oam = entry->mutable_offset();
+      oam->set_offset(kafka_consumer_OffsetAndMetadata_offset(v));
+      const char* meta = kafka_consumer_OffsetAndMetadata_metadata(v);
+      oam->set_metadata(meta ? meta : "");
+      int32_t epoch = 0;
+      if (kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch)) oam->set_leader_epoch(epoch);
+    }
+    kafka_consumer_OffsetMap_destroy(map);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Position(grpc::ServerContext*, const PositionRequest* req,
+                        PositionResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    int64_t out = 0;
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_position(
+        c, req->partition().topic().c_str(), req->partition().partition(), &out);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+    } else {
+      resp->set_offset(out);
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Seek(grpc::ServerContext*, const SeekRequest* req,
+                    StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    kafka_common_KafkaError_t* err = nullptr;
+    if (req->has_metadata() || req->has_leader_epoch()) {
+      err = kafka_consumer_Consumer_seek_with_metadata(
+          c, req->partition().topic().c_str(), req->partition().partition(),
+          req->offset(), req->has_leader_epoch() ? req->leader_epoch() : -1,
+          req->has_metadata() ? req->metadata().c_str() : "");
+    } else {
+      err = kafka_consumer_Consumer_seek(
+          c, req->partition().topic().c_str(), req->partition().partition(), req->offset());
+    }
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status SeekToBeginning(grpc::ServerContext*, const TopicPartitionListRequest* req,
+                               StatusResponse* resp) override {
+    return tp_list_op(req, resp, kafka_consumer_Consumer_seek_to_beginning);
+  }
+  grpc::Status SeekToEnd(grpc::ServerContext*, const TopicPartitionListRequest* req,
+                         StatusResponse* resp) override {
+    return tp_list_op(req, resp, kafka_consumer_Consumer_seek_to_end);
+  }
+  grpc::Status Pause(grpc::ServerContext*, const TopicPartitionListRequest* req,
+                     StatusResponse* resp) override {
+    return tp_list_op(req, resp, kafka_consumer_Consumer_pause);
+  }
+  grpc::Status Resume(grpc::ServerContext*, const TopicPartitionListRequest* req,
+                      StatusResponse* resp) override {
+    return tp_list_op(req, resp, kafka_consumer_Consumer_resume);
+  }
+
+  grpc::Status BeginningOffsets(grpc::ServerContext*, const TopicPartitionListRequest* req,
+                                LongOffsetsResponse* resp) override {
+    return long_offsets(req, resp, kafka_consumer_Consumer_beginning_offsets);
+  }
+  grpc::Status EndOffsets(grpc::ServerContext*, const TopicPartitionListRequest* req,
+                          LongOffsetsResponse* resp) override {
+    return long_offsets(req, resp, kafka_consumer_Consumer_end_offsets);
+  }
+
+  grpc::Status OffsetsForTimes(grpc::ServerContext*, const OffsetsForTimesRequest* req,
+                               OffsetAndTimestampResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    std::vector<const char*> topics;
+    std::vector<int32_t> partitions;
+    std::vector<int64_t> timestamps;
+    for (const auto& e : req->timestamps()) {
+      topics.push_back(e.partition().topic().c_str());
+      partitions.push_back(e.partition().partition());
+      timestamps.push_back(e.timestamp());
+    }
+    kafka_consumer_OffsetAndTimestampMap_t* map = nullptr;
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_offsets_for_times(
+        c, topics.data(), partitions.data(), timestamps.data(),
+        static_cast<int32_t>(topics.size()), &map);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    OffsetAndTimestampMap* out = resp->mutable_offsets();
+    int32_t n = kafka_consumer_OffsetAndTimestampMap_count(map);
+    for (int32_t i = 0; i < n; i++) {
+      OffsetAndTimestampMapEntry* entry = out->add_entries();
+      tp_to_proto(kafka_consumer_OffsetAndTimestampMap_get_key(map, i), entry->mutable_partition());
+      const kafka_consumer_OffsetAndTimestamp_t* v =
+          kafka_consumer_OffsetAndTimestampMap_get_value(map, i);
+      OffsetAndTimestamp* oat = entry->mutable_offset();
+      oat->set_offset(kafka_consumer_OffsetAndTimestamp_offset(v));
+      oat->set_timestamp(kafka_consumer_OffsetAndTimestamp_timestamp(v));
+      int32_t epoch = 0;
+      if (kafka_consumer_OffsetAndTimestamp_leader_epoch(v, &epoch)) oat->set_leader_epoch(epoch);
+    }
+    kafka_consumer_OffsetAndTimestampMap_destroy(map);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status PartitionsFor(grpc::ServerContext*, const ConsumerPartitionsForRequest* req,
+                             PartitionsForResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_PartitionInfoList_t* infos = nullptr;
+    kafka_common_KafkaError_t* err =
+        kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    int32_t n = kafka_consumer_PartitionInfoList_count(infos);
+    for (int32_t i = 0; i < n; i++) {
+      partition_info_to_proto(kafka_consumer_PartitionInfoList_get(infos, i), resp->add_partitions());
+    }
+    kafka_consumer_PartitionInfoList_destroy(infos);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListTopics(grpc::ServerContext*, const ConsumerIdRequest* req,
+                          ListTopicsResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_TopicPartitionInfoMap_t* map = nullptr;
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_list_topics(c, &map);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    TopicListing* listing = resp->mutable_topics();
+    int32_t n = kafka_consumer_TopicPartitionInfoMap_count(map);
+    for (int32_t i = 0; i < n; i++) {
+      TopicPartitionInfoEntry* entry = listing->add_topics();
+      const char* topic = kafka_consumer_TopicPartitionInfoMap_get_topic(map, i);
+      entry->set_topic(topic ? topic : "");
+      const kafka_consumer_PartitionInfoList_t* infos =
+          kafka_consumer_TopicPartitionInfoMap_get_partitions(map, i);
+      int32_t pn = kafka_consumer_PartitionInfoList_count(infos);
+      for (int32_t j = 0; j < pn; j++) {
+        partition_info_to_proto(kafka_consumer_PartitionInfoList_get(infos, j), entry->add_partitions());
+      }
+    }
+    kafka_consumer_TopicPartitionInfoMap_destroy(map);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Assignment(grpc::ServerContext*, const ConsumerIdRequest* req,
+                          TopicPartitionListResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
+    fill_tp_list(list, resp);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Paused(grpc::ServerContext*, const ConsumerIdRequest* req,
+                      TopicPartitionListResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
+    fill_tp_list(list, resp);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Subscription(grpc::ServerContext*, const ConsumerIdRequest* req,
+                            SubscriptionResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_StringList_t* list = kafka_consumer_Consumer_subscription(c);
+    StringList* out = resp->mutable_topics();
+    if (list != nullptr) {
+      int32_t n = kafka_consumer_StringList_count(list);
+      for (int32_t i = 0; i < n; i++) {
+        const char* s = kafka_consumer_StringList_get(list, i);
+        out->add_values(s ? s : "");
+      }
+      kafka_consumer_StringList_destroy(list);
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Wakeup(grpc::ServerContext*, const ConsumerIdRequest* req,
+                      StatusResponse*) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c != nullptr) kafka_consumer_Consumer_wakeup(c);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Close(grpc::ServerContext*, const ConsumerCloseRequest* req,
+                     StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* consumer = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = consumers_.find(req->consumer_id());
+      if (it != consumers_.end()) {
+        consumer = it->second;
+        consumers_.erase(it);
+      }
+    }
+    if (consumer == nullptr) return grpc::Status::OK;  // idempotent
+    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_close(consumer);
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    kafka_consumer_Consumer_destroy(consumer);
+    return grpc::Status::OK;
+  }
+
+ private:
+  kafka_consumer_Consumer_t* consumer_for(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = consumers_.find(id);
+    return it == consumers_.end() ? nullptr : it->second;
+  }
+
+  grpc::Status unknown(StatusResponse* resp, uint64_t id) {
+    *resp->mutable_error() =
+        make_synthetic_error(VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(id));
+    return grpc::Status::OK;
+  }
+
+  using TpListFn = kafka_common_KafkaError_t* (*)(const kafka_consumer_Consumer_t*,
+                                                  const char* const*, const int32_t*, int32_t);
+  grpc::Status tp_list_op(const TopicPartitionListRequest* req, StatusResponse* resp, TpListFn fn) {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    TpArrays a = tp_arrays(req->partitions());
+    kafka_common_KafkaError_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count());
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  using LongOffFn = kafka_common_KafkaError_t* (*)(const kafka_consumer_Consumer_t*,
+                                                   const char* const*, const int32_t*, int32_t,
+                                                   kafka_consumer_LongOffsetMap_t**);
+  grpc::Status long_offsets(const TopicPartitionListRequest* req, LongOffsetsResponse* resp,
+                            LongOffFn fn) {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    TpArrays a = tp_arrays(req->partitions());
+    kafka_consumer_LongOffsetMap_t* map = nullptr;
+    kafka_common_KafkaError_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count(), &map);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    LongOffsetMap* out = resp->mutable_offsets();
+    int32_t n = kafka_consumer_LongOffsetMap_count(map);
+    for (int32_t i = 0; i < n; i++) {
+      LongOffsetMapEntry* entry = out->add_entries();
+      tp_to_proto(kafka_consumer_LongOffsetMap_get_key(map, i), entry->mutable_partition());
+      entry->set_offset(kafka_consumer_LongOffsetMap_get_value(map, i));
+    }
+    kafka_consumer_LongOffsetMap_destroy(map);
+    return grpc::Status::OK;
+  }
+
+  void fill_tp_list(kafka_consumer_TopicPartitionList_t* list, TopicPartitionListResponse* resp) {
+    TopicPartitionList* out = resp->mutable_partitions();
+    if (list != nullptr) {
+      int32_t n = kafka_consumer_TopicPartitionList_count(list);
+      for (int32_t i = 0; i < n; i++) {
+        tp_to_proto(kafka_consumer_TopicPartitionList_get(list, i), out->add_partitions());
+      }
+      kafka_consumer_TopicPartitionList_destroy(list);
+    }
+  }
+
+  static void record_to_proto(const kafka_consumer_ConsumerRecord_t* rec, ConsumerRecord* dst) {
+    int32_t topic_len = 0;
+    const char* topic = kafka_consumer_ConsumerRecord_topic(rec, &topic_len);
+    if (topic != nullptr) dst->set_topic(std::string(topic, topic_len));
+    dst->set_partition(kafka_consumer_ConsumerRecord_partition(rec));
+    dst->set_offset(kafka_consumer_ConsumerRecord_offset(rec));
+    dst->set_timestamp(kafka_consumer_ConsumerRecord_timestamp(rec));
+    dst->set_timestamp_type(kafka_consumer_ConsumerRecord_timestamp_type(rec));
+    int32_t key_len = 0;
+    const uint8_t* key = kafka_consumer_ConsumerRecord_key(rec, &key_len);
+    if (key != nullptr) dst->set_key(std::string(reinterpret_cast<const char*>(key), key_len));
+    int32_t val_len = 0;
+    const uint8_t* value = kafka_consumer_ConsumerRecord_value(rec, &val_len);
+    if (value != nullptr) dst->set_value(std::string(reinterpret_cast<const char*>(value), val_len));
+    int32_t epoch = 0;
+    if (kafka_consumer_ConsumerRecord_leader_epoch(rec, &epoch)) dst->set_leader_epoch(epoch);
+    int32_t hn = kafka_consumer_ConsumerRecord_header_count(rec);
+    for (int32_t i = 0; i < hn; i++) {
+      Header* h = dst->add_headers();
+      int32_t hk_len = 0;
+      const char* hk = kafka_consumer_ConsumerRecord_header_key(rec, i, &hk_len);
+      if (hk != nullptr) h->set_key(std::string(hk, hk_len));
+      int32_t hv_len = 0;
+      const uint8_t* hv = kafka_consumer_ConsumerRecord_header_value(rec, i, &hv_len);
+      if (hv != nullptr) h->set_value(std::string(reinterpret_cast<const char*>(hv), hv_len));
+    }
+  }
+
+  std::mutex mu_;
+  std::unordered_map<uint64_t, kafka_consumer_Consumer_t*> consumers_;
+  std::atomic<uint64_t> next_id_{1};
+};
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
@@ -334,8 +923,10 @@ int main(int /*argc*/, char** /*argv*/) {
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(address, grpc::InsecureServerCredentials());
-  ProducerServiceImpl service;
-  builder.RegisterService(&service);
+  ProducerServiceImpl producer_service;
+  ConsumerServiceImpl consumer_service;
+  builder.RegisterService(&producer_service);
+  builder.RegisterService(&consumer_service);
 
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   if (!server) {
