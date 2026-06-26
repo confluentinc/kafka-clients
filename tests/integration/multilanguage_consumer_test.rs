@@ -217,8 +217,67 @@ async fn pause_resume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory:
     consumer.close().await.expect("close");
 }
 
+async fn seek_to_beginning_end<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_seek_ends");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    // Consume both, then rewind to the beginning and re-consume them.
+    assert_eq!(collect(&mut consumer, 2, Duration::from_secs(20)).await.len(), 2);
+    consumer.seek_to_beginning(std::slice::from_ref(&tp)).await.expect("seek_to_beginning");
+    assert_eq!(collect(&mut consumer, 2, Duration::from_secs(20)).await.len(), 2, "{} backend", factory.name());
+
+    // Seek to end: position is now the log end, so poll yields nothing new.
+    consumer.seek_to_end(std::slice::from_ref(&tp)).await.expect("seek_to_end");
+    let at_end = consumer.poll(Duration::from_millis(500)).await.expect("poll");
+    assert_eq!(at_end.count(), 0, "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn unsubscribe_clears_subscription<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_unsubscribe");
+    produce(ctx, &topic, &[("k", "v")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    // Poll once so the subscription takes effect, then unsubscribe.
+    let _ = collect(&mut consumer, 1, Duration::from_secs(20)).await;
+    consumer.unsubscribe().await.expect("unsubscribe");
+    assert!(consumer.subscription().is_empty(), "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+async fn partitions_for_metadata<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_partitions_for");
+    produce(ctx, &topic, &[("k", "v")]).await; // ensure the topic exists
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let infos = consumer.partitions_for(&topic).await.expect("partitions_for");
+    assert!(!infos.is_empty(), "{} backend: expected >=1 partition", factory.name());
+    assert!(infos.iter().any(|p| p.topic() == topic && p.partition() == 0), "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
 multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);
 multilanguage_consumer_test!(test_ml_subscribe_and_consume, subscribe_and_consume);
 multilanguage_consumer_test!(test_ml_commit_and_committed, commit_and_committed);
 multilanguage_consumer_test!(test_ml_seek_and_offsets, seek_and_offsets);
 multilanguage_consumer_test!(test_ml_pause_resume, pause_resume);
+multilanguage_consumer_test!(test_ml_seek_to_beginning_end, seek_to_beginning_end);
+multilanguage_consumer_test!(test_ml_unsubscribe, unsubscribe_clears_subscription);
+multilanguage_consumer_test!(test_ml_partitions_for, partitions_for_metadata);
