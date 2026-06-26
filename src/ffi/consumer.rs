@@ -2540,6 +2540,15 @@ unsafe fn async_void_op<F, Fut>(
 struct SendUserData(*mut c_void);
 // SAFETY: the C user is responsible for the thread-safety of `user_data`.
 unsafe impl Send for SendUserData {}
+impl SendUserData {
+    /// Consume the wrapper, returning the raw pointer. Taking `self` by value
+    /// forces a completion closure that calls this to capture the whole
+    /// `SendUserData` (which is `Send`) rather than disjointly capturing the
+    /// inner `*mut c_void` field (which is not) — see Rust 2021 closure capture.
+    fn into_ptr(self) -> *mut c_void {
+        self.0
+    }
+}
 
 /// Async dispatch for a **data-returning** consumer op (one-operation-in-flight),
 /// mirroring [`async_void_op`] but for methods that return a value. The access
@@ -2582,7 +2591,7 @@ unsafe fn async_value_op<T, Fut, F, C>(
         let ud = ud;
         let result = op(unsafe { consumer_mut(hs) }).await;
         let job: CompletionJob = Box::new(move || {
-            complete(result, ud.0);
+            complete(result, ud.into_ptr());
             // Release only after the callback fires, so `owner` stays held for
             // the whole submit->callback window.
             release(hs);
