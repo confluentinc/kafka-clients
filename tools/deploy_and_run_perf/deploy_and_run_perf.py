@@ -32,6 +32,15 @@ Examples (paths shown relative to the repo root):
   # Then the Rust-native test on the already-deployed server (no re-upload):
   python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
       --test rust-native --env-file ../rust.env --results-dir ./perf-results
+
+  # Python binding perf tests (backend via CLIENT_VERSION in the .env; sync
+  # unless --async). Producer:
+  python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
+      --test python-producer --recreate-zip --env-file ../rust.env --results-dir ./perf-results
+
+  # Async consumer (bootstrap installs a JRE + Kafka so it self-spawns load):
+  python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
+      --test python-consumer --async --env-file ../rust.env --results-dir ./perf-results
 """
 
 import argparse
@@ -62,7 +71,7 @@ DEFAULT_PLOT = os.path.join(REPO_ROOT, "tools", "performance_metrics_plot", "plo
 BOOTSTRAP_SH = r"""#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java>}"
+TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer>}"
 REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 
 echo "== apt: base packages =="
@@ -93,6 +102,41 @@ if [ "$TEST" = "java" ]; then
   echo "== Building Java perf jar in $REPO/tools/java-perf-test =="
   ( cd "$REPO/tools/java-perf-test" && gradle shadowJar --console=plain )
   echo "== Bootstrap complete (java) =="
+  exit 0
+fi
+
+if [[ "$TEST" == python-* ]]; then
+  # Python binding perf tests. Build the Rust lib (release) + the _confluentkafka
+  # extension into a venv; install confluent-kafka (v2 backend) + psutil. No kafka
+  # submodule needed (only the Rust build + the C extension). For python-consumer
+  # also install a JRE + Apache Kafka so the test self-spawns load via KAFKA_BIN.
+  sudo apt install -y python3 python3-venv python3-pip rustup
+  rustup default stable
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="$HOME/.cargo/bin:$PATH"
+  echo "== Building Rust (FFI, release) in $REPO =="
+  cd "$REPO"
+  RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release
+  echo "== Creating venv + building the _confluentkafka extension =="
+  python3 -m venv "$REPO/venv"
+  set +u; . "$REPO/venv/bin/activate"; set -u
+  pip install --upgrade pip setuptools wheel
+  ( cd "$REPO/bindings/python" && \
+    CONFLUENT_KAFKA_LIB_DIR="$REPO/target/release" CFLAGS="-O2 -march=native" pip install -e . )
+  pip install "confluent-kafka>=2.13.0" psutil
+  if [ "$TEST" = "python-consumer" ]; then
+    KVER="${KAFKA_VERSION:-4.2.0}"
+    if [ ! -x /opt/kafka/bin/kafka-producer-perf-test.sh ]; then
+      echo "== Installing JRE + Apache Kafka $KVER (kafka-producer-perf-test.sh) =="
+      sudo apt install -y default-jre
+      TGZ="kafka_2.13-${KVER}.tgz"
+      curl -fsSL -o "/tmp/$TGZ" "https://archive.apache.org/dist/kafka/${KVER}/${TGZ}"
+      sudo rm -rf /opt/kafka && sudo mkdir -p /opt/kafka
+      sudo tar -xzf "/tmp/$TGZ" -C /opt/kafka --strip-components=1
+    fi
+    echo "Kafka bin: /opt/kafka/bin"
+  fi
+  echo "== Bootstrap complete (python) =="
   exit 0
 fi
 
@@ -132,7 +176,7 @@ echo "== Bootstrap complete =="
 RUN_PERF_SH = r"""#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEST="${1:?usage: run-perf.sh <rust-native|c-v2|c-v3>}"
+TEST="${1:?usage: run-perf.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer>}"
 RESULTS="$SCRIPT_DIR/results"
 mkdir -p "$RESULTS"
 exec > >(tee "$RESULTS/run.log") 2>&1   # mirror all output to the log
@@ -143,10 +187,14 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 # Parameters from the .env file. Only one test runs per invocation, so each run
 # may use a different .env: BOOTSTRAP_SERVERS, TOPIC_NAME, VALUE_SIZE, LIMIT_RPS,
-# TEST_DURATION_SECONDS, WARMUP_SECONDS, P99_LIMIT_MS, etc.
+# TEST_DURATION_SECONDS, WARMUP_SECONDS, P99_LIMIT_MS, SECURITY_PROTOCOL/SASL_*, etc.
 set -a
 [ -f "$SCRIPT_DIR/perf-test.env" ] && . "$SCRIPT_DIR/perf-test.env"
 set +a
+
+# The --async flag (python tests) is delivered as RUN_ASYNC=1 in the launch env;
+# apply it AFTER sourcing the .env so the flag wins over any ASYNC there.
+if [ "${RUN_ASYNC:-0}" = "1" ]; then export ASYNC=True; fi
 
 cd "$REPO"
 case "$TEST" in
@@ -173,8 +221,25 @@ case "$TEST" in
     mkdir -p "$RESULTS/java"
     ( cd "$RESULTS/java" && java -jar "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar" )
     ;;
+  python-producer)
+    echo "######## Python producer perf test (ASYNC=${ASYNC:-False}, CLIENT_VERSION=${CLIENT_VERSION:-3}) ########"
+    set +u; . "$REPO/venv/bin/activate"; set -u
+    mkdir -p "$RESULTS/python-producer"
+    ( cd "$RESULTS/python-producer" && \
+      python "$REPO/bindings/python/test/performance/producer_performance_test.py" )
+    ;;
+  python-consumer)
+    echo "######## Python consumer perf test (ASYNC=${ASYNC:-False}, CLIENT_VERSION=${CLIENT_VERSION:-3}) ########"
+    set +u; . "$REPO/venv/bin/activate"; set -u
+    # Self-spawn load via kafka-producer-perf-test.sh from the installed Kafka
+    # (KAFKA_BIN in the .env overrides). Without it the test is consume-only.
+    export KAFKA_BIN="${KAFKA_BIN:-/opt/kafka/bin}"
+    mkdir -p "$RESULTS/python-consumer"
+    ( cd "$RESULTS/python-consumer" && \
+      python "$REPO/bindings/python/test/performance/consumer_performance_test.py" )
+    ;;
   *)
-    echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java)" >&2
+    echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java|python-producer|python-consumer)" >&2
     exit 2
     ;;
 esac
@@ -266,13 +331,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("host", help="SSH target, e.g. user@host")
-    p.add_argument("--test", required=True, choices=["rust-native", "c-v2", "c-v3", "java"],
+    p.add_argument("--test", required=True,
+                   choices=["rust-native", "c-v2", "c-v3", "java",
+                            "python-producer", "python-consumer"],
                    help="which single test to run. Only one runs per invocation, since the "
                         "env vars (in --env-file) can differ per test: "
                         "rust-native = Rust client in-process; "
                         "c-v2 = librdkafka; c-v3 = Rust client via C FFI; "
                         "java = Apache Kafka Java client (tools/java-perf-test, built with "
-                        "Corretto + Gradle via sdkman).")
+                        "Corretto + Gradle via sdkman); "
+                        "python-producer / python-consumer = the Python binding perf tests "
+                        "(backend via CLIENT_VERSION in --env-file: 3 = Rust binding, "
+                        "2 = confluent-kafka; sync unless --async).")
+    p.add_argument("--async", dest="run_async", action="store_true",
+                   help="for python-producer / python-consumer, drive the asyncio-native "
+                        "client (sets ASYNC=True, overriding the env-file). Ignored by the "
+                        "non-Python tests.")
+    p.add_argument("--kafka-version", default="4.2.0",
+                   help="for python-consumer, the Apache Kafka version whose "
+                        "kafka-producer-perf-test.sh is installed to /opt/kafka to generate "
+                        "load (default: 4.2.0). KAFKA_BIN in --env-file overrides the path.")
     p.add_argument("--env-file", default=os.path.join(WORKSPACE, ".env"),
                    help="parameters file sourced for the run (default: <repo-parent>/.env)")
     p.add_argument("--repo-dir", default=REPO_ROOT,
@@ -351,15 +429,22 @@ def main():
     ssh(host, f"cat > {shlex.quote(base)}/bootstrap.sh", ssh_opts, stdin=BOOTSTRAP_SH)
     ssh(host, f"cat > {shlex.quote(base)}/run-perf.sh", ssh_opts, stdin=RUN_PERF_SH)
     ssh(host, f"chmod +x {shlex.quote(base)}/bootstrap.sh {shlex.quote(base)}/run-perf.sh", ssh_opts)
-    ssh(host, f"bash {shlex.quote(base)}/bootstrap.sh {shlex.quote(args.test)}", ssh_opts, tty=True)
+    # KAFKA_VERSION is only consumed by the python-consumer bootstrap (installs
+    # the matching kafka-producer-perf-test.sh); harmless for the other tests.
+    ssh(host, f"KAFKA_VERSION={shlex.quote(args.kafka_version)} "
+              f"bash {shlex.quote(base)}/bootstrap.sh {shlex.quote(args.test)}", ssh_opts, tty=True)
 
     # 5. Launch the selected test in a detached tmux session.
-    print(f"==> [5/5] Launching '{args.test}' in detached tmux session 'perftest'")
+    print(f"==> [5/5] Launching '{args.test}' in detached tmux session 'perftest'"
+          + (" (async)" if args.run_async else ""))
+    # --async is delivered as RUN_ASYNC=1 in the run's environment (run-perf.sh
+    # turns it into ASYNC=True after sourcing the .env, so it overrides the file).
+    async_prefix = "RUN_ASYNC=1 " if args.run_async else ""
     launch = (
         f"mkdir -p {shlex.quote(base)}/results; "
         f"tmux kill-session -t perftest 2>/dev/null; "
         f"tmux new-session -d -s perftest "
-        f"'bash {shlex.quote(base)}/run-perf.sh {shlex.quote(args.test)}'"
+        f"'{async_prefix}bash {shlex.quote(base)}/run-perf.sh {shlex.quote(args.test)}'"
     )
     ssh(host, launch, ssh_opts)
 
@@ -385,7 +470,7 @@ Deployed and started. The '{args.test}' test is running in tmux on {host}.
     # accumulates other tests' files across runs on the same server).
     if args.test == "rust-native":
         scp(f"{host}:{base}/results/rust-native.jsonl", dest + "/", ssh_opts)
-    else:  # c-v2 / c-v3 write metrics.jsonl inside results/<test>/
+    else:  # c-v2/c-v3/java/python-* write metrics.jsonl inside results/<test>/
         scp(f"{host}:{base}/results/{args.test}", dest + "/", ssh_opts, recursive=True)
     # The run log is per-run (truncated each run); copy it best-effort.
     scp(f"{host}:{base}/results/run.log", dest + "/", ssh_opts, check=False)

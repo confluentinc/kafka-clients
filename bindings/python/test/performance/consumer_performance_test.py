@@ -70,6 +70,37 @@ def _env_int(name, default):
     return int(v) if v is not None and v != "" else default
 
 
+def sasl_config_from_env(v2=False):
+    """SASL config from the environment, matching producer_performance_test.py
+    and the Rust perf test (tests/integration/producer_perf_test.rs): enabled
+    only when SECURITY_PROTOCOL is SASL_PLAINTEXT or SASL_SSL and mechanism +
+    username + password are all set. The v3/Java form uses sasl.jaas.config; the
+    v2/librdkafka form uses sasl.username/sasl.password. Returns {} (a no-op)
+    for PLAINTEXT/SSL or incomplete credentials."""
+    security_protocol = os.environ.get("SECURITY_PROTOCOL")
+    mechanism = os.environ.get("SASL_MECHANISM")
+    username = os.environ.get("SASL_USERNAME")
+    password = os.environ.get("SASL_PASSWORD")
+    if security_protocol not in ("SASL_PLAINTEXT", "SASL_SSL") \
+            or not all((mechanism, username, password)):
+        return {}
+    if not v2:
+        sasl_jaas_config = (
+            "org.apache.kafka.common.security.plain.PlainLoginModule required \n\t"
+            f"username=\"{username}\" \n\tpassword=\"{password}\";")
+        return {
+            "security.protocol": security_protocol,
+            "sasl.mechanism": mechanism,
+            "sasl.jaas.config": sasl_jaas_config,
+        }
+    return {
+        "security.protocol": security_protocol,
+        "sasl.mechanism": mechanism,
+        "sasl.username": username,
+        "sasl.password": password,
+    }
+
+
 class Config:
     """Benchmark configuration, parsed from the environment."""
 
@@ -122,6 +153,7 @@ class _RustConsumer:
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size),
         }
+        conf.update(sasl_config_from_env(v2=False))
         self._c = KafkaConsumer(conf)
         self._timeout = cfg.poll_timeout_ms / 1000.0
 
@@ -163,6 +195,7 @@ class _LibrdkafkaConsumer:
             "fetch.message.max.bytes": cfg.fetch_max_bytes,
             "check.crcs": False,
         }
+        conf.update(sasl_config_from_env(v2=True))
         self._c = Consumer(conf)
         self._timeout = cfg.poll_timeout_ms / 1000.0
         self._batch = cfg.batch_size
@@ -216,6 +249,7 @@ class _AsyncRustConsumer:
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size),
         }
+        conf.update(sasl_config_from_env(v2=False))
         self._c = AsyncKafkaConsumer(conf)
         self._timeout = cfg.poll_timeout_ms / 1000.0
 
@@ -257,6 +291,7 @@ class _AsyncLibrdkafkaConsumer:
             "fetch.message.max.bytes": cfg.fetch_max_bytes,
             "check.crcs": False,
         }
+        conf.update(sasl_config_from_env(v2=True))
         self._c = AIOConsumer(conf)
         self._timeout = cfg.poll_timeout_ms / 1000.0
         self._batch = cfg.batch_size
@@ -296,13 +331,20 @@ def build_async_consumer(cfg):
 # ---------------------------------------------------------------------------
 def spawn_producer(cfg, total_records):
     bin_path = os.path.join(cfg.kafka_bin, "kafka-producer-perf-test.sh")
+    # --producer-props takes space-separated key=value tokens; each token is a
+    # separate argv element here, so the sasl.jaas.config value (which contains
+    # spaces) stays intact. SASL props use the Java form (security.protocol,
+    # sasl.mechanism, sasl.jaas.config) so the Java producer authenticates
+    # against the same SASL broker the consumer connects to.
+    producer_props = [f"bootstrap.servers={cfg.bootstrap_servers}", "acks=1"]
+    producer_props += [f"{k}={v}" for k, v in sasl_config_from_env(v2=False).items()]
     cmd = [
         bin_path,
         "--topic", cfg.topic,
         "--num-records", str(total_records),
         "--record-size", str(cfg.message_size),
         "--throughput", str(cfg.throughput),
-        "--producer-props", f"bootstrap.servers={cfg.bootstrap_servers}", "acks=1",
+        "--producer-props", *producer_props,
     ]
     print(f">>> Launching producer: throughput={cfg.throughput} msg/s, "
           f"{cfg.message_size} bytes, ~{total_records} records", flush=True)
