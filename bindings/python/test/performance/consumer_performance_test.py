@@ -400,24 +400,38 @@ def test_consumer_e2e_latency(kafka_broker):
     topic = "consumer-perf-smoke"
     conftest.create_topic(kafka_broker, topic, partitions=4)
 
+    # Match the Rust automatic perf test's in-suite config
+    # (tests/integration/producer_perf_test.rs): 100 rps, 10 s, p99<=70 ms,
+    # no warmup, 2048-byte values. SETTLE_TIMEOUT_SECONDS is consumer-specific
+    # (kept short so the low-rate live-edge settle doesn't dominate the run).
+    #
+    # FETCH_MIN_BYTES=1 is set for the in-suite run only: the C benchmark's 4 MiB
+    # floor never fills at 100 rps, so fetches would block on fetch.max.wait.ms
+    # (~500 ms) and dominate e2e latency. With a 1-byte floor the broker returns
+    # as soon as a record is available, so the 70 ms budget measures the pipeline
+    # rather than fetch batching. The manual/full benchmark keeps the C-faithful
+    # 4 MiB default.
     env = dict(os.environ)
     env.update({
         "BOOTSTRAP_SERVERS": kafka_broker.external_bootstrap,
         "TOPIC_NAME": topic,
         "CLIENT_VERSION": "3",
         "WARMUP_SECONDS": "0",
-        "TEST_DURATION_SECONDS": "8",
+        "TEST_DURATION_SECONDS": "10",
         "INTERVAL_SECONDS": "1",
         "POLL_TIMEOUT_MS": "500",
-        "VALUE_SIZE": "256",
-        "P99_LIMIT_MS": "5000",
+        "VALUE_SIZE": "2048",
+        "FETCH_MIN_BYTES": "1",
+        "P99_LIMIT_MS": "70",
         "JOIN_TIMEOUT_SECONDS": "60",
+        "SETTLE_TIMEOUT_SECONDS": "5",
     })
     env.pop("KAFKA_BIN", None)  # consume-only; load comes from the container
 
-    # Produce a steady burst inside the container while the consumer measures.
+    # Produce a steady 100 msg/s stream (Rust LIMIT_RPS) inside the container for
+    # the whole consumer lifetime (bounded high; reaped at container teardown).
     producer = conftest.produce_perf_in_container(
-        kafka_broker, topic, num_records=40000, record_size=256, throughput=2000)
+        kafka_broker, topic, num_records=10000, record_size=2048, throughput=100)
     try:
         proc = subprocess.run(
             [sys.executable, os.path.abspath(__file__)],

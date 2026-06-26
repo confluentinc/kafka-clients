@@ -948,6 +948,9 @@ def test_producer_e2e_latency(kafka_broker):
     topic = "producer-perf-smoke"
     conftest.create_topic(kafka_broker, topic, partitions=4)
 
+    # Match the Rust automatic perf test's in-suite config
+    # (tests/integration/producer_perf_test.rs): 100 rps, 10 s, p99<=70 ms,
+    # no warmup, default 2048-byte values.
     env = dict(os.environ)
     env.update({
         "BOOTSTRAP_SERVERS": kafka_broker.external_bootstrap,
@@ -955,10 +958,10 @@ def test_producer_e2e_latency(kafka_broker):
         "CLIENT_VERSION": "3",
         "ASYNC": "False",
         "WARMUP_SECONDS": "0",
-        "TEST_DURATION_SECONDS": "8",
-        "LIMIT_RPS": "2000",
-        "VALUE_SIZE": "256",
-        "P99_LIMIT_MS": "5000",
+        "TEST_DURATION_SECONDS": "10",
+        "LIMIT_RPS": "100",
+        "VALUE_SIZE": "2048",
+        "P99_LIMIT_MS": "70",
         "DO_VERIFY": "False",
     })
 
