@@ -290,12 +290,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 def _node_to_proto(node):
     if node is None:
         return None
-    return cpb.Node(id=node.id, host=node.host, port=node.port,
+    return pb.Node(id=node.id, host=node.host, port=node.port,
                     rack=node.rack if node.rack is not None else None)
 
 
 def _partition_info_to_proto(info):
-    return cpb.PartitionInfo(
+    return pb.PartitionInfo(
         topic=info.topic,
         partition=info.partition,
         leader=_node_to_proto(info.leader),
@@ -324,7 +324,7 @@ def _oam_to_proto(oam):
 def _record_to_proto(r):
     key = bytes(r.key) if r.key is not None else None
     value = bytes(r.value) if r.value is not None else None
-    headers = [cpb.Header(key=k, value=bytes(v) if v is not None else b"") for (k, v) in r.headers]
+    headers = [pb.Header(key=k, value=bytes(v) if v is not None else b"") for (k, v) in r.headers]
     return cpb.ConsumerRecord(
         topic=r.topic,
         partition=r.partition,
@@ -353,7 +353,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return self._consumers.get(consumer_id)
 
     def _status_err(self, e):
-        return cpb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse(error=_kafka_error_to_proto(e))
 
     def CreateConsumer(self, request, context):
         config = dict(request.config)
@@ -375,12 +375,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     def _run_status(self, consumer_id, fn):
         consumer = self._get(consumer_id)
         if consumer is None:
-            return cpb.StatusResponse(error=pb.KafkaError(
+            return pb.StatusResponse(error=pb.KafkaError(
                 variant=ILLEGAL_STATE, code=-1,
                 message=f"unknown consumer_id {consumer_id}", is_retriable=False, is_fatal=True))
         try:
             fn(consumer)
-            return cpb.StatusResponse()
+            return pb.StatusResponse()
         except kc.KafkaError as e:
             return self._status_err(e)
         except Exception as e:  # noqa: BLE001
@@ -591,18 +591,18 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is not None:
             consumer.wakeup()
-        return cpb.StatusResponse()
+        return pb.StatusResponse()
 
     def Close(self, request, context):
         with self._lock:
             consumer = self._consumers.pop(request.consumer_id, None)
         if consumer is None:
-            return cpb.StatusResponse()
+            return pb.StatusResponse()
         try:
             consumer.close()
         except kc.KafkaError as e:
             return self._status_err(e)
-        return cpb.StatusResponse()
+        return pb.StatusResponse()
 
 
 def main():
