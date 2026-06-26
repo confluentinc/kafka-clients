@@ -58,7 +58,7 @@ _BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # bindings/python (consumer
 for _p in (_HERE, _BINDINGS):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist  # noqa: E402
+from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic  # noqa: E402
 
 
 def _now_ms():
@@ -117,7 +117,10 @@ class Config:
         self.message_size = _env_int("VALUE_SIZE", _env_int("MESSAGE_SIZE", 1024))
         self.throughput = _env_int("THROUGHPUT", 100000)  # producer msg/s (KAFKA_BIN path)
         self.num_messages = _env_int("NUM_MESSAGES", 0)  # 0 => duration-based
-        self.partitions = _env_int("PARTITIONS", 1)
+        self.partitions = _env_int("PARTITIONS", -1)  # -1 => broker default
+        # When True (default), delete + re-create the topic before consuming
+        # (see performance_common.recreate_topic).
+        self.create_topic = os.getenv("CREATE_TOPIC", "True") == "True"
         self.p99_limit_ms = _env_int("P99_LIMIT_MS", 0)
         self.join_timeout_s = _env_int("JOIN_TIMEOUT_SECONDS", 120)
         self.settle_timeout_s = _env_int("SETTLE_TIMEOUT_SECONDS", 15)
@@ -455,6 +458,12 @@ def run(cfg, metrics=None):
     if own_metrics:
         metrics = Metrics()
 
+    # Optionally start from a clean topic before consuming (admin uses the
+    # librdkafka v2-form SASL config regardless of CLIENT_VERSION).
+    if cfg.create_topic:
+        recreate_topic(cfg.bootstrap_servers, cfg.topic,
+                       sasl_config_from_env(v2=True), cfg.partitions)
+
     consumer = build_consumer(cfg)
     consumer.subscribe(cfg.topic)
 
@@ -521,6 +530,12 @@ async def run_async(cfg, metrics=None):
     own_metrics = metrics is None
     if own_metrics:
         metrics = Metrics()
+
+    # Clean topic before consuming. recreate_topic is synchronous (admin +
+    # sleeps); it runs once at setup before the consumer touches the loop.
+    if cfg.create_topic:
+        recreate_topic(cfg.bootstrap_servers, cfg.topic,
+                       sasl_config_from_env(v2=True), cfg.partitions)
 
     consumer = build_async_consumer(cfg)
     await consumer.subscribe(cfg.topic)
@@ -665,6 +680,9 @@ def _smoke_env(kafka_broker, topic, extra=None):
         "P99_LIMIT_MS": "70",
         "JOIN_TIMEOUT_SECONDS": "60",
         "SETTLE_TIMEOUT_SECONDS": "5",
+        # The fixture creates the topic via testcontainers; skip the
+        # delete+recreate (and its 20s of sleeps) for the in-suite run.
+        "CREATE_TOPIC": "False",
     })
     if extra:
         env.update(extra)

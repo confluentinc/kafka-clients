@@ -11,7 +11,7 @@ import uuid
 from threading import Thread
 
 
-from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist
+from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic
 from concurrent.futures import CancelledError, Future
 from producer import (KafkaProducer, AsyncKafkaProducer, ProducerRecord,
                       RecordMetadata)
@@ -66,6 +66,11 @@ if limit_rps is not None:
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
 run_async = os.getenv("ASYNC", "False") == "True"
 do_verify = os.getenv("DO_VERIFY", "True") == "True"
+# When True (default), delete + re-create the topic before the run (broker-
+# default partitions unless PARTITIONS is set; broker-default RF). See
+# performance_common.recreate_topic.
+create_topic = os.getenv("CREATE_TOPIC", "True") == "True"
+partitions = int(os.getenv("PARTITIONS", "-1"))
 warmup_s = int(os.getenv("WARMUP_SECONDS", "120"))
 test_duration_s = os.getenv("TEST_DURATION_SECONDS", None)
 if test_duration_s is not None:
@@ -582,6 +587,12 @@ def main(v2=False):
         "BOOTSTRAP_SERVERS",
         common_default_configuration["bootstrap.servers"])
 
+    # Optionally start from a clean topic (delete + re-create) before producing.
+    # Admin uses librdkafka (v2-form) SASL config regardless of CLIENT_VERSION.
+    if create_topic:
+        recreate_topic(bootstrap_servers, topic_name,
+                       sasl_config_from_env(v2=True), partitions)
+
     if verify_consumed:
         try:
             baseline_end_offsets = get_topic_end_offsets(bootstrap_servers, topic_name)
@@ -763,6 +774,12 @@ async def async_main():
     bootstrap_servers = os.environ.get(
         "BOOTSTRAP_SERVERS",
         common_default_configuration["bootstrap.servers"])
+
+    # Optionally start from a clean topic (delete + re-create) before producing.
+    # Admin uses librdkafka (v2-form) SASL config regardless of CLIENT_VERSION.
+    if create_topic:
+        recreate_topic(bootstrap_servers, topic_name,
+                       sasl_config_from_env(v2=True), partitions)
 
     if verify_consumed:
         try:
@@ -963,6 +980,9 @@ def test_producer_e2e_latency(kafka_broker):
         "VALUE_SIZE": "2048",
         "P99_LIMIT_MS": "70",
         "DO_VERIFY": "False",
+        # The fixture already created the topic via testcontainers; skip the
+        # delete+recreate (and its 20s of sleeps) for the in-suite run.
+        "CREATE_TOPIC": "False",
     })
 
     proc = _sp.run(

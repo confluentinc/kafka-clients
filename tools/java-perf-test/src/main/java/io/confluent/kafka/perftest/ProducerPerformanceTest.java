@@ -23,6 +23,14 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.errors.TopicExistsException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -97,6 +105,11 @@ public class ProducerPerformanceTest {
     private static final long NUM_MESSAGES = envLong("NUM_MESSAGES", 0);
     private static final boolean DO_VERIFY = envBool("DO_VERIFY", true);
     private static final boolean VERIFY_CONSUMED = envBool("VERIFY_CONSUMED", false);
+    // When true (default), delete + re-create the topic before the run. -1
+    // partitions => broker default (RF is always broker default, so this works
+    // on Confluent Cloud where RF=1 is rejected).
+    private static final boolean CREATE_TOPIC = envBool("CREATE_TOPIC", true);
+    private static final int PARTITIONS = envInt("PARTITIONS", -1);
     // Per-message p99 latency budget in ms (0 = off). Matches C/Rust.
     private static final long P99_LIMIT_MS = envLong("P99_LIMIT_MS", 0);
     private static final int MAX_LATENCY_MS = 10_000;
@@ -128,6 +141,10 @@ public class ProducerPerformanceTest {
 
         Properties producerConf = configurationFromEnv();
         printConfiguration(producerConf);
+
+        if (CREATE_TOPIC) {
+            recreateTopic(producerConf, TOPIC_NAME, PARTITIONS);
+        }
 
         // Pre-generate messages, just like the Python test.
         List<KeyValue> generated = generateMessages(10_000, KEY_SIZE, VALUE_SIZE);
@@ -619,6 +636,58 @@ public class ProducerPerformanceTest {
             if (producerConf.containsKey(k)) conf.put(k, producerConf.get(k));
         }
         return conf;
+    }
+
+    /**
+     * Delete the topic (ignoring "does not exist"), wait 10s, re-create it, wait
+     * 10s — using the Java AdminClient. Partition count and replication factor
+     * use the broker default (Optional.empty) unless {@code partitions} &gt; 0,
+     * so this works on Confluent Cloud where RF=1 is rejected. The sleeps let the
+     * delete/create metadata propagate across the cluster.
+     */
+    private static void recreateTopic(Properties producerConf, String topic, int partitions)
+            throws InterruptedException {
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+            producerConf.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG));
+        // Reuse the producer's security/SASL config for the admin client.
+        for (String k : new String[]{"security.protocol", "sasl.mechanism", "sasl.jaas.config"}) {
+            if (producerConf.containsKey(k)) adminProps.put(k, producerConf.get(k));
+        }
+        try (Admin admin = Admin.create(adminProps)) {
+            System.out.println(">>> CREATE_TOPIC: deleting topic '" + topic + "' (ignored if absent) ...");
+            try {
+                admin.deleteTopics(Collections.singletonList(topic)).all().get();
+                System.out.println(">>> deleted '" + topic + "'");
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof UnknownTopicOrPartitionException) {
+                    System.out.println(">>> '" + topic + "' did not exist (ok)");
+                } else {
+                    throw new RuntimeException(e);
+                }
+            }
+            System.out.println(">>> waiting 10s after delete ...");
+            Thread.sleep(10_000);
+
+            String pdesc = partitions > 0 ? String.valueOf(partitions) : "broker-default";
+            System.out.println(">>> CREATE_TOPIC: creating topic '" + topic
+                + "' (partitions=" + pdesc + ", rf=broker-default) ...");
+            NewTopic newTopic = new NewTopic(topic,
+                partitions > 0 ? Optional.of(partitions) : Optional.<Integer>empty(),
+                Optional.<Short>empty());
+            try {
+                admin.createTopics(Collections.singletonList(newTopic)).all().get();
+                System.out.println(">>> created '" + topic + "'");
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof TopicExistsException) {
+                    System.out.println(">>> '" + topic + "' already exists (ok)");
+                } else {
+                    throw new RuntimeException(e);
+                }
+            }
+            System.out.println(">>> waiting 10s after create ...");
+            Thread.sleep(10_000);
+        }
     }
 
     // === Utility helpers =====================================================
