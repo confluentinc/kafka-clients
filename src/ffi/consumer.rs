@@ -47,9 +47,9 @@
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_void};
-use std::sync::Mutex;
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::common::header::{Header, RecordHeader};
@@ -62,8 +62,8 @@ use crate::consumer::{
 };
 
 use super::common::{
-    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
+    self, box_error, enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t, CompletionJob,
+    OperationCallbackFn, OperationCallbackTarget, OperationCompletion,
 };
 
 // The byte-array consumer is monomorphized over `Vec<u8>` keys and values.
@@ -2535,6 +2535,62 @@ unsafe fn async_void_op<F, Fut>(
     });
 }
 
+/// A raw `user_data` pointer wrapped so it can cross into the spawned task and
+/// completion job. The C user owns its thread-safety (CLAUDE.md FFI §3).
+struct SendUserData(*mut c_void);
+// SAFETY: the C user is responsible for the thread-safety of `user_data`.
+unsafe impl Send for SendUserData {}
+
+/// Async dispatch for a **data-returning** consumer op (one-operation-in-flight),
+/// mirroring [`async_void_op`] but for methods that return a value. The access
+/// guard is held from submission until the completion job fires, so any
+/// concurrent op (sync or async) is rejected with `ConcurrentModification` until
+/// completion. If the guard cannot be acquired, `complete` fires inline with the
+/// error.
+///
+/// `op` runs the awaited consumer method on the runtime; `complete` runs on the
+/// dispatcher thread, builds the C result handle from the `Ok` value (or an
+/// error handle from the `Err`) and fires the typed C callback with `user_data`.
+/// Building the handle inside `complete` (not inside the spawned task) keeps the
+/// future free of non-`Send` raw pointers — the symmetric reason
+/// [`kafka_consumer_Consumer_poll_async`] forbids `.await` after building handles.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle from a consumer constructor.
+unsafe fn async_value_op<T, Fut, F, C>(
+    consumer: *const kafka_consumer_Consumer_t,
+    user_data: *mut c_void,
+    op: F,
+    complete: C,
+) where
+    T: Send + 'static,
+    Fut: std::future::Future<Output = Result<T, KafkaError>> + Send,
+    F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
+    C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
+{
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        // Rejected: fire the callback inline with the error; guard not taken.
+        complete(Err(e), user_data);
+        return;
+    }
+    let tx = h.completion_tx.clone();
+    let hs: &'static ConsumerHandle = unsafe { handle_ref(consumer) };
+    let ud = SendUserData(user_data);
+    h.runtime_handle.spawn(async move {
+        let ud = ud;
+        let result = op(unsafe { consumer_mut(hs) }).await;
+        let job: CompletionJob = Box::new(move || {
+            complete(result, ud.0);
+            // Release only after the callback fires, so `owner` stays held for
+            // the whole submit->callback window.
+            release(hs);
+        });
+        enqueue_or_run_inline(&tx, job);
+    });
+}
+
 // ── subscribe ──
 
 /// Subscribes to a list of topics (sync). `topics` is an array of `count` C
@@ -2849,6 +2905,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_sync())) }
 }
 
+/// Commits the current positions asynchronously (async dispatch of
+/// [`kafka_consumer_Consumer_commit_sync`]; the callback fires when the commit
+/// has completed). One-operation-in-flight; reuses [`kafka_consumer_Consumer_op_callback_t`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe { async_void_op(consumer, callback, user_data, |c| c.commit_sync()) };
+}
+
 /// Reads `count` `(topic, partition, offset, leader_epoch, metadata)` tuples
 /// from parallel C arrays into a `HashMap<TopicPartition, OffsetAndMetadata>`.
 /// `metadata` may be null (whole array) or contain null entries (per element);
@@ -2876,7 +2948,11 @@ unsafe fn read_offset_map(
             None
         } else {
             let e = unsafe { *leader_epochs.add(i) };
-            if e < 0 { None } else { Some(e) }
+            if e < 0 {
+                None
+            } else {
+                Some(e)
+            }
         };
         let meta = if metadata.is_null() {
             String::new()
@@ -2916,6 +2992,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
         Err(e) => return box_error(e),
     };
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_sync_offsets(map))) }
+}
+
+/// Commits specific offsets asynchronously (async dispatch of
+/// [`kafka_consumer_Consumer_commit_sync_offsets`]; the callback fires when the
+/// commit has completed). One-operation-in-flight; reuses
+/// [`kafka_consumer_Consumer_op_callback_t`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; arrays `count` valid entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
+        Ok(m) => m,
+        Err(e) => {
+            // Marshaling failed: fire inline with the error (no guard taken).
+            unsafe { callback(box_error(e), user_data) };
+            return;
+        },
+    };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.commit_sync_offsets(map)) };
 }
 
 /// Commits the consumed offsets asynchronously (sync call, returns once the
@@ -3036,6 +3143,46 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     }
 }
 
+/// Completion callback for [`kafka_consumer_Consumer_position_async`]. On
+/// success `error` is null and `position` is the offset; on failure `error` is
+/// non-null and `position` is 0. (Position is never absent on success, so —
+/// unlike `current_lag` — no presence flag is needed.) The callback owns
+/// `error` if non-null.
+pub type kafka_consumer_Consumer_position_callback_t =
+    unsafe extern "C" fn(i64, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Returns the current position of `(topic, partition)` asynchronously
+/// (one-operation-in-flight). See [`kafka_consumer_Consumer_position`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; `topic` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_position_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topic: *const c_char,
+    partition: i32,
+    callback: kafka_consumer_Consumer_position_callback_t,
+    user_data: *mut c_void,
+) {
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    let tp = TopicPartition::new(topic_str, partition);
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.position(&tp).await },
+            move |result, ud| {
+                let (pos, err) = match result {
+                    Ok(p) => (p, std::ptr::null_mut()),
+                    Err(e) => (0i64, box_error(e)),
+                };
+                callback(pos, err, ud);
+            },
+        )
+    };
+}
+
 /// Returns the last committed offsets for the given partitions (sync). On
 /// success writes an [`kafka_consumer_OffsetMap_t`] to `*out_map` (free it with
 /// [`kafka_consumer_OffsetMap_destroy`]) and returns null; on failure returns a
@@ -3068,6 +3215,45 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
         },
         Err(e) => box_error(e),
     }
+}
+
+/// Completion callback for [`kafka_consumer_Consumer_committed_async`]. On
+/// success `map` is non-null (an [`kafka_consumer_OffsetMap_t`], free with
+/// [`kafka_consumer_OffsetMap_destroy`]) and `error` is null; on failure `map`
+/// is null and `error` is non-null. The callback owns whichever is non-null.
+pub type kafka_consumer_Consumer_committed_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_OffsetMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Returns the last committed offsets for the given partitions asynchronously
+/// (one-operation-in-flight). See [`kafka_consumer_Consumer_committed`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_committed_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    callback: kafka_consumer_Consumer_committed_callback_t,
+    user_data: *mut c_void,
+) {
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.committed(&tps).await },
+            move |result, ud| {
+                let (map, err) = match result {
+                    Ok(m) => (box_offset_map(m), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(map, err, ud);
+            },
+        )
+    };
 }
 
 /// Looks up offsets by timestamp for the given partitions (sync). Parallel
@@ -3112,6 +3298,71 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     }
 }
 
+/// Reads `count` `(topic, partition, timestamp)` tuples from parallel C arrays
+/// into the `HashMap<TopicPartition, i64>` request for `offsets_for_times`.
+///
+/// # Safety
+///
+/// All arrays must have `count` valid entries.
+unsafe fn read_timestamps_to_search(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    timestamps: *const i64,
+    count: i32,
+) -> HashMap<TopicPartition, i64> {
+    let n = count.max(0) as usize;
+    let mut req = HashMap::with_capacity(n);
+    for i in 0..n {
+        let topic_ptr = unsafe { *topics.add(i) };
+        let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        let partition = unsafe { *partitions.add(i) };
+        let timestamp = unsafe { *timestamps.add(i) };
+        req.insert(TopicPartition::new(topic, partition), timestamp);
+    }
+    req
+}
+
+/// Completion callback for [`kafka_consumer_Consumer_offsets_for_times_async`].
+/// On success `map` is a non-null [`kafka_consumer_OffsetAndTimestampMap_t`]
+/// (free with [`kafka_consumer_OffsetAndTimestampMap_destroy`]) and `error` is
+/// null; on failure `map` is null and `error` is non-null. The callback owns
+/// whichever is non-null.
+pub type kafka_consumer_Consumer_offsets_for_times_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_OffsetAndTimestampMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Looks up offsets by timestamp asynchronously (one-operation-in-flight).
+/// See [`kafka_consumer_Consumer_offsets_for_times`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; arrays `count` valid entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    timestamps: *const i64,
+    count: i32,
+    callback: kafka_consumer_Consumer_offsets_for_times_callback_t,
+    user_data: *mut c_void,
+) {
+    let req = unsafe { read_timestamps_to_search(topics, partitions, timestamps, count) };
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.offsets_for_times(req).await },
+            move |result, ud| {
+                let (map, err) = match result {
+                    Ok(m) => (box_offset_and_timestamp_map(m), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(map, err, ud);
+            },
+        )
+    };
+}
+
 /// Returns the beginning offsets for the given partitions (sync). On success
 /// writes a [`kafka_consumer_LongOffsetMap_t`] to `*out_map`.
 ///
@@ -3142,6 +3393,46 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
         },
         Err(e) => box_error(e),
     }
+}
+
+/// Completion callback shared by [`kafka_consumer_Consumer_beginning_offsets_async`]
+/// and [`kafka_consumer_Consumer_end_offsets_async`] (both return a
+/// [`kafka_consumer_LongOffsetMap_t`]). On success `map` is non-null (free with
+/// [`kafka_consumer_LongOffsetMap_destroy`]) and `error` is null; on failure
+/// `map` is null and `error` is non-null. The callback owns whichever is non-null.
+pub type kafka_consumer_Consumer_long_offsets_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_LongOffsetMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Returns the beginning offsets for the given partitions asynchronously
+/// (one-operation-in-flight). See [`kafka_consumer_Consumer_beginning_offsets`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    callback: kafka_consumer_Consumer_long_offsets_callback_t,
+    user_data: *mut c_void,
+) {
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.beginning_offsets(&tps).await },
+            move |result, ud| {
+                let (map, err) = match result {
+                    Ok(m) => (box_long_offset_map(m), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(map, err, ud);
+            },
+        )
+    };
 }
 
 /// Returns the end offsets for the given partitions (sync). On success writes a
@@ -3176,6 +3467,38 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     }
 }
 
+/// Returns the end offsets for the given partitions asynchronously
+/// (one-operation-in-flight). See [`kafka_consumer_Consumer_end_offsets`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    callback: kafka_consumer_Consumer_long_offsets_callback_t,
+    user_data: *mut c_void,
+) {
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.end_offsets(&tps).await },
+            move |result, ud| {
+                let (map, err) = match result {
+                    Ok(m) => (box_long_offset_map(m), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(map, err, ud);
+            },
+        )
+    };
+}
+
 /// Returns the partition metadata for a topic (sync). On success writes a
 /// [`kafka_consumer_PartitionInfoList_t`] to `*out_list`.
 ///
@@ -3205,6 +3528,43 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     }
 }
 
+/// Completion callback for [`kafka_consumer_Consumer_partitions_for_async`]. On
+/// success `list` is a non-null [`kafka_consumer_PartitionInfoList_t`] (free with
+/// [`kafka_consumer_PartitionInfoList_destroy`]) and `error` is null; on failure
+/// `list` is null and `error` is non-null. The callback owns whichever is non-null.
+pub type kafka_consumer_Consumer_partitions_for_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_PartitionInfoList_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Returns the partition metadata for a topic asynchronously
+/// (one-operation-in-flight). See [`kafka_consumer_Consumer_partitions_for`].
+///
+/// # Safety
+///
+/// `consumer` a valid handle; `topic` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topic: *const c_char,
+    callback: kafka_consumer_Consumer_partitions_for_callback_t,
+    user_data: *mut c_void,
+) {
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.partitions_for(&topic_str).await },
+            move |result, ud| {
+                let (list, err) = match result {
+                    Ok(infos) => (box_partition_info_list(infos), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(list, err, ud);
+            },
+        )
+    };
+}
+
 /// Returns metadata for all topics the consumer is authorized to view (sync).
 /// On success writes a [`kafka_consumer_TopicPartitionInfoMap_t`] to `*out_map`.
 ///
@@ -3230,6 +3590,42 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
         },
         Err(e) => box_error(e),
     }
+}
+
+/// Completion callback for [`kafka_consumer_Consumer_list_topics_async`]. On
+/// success `map` is a non-null [`kafka_consumer_TopicPartitionInfoMap_t`] (free
+/// with [`kafka_consumer_TopicPartitionInfoMap_destroy`]) and `error` is null;
+/// on failure `map` is null and `error` is non-null. The callback owns whichever
+/// is non-null.
+pub type kafka_consumer_Consumer_list_topics_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionInfoMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Returns metadata for all topics the consumer is authorized to view
+/// asynchronously (one-operation-in-flight). See [`kafka_consumer_Consumer_list_topics`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    callback: kafka_consumer_Consumer_list_topics_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            |c| async move { c.list_topics().await },
+            move |result, ud| {
+                let (map, err) = match result {
+                    Ok(m) => (box_topic_partition_info_map(m), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(map, err, ud);
+            },
+        )
+    };
 }
 
 // ---------------------------------------------------------------------------
