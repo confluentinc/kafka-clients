@@ -70,5 +70,11 @@ pub mod backend_pool;
 #[allow(dead_code)]
 pub mod multilanguage_producer;
 #[cfg(feature = "multilanguage-tests")]
+#[allow(dead_code)]
+pub mod multilanguage_consumer;
+#[cfg(feature = "multilanguage-tests")]
 #[macro_use]
 pub mod multilanguage_test_macro;
+#[cfg(feature = "multilanguage-tests")]
+#[macro_use]
+pub mod multilanguage_consumer_test_macro;
