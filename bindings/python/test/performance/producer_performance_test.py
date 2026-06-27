@@ -92,6 +92,22 @@ latency_hist = [0] * (MAX_LATENCY_MS + 2)
 latency_budget_exceeded = False
 
 
+def _is_queue_full(exc):
+    """True if `exc` is a librdkafka / confluent-kafka QUEUE_FULL delivery error
+    (local producer queue overflow), e.g.
+    KafkaError{code=_QUEUE_FULL,val=-184,...}. Handles both the confluent-kafka
+    (v2) and Rust-binding (v3) backends."""
+    try:
+        from confluent_kafka import KafkaError
+        arg = exc.args[0] if getattr(exc, "args", None) else None
+        if arg is not None and hasattr(arg, "code") and arg.code() == KafkaError._QUEUE_FULL:
+            return True
+    except Exception:
+        pass
+    s = str(exc).lower()
+    return "queue_full" in s or "queue full" in s
+
+
 def record_latency(latency_ms):
     idx = min(max(int(latency_ms), 0), MAX_LATENCY_MS + 1)
     latency_hist[idx] += 1
@@ -147,7 +163,7 @@ class CompatibleProducer:
                     callback=delivery_report
                 )
                 break
-            except BufferError as e:
+            except BufferError:
                 time.sleep(0.001)
         return fut
 
@@ -619,8 +635,6 @@ def main(v2=False):
         except CancelledError:
             pass
         completed_messages += 1
-        if completed_messages % 10000 == 0:
-            print(f"Completed messages: {completed_messages}. Rate so far: {completed_messages / ((time.time_ns() - first_message_time) / 1e9):.2f} msg/s", end='\r')  # noqa: E501
         current_latency = int(time.time() * 1000) - start_time
         metrics.latency.add_measurement(current_latency)
         record_latency(current_latency)
@@ -670,7 +684,7 @@ def main(v2=False):
                         r = produce_call.result()
                         verification_function(r)
                         warmup_sent += 1
-                    except Exception as e:
+                    except Exception:
                         print("Warmup failed due to message verification error")
                         producer = None
                         return
@@ -765,6 +779,9 @@ async def async_main():
     total_latency_ms = 0
     max_latency_ms = 0
     completed_messages = 0
+    # Messages whose delivery failed with QUEUE_FULL (local queue overflow):
+    # they were never actually sent, so they are subtracted from measured_sent.
+    queue_full = 0
     before_ms = None
     first_message_time = None
 
@@ -802,8 +819,6 @@ async def async_main():
         except Exception as e:
             print(f"Produce call resulted in exception: {e}")
         completed_messages += 1
-        if completed_messages % 10000 == 0:
-            print(f"Completed messages: {completed_messages}. Rate so far: {completed_messages / ((time.time_ns() - first_message_time) / 1e9):.2f} msg/s", end='\r')  # noqa: E501
         current_latency = int(time.time() * 1000) - start_time
         metrics.latency.add_measurement(current_latency)
         record_latency(current_latency)
@@ -814,6 +829,7 @@ async def async_main():
 
     async def record_completed_calls_worker(produce_calls_queue):
         # Stops on the `None` sentinel enqueued after the send loop completes.
+        nonlocal queue_full
         while True:
             item = await produce_calls_queue.get()
             if item is None:
@@ -824,7 +840,13 @@ async def async_main():
             except CancelledError:
                 continue
             except Exception as e:
-                print(f"Produce call resulted in exception: {e}")
+                # QUEUE_FULL means the message was never sent — count it (it is
+                # subtracted from measured_sent below) and don't log it (it can
+                # occur tens of thousands of times and would flood the output).
+                if _is_queue_full(e):
+                    queue_full += 1
+                else:
+                    print(f"Produce call resulted in exception: {e}")
                 continue
             record_completed_call(r, start_time)
 
@@ -907,7 +929,12 @@ async def async_main():
             await produce_calls.put(None)  # stop the recorder once drained
             await record_task
             record_task = None
-            measured_sent = messages_sent
+            # QUEUE_FULL deliveries were never sent — subtract them from the
+            # measured sent count (recorder finished draining at await above).
+            measured_sent = messages_sent - queue_full
+            if queue_full > 0:
+                print(f"QUEUE_FULL errors: {queue_full} (subtracted from sent; "
+                      f"measured_sent={measured_sent})")
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
