@@ -3444,14 +3444,12 @@ fn generate_bytes_read(
             writeln!(file, "{}        result.{} = None;", indent, field_name)?;
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let length = len - 1;", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}    }}", indent)?;
         } else {
             writeln!(file, "{}    let length = if len == 0 {{ 0 }} else {{ len - 1 }};", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
         }
         writeln!(file, "{}}} else {{", indent)?;
@@ -3460,14 +3458,12 @@ fn generate_bytes_read(
             writeln!(file, "{}    if len < 0 {{", indent)?;
             writeln!(file, "{}        result.{} = None;", indent, field_name)?;
             writeln!(file, "{}    }} else {{", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_array(len as usize)?;", indent)?;
             writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}    }}", indent)?;
         } else {
             writeln!(file, "{}    let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
         }
         writeln!(file, "{}}}", indent)?;
@@ -3477,14 +3473,12 @@ fn generate_bytes_read(
             writeln!(file, "{}if len < 0 {{", indent)?;
             writeln!(file, "{}    result.{} = None;", indent, field_name)?;
             writeln!(file, "{}}} else {{", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_array(len as usize)?;", indent)?;
             writeln!(file, "{}    result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}}}", indent)?;
         } else {
             writeln!(file, "{}let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
-            writeln!(file, "{}let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}result.{} = {}bytes{};", indent, field_name, some_wrap, some_close)?;
         }
     }
