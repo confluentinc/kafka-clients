@@ -303,10 +303,20 @@ where
                     let num = partition_records.len() as i32;
                     if num > 0 {
                         records_remaining -= num;
-                        records_by_partition
-                            .entry(cf_back.partition.clone())
-                            .or_default()
-                            .extend(partition_records);
+                        // Common case (one fetch per partition per poll): the
+                        // entry does not yet exist, so MOVE the whole Vec in
+                        // wholesale instead of an element-by-element `extend`,
+                        // which would memmove every (large) `ConsumerRecord`
+                        // struct. Only when a partition already has records
+                        // collected in this poll do we fall back to `extend`.
+                        match records_by_partition.entry(cf_back.partition.clone()) {
+                            indexmap::map::Entry::Vacant(e) => {
+                                e.insert(partition_records);
+                            },
+                            indexmap::map::Entry::Occupied(mut e) => {
+                                e.get_mut().extend(partition_records);
+                            },
+                        }
                     }
                     if let Some(no) = next_offset {
                         next_offsets.insert(cf_back.partition.clone(), no);

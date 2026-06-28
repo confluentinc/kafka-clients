@@ -439,7 +439,19 @@ impl CompletedFetch {
         }
 
         self.ensure_cursor();
-        let mut out: Vec<ConsumerRecord<K, V>> = Vec::new();
+        // Preallocate the output Vec to avoid the realloc churn of growing from
+        // zero on every batch. At this point no batch has been loaded yet
+        // (`ensure_cursor` defers parsing the first batch to the loop below, so
+        // `records_remaining == 0` here and the batch's record count is not yet
+        // known). Blindly reserving `max_records` (= `max.poll.records`, default
+        // 500) would over-allocate ~hundreds of `ConsumerRecord` slots for small
+        // fetches. We therefore cap the preallocation to a small constant: the
+        // common steady-state fetch returns far fewer records than the cap, and
+        // a larger fetch simply grows the Vec a couple more times — far cheaper
+        // than the per-poll over-allocation. 512 covers the default
+        // `max.poll.records` (500) without exceeding it for typical configs.
+        let initial_capacity = (max_records as usize).min(512);
+        let mut out: Vec<ConsumerRecord<K, V>> = Vec::with_capacity(initial_capacity);
 
         for _ in 0..max_records {
             // Only advance to the next record if there was no cached
