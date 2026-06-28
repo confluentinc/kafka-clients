@@ -476,12 +476,23 @@ Deployed and started. The '{args.test}' test is running in tmux on {host}.
     scp(f"{host}:{base}/results/run.log", dest + "/", ssh_opts, check=False)
 
     if args.plot_script:
-        print(f"==> Plotting metrics with {args.plot_script}")
+        # plot_metrics.py needs matplotlib. Prefer the repo venv's interpreter
+        # (which has it) over whatever python launched this script — running the
+        # deploy with the system python is common and the system python usually
+        # lacks matplotlib, which silently turned every report into "WARN failed".
+        plot_python = sys.executable
+        venv_python = os.path.join(REPO_ROOT, "venv", "bin", "python")
+        if os.path.isfile(venv_python):
+            plot_python = venv_python
+        print(f"==> Plotting metrics with {args.plot_script} (python: {plot_python})")
         for jsonl in sorted(glob.glob(os.path.join(dest, "**", "*.jsonl"), recursive=True)):
             out = jsonl[: -len(".jsonl")] + ".md"
-            r = subprocess.run([sys.executable, args.plot_script, jsonl, out],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print(f"  {'plotted' if r.returncode == 0 else 'WARN failed'} {jsonl} -> {out}")
+            r = subprocess.run([plot_python, args.plot_script, jsonl, out],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            ok = r.returncode == 0
+            print(f"  {'plotted' if ok else 'WARN failed'} {jsonl} -> {out}")
+            if not ok and r.stderr:
+                print("    " + r.stderr.decode(errors="replace").strip().splitlines()[-1])
 
     print(f"\nDone. Metrics + plots saved under: {dest}")
 

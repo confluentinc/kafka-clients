@@ -51,6 +51,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -114,8 +115,8 @@ class Config:
         self.test_duration_seconds = _env_int("TEST_DURATION_SECONDS", 600)
         self.interval_seconds = _env_int("INTERVAL_SECONDS", 1)
         self.poll_timeout_ms = _env_int("POLL_TIMEOUT_MS", 1000)
-        self.message_size = _env_int("VALUE_SIZE", _env_int("MESSAGE_SIZE", 1024))
-        self.throughput = _env_int("THROUGHPUT", 100000)  # producer msg/s (KAFKA_BIN path)
+        self.message_size = _env_int("VALUE_SIZE", 2048)
+        self.throughput = _env_int("THROUGHPUT", 125000)  # producer msg/s (KAFKA_BIN path)
         self.num_messages = _env_int("NUM_MESSAGES", 0)  # 0 => duration-based
         self.partitions = _env_int("PARTITIONS", -1)  # -1 => broker default
         # When True (default), delete + re-create the topic before consuming
@@ -154,7 +155,8 @@ class _RustConsumer:
             "enable.auto.commit": "true",
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
-            "max.poll.records": str(cfg.batch_size),
+            "max.poll.records": str(cfg.batch_size + 500),
+            "check.crcs": "false",
         }
         conf.update(sasl_config_from_env(v2=False))
         self._c = KafkaConsumer(conf)
@@ -250,7 +252,8 @@ class _AsyncRustConsumer:
             "enable.auto.commit": "true",
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
-            "max.poll.records": str(cfg.batch_size),
+            "max.poll.records": str(cfg.batch_size + 500),
+            "check.crcs": "false",
         }
         conf.update(sasl_config_from_env(v2=False))
         self._c = AsyncKafkaConsumer(conf)
@@ -334,24 +337,42 @@ def build_async_consumer(cfg):
 # ---------------------------------------------------------------------------
 def spawn_producer(cfg, total_records):
     bin_path = os.path.join(cfg.kafka_bin, "kafka-producer-perf-test.sh")
-    # --producer-props takes space-separated key=value tokens; each token is a
-    # separate argv element here, so the sasl.jaas.config value (which contains
-    # spaces) stays intact. SASL props use the Java form (security.protocol,
-    # sasl.mechanism, sasl.jaas.config) so the Java producer authenticates
-    # against the same SASL broker the consumer connects to.
-    producer_props = [f"bootstrap.servers={cfg.bootstrap_servers}", "acks=1"]
-    producer_props += [f"{k}={v}" for k, v in sasl_config_from_env(v2=False).items()]
+    # The producer config goes through a properties file (--producer.config), not
+    # --producer-props: ProducerPerformance.readProps() splits each --producer-props
+    # token on "=" and rejects any value containing more than one "=" — which the
+    # sasl.jaas.config value always does (username="..." password="...";). A Java
+    # .properties file splits only on the first "=", so the jaas value stays intact.
+    # SASL uses the Java form (security.protocol, sasl.mechanism, sasl.jaas.config)
+    # so the Java producer authenticates against the same SASL broker as the consumer.
+    props = {"bootstrap.servers": cfg.bootstrap_servers, "acks": "1"}
+    props.update(sasl_config_from_env(v2=False))
+    fd, props_path = tempfile.mkstemp(prefix="producer_perf_", suffix=".properties")
+    with os.fdopen(fd, "w") as f:
+        for k, v in props.items():
+            # A Java .properties value must be one logical line: a raw newline
+            # ends the entry. sasl.jaas.config from sasl_config_from_env carries
+            # cosmetic "\n\t" between its terms, so collapse all whitespace runs
+            # to single spaces before writing (the value is whitespace-insensitive).
+            one_line = " ".join(str(v).split())
+            f.write(f"{k}={one_line}\n")
     cmd = [
         bin_path,
         "--topic", cfg.topic,
         "--num-records", str(total_records),
         "--record-size", str(cfg.message_size),
         "--throughput", str(cfg.throughput),
-        "--producer-props", *producer_props,
+        "--producer.config", props_path,
     ]
     print(f">>> Launching producer: throughput={cfg.throughput} msg/s, "
           f"{cfg.message_size} bytes, ~{total_records} records", flush=True)
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Capture producer output to a file (cwd is the results dir) instead of
+    # discarding it: a silent producer failure looks identical to "no data" on
+    # the consumer side, so its stdout/stderr must remain inspectable.
+    log = open("producer.log", "w")
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    # The caller removes this once the producer is killed (see run / run_async).
+    proc.props_path = props_path
+    return proc
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +534,10 @@ def run(cfg, metrics=None):
                 producer.wait(timeout=5)
             except Exception:
                 pass
+            try:
+                os.unlink(producer.props_path)
+            except OSError:
+                pass
         consumer.close()
         if own_metrics:
             metrics.stop_collecting()
@@ -587,6 +612,10 @@ async def run_async(cfg, metrics=None):
                 producer.kill()
                 producer.wait(timeout=5)
             except Exception:
+                pass
+            try:
+                os.unlink(producer.props_path)
+            except OSError:
                 pass
         await consumer.close()
         if own_metrics:

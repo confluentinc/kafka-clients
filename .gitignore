@@ -4,6 +4,8 @@
 *.json
 *.jsonl
 *.md.lock
+*.pyc
+bin
 venv
 COMMENTS\.[0-9]*\.md
 COMMENTS\.TBR\.[0-9]*\.md
