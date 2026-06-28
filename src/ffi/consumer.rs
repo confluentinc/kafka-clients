@@ -47,13 +47,13 @@
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CStr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::common::header::{Header, RecordHeader};
-use crate::common::serialization::ByteArrayDeserializer;
+use crate::common::serialization::BytesDeserializer;
 use crate::common::{KafkaError, Node, PartitionInfo, TopicPartition};
 use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
 use crate::consumer::{
@@ -62,12 +62,15 @@ use crate::consumer::{
 };
 
 use super::common::{
-    self, box_error, enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t, CompletionJob,
-    OperationCallbackFn, OperationCallbackTarget, OperationCompletion,
+    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
+    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
 
-// The byte-array consumer is monomorphized over `Vec<u8>` keys and values.
-type Bytes = Vec<u8>;
+// The byte-array consumer is monomorphized over refcounted `bytes::Bytes` keys
+// and values, so each record's key/value is a zero-copy slice of the owning
+// fetch buffer (consumer-threading.md §27). The C side borrows ptr+len from the
+// `Bytes` (which derefs to `&[u8]`); the batch keeps the buffer alive.
+type Bytes = bytes::Bytes;
 
 // ---------------------------------------------------------------------------
 // Access guard
@@ -418,19 +421,17 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
         },
     }
 
-    let consumer = match AsyncKafkaConsumer::<Bytes, Bytes>::new(
-        config,
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            if !out_error.is_null() {
-                unsafe { *out_error = box_error(e) };
-            }
-            return std::ptr::null_mut();
-        },
-    };
+    let consumer =
+        match AsyncKafkaConsumer::<Bytes, Bytes>::new(config, Box::new(BytesDeserializer), Box::new(BytesDeserializer))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                if !out_error.is_null() {
+                    unsafe { *out_error = box_error(e) };
+                }
+                return std::ptr::null_mut();
+            },
+        };
 
     let wakeup_handle = consumer.wakeup_handle();
     if !out_error.is_null() {
@@ -1179,12 +1180,16 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     let key_vec: Option<Bytes> = if key_len < 0 || key.is_null() {
         None
     } else {
-        Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) }.to_vec())
+        Some(Bytes::copy_from_slice(unsafe {
+            std::slice::from_raw_parts(key, key_len as usize)
+        }))
     };
     let value_vec: Option<Bytes> = if value_len < 0 || value.is_null() {
         None
     } else {
-        Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) }.to_vec())
+        Some(Bytes::copy_from_slice(unsafe {
+            std::slice::from_raw_parts(value, value_len as usize)
+        }))
     };
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
@@ -2968,11 +2973,7 @@ unsafe fn read_offset_map(
             None
         } else {
             let e = unsafe { *leader_epochs.add(i) };
-            if e < 0 {
-                None
-            } else {
-                Some(e)
-            }
+            if e < 0 { None } else { Some(e) }
         };
         let meta = if metadata.is_null() {
             String::new()

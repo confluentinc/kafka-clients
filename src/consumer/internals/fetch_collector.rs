@@ -970,7 +970,7 @@ mod tests {
         let mut partition_data = PartitionData::new();
         partition_data.set_partition_index(partition.partition());
         partition_data.set_high_watermark(1000);
-        partition_data.set_records(Some(make_records(0, record_count)));
+        partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
         if let Some(e) = error {
             partition_data.set_error_code(e.code());
         }
@@ -1345,9 +1345,9 @@ mod tests {
         partition_data.set_partition_index(partition.partition());
         partition_data.set_high_watermark(1000);
         if record_count == 0 {
-            partition_data.set_records(Some(Vec::new()));
+            partition_data.set_records(Some(bytes::Bytes::new()));
         } else {
-            partition_data.set_records(Some(make_records(0, record_count)));
+            partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
         }
         CompletedFetch::new_full(
             h.subs.clone(),
@@ -1663,7 +1663,7 @@ mod tests {
         let mut partition_data = PartitionData::new();
         partition_data.set_partition_index(partition.partition());
         partition_data.set_high_watermark(1000);
-        partition_data.set_records(Some(records_bytes));
+        partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         partition_data.set_aborted_transactions(Some(vec![txn]));
         CompletedFetch::new_full(
             h.subs.clone(),
@@ -1820,7 +1820,7 @@ mod tests {
         let mut partition_data = PartitionData::new();
         partition_data.set_partition_index(0);
         partition_data.set_high_watermark(1000);
-        partition_data.set_records(Some(make_records(0, 3)));
+        partition_data.set_records(Some(bytes::Bytes::from(make_records(0, 3))));
         partition_data.set_preferred_read_replica(99);
 
         let updated = h.collector.update_partition_state(&partition_data, &partition);
@@ -1984,6 +1984,85 @@ mod tests {
         // deserializer was elided) the lower bound above catches it.
         eprintln!(
             "§27 allocation budget: {alloc_count} allocs for {RECORD_COUNT} records \
+             (avg {avg:.2}/record, max allowed {max_allowed})",
+            avg = alloc_count as f64 / RECORD_COUNT as f64,
+        );
+    }
+
+    /// §27 zero-copy per-record allocation-budget test for the
+    /// [`BytesDeserializer`] (Phase 1).
+    ///
+    /// With `BytesDeserializer`, each record's key and value are handed out as
+    /// refcounted `Bytes::slice_ref` slices of the single owning fetch buffer —
+    /// NO per-record key/value copy. This locks in that win: the per-record
+    /// budget here must be strictly below the `String`/`ByteArray` deserializer
+    /// budget (which copies both key and value via `to_vec`), and there must be
+    /// no `Vec<u8>::clone` of the fetch buffer.
+    ///
+    /// The only per-record allocations that remain are the §27-sanctioned ones
+    /// that are NOT key/value byte copies: the owned `RecordHeaders` and the
+    /// `ConsumerRecord` push onto the per-partition `Vec` (amortized). A
+    /// regression that re-introduces a per-record key/value copy (e.g. routing
+    /// `BytesDeserializer` through the copying `deserialize` instead of
+    /// `deserialize_from_shared`) would push the count up and fail this test.
+    #[test]
+    fn test_collect_fetch_bytes_deserializer_zero_copy_budget() {
+        use crate::common::serialization::BytesDeserializer;
+
+        const RECORD_COUNT: i32 = 100;
+        // Each record carries a 1-byte key and a small value (see
+        // `make_records`). The copying ByteArray/String path costs ~2.2
+        // allocs/record (key copy + value copy). The zero-copy Bytes path
+        // must stay at or below 2/record (headers Vec + amortized
+        // ConsumerRecord push), with NO key/value byte copy.
+        const ALLOC_BUDGET_PER_RECORD: usize = 2;
+        const OVERHEAD_BUDGET: usize = 100;
+
+        let max_poll_records = RECORD_COUNT;
+        let h = build_harness(max_poll_records, IsolationLevel::ReadUncommitted);
+
+        let deserializers: Arc<Deserializers<bytes::Bytes, bytes::Bytes>> =
+            Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
+        let collector = FetchCollector::new(
+            h.metadata.clone(),
+            h.subs.clone(),
+            h.fetch_config.clone(),
+            deserializers,
+            h.time.clone(),
+        );
+
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        let cf = build_completed_fetch(&h, partition.clone(), 0, RECORD_COUNT, None);
+        h.fetch_buffer.add(cf);
+
+        let alloc_count;
+        let fetch_count;
+        {
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let fetch = collector.collect_fetch(&h.fetch_buffer).unwrap();
+            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            fetch_count = fetch.count();
+        }
+
+        assert_eq!(
+            RECORD_COUNT as usize, fetch_count,
+            "collect_fetch did not return the expected number of records"
+        );
+
+        let max_allowed = OVERHEAD_BUDGET + ALLOC_BUDGET_PER_RECORD * (RECORD_COUNT as usize);
+        assert!(
+            alloc_count <= max_allowed,
+            "BytesDeserializer per-record allocation regression: {alloc_count} allocs for \
+             {RECORD_COUNT} records (budget: {max_allowed} = {OVERHEAD_BUDGET} overhead + \
+             {ALLOC_BUDGET_PER_RECORD}/record). Likely cause: a per-record key/value byte copy \
+             re-entered the path — `BytesDeserializer` must slice the shared buffer via \
+             `deserialize_from_shared` (consumer-threading.md §27)."
+        );
+
+        eprintln!(
+            "§27 Bytes zero-copy budget: {alloc_count} allocs for {RECORD_COUNT} records \
              (avg {avg:.2}/record, max allowed {max_allowed})",
             avg = alloc_count as f64 / RECORD_COUNT as f64,
         );

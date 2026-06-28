@@ -68,7 +68,10 @@ impl MultilanguageConsumer {
         config: HashMap<String, String>,
         backend: &'static str,
     ) -> Result<Self, KafkaError> {
-        let client_id = config.get("client.id").cloned().unwrap_or_else(|| format!("multilanguage-{backend}"));
+        let client_id = config
+            .get("client.id")
+            .cloned()
+            .unwrap_or_else(|| format!("multilanguage-{backend}"));
         let mut client = ConsumerServiceClient::new(channel);
         let response = client
             .create_consumer(proto::CreateConsumerRequest { config })
@@ -113,16 +116,10 @@ impl MultilanguageConsumer {
         self.status_rpc(client.assign(req)).await
     }
 
-    async fn tp_list_rpc(
-        &self,
-        partitions: &[TopicPartition],
-        which: TpListOp,
-    ) -> Result<(), KafkaError> {
+    async fn tp_list_rpc(&self, partitions: &[TopicPartition], which: TpListOp) -> Result<(), KafkaError> {
         let mut client = self.client.clone();
-        let req = proto::TopicPartitionListRequest {
-            consumer_id: self.consumer_id,
-            partitions: tps_to_proto(partitions),
-        };
+        let req =
+            proto::TopicPartitionListRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
         match which {
             TpListOp::SeekToBeginning => self.status_rpc(client.seek_to_beginning(req)).await,
             TpListOp::SeekToEnd => self.status_rpc(client.seek_to_end(req)).await,
@@ -134,8 +131,11 @@ impl MultilanguageConsumer {
     async fn poll_rpc(&self, timeout: Duration) -> Result<ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
         let mut client = self.client.clone();
         let req = proto::PollRequest { consumer_id: self.consumer_id, timeout_ms: timeout.as_millis() as i64 };
-        let response =
-            client.poll(req).await.map_err(|s| status_to_kafka_error(&s, self.backend))?.into_inner();
+        let response = client
+            .poll(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, self.backend))?
+            .into_inner();
         match response.result {
             Some(proto::poll_response::Result::Records(list)) => Ok(consumer_records_from_proto(list)),
             Some(proto::poll_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
@@ -155,8 +155,11 @@ impl MultilanguageConsumer {
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
         let mut client = self.client.clone();
         let req = proto::CommittedRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
-        let response =
-            client.committed(req).await.map_err(|s| status_to_kafka_error(&s, self.backend))?.into_inner();
+        let response = client
+            .committed(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, self.backend))?
+            .into_inner();
         match response.result {
             Some(proto::committed_response::Result::Offsets(map)) => Ok(offset_map_from_proto(map)),
             Some(proto::committed_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
@@ -167,8 +170,11 @@ impl MultilanguageConsumer {
     async fn position_rpc(&self, partition: &TopicPartition) -> Result<i64, KafkaError> {
         let mut client = self.client.clone();
         let req = proto::PositionRequest { consumer_id: self.consumer_id, partition: Some(tp_to_proto(partition)) };
-        let response =
-            client.position(req).await.map_err(|s| status_to_kafka_error(&s, self.backend))?.into_inner();
+        let response = client
+            .position(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, self.backend))?
+            .into_inner();
         match response.result {
             Some(proto::position_response::Result::Offset(o)) => Ok(o),
             Some(proto::position_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
@@ -182,10 +188,8 @@ impl MultilanguageConsumer {
         end: bool,
     ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
         let mut client = self.client.clone();
-        let req = proto::TopicPartitionListRequest {
-            consumer_id: self.consumer_id,
-            partitions: tps_to_proto(partitions),
-        };
+        let req =
+            proto::TopicPartitionListRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
         let response = if end {
             client.end_offsets(req).await
         } else {
@@ -203,8 +207,11 @@ impl MultilanguageConsumer {
     async fn partitions_for_rpc(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
         let mut client = self.client.clone();
         let req = proto::ConsumerPartitionsForRequest { consumer_id: self.consumer_id, topic: topic.to_string() };
-        let response =
-            client.partitions_for(req).await.map_err(|s| status_to_kafka_error(&s, self.backend))?.into_inner();
+        let response = client
+            .partitions_for(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, self.backend))?
+            .into_inner();
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
@@ -346,7 +353,8 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
         let mut client = self.client.clone();
-        self.status_rpc(client.unsubscribe(proto::ConsumerIdRequest { consumer_id: self.consumer_id })).await
+        self.status_rpc(client.unsubscribe(proto::ConsumerIdRequest { consumer_id: self.consumer_id }))
+            .await
     }
 
     // ── poll ──
@@ -385,10 +393,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_async_with_callback(
-        &mut self,
-        _callback: Arc<dyn OffsetCommitCallback>,
-    ) -> Result<(), KafkaError> {
+    async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), KafkaError> {
         Err(self.unsupported("commit_async_with_callback"))
     }
 
@@ -506,8 +511,11 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
             .map(|(tp, ts)| proto::TimestampSpecEntry { partition: Some(tp_to_proto(tp)), timestamp: *ts })
             .collect();
         let req = proto::OffsetsForTimesRequest { consumer_id: self.consumer_id, timestamps };
-        let response =
-            client.offsets_for_times(req).await.map_err(|s| status_to_kafka_error(&s, self.backend))?.into_inner();
+        let response = client
+            .offsets_for_times(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, self.backend))?
+            .into_inner();
         match response.result {
             Some(proto::offset_and_timestamp_response::Result::Offsets(map)) => {
                 Ok(offset_and_timestamp_map_from_proto(map))
@@ -651,7 +659,12 @@ fn topic_listing_from_proto(listing: proto::TopicListing) -> HashMap<String, Vec
     listing
         .topics
         .into_iter()
-        .map(|entry| (entry.topic, entry.partitions.into_iter().map(partition_info_from_proto).collect()))
+        .map(|entry| {
+            (
+                entry.topic,
+                entry.partitions.into_iter().map(partition_info_from_proto).collect(),
+            )
+        })
         .collect()
 }
 
@@ -664,9 +677,7 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 }
 
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
-    let headers = RecordHeaders::from_headers(
-        r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))),
-    );
+    let headers = RecordHeaders::from_headers(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
     ConsumerRecord::with_all(

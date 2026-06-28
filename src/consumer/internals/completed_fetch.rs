@@ -247,8 +247,10 @@ enum RecordSource {
     None,
     /// Uncompressed: record bytes are `memory_records.buffer()[range]`.
     Borrowed(std::ops::Range<usize>),
-    /// Compressed: record bytes are the owned decompressed buffer.
-    Owned(Vec<u8>),
+    /// Compressed: record bytes are the owned decompressed buffer, held as a
+    /// refcounted [`bytes::Bytes`] so per-record key/value slices can be handed
+    /// out zero-copy via [`bytes::Bytes::slice_ref`] (§27).
+    Owned(bytes::Bytes),
 }
 
 impl CompletedFetch {
@@ -383,6 +385,9 @@ impl CompletedFetch {
         }
         // §27: single move (no clone, no per-record copy). Bounded by
         // partition size and runs at most once.
+        // `partition_data.records` is already a refcounted `bytes::Bytes`
+        // sliced from the FetchResponse payload (BytesReader, §27); moving it
+        // into `MemoryRecords` is an O(1) refcount move, no copy.
         let records_buffer = self.partition_data.records.take().unwrap_or_default();
         let memory_records = MemoryRecords::new(records_buffer);
         self.cursor = Some(BatchCursor {
@@ -482,6 +487,13 @@ impl CompletedFetch {
                     )));
                 };
                 let topic_str: &str = &self.topic_arc;
+                // §27: the refcounted buffer that owns this record's key/value
+                // bytes. `BytesDeserializer::deserialize_from_shared` slices it
+                // (slice_ref) with no copy; other deserializers ignore it. The
+                // clone is an O(1) refcount bump.
+                let source_bytes = self
+                    .current_record_source_bytes()
+                    .expect("record source must exist while peeking");
                 // The only owned copy of record payload on the happy path:
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
                 // owned headers on the emitted `ConsumerRecord`).
@@ -497,13 +509,13 @@ impl CompletedFetch {
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
-                        .deserialize_with_headers(topic_str, &headers_owned, key_bytes)
+                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
                         .map(Some),
                 };
                 value_result = match record.value() {
                     None => Ok(None),
                     Some(value_bytes) => value_deserializer
-                        .deserialize_with_headers(topic_str, &headers_owned, value_bytes)
+                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
                         .map(Some),
                 };
                 leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
@@ -724,6 +736,23 @@ impl CompletedFetch {
         Ok(())
     }
 
+    /// Returns the refcounted buffer that owns the current batch's record
+    /// bytes, so per-record key/value slices can be handed to the deserializer
+    /// as zero-copy `Bytes` via [`bytes::Bytes::slice_ref`] (§27).
+    ///
+    /// For an uncompressed batch this is the whole `MemoryRecords` buffer (the
+    /// borrowed record slice is a subslice of it); for a compressed batch it is
+    /// the decompressed buffer. Clones are O(1) refcount bumps. Returns `None`
+    /// when no batch is loaded.
+    fn current_record_source_bytes(&self) -> Option<bytes::Bytes> {
+        let cursor = self.cursor.as_ref()?;
+        match &cursor.record_source {
+            RecordSource::None => None,
+            RecordSource::Borrowed(_) => Some(cursor.memory_records.buffer_bytes().clone()),
+            RecordSource::Owned(buf) => Some(buf.clone()),
+        }
+    }
+
     /// Parses the current record (the one at `cursor.record_byte_offset`)
     /// into a borrowing [`DefaultRecordRef`] and returns it together with its
     /// enclosing batch metadata, both borrowing from `self`.
@@ -758,7 +787,7 @@ impl CompletedFetch {
         let records_bytes = match &cursor.record_source {
             RecordSource::None => return Ok(None),
             RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
-            RecordSource::Owned(buf) => buf.as_slice(),
+            RecordSource::Owned(buf) => &buf[..],
         };
         if cursor.record_byte_offset >= records_bytes.len() {
             return Ok(None);
@@ -873,7 +902,9 @@ impl CompletedFetch {
                             self.partition, meta.base_offset, e
                         ))
                     })?;
-                    RecordSource::Owned(decompressed)
+                    // `Bytes::from(Vec<u8>)` adopts the decompressed allocation
+                    // without copying; records then slice_ref from it (§27).
+                    RecordSource::Owned(bytes::Bytes::from(decompressed))
                 } else {
                     // Borrow the records section directly from the canonical
                     // buffer. `batch_size` includes LOG_OVERHEAD, so the
@@ -1209,7 +1240,7 @@ mod tests {
 
     fn new_completed_fetch(fetch_offset: i64, records_bytes: Vec<u8>) -> CompletedFetch {
         let mut partition_data = PartitionData::new();
-        partition_data.set_records(Some(records_bytes));
+        partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         CompletedFetch::new_full(
             make_subscriptions(),
             Arc::new(BufferSupplier::create()),
@@ -1397,7 +1428,7 @@ mod tests {
         txn.set_producer_id(producer_id);
         txn.set_first_offset(first_offset);
         let mut partition_data = PartitionData::new();
-        partition_data.set_records(Some(records_bytes));
+        partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         partition_data.set_aborted_transactions(Some(vec![txn]));
         partition_data
     }
@@ -1842,7 +1873,7 @@ mod tests {
         // Transactional batch, NOT in any aborted-txn list ⇒ committed.
         let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
         let mut partition_data = PartitionData::new();
-        partition_data.set_records(Some(buf));
+        partition_data.set_records(Some(bytes::Bytes::from(buf)));
         let mut cf = CompletedFetch::new_full(
             make_subscriptions(),
             Arc::new(BufferSupplier::create()),

@@ -290,10 +290,7 @@ impl ConcreteResponse {
     /// - The response header cannot be parsed
     /// - The correlation id in the response does not match the request
     /// - The response body cannot be parsed
-    pub fn parse_response(
-        buffer: &mut crate::common::protocol::ByteBufferAccessor,
-        request_header: &RequestHeader,
-    ) -> io::Result<Self> {
+    pub fn parse_response(buffer: &mut dyn Readable, request_header: &RequestHeader) -> io::Result<Self> {
         let api_key = request_header.api_key();
         let api_version = request_header.api_version();
 

@@ -22,6 +22,7 @@ use std::io;
 use crate::common::protocol::ByteBufferAccessor;
 use crate::common::protocol::Message;
 use crate::common::protocol::ObjectSerializationCache;
+use crate::common::protocol::Readable;
 use crate::response_header_data::ResponseHeaderData;
 
 /// Sentinel value indicating that the cached size has not been computed yet.
@@ -117,10 +118,14 @@ impl ResponseHeader {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
-    pub fn parse(buffer: &mut ByteBufferAccessor, header_version: i16) -> io::Result<Self> {
-        let start_position = buffer.position();
+    pub fn parse(buffer: &mut dyn Readable, header_version: i16) -> io::Result<Self> {
+        // Track consumed bytes via `remaining()` (on the `Readable` trait)
+        // rather than `position()` (a concrete accessor method), so the header
+        // can be parsed from any reader — notably the zero-copy `BytesReader`
+        // used on the receive path (§27).
+        let start_remaining = buffer.remaining();
         let data = ResponseHeaderData::read(buffer, header_version)?;
-        let consumed = buffer.position() - start_position;
+        let consumed = start_remaining - buffer.remaining();
         Ok(Self { data, header_version, size: consumed as i32 })
     }
 }

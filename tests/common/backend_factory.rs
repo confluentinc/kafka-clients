@@ -52,10 +52,7 @@ use crate::common::multilanguage_producer::MultilanguageProducer;
 #[allow(async_fn_in_trait)]
 pub trait ConsumerBackendFactory {
     /// Construct a consumer from the given config properties.
-    async fn create(
-        &self,
-        config: HashMap<String, String>,
-    ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError>;
+    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError>;
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
@@ -122,10 +119,7 @@ impl ProducerBackendFactory for RustNativeFactory {
 }
 
 impl ConsumerBackendFactory for RustNativeFactory {
-    async fn create(
-        &self,
-        config: HashMap<String, String>,
-    ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
         let consumer_config = ConsumerConfig::from_properties(&config)?;
         new_consumer::<Vec<u8>, Vec<u8>>(
             consumer_config,
@@ -185,7 +179,9 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
-            Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "python").await?))
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), config, "python").await?,
+            ))
         }
 
         fn name(&self) -> &'static str {

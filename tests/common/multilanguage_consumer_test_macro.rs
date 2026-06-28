@@ -31,11 +31,7 @@
 #[macro_export]
 macro_rules! multilanguage_consumer_test {
     ($name:ident, $body:ident) => {
-        $crate::multilanguage_consumer_test!(
-            $name,
-            $body,
-            $crate::common::cluster_config::ClusterConfig::default()
-        );
+        $crate::multilanguage_consumer_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
     };
     ($name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {

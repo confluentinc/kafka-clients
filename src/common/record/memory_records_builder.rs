@@ -459,8 +459,20 @@ impl MemoryRecordsBuilder {
         self.closed = true;
     }
 
-    fn take_batch_data(&mut self) -> Vec<u8> {
-        self.buffer[self.initial_position..].to_vec()
+    /// Extract the finalized batch bytes as a refcounted [`bytes::Bytes`].
+    ///
+    /// Note (Phase 1 deviation): the producer builder keeps its working buffer
+    /// as `Vec<u8>` rather than `BytesMut`. `bytes` 1.x exposes no public
+    /// zero-copy `Vec<u8> -> BytesMut` adoption (`BytesMut::from_vec` is
+    /// crate-private), so switching the builder to `BytesMut` would either copy
+    /// at construction (adopting the pooled `Vec`) or break `BufferPool` reuse
+    /// (the pool reclaims the original-capacity `Vec` via `take_buffer`). We
+    /// therefore retain the single finalization copy here — the same copy the
+    /// previous `to_vec()` performed — and wrap it in `Bytes` (which adopts the
+    /// freshly allocated `Vec` with no extra copy). The receive path, which is
+    /// the actual zero-copy target of §27, is unaffected by this.
+    fn take_batch_data(&mut self) -> bytes::Bytes {
+        bytes::Bytes::from(self.buffer[self.initial_position..].to_vec())
     }
 
     fn validate_producer_state(&self) {

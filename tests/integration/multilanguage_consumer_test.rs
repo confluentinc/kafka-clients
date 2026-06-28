@@ -116,7 +116,10 @@ async fn assign_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext, fa
         .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
         .await
         .expect("create consumer");
-    consumer.assign(vec![TopicPartition::new(topic.clone(), 0)]).await.expect("assign");
+    consumer
+        .assign(vec![TopicPartition::new(topic.clone(), 0)])
+        .await
+        .expect("assign");
 
     let got = collect(&mut consumer, 3, Duration::from_secs(20)).await;
     let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
@@ -230,8 +233,16 @@ async fn seek_to_beginning_end<F: ConsumerBackendFactory>(ctx: &mut TestContext,
 
     // Consume both, then rewind to the beginning and re-consume them.
     assert_eq!(collect(&mut consumer, 2, Duration::from_secs(20)).await.len(), 2);
-    consumer.seek_to_beginning(std::slice::from_ref(&tp)).await.expect("seek_to_beginning");
-    assert_eq!(collect(&mut consumer, 2, Duration::from_secs(20)).await.len(), 2, "{} backend", factory.name());
+    consumer
+        .seek_to_beginning(std::slice::from_ref(&tp))
+        .await
+        .expect("seek_to_beginning");
+    assert_eq!(
+        collect(&mut consumer, 2, Duration::from_secs(20)).await.len(),
+        2,
+        "{} backend",
+        factory.name()
+    );
 
     // Seek to end: position is now the log end, so poll yields nothing new.
     consumer.seek_to_end(std::slice::from_ref(&tp)).await.expect("seek_to_end");
@@ -268,7 +279,11 @@ async fn partitions_for_metadata<F: ConsumerBackendFactory>(ctx: &mut TestContex
         .expect("create consumer");
     let infos = consumer.partitions_for(&topic).await.expect("partitions_for");
     assert!(!infos.is_empty(), "{} backend: expected >=1 partition", factory.name());
-    assert!(infos.iter().any(|p| p.topic() == topic && p.partition() == 0), "{} backend", factory.name());
+    assert!(
+        infos.iter().any(|p| p.topic() == topic && p.partition() == 0),
+        "{} backend",
+        factory.name()
+    );
 
     consumer.close().await.expect("close");
 }
@@ -301,7 +316,11 @@ async fn list_topics_contains<F: ConsumerBackendFactory>(ctx: &mut TestContext, 
         .await
         .expect("create consumer");
     let topics = consumer.list_topics().await.expect("list_topics");
-    assert!(topics.contains_key(&topic), "{} backend: {topic} missing from list_topics", factory.name());
+    assert!(
+        topics.contains_key(&topic),
+        "{} backend: {topic} missing from list_topics",
+        factory.name()
+    );
 
     consumer.close().await.expect("close");
 }
