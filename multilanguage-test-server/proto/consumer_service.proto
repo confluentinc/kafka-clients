@@ -1,0 +1,328 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// gRPC service exposing the org.apache.kafka.clients.consumer.Consumer
+// trait for the multilanguage integration test harness.
+//
+// Used by:
+//   - the Rust MultilanguageConsumer client (under tests/common)
+//   - the Python gRPC server (bindings/python/grpc_server.py)
+//   - the C++ gRPC server (bindings/c/grpc_server/server.cc)
+//
+// Same package as producer_service.proto; shared messages (KafkaError,
+// PartitionInfo, Node, Header, StatusResponse, PartitionsForResponse) are
+// imported and reused.
+//
+// Scope: only the consumer surface the C FFI / Python binding support is
+// modeled. The binding deliberately bridges no callbacks, so there are NO
+// RPCs for ConsumerRebalanceListener, OffsetCommitCallback, or regex pattern
+// subscription — tests needing those stay native-Rust-only.
+//
+// Like the producer service, blocking methods are awaited server-side: the
+// unary RPC response IS the resolved result (no future/streaming on the wire).
+
+syntax = "proto3";
+
+package confluent.kafka.test;
+
+import "producer_service.proto";
+
+service ConsumerService {
+  // Construct a new consumer (KafkaConsumer or MockConsumer depending on
+  // config) and return an opaque server-local id.
+  rpc CreateConsumer(CreateConsumerRequest) returns (CreateConsumerResponse);
+
+  // Subscription / assignment.
+  rpc Subscribe(SubscribeRequest) returns (StatusResponse);
+  rpc Unsubscribe(ConsumerIdRequest) returns (StatusResponse);
+  rpc Assign(AssignRequest) returns (StatusResponse);
+
+  // Fetch a batch of records (server awaits poll(timeout)).
+  rpc Poll(PollRequest) returns (PollResponse);
+
+  // Offset commit (empty offsets => commit current positions).
+  rpc CommitSync(CommitSyncRequest) returns (StatusResponse);
+  rpc Committed(CommittedRequest) returns (CommittedResponse);
+  rpc Position(PositionRequest) returns (PositionResponse);
+
+  // Seeking.
+  rpc Seek(SeekRequest) returns (StatusResponse);
+  rpc SeekToBeginning(TopicPartitionListRequest) returns (StatusResponse);
+  rpc SeekToEnd(TopicPartitionListRequest) returns (StatusResponse);
+
+  // Flow control.
+  rpc Pause(TopicPartitionListRequest) returns (StatusResponse);
+  rpc Resume(TopicPartitionListRequest) returns (StatusResponse);
+
+  // Offset lookups.
+  rpc BeginningOffsets(TopicPartitionListRequest) returns (LongOffsetsResponse);
+  rpc EndOffsets(TopicPartitionListRequest) returns (LongOffsetsResponse);
+  rpc OffsetsForTimes(OffsetsForTimesRequest) returns (OffsetAndTimestampResponse);
+
+  // Metadata.
+  rpc PartitionsFor(ConsumerPartitionsForRequest) returns (PartitionsForResponse);
+  rpc ListTopics(ConsumerIdRequest) returns (ListTopicsResponse);
+
+  // Non-blocking state reads.
+  rpc Assignment(ConsumerIdRequest) returns (TopicPartitionListResponse);
+  rpc Subscription(ConsumerIdRequest) returns (SubscriptionResponse);
+  rpc Paused(ConsumerIdRequest) returns (TopicPartitionListResponse);
+
+  // Signalling / lifecycle.
+  rpc Wakeup(ConsumerIdRequest) returns (StatusResponse);
+  rpc Close(ConsumerCloseRequest) returns (StatusResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Common
+// ---------------------------------------------------------------------------
+
+message ConsumerIdRequest {
+  uint64 consumer_id = 1;
+}
+
+message TopicPartition {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+message TopicPartitionList {
+  repeated TopicPartition partitions = 1;
+}
+
+message StringList {
+  repeated string values = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+message CreateConsumerRequest {
+  // ConsumerConfig key/value properties. At minimum "bootstrap.servers" and
+  // "group.protocol=consumer" for a real KafkaConsumer; an empty config
+  // selects a MockConsumer.
+  map<string, string> config = 1;
+}
+
+message CreateConsumerResponse {
+  uint64 consumer_id = 1;
+  optional KafkaError error = 2;
+}
+
+message ConsumerCloseRequest {
+  uint64 consumer_id = 1;
+  optional int64 timeout_ms = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Subscription / assignment
+// ---------------------------------------------------------------------------
+
+message SubscribeRequest {
+  uint64 consumer_id = 1;
+  repeated string topics = 2;
+}
+
+message AssignRequest {
+  uint64 consumer_id = 1;
+  repeated TopicPartition partitions = 2;
+}
+
+// Shared by assign-shaped ops: seek_to_beginning/end, pause, resume,
+// beginning_offsets, end_offsets.
+message TopicPartitionListRequest {
+  uint64 consumer_id = 1;
+  repeated TopicPartition partitions = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Poll
+// ---------------------------------------------------------------------------
+
+message PollRequest {
+  uint64 consumer_id = 1;
+  int64 timeout_ms = 2;
+}
+
+message ConsumerRecord {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  int64 timestamp = 4;
+  int32 timestamp_type = 5;
+  optional bytes key = 6;
+  optional bytes value = 7;
+  repeated Header headers = 8;
+  optional int32 leader_epoch = 9;
+}
+
+message ConsumerRecordList {
+  repeated ConsumerRecord records = 1;
+}
+
+message PollResponse {
+  oneof result {
+    ConsumerRecordList records = 1;
+    KafkaError error = 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Offsets / commit
+// ---------------------------------------------------------------------------
+
+message OffsetAndMetadata {
+  int64 offset = 1;
+  string metadata = 2;
+  optional int32 leader_epoch = 3;
+}
+
+message OffsetAndTimestamp {
+  int64 offset = 1;
+  int64 timestamp = 2;
+  optional int32 leader_epoch = 3;
+}
+
+message OffsetMapEntry {
+  TopicPartition partition = 1;
+  OffsetAndMetadata offset = 2;
+}
+
+message OffsetMap {
+  repeated OffsetMapEntry entries = 1;
+}
+
+message CommitSyncRequest {
+  uint64 consumer_id = 1;
+  // Empty => commit the current consumed positions; otherwise commit these.
+  repeated OffsetMapEntry offsets = 2;
+}
+
+message CommittedRequest {
+  uint64 consumer_id = 1;
+  repeated TopicPartition partitions = 2;
+}
+
+message CommittedResponse {
+  oneof result {
+    OffsetMap offsets = 1;
+    KafkaError error = 2;
+  }
+}
+
+message PositionRequest {
+  uint64 consumer_id = 1;
+  TopicPartition partition = 2;
+}
+
+message PositionResponse {
+  oneof result {
+    int64 offset = 1;
+    KafkaError error = 2;
+  }
+}
+
+message SeekRequest {
+  uint64 consumer_id = 1;
+  TopicPartition partition = 2;
+  int64 offset = 3;
+  // Present for seek(OffsetAndMetadata); absent for seek(offset).
+  optional int32 leader_epoch = 4;
+  optional string metadata = 5;
+}
+
+message LongOffsetMapEntry {
+  TopicPartition partition = 1;
+  int64 offset = 2;
+}
+
+message LongOffsetMap {
+  repeated LongOffsetMapEntry entries = 1;
+}
+
+message LongOffsetsResponse {
+  oneof result {
+    LongOffsetMap offsets = 1;
+    KafkaError error = 2;
+  }
+}
+
+message TimestampSpecEntry {
+  TopicPartition partition = 1;
+  int64 timestamp = 2;
+}
+
+message OffsetsForTimesRequest {
+  uint64 consumer_id = 1;
+  repeated TimestampSpecEntry timestamps = 2;
+}
+
+message OffsetAndTimestampMapEntry {
+  TopicPartition partition = 1;
+  OffsetAndTimestamp offset = 2;
+}
+
+message OffsetAndTimestampMap {
+  // Only partitions with a resolved offset are present (matches the binding,
+  // which omits unresolved partitions).
+  repeated OffsetAndTimestampMapEntry entries = 1;
+}
+
+message OffsetAndTimestampResponse {
+  oneof result {
+    OffsetAndTimestampMap offsets = 1;
+    KafkaError error = 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Metadata / state reads
+// ---------------------------------------------------------------------------
+
+message ConsumerPartitionsForRequest {
+  uint64 consumer_id = 1;
+  string topic = 2;
+}
+// PartitionsForResponse is reused from producer_service.proto.
+
+message TopicPartitionInfoEntry {
+  string topic = 1;
+  repeated PartitionInfo partitions = 2;
+}
+
+message TopicListing {
+  repeated TopicPartitionInfoEntry topics = 1;
+}
+
+message ListTopicsResponse {
+  oneof result {
+    TopicListing topics = 1;
+    KafkaError error = 2;
+  }
+}
+
+message TopicPartitionListResponse {
+  oneof result {
+    TopicPartitionList partitions = 1;
+    KafkaError error = 2;
+  }
+}
+
+message SubscriptionResponse {
+  oneof result {
+    StringList topics = 1;
+    KafkaError error = 2;
+  }
+}

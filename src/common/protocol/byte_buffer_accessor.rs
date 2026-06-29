@@ -174,10 +174,23 @@ impl Readable for ByteBufferAccessor {
 
     fn read_array(&mut self, length: usize) -> io::Result<Vec<u8>> {
         self.check_remaining(length)?;
-        let mut arr = vec![0u8; length];
-        arr.copy_from_slice(&self.buffer[self.position..self.position + length]);
+        // `to_vec` does a single alloc + memcpy. The previous `vec![0u8; length]`
+        // zero-filled the buffer (memset) before immediately overwriting it with
+        // `copy_from_slice` — pure waste on a hot decode path.
+        let arr = self.buffer[self.position..self.position + length].to_vec();
         self.position += length;
         Ok(arr)
+    }
+
+    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        // Copy straight from the backing buffer into the caller's slice. The
+        // default `Readable::read_bytes` routes through `read_array`, allocating
+        // and copying into a throwaway `Vec` first; this override avoids both.
+        let length = buf.len();
+        self.check_remaining(length)?;
+        buf.copy_from_slice(&self.buffer[self.position..self.position + length]);
+        self.position += length;
+        Ok(())
     }
 
     fn read_unsigned_varint(&mut self) -> io::Result<u32> {

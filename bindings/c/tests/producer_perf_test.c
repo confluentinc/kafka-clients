@@ -69,6 +69,11 @@ static bool DO_VERIFY = true;
 static int CLIENT_VERSION = 3;
 static int WARMUP_S = 120;
 static int TEST_DURATION_S = 600;
+// When true (default), delete + re-create TOPIC before producing. PARTITIONS<0
+// (and RF always) use the broker default, so this works on Confluent Cloud
+// where RF=1 is rejected.
+static bool CREATE_TOPIC = true;
+static int PARTITIONS = -1;
 static const char *BOOTSTRAP_SERVERS = "localhost:9092";
 static const char *SECURITY_PROTOCOL = NULL;
 static const char *SASL_MECHANISM = NULL;
@@ -1398,6 +1403,108 @@ end:
     free_message_data(messages);
 }
 
+// Delete TOPIC (ignoring "does not exist"), wait 10s, create it, wait 10s,
+// using the librdkafka admin API. Replication factor and (unless PARTITIONS>0)
+// partition count use the broker default (-1), so this works on Confluent Cloud
+// where RF=1 is rejected. librdkafka is always linked, so this runs for both
+// the v2 and v3 backends. The sleeps let the delete/create metadata propagate.
+static void recreate_topic(void) {
+    char errstr[512];
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    rd_kafka_conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS, NULL, 0);
+    if (SECURITY_PROTOCOL) rd_kafka_conf_set(conf, "security.protocol", SECURITY_PROTOCOL, NULL, 0);
+    if (SASL_MECHANISM) rd_kafka_conf_set(conf, "sasl.mechanism", SASL_MECHANISM, NULL, 0);
+    if (SASL_USERNAME) rd_kafka_conf_set(conf, "sasl.username", SASL_USERNAME, NULL, 0);
+    if (SASL_PASSWORD) rd_kafka_conf_set(conf, "sasl.password", SASL_PASSWORD, NULL, 0);
+    if (SSL_CA_LOCATION) rd_kafka_conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION, NULL, 0);
+
+    rd_kafka_t *admin = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+    if (!admin) {
+        fprintf(stderr, "recreate_topic: failed to create admin client: %s\n", errstr);
+        rd_kafka_conf_destroy(conf);  // not consumed on failure
+        return;
+    }
+    rd_kafka_queue_t *queue = rd_kafka_queue_new(admin);
+
+    // --- Delete (ignore "unknown topic") ---
+    printf(">>> CREATE_TOPIC: deleting topic '%s' (ignored if absent) ...\n", TOPIC);
+    fflush(stdout);
+    rd_kafka_DeleteTopic_t *del = rd_kafka_DeleteTopic_new(TOPIC);
+    rd_kafka_AdminOptions_t *del_opts =
+        rd_kafka_AdminOptions_new(admin, RD_KAFKA_ADMIN_OP_DELETETOPICS);
+    rd_kafka_AdminOptions_set_request_timeout(del_opts, 30000, errstr, sizeof(errstr));
+    rd_kafka_DeleteTopics(admin, &del, 1, del_opts, queue);
+    rd_kafka_event_t *del_ev = rd_kafka_queue_poll(queue, 60000);
+    if (del_ev) {
+        const rd_kafka_DeleteTopics_result_t *res = rd_kafka_event_DeleteTopics_result(del_ev);
+        size_t cnt = 0;
+        const rd_kafka_topic_result_t **topics =
+            res ? rd_kafka_DeleteTopics_result_topics(res, &cnt) : NULL;
+        for (size_t i = 0; i < cnt; i++) {
+            rd_kafka_resp_err_t e = rd_kafka_topic_result_error(topics[i]);
+            if (e == RD_KAFKA_RESP_ERR_NO_ERROR)
+                printf(">>> deleted '%s'\n", rd_kafka_topic_result_name(topics[i]));
+            else if (e == RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART)
+                printf(">>> '%s' did not exist (ok)\n", rd_kafka_topic_result_name(topics[i]));
+            else
+                fprintf(stderr, ">>> delete '%s' failed: %s\n",
+                        rd_kafka_topic_result_name(topics[i]), rd_kafka_err2str(e));
+        }
+        rd_kafka_event_destroy(del_ev);
+    } else {
+        fprintf(stderr, ">>> delete timed out\n");
+    }
+    rd_kafka_AdminOptions_destroy(del_opts);
+    rd_kafka_DeleteTopic_destroy(del);
+
+    printf(">>> waiting 10s after delete ...\n");
+    fflush(stdout);
+    sleep(10);
+
+    // --- Create (ignore "already exists") ---
+    printf(">>> CREATE_TOPIC: creating topic '%s' (partitions=%d [-1=broker default], "
+           "rf=broker default) ...\n", TOPIC, PARTITIONS);
+    fflush(stdout);
+    rd_kafka_NewTopic_t *nt = rd_kafka_NewTopic_new(TOPIC, PARTITIONS, -1, errstr, sizeof(errstr));
+    if (!nt) {
+        fprintf(stderr, "recreate_topic: NewTopic_new failed: %s\n", errstr);
+    } else {
+        rd_kafka_AdminOptions_t *cre_opts =
+            rd_kafka_AdminOptions_new(admin, RD_KAFKA_ADMIN_OP_CREATETOPICS);
+        rd_kafka_AdminOptions_set_request_timeout(cre_opts, 30000, errstr, sizeof(errstr));
+        rd_kafka_CreateTopics(admin, &nt, 1, cre_opts, queue);
+        rd_kafka_event_t *cre_ev = rd_kafka_queue_poll(queue, 60000);
+        if (cre_ev) {
+            const rd_kafka_CreateTopics_result_t *res = rd_kafka_event_CreateTopics_result(cre_ev);
+            size_t cnt = 0;
+            const rd_kafka_topic_result_t **topics =
+                res ? rd_kafka_CreateTopics_result_topics(res, &cnt) : NULL;
+            for (size_t i = 0; i < cnt; i++) {
+                rd_kafka_resp_err_t e = rd_kafka_topic_result_error(topics[i]);
+                if (e == RD_KAFKA_RESP_ERR_NO_ERROR)
+                    printf(">>> created '%s'\n", rd_kafka_topic_result_name(topics[i]));
+                else if (e == RD_KAFKA_RESP_ERR_TOPIC_ALREADY_EXISTS)
+                    printf(">>> '%s' already exists (ok)\n", rd_kafka_topic_result_name(topics[i]));
+                else
+                    fprintf(stderr, ">>> create '%s' failed: %s\n",
+                            rd_kafka_topic_result_name(topics[i]), rd_kafka_err2str(e));
+            }
+            rd_kafka_event_destroy(cre_ev);
+        } else {
+            fprintf(stderr, ">>> create timed out\n");
+        }
+        rd_kafka_AdminOptions_destroy(cre_opts);
+        rd_kafka_NewTopic_destroy(nt);
+    }
+
+    printf(">>> waiting 10s after create ...\n");
+    fflush(stdout);
+    sleep(10);
+
+    rd_kafka_queue_destroy(queue);
+    rd_kafka_destroy(admin);
+}
+
 int main(int argc, char** argv) {
     srand(time(NULL));
     double last_cpu = 0.0;
@@ -1438,6 +1545,16 @@ int main(int argc, char** argv) {
     SASL_USERNAME = getenv("SASL_USERNAME");
     SASL_PASSWORD = getenv("SASL_PASSWORD");
     SSL_CA_LOCATION = getenv("SSL_CA_LOCATION");
+
+    const char *create_topic_env = getenv("CREATE_TOPIC");
+    if (create_topic_env != NULL &&
+        (strcmp(create_topic_env, "False") == 0 || strcmp(create_topic_env, "0") == 0)) {
+        CREATE_TOPIC = false;
+    }
+    const char *partitions_env = getenv("PARTITIONS");
+    if (partitions_env != NULL) {
+        PARTITIONS = atoi(partitions_env);
+    }
 
     const char *enable_idempotence_env = getenv("ENABLE_IDEMPOTENCE");
     if (enable_idempotence_env != NULL && strcmp(enable_idempotence_env, "True") == 0) {
@@ -1556,6 +1673,11 @@ int main(int argc, char** argv) {
         TOPIC = topic_name_env;
     }
     printf("Using topic name: %s\n", TOPIC);
+
+    // Optionally start from a clean topic (delete + re-create) before producing.
+    if (CREATE_TOPIC) {
+        recreate_topic();
+    }
 
     const char *num_messages_env = getenv("NUM_MESSAGES");
     if (num_messages_env != NULL) {
