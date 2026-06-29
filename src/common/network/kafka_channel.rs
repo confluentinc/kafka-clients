@@ -1012,14 +1012,14 @@ mod tests {
         let mut channel =
             KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
 
-        let send = ByteBufferSend::size_prefixed(vec![0xABu8; 128]);
+        let send = ByteBufferSend::size_prefixed(bytes::Bytes::from(vec![0xABu8; 128]));
         let network_send = NetworkSend::new("0", Box::new(send));
 
         channel.set_send(network_send).unwrap();
         assert!(channel.has_send());
 
         // Duplicate send should fail
-        let send2 = ByteBufferSend::size_prefixed(vec![0xCDu8; 32]);
+        let send2 = ByteBufferSend::size_prefixed(bytes::Bytes::from(vec![0xCDu8; 32]));
         let network_send2 = NetworkSend::new("0", Box::new(send2));
         assert!(channel.set_send(network_send2).is_err());
 

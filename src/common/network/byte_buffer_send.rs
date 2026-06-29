@@ -19,6 +19,7 @@
 use super::KafkaSend;
 use super::TransportLayer;
 
+use bytes::Bytes;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -31,7 +32,13 @@ use std::pin::Pin;
 pub struct ByteBufferSend {
     /// The byte buffers to send. Each buffer tracks its own position
     /// as a `(data, offset)` pair where offset marks the next byte to write.
-    buffers: Vec<(Vec<u8>, usize)>,
+    ///
+    /// The buffers are refcounted [`bytes::Bytes`] so a records payload moved
+    /// here from the [`MemoryRecords`] buffer is sent via vectored I/O without
+    /// any copy (`IoSlice` borrows `&data[..]` through `Bytes`'s `Deref`).
+    ///
+    /// [`MemoryRecords`]: crate::common::record::MemoryRecords
+    buffers: Vec<(Bytes, usize)>,
     /// The total size of this send (sum of all buffer lengths).
     size: usize,
     /// The remaining number of bytes to write.
@@ -44,7 +51,7 @@ impl ByteBufferSend {
     /// Creates a new `ByteBufferSend` from the given byte buffers.
     ///
     /// The size is computed as the sum of all buffer lengths.
-    pub fn new(buffers: Vec<Vec<u8>>) -> Self {
+    pub fn new(buffers: Vec<Bytes>) -> Self {
         let remaining: usize = buffers.iter().map(|b| b.len()).sum();
         let size = remaining;
         let buffers = buffers.into_iter().map(|b| (b, 0)).collect();
@@ -55,15 +62,15 @@ impl ByteBufferSend {
     ///
     /// This constructor allows specifying the size explicitly, which may differ from the
     /// sum of buffer lengths if buffers have already been partially consumed.
-    pub fn with_size(buffers: Vec<Vec<u8>>, size: usize) -> Self {
+    pub fn with_size(buffers: Vec<Bytes>, size: usize) -> Self {
         let buffers = buffers.into_iter().map(|b| (b, 0)).collect();
         Self { buffers, size, remaining: size, pending: false }
     }
 
     /// Creates a size-prefixed send: prepends a 4-byte big-endian size header
     /// followed by the given buffer's content.
-    pub fn size_prefixed(buffer: Vec<u8>) -> Self {
-        let size_buffer = (buffer.len() as i32).to_be_bytes().to_vec();
+    pub fn size_prefixed(buffer: Bytes) -> Self {
+        let size_buffer = Bytes::copy_from_slice(&(buffer.len() as i32).to_be_bytes());
         Self::new(vec![size_buffer, buffer])
     }
 

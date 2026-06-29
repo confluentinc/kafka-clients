@@ -42,6 +42,17 @@ pub trait Readable {
     /// Read an array of bytes with the given length.
     fn read_array(&mut self, length: usize) -> io::Result<Vec<u8>>;
 
+    /// Read `length` bytes as an owned, reference-counted [`bytes::Bytes`].
+    ///
+    /// This is the zero-copy entry point used for the wire `records` field on
+    /// the receive path (see `consumer-threading.md` §27). The default
+    /// implementation falls back to a copy through [`read_array`]; readers
+    /// backed by a [`bytes::Bytes`] buffer (e.g. `BytesReader`) override this
+    /// to return an O(1) refcounted slice of the source buffer instead.
+    fn read_bytes_owned(&mut self, length: usize) -> io::Result<bytes::Bytes> {
+        Ok(bytes::Bytes::from(self.read_array(length)?))
+    }
+
     /// Read an unsigned varint (for sizes, lengths, counts).
     fn read_unsigned_varint(&mut self) -> io::Result<u32>;
 
