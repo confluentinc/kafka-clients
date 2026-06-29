@@ -68,6 +68,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   LINGER_MS               linger.ms
  *   COMPRESSION_TYPE        none / gzip / snappy / lz4 / zstd (default none)
  *   ENABLE_IDEMPOTENCE      true / false (default false)
+ *   USE_DEFAULTS            True / False (default False); omit all tuning knobs, use client defaults
  *   MAX_IN_FLIGHT           max.in.flight.requests.per.connection
  *   WARMUP_SECONDS          warmup duration (default 0)
  *   TEST_DURATION_SECONDS   measured interval (default 600)
@@ -341,43 +342,53 @@ public class ProducerPerformanceTest {
         conf.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, envOr("BOOTSTRAP_SERVERS", "localhost:9092"));
         conf.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         conf.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
-        conf.put(ProducerConfig.ACKS_CONFIG, "all");
-        conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
 
-        // batch.size: default 1 MiB (1024 KiB); env value is in KiB. Matches
-        // the C and Rust perf tests.
-        long batchSizeBytes;
-        if (System.getenv("BATCH_SIZE") != null) {
-            batchSizeBytes = envLong("BATCH_SIZE", 1024) * 1024L;
+        // With USE_DEFAULTS the client runs at its own defaults: only the
+        // bootstrap servers, the (mandatory) serializers and SASL credentials
+        // are set, and every performance-tuning knob is omitted. Mirrors the
+        // Python, C and Rust producer performance tests' USE_DEFAULTS behavior.
+        boolean useDefaults = "True".equals(System.getenv("USE_DEFAULTS"));
+        if (!useDefaults) {
+            conf.put(ProducerConfig.ACKS_CONFIG, "all");
+            conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
+
+            // batch.size: default 1 MiB (1024 KiB); env value is in KiB. Matches
+            // the C and Rust perf tests.
+            long batchSizeBytes;
+            if (System.getenv("BATCH_SIZE") != null) {
+                batchSizeBytes = envLong("BATCH_SIZE", 1024) * 1024L;
+            } else {
+                batchSizeBytes = 1024L * 1024L;
+            }
+            conf.put(ProducerConfig.BATCH_SIZE_CONFIG, Long.toString(batchSizeBytes));
+
+            // max.request.size: default batch*64, capped at 8 MiB; env is in KiB.
+            // Matches the C and Rust perf tests.
+            long maxRequestSizeBytes;
+            if (System.getenv("MAX_REQUEST_SIZE") != null) {
+                maxRequestSizeBytes = envLong("MAX_REQUEST_SIZE", 0) * 1024L;
+            } else {
+                maxRequestSizeBytes = batchSizeBytes * 64L;
+            }
+            maxRequestSizeBytes = Math.min(maxRequestSizeBytes, 8L * 1024 * 1024);
+            conf.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, Long.toString(maxRequestSizeBytes));
+
+            conf.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, envOr("COMPRESSION_TYPE", "none"));
+            conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, envOr("ENABLE_IDEMPOTENCE", "false"));
+
+            if (System.getenv("MAX_IN_FLIGHT") != null) {
+                conf.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+                    System.getenv("MAX_IN_FLIGHT"));
+            }
+            if (System.getenv("BUFFER_MEMORY") != null) {
+                conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
+                    Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
+            }
+            // linger.ms: default 5 (matches the C and Rust perf tests).
+            conf.put(ProducerConfig.LINGER_MS_CONFIG, envOr("LINGER_MS", "5"));
         } else {
-            batchSizeBytes = 1024L * 1024L;
+            System.out.println("USE_DEFAULTS: true (client defaults; tuning knobs omitted)");
         }
-        conf.put(ProducerConfig.BATCH_SIZE_CONFIG, Long.toString(batchSizeBytes));
-
-        // max.request.size: default batch*64, capped at 8 MiB; env is in KiB.
-        // Matches the C and Rust perf tests.
-        long maxRequestSizeBytes;
-        if (System.getenv("MAX_REQUEST_SIZE") != null) {
-            maxRequestSizeBytes = envLong("MAX_REQUEST_SIZE", 0) * 1024L;
-        } else {
-            maxRequestSizeBytes = batchSizeBytes * 64L;
-        }
-        maxRequestSizeBytes = Math.min(maxRequestSizeBytes, 8L * 1024 * 1024);
-        conf.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, Long.toString(maxRequestSizeBytes));
-
-        conf.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, envOr("COMPRESSION_TYPE", "none"));
-        conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, envOr("ENABLE_IDEMPOTENCE", "false"));
-
-        if (System.getenv("MAX_IN_FLIGHT") != null) {
-            conf.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
-                System.getenv("MAX_IN_FLIGHT"));
-        }
-        if (System.getenv("BUFFER_MEMORY") != null) {
-            conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
-                Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
-        }
-        // linger.ms: default 5 (matches the C and Rust perf tests).
-        conf.put(ProducerConfig.LINGER_MS_CONFIG, envOr("LINGER_MS", "5"));
 
         // SASL
         String securityProtocol = System.getenv("SECURITY_PROTOCOL");

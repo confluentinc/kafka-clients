@@ -28,7 +28,8 @@
 // implementations. Configure via the same environment variables
 // (BOOTSTRAP_SERVERS, NUM_MESSAGES, LIMIT_RPS, KEY_SIZE, VALUE_SIZE,
 // BATCH_SIZE, MAX_REQUEST_SIZE, BUFFER_MEMORY, LINGER_MS, MAX_IN_FLIGHT,
-// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, WARMUP_SECONDS, TEST_DURATION_SECONDS,
+// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, USE_DEFAULTS, WARMUP_SECONDS,
+// TEST_DURATION_SECONDS,
 // DO_VERIFY, P99_LIMIT_MS, TOPIC_NAME, SECURITY_PROTOCOL, SASL_MECHANISM,
 // SASL_USERNAME, SASL_PASSWORD, SSL_CA_LOCATION). P99_LIMIT_MS (ms) asserts a
 // per-message p99 latency budget when > 0 (0 = off); a breach makes the test
@@ -87,6 +88,10 @@ static const char *MAX_IN_FLIGHT = "1000";
 static int BUFFER_MEMORY_MB = -1;
 static const char *COMPRESSION_TYPE = "none";
 static const char *LINGER_MS = "5";
+// When true, omit every performance-tuning knob and let the client run at its
+// own defaults (only bootstrap servers, client id and SASL are configured).
+// Mirrors the Python and Rust producer performance tests' USE_DEFAULTS.
+static bool USE_DEFAULTS = false;
 static bool sasl_enabled = false;
 static int64_t buffer_memory_bytes;
 int64_t batch_size_bytes;
@@ -1152,19 +1157,21 @@ static void run_test() {
         }
 
         char buffer[512];
-        if (buffer_memory_bytes > 0) {
-            snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes);
-            kafka_producer_ProducerProperties_put(properties, "buffer.memory", buffer);
+        if (!USE_DEFAULTS) {
+            if (buffer_memory_bytes > 0) {
+                snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes);
+                kafka_producer_ProducerProperties_put(properties, "buffer.memory", buffer);
+            }
+            snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
+            kafka_producer_ProducerProperties_put(properties, "batch.size", buffer);
+            snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
+            kafka_producer_ProducerProperties_put(properties, "max.request.size", buffer);
+            kafka_producer_ProducerProperties_put(properties, "compression.type", COMPRESSION_TYPE);
+            kafka_producer_ProducerProperties_put(properties, "linger.ms", LINGER_MS);
+            kafka_producer_ProducerProperties_put(properties, "acks", "all");
+            kafka_producer_ProducerProperties_put(properties, "enable.idempotence", ENABLE_IDEMPOTENCE);
+            kafka_producer_ProducerProperties_put(properties, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT);
         }
-        snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
-        kafka_producer_ProducerProperties_put(properties, "batch.size", buffer);
-        snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
-        kafka_producer_ProducerProperties_put(properties, "max.request.size", buffer);
-        kafka_producer_ProducerProperties_put(properties, "compression.type", COMPRESSION_TYPE);
-        kafka_producer_ProducerProperties_put(properties, "linger.ms", LINGER_MS);
-        kafka_producer_ProducerProperties_put(properties, "acks", "all");
-        kafka_producer_ProducerProperties_put(properties, "enable.idempotence", ENABLE_IDEMPOTENCE);
-        kafka_producer_ProducerProperties_put(properties, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT);
 
         kafka_common_KafkaError_t* error = NULL;
         producer = kafka_producer_KafkaProducer_new(properties, &error);
@@ -1192,23 +1199,25 @@ static void run_test() {
             rd_kafka_conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION, NULL, 0);
         }
 
-        if (NUM_MESSAGES > 0) {
-            snprintf(buffer, sizeof(buffer), "%" PRId64, num_messages_conf);
-            rd_kafka_conf_set(conf, "queue.buffering.max.messages", buffer, NULL, 0);
+        if (!USE_DEFAULTS) {
+            if (NUM_MESSAGES > 0) {
+                snprintf(buffer, sizeof(buffer), "%" PRId64, num_messages_conf);
+                rd_kafka_conf_set(conf, "queue.buffering.max.messages", buffer, NULL, 0);
+            }
+            if (buffer_memory_bytes > 0) {
+                snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes / 1024);
+                rd_kafka_conf_set(conf, "queue.buffering.max.kbytes", buffer, NULL, 0);
+            }
+            snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
+            rd_kafka_conf_set(conf, "batch.size", buffer, NULL, 0);
+            snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
+            rd_kafka_conf_set(conf, "message.max.bytes", buffer, NULL, 0);
+            rd_kafka_conf_set(conf, "compression.type", COMPRESSION_TYPE, NULL, 0);
+            rd_kafka_conf_set(conf, "linger.ms", LINGER_MS, NULL, 0);
+            rd_kafka_conf_set(conf, "acks", "all", NULL, 0);
+            rd_kafka_conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE, NULL, 0);
+            rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
         }
-        if (buffer_memory_bytes > 0) {
-            snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes / 1024);
-            rd_kafka_conf_set(conf, "queue.buffering.max.kbytes", buffer, NULL, 0);
-        }
-        snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
-        rd_kafka_conf_set(conf, "batch.size", buffer, NULL, 0);
-        snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
-        rd_kafka_conf_set(conf, "message.max.bytes", buffer, NULL, 0);
-        rd_kafka_conf_set(conf, "compression.type", COMPRESSION_TYPE, NULL, 0);
-        rd_kafka_conf_set(conf, "linger.ms", LINGER_MS, NULL, 0);
-        rd_kafka_conf_set(conf, "acks", "all", NULL, 0);
-        rd_kafka_conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE, NULL, 0);
-        rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
 
         rd_kafka_conf_set_dr_msg_cb(conf, test_v2_dr);
 
@@ -1589,6 +1598,12 @@ int main(int argc, char** argv) {
     const char *linger_ms_env = getenv("LINGER_MS");
     if (linger_ms_env != NULL) {
         LINGER_MS = linger_ms_env;
+    }
+
+    const char *use_defaults_env = getenv("USE_DEFAULTS");
+    if (use_defaults_env != NULL && strcmp(use_defaults_env, "True") == 0) {
+        USE_DEFAULTS = true;
+        printf("USE_DEFAULTS: true (client defaults; tuning knobs omitted)\n");
     }
 
     const char *key_size_env = getenv("KEY_SIZE");

@@ -136,6 +136,11 @@ class Config:
         # (producer_performance_test.py). When set, the benchmark drives the
         # asyncio-native consumer of the selected CLIENT_VERSION.
         self.async_mode = os.getenv("ASYNC", "False") == "True"
+        # When True, consume one message at a time: confluent_kafka's single
+        # poll() (v2) / a poll_batch-backed single path (Rust v3), instead of
+        # the batched consume()/poll().
+        self.poll_single = os.getenv("POLL_SINGLE", "False") == "True"
+        self.use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +151,12 @@ class _RustConsumer:
 
     def __init__(self, cfg):
         from consumer import KafkaConsumer
+        custom_conf = {} if cfg.use_defaults else {
+            "fetch.min.bytes": str(cfg.fetch_min_bytes),
+            "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
+            "max.poll.records": str(cfg.batch_size + 500),
+            "check.crcs": "false",
+        }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -153,10 +164,7 @@ class _RustConsumer:
             "client.id": "rust-consumer-perf",
             "auto.offset.reset": "latest",
             "enable.auto.commit": "true",
-            "fetch.min.bytes": str(cfg.fetch_min_bytes),
-            "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
-            "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
+            **custom_conf
         }
         conf.update(sasl_config_from_env(v2=False))
         self._c = KafkaConsumer(conf)
@@ -180,6 +188,11 @@ class _RustConsumer:
             nbytes = (len(value) if value is not None else 0) + (len(key) if key is not None else 0)
             yield r.timestamp, nbytes
 
+    def poll_single(self):
+        """POLL_SINGLE: the Rust binding exposes no single-message API, so reuse
+        the existing batch poll (each record of one poll is yielded one by one)."""
+        yield from self.poll_batch()
+
     def close(self):
         self._c.close()
 
@@ -189,6 +202,11 @@ class _LibrdkafkaConsumer:
 
     def __init__(self, cfg):
         from confluent_kafka import Consumer
+        custom_conf = {} if cfg.use_defaults else {
+            "fetch.min.bytes": cfg.fetch_min_bytes,
+            "fetch.message.max.bytes": cfg.fetch_max_bytes,
+            "check.crcs": False,
+        }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -196,9 +214,7 @@ class _LibrdkafkaConsumer:
             "client.id": "librdkafka-consumer-perf",
             "auto.offset.reset": "latest",
             "enable.auto.commit": True,
-            "fetch.min.bytes": cfg.fetch_min_bytes,
-            "fetch.message.max.bytes": cfg.fetch_max_bytes,
-            "check.crcs": False,
+            **custom_conf
         }
         conf.update(sasl_config_from_env(v2=True))
         self._c = Consumer(conf)
@@ -225,6 +241,17 @@ class _LibrdkafkaConsumer:
             nbytes = (len(value) if value else 0) + (len(key) if key else 0)
             yield ts, nbytes
 
+    def poll_single(self):
+        """POLL_SINGLE: consume one message at a time via Consumer.poll()."""
+        msg = self._c.poll(self._timeout)
+        if msg is None or msg.error():
+            return
+        _ts_type, ts = msg.timestamp()
+        value = msg.value()
+        key = msg.key()
+        nbytes = (len(value) if value else 0) + (len(key) if key else 0)
+        yield ts, nbytes
+
     def close(self):
         self._c.close()
 
@@ -243,6 +270,12 @@ class _AsyncRustConsumer:
 
     def __init__(self, cfg):
         from consumer import AsyncKafkaConsumer
+        custom_conf = {} if cfg.use_defaults else {
+            "fetch.min.bytes": str(cfg.fetch_min_bytes),
+            "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
+            "max.poll.records": str(cfg.batch_size + 500),
+            "check.crcs": "false",
+        }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -250,10 +283,7 @@ class _AsyncRustConsumer:
             "client.id": "rust-consumer-perf",
             "auto.offset.reset": "latest",
             "enable.auto.commit": "true",
-            "fetch.min.bytes": str(cfg.fetch_min_bytes),
-            "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
-            "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
+            **custom_conf
         }
         conf.update(sasl_config_from_env(v2=False))
         self._c = AsyncKafkaConsumer(conf)
@@ -277,6 +307,12 @@ class _AsyncRustConsumer:
             nbytes = (len(value) if value is not None else 0) + (len(key) if key is not None else 0)
             yield r.timestamp, nbytes
 
+    async def poll_single(self):
+        """POLL_SINGLE: no single-message API on the Rust async binding; reuse
+        the existing batch poll."""
+        async for x in self.poll_batch():
+            yield x
+
     async def close(self):
         await self._c.close()
 
@@ -286,6 +322,11 @@ class _AsyncLibrdkafkaConsumer:
 
     def __init__(self, cfg):
         from confluent_kafka.aio import AIOConsumer
+        custom_conf = {} if cfg.use_defaults else {
+            "fetch.min.bytes": cfg.fetch_min_bytes,
+            "fetch.message.max.bytes": cfg.fetch_max_bytes,
+            "check.crcs": False,
+        }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -293,9 +334,7 @@ class _AsyncLibrdkafkaConsumer:
             "client.id": "librdkafka-consumer-perf",
             "auto.offset.reset": "latest",
             "enable.auto.commit": True,
-            "fetch.min.bytes": cfg.fetch_min_bytes,
-            "fetch.message.max.bytes": cfg.fetch_max_bytes,
-            "check.crcs": False,
+            **custom_conf
         }
         conf.update(sasl_config_from_env(v2=True))
         self._c = AIOConsumer(conf)
@@ -322,6 +361,17 @@ class _AsyncLibrdkafkaConsumer:
             key = msg.key()
             nbytes = (len(value) if value else 0) + (len(key) if key else 0)
             yield ts, nbytes
+
+    async def poll_single(self):
+        """POLL_SINGLE: consume one message at a time via AIOConsumer.poll()."""
+        msg = await self._c.poll(self._timeout)
+        if msg is None or msg.error():
+            return
+        _ts_type, ts = msg.timestamp()
+        value = msg.value()
+        key = msg.key()
+        nbytes = (len(value) if value else 0) + (len(key) if key else 0)
+        yield ts, nbytes
 
     async def close(self):
         await self._c.close()
@@ -395,8 +445,9 @@ class _Done(Exception):
 
 def _print_header(cfg):
     mode = "async" if cfg.async_mode else "sync"
+    poll_mode = "single" if cfg.poll_single else "batch"
     print("=" * 72)
-    print(f"Consumer E2E Latency Benchmark - CLIENT_VERSION={cfg.client_version} ({mode})")
+    print(f"Consumer E2E Latency Benchmark - CLIENT_VERSION={cfg.client_version} ({mode}, poll={poll_mode})")
     print("=" * 72)
     print(f"Bootstrap: {cfg.bootstrap_servers}  Topic: {cfg.topic}  Group: {cfg.group_id}")
     print(f"Warmup: {cfg.warmup_seconds}s  Measure: {cfg.test_duration_seconds}s  "
@@ -487,11 +538,13 @@ def run(cfg, metrics=None):
 
     consumer = build_consumer(cfg)
     consumer.subscribe(cfg.topic)
+    # Single-message vs batched consume (POLL_SINGLE), used for settle + measure.
+    poll = consumer.poll_single if cfg.poll_single else consumer.poll_batch
 
     # Wait for partition assignment.
     join_start = time.monotonic()
     while not consumer.assigned():
-        list(consumer.poll_batch())
+        list(poll())
         if time.monotonic() - join_start >= cfg.join_timeout_s:
             print("ERROR: timed out waiting for assignment", file=sys.stderr)
             consumer.close()
@@ -503,7 +556,7 @@ def run(cfg, metrics=None):
     settle_deadline = time.monotonic() + cfg.settle_timeout_s
     empties = 0
     while empties < 2 and time.monotonic() < settle_deadline:
-        got = list(consumer.poll_batch())
+        got = list(poll())
         empties = empties + 1 if not got else 0
     print(">>> at live edge", flush=True)
 
@@ -517,7 +570,7 @@ def run(cfg, metrics=None):
     meas.begin()
     try:
         while not _terminating:
-            for ts_ms, nbytes in consumer.poll_batch():
+            for ts_ms, nbytes in poll():
                 meas.process_record(ts_ms, nbytes)
             if meas.time_limit_reached():
                 break
@@ -564,11 +617,13 @@ async def run_async(cfg, metrics=None):
 
     consumer = build_async_consumer(cfg)
     await consumer.subscribe(cfg.topic)
+    # Single-message vs batched consume (POLL_SINGLE), used for settle + measure.
+    poll = consumer.poll_single if cfg.poll_single else consumer.poll_batch
 
     # Wait for partition assignment.
     join_start = time.monotonic()
     while not await consumer.assigned():
-        async for _ in consumer.poll_batch():
+        async for _ in poll():
             pass
         if time.monotonic() - join_start >= cfg.join_timeout_s:
             print("ERROR: timed out waiting for assignment", file=sys.stderr)
@@ -581,7 +636,7 @@ async def run_async(cfg, metrics=None):
     empties = 0
     while empties < 2 and time.monotonic() < settle_deadline:
         got = False
-        async for _ in consumer.poll_batch():
+        async for _ in poll():
             got = True
         empties = empties + 1 if not got else 0
     print(">>> at live edge", flush=True)
@@ -596,7 +651,7 @@ async def run_async(cfg, metrics=None):
     meas.begin()
     try:
         while not _terminating:
-            async for ts_ms, nbytes in consumer.poll_batch():
+            async for ts_ms, nbytes in poll():
                 meas.process_record(ts_ms, nbytes)
             if meas.time_limit_reached():
                 break

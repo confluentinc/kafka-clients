@@ -66,6 +66,7 @@ if limit_rps is not None:
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
 run_async = os.getenv("ASYNC", "False") == "True"
 do_verify = os.getenv("DO_VERIFY", "True") == "True"
+use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
 # When True (default), delete + re-create the topic before the run (broker-
 # default partitions unless PARTITIONS is set; broker-default RF). See
 # performance_common.recreate_topic.
@@ -284,52 +285,54 @@ def configuration_from_env(common_default_configuration, v2=False):
     batch_size = 1024 * 1024
     conf = dict(common_default_configuration)
     conf.update(sasl_config_from_env(v2=v2))
-    # acks=all, hardcoded like the C and Java perf tests (the Rust test relies
-    # on the same client default).
-    conf['acks'] = 'all'
-
     if 'BOOTSTRAP_SERVERS' in os.environ:
         conf['bootstrap.servers'] = os.environ['BOOTSTRAP_SERVERS']
 
-    if 'BATCH_SIZE' in os.environ:
-        batch_size = int(os.environ['BATCH_SIZE']) * 1024  # Convert KB to bytes
-    conf['batch.size'] = batch_size
+    if not use_defaults:
+        # acks=all, hardcoded like the C and Java perf tests (the Rust test relies
+        # on the same client default).
+        conf['acks'] = 'all'
 
-    if 'MAX_REQUEST_SIZE' in os.environ:
-        max_request_size = int(os.environ['MAX_REQUEST_SIZE']) * 1024  # Convert KB to bytes
-    else:
-        # batch.size * 64, capped at 8 MiB — matches C/Rust/Java.
-        max_request_size = min(batch_size * 64, 8 * 1024 * 1024)
-    if not v2:
-        conf['max.request.size'] = max_request_size
-    else:
-        conf['message.max.bytes'] = max_request_size
+        if 'BATCH_SIZE' in os.environ:
+            batch_size = int(os.environ['BATCH_SIZE']) * 1024  # Convert KB to bytes
+        conf['batch.size'] = batch_size
 
-    if 'COMPRESSION_TYPE' in os.environ:
-        conf['compression.type'] = os.environ['COMPRESSION_TYPE']
-    else:
-        conf['compression.type'] = 'none'
-
-    if 'ENABLE_IDEMPOTENCE' in os.environ:
-        conf['enable.idempotence'] = os.environ['ENABLE_IDEMPOTENCE']
-    else:
-        conf['enable.idempotence'] = 'false'
-
-    if 'MAX_IN_FLIGHT' in os.environ:
-        conf['max.in.flight.requests.per.connection'] = os.environ['MAX_IN_FLIGHT']
-
-    if 'BUFFER_MEMORY' in os.environ:
-        buffer_memory = int(os.environ['BUFFER_MEMORY']) * 1024 * 1024  # Convert MB to bytes
-        if not v2:
-            conf['buffer.memory'] = buffer_memory
+        if 'MAX_REQUEST_SIZE' in os.environ:
+            max_request_size = int(os.environ['MAX_REQUEST_SIZE']) * 1024  # Convert KB to bytes
         else:
-            conf['queue.buffering.max.kbytes'] = buffer_memory // 1024  # Convert bytes to KB
-            conf['queue.buffering.max.messages'] = 2147483647
+            # batch.size * 64, capped at 8 MiB — matches C/Rust/Java.
+            max_request_size = min(batch_size * 64, 8 * 1024 * 1024)
 
-    if 'LINGER_MS' in os.environ:
-        conf['linger.ms'] = os.environ['LINGER_MS']
-    else:
-        conf['linger.ms'] = '5'  # default linger, matching C/Rust/Java
+        if not v2:
+            conf['max.request.size'] = max_request_size
+        else:
+            conf['message.max.bytes'] = max_request_size
+
+        if 'COMPRESSION_TYPE' in os.environ:
+            conf['compression.type'] = os.environ['COMPRESSION_TYPE']
+        else:
+            conf['compression.type'] = 'none'
+
+        if 'ENABLE_IDEMPOTENCE' in os.environ:
+            conf['enable.idempotence'] = os.environ['ENABLE_IDEMPOTENCE']
+        else:
+            conf['enable.idempotence'] = 'false'
+
+        if 'MAX_IN_FLIGHT' in os.environ:
+            conf['max.in.flight.requests.per.connection'] = os.environ['MAX_IN_FLIGHT']
+
+        if 'BUFFER_MEMORY' in os.environ:
+            buffer_memory = int(os.environ['BUFFER_MEMORY']) * 1024 * 1024  # Convert MB to bytes
+            if not v2:
+                conf['buffer.memory'] = buffer_memory
+            else:
+                conf['queue.buffering.max.kbytes'] = buffer_memory // 1024  # Convert bytes to KB
+                conf['queue.buffering.max.messages'] = 2147483647
+
+        if 'LINGER_MS' in os.environ:
+            conf['linger.ms'] = os.environ['LINGER_MS']
+        else:
+            conf['linger.ms'] = '5'  # default linger, matching C/Rust/Java
     return conf
 
 
@@ -509,7 +512,8 @@ def v2_producer(common_default_configuration):
     # Match Apache Kafka's default partitioner so end-of-run partition
     # verification is apples-to-apples vs the v3 (Java/Rust) client.
     # librdkafka defaults to consistent_random (CRC32-based), not murmur2.
-    conf['partitioner'] = 'murmur2_random'
+    if not use_defaults:
+        conf['partitioner'] = 'murmur2_random'
     print_configuration(conf)
     return CompatibleProducer(conf)
 
