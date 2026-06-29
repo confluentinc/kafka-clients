@@ -209,7 +209,7 @@ fn record_metadata_from_proto(m: proto::RecordMetadata) -> RecordMetadata {
     )
 }
 
-fn partition_info_from_proto(p: proto::PartitionInfo) -> PartitionInfo {
+pub(crate) fn partition_info_from_proto(p: proto::PartitionInfo) -> PartitionInfo {
     PartitionInfo::with_offline_replicas(
         p.topic,
         p.partition,
@@ -220,14 +220,14 @@ fn partition_info_from_proto(p: proto::PartitionInfo) -> PartitionInfo {
     )
 }
 
-fn node_from_proto(n: proto::Node) -> Node {
+pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     match n.rack {
         Some(rack) => Node::with_rack(n.id, n.host, n.port, Some(rack)),
         None => Node::new(n.id, n.host, n.port),
     }
 }
 
-fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
+pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
     use proto::kafka_error::Variant;
     let variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
     let errors = errors_from_code(p.code);
@@ -268,7 +268,7 @@ fn errors_from_code(code: i32) -> Errors {
 /// that aren't produced by a real Kafka client; surfacing them as
 /// `IllegalState` makes failures visible without conflating with broker
 /// errors.
-fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> KafkaError {
+pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> KafkaError {
     KafkaError::illegal_state(format!(
         "{} gRPC backend transport error ({:?}): {}",
         backend,

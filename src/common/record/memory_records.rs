@@ -41,23 +41,31 @@ use crate::common::record::abstract_records::LOG_OVERHEAD;
 /// Corresponds to Java's `org.apache.kafka.common.record.MemoryRecords`.
 #[derive(Clone, Debug)]
 pub struct MemoryRecords {
-    buffer: Vec<u8>,
+    /// The single owning buffer for all record bytes in this set, held as a
+    /// refcounted [`bytes::Bytes`]. On the receive path this is a zero-copy
+    /// slice of the FetchResponse payload; every downstream `DefaultRecordRef`
+    /// borrows from it and never copies key/value bytes (consumer-threading.md
+    /// §27). `Clone` is an O(1) refcount bump.
+    buffer: bytes::Bytes,
 }
 
 impl MemoryRecords {
     /// Create a new `MemoryRecords` wrapping the given buffer.
-    pub fn new(buffer: Vec<u8>) -> Self {
+    ///
+    /// Accepts an owned [`bytes::Bytes`]; callers holding a `Vec<u8>` can pass
+    /// `vec.into()` (which adopts the allocation without copying).
+    pub fn new(buffer: bytes::Bytes) -> Self {
         Self { buffer }
     }
 
     /// Create an empty `MemoryRecords`.
     pub fn empty() -> Self {
-        Self { buffer: Vec::new() }
+        Self { buffer: bytes::Bytes::new() }
     }
 
     /// Create a `MemoryRecords` from a byte slice (copies the data).
     pub fn readable_records(data: &[u8]) -> Self {
-        Self { buffer: data.to_vec() }
+        Self { buffer: bytes::Bytes::copy_from_slice(data) }
     }
 
     /// Returns the total size of this records set in bytes.
@@ -70,13 +78,20 @@ impl MemoryRecords {
         &self.buffer
     }
 
-    /// Returns a mutable reference to the underlying buffer.
-    pub fn buffer_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buffer
+    /// Returns a reference to the underlying refcounted buffer.
+    ///
+    /// Used on the receive path to slice individual record key/value bytes
+    /// out of the owning buffer as zero-copy `Bytes` via
+    /// [`bytes::Bytes::slice_ref`] (consumer-threading.md §27).
+    pub fn buffer_bytes(&self) -> &bytes::Bytes {
+        &self.buffer
     }
 
     /// Consume this `MemoryRecords` and return the underlying buffer.
-    pub fn into_buffer(self) -> Vec<u8> {
+    ///
+    /// Returns the refcounted [`bytes::Bytes`]; on the write path this is
+    /// moved straight into the network send (no copy).
+    pub fn into_buffer(self) -> bytes::Bytes {
         self.buffer
     }
 
@@ -172,7 +187,8 @@ impl MemoryRecords {
             position
         );
         let available_bytes = size.min(self.buffer.len() - position);
-        MemoryRecords::new(self.buffer[position..position + available_bytes].to_vec())
+        // `Bytes::slice` is O(1) (refcount bump + range), not a copy.
+        MemoryRecords::new(self.buffer.slice(position..position + available_bytes))
     }
 
     // -- Builder factory methods --
@@ -840,29 +856,29 @@ mod tests {
             assert_eq!(Some(size), records.first_batch_size().unwrap());
 
             // size not in buffer (only 1 byte)
-            let short_records = MemoryRecords::new(records.buffer()[..1].to_vec());
+            let short_records = MemoryRecords::new(records.buffer()[..1].to_vec().into());
             assert_eq!(None, short_records.first_batch_size().unwrap());
 
             // magic not in buffer (only LOG_OVERHEAD bytes = 12)
-            let short_records = MemoryRecords::new(records.buffer()[..LOG_OVERHEAD].to_vec());
+            let short_records = MemoryRecords::new(records.buffer()[..LOG_OVERHEAD].to_vec().into());
             assert_eq!(None, short_records.first_batch_size().unwrap());
 
             // payload not in buffer, but header up to magic is present
             let short_records =
-                MemoryRecords::new(records.buffer()[..abstract_records::HEADER_SIZE_UP_TO_MAGIC].to_vec());
+                MemoryRecords::new(records.buffer()[..abstract_records::HEADER_SIZE_UP_TO_MAGIC].to_vec().into());
             assert_eq!(Some(size), short_records.first_batch_size().unwrap());
 
             // Invalid magic byte (10) should return CorruptMessage error
             let mut corrupt_magic_buf = records.buffer().to_vec();
             corrupt_magic_buf[RecordBatch::MAGIC_OFFSET] = 10;
-            let corrupt_records = MemoryRecords::new(corrupt_magic_buf);
+            let corrupt_records = MemoryRecords::new(corrupt_magic_buf.into());
             let err = corrupt_records.first_batch_size().unwrap_err();
             assert_eq!(err.error(), Errors::CorruptMessage);
 
             // Invalid record size (set LSB of size field to 0, making it too small)
             let mut corrupt_size_buf = records.buffer().to_vec();
             corrupt_size_buf[RecordBatch::LENGTH_OFFSET + 3] = 0;
-            let corrupt_records = MemoryRecords::new(corrupt_size_buf);
+            let corrupt_records = MemoryRecords::new(corrupt_size_buf.into());
             let err = corrupt_records.first_batch_size().unwrap_err();
             assert_eq!(err.error(), Errors::CorruptMessage);
         }
@@ -894,7 +910,7 @@ mod tests {
                 buf.extend_from_slice(batch_records.buffer());
             }
 
-            let records = MemoryRecords::new(buf);
+            let records = MemoryRecords::new(buf.into());
 
             // Test slicing from start
             let sliced = records.slice(0, records.size_in_bytes());
@@ -1011,7 +1027,7 @@ mod tests {
                 let batch_records = builder.build();
                 buf.extend_from_slice(batch_records.buffer());
             }
-            let records = MemoryRecords::new(buf);
+            let records = MemoryRecords::new(buf.into());
 
             let items: Vec<DefaultRecordBatch> = records.batches().collect();
 

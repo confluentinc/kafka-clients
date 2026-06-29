@@ -16,10 +16,88 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <stdatomic.h>
+#include <time.h>
+#include <pthread.h>
 #include "unity.h"
 
 void setUp(void) {}
 void tearDown(void) {}
+
+// ---------------------------------------------------------------------------
+// Async (callback-based) test helpers
+//
+// Async callbacks fire on the producer's dedicated dispatcher thread, so tests
+// must synchronize on a flag rather than assume inline execution. `wait_for`
+// spins (bounded) until the expected number of callbacks have fired.
+// ---------------------------------------------------------------------------
+
+/* Captures the result(s) delivered to an async record callback. */
+typedef struct {
+    atomic_int fired;       /* number of callback invocations */
+    int64_t offset;
+    int32_t partition;
+    char topic[256];
+    int had_metadata;
+    int had_error;
+    int32_t error_code;
+    pthread_t thread_id;    /* dispatcher thread the last callback ran on */
+} async_record_result_t;
+
+/* Captures the result delivered to an async operation (flush/close) callback. */
+typedef struct {
+    atomic_int fired;
+    int had_error;
+    pthread_t thread_id;
+} async_op_result_t;
+
+/* Spins up to ~5s for `*flag` to reach `expected`. Returns 1 on success. */
+static int wait_for(atomic_int *flag, int expected) {
+    for (int i = 0; i < 5000; i++) {
+        if (atomic_load(flag) >= expected) {
+            return 1;
+        }
+        struct timespec ts = {0, 1000000}; /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+    return atomic_load(flag) >= expected;
+}
+
+/* Per-record completion callback. Takes ownership of the handles (sync-call
+ * semantics) and frees them after reading. */
+static void on_record(kafka_producer_RecordMetadata_t *metadata,
+                      kafka_common_KafkaError_t *error,
+                      void *user_data) {
+    async_record_result_t *r = (async_record_result_t *)user_data;
+    if (metadata != NULL) {
+        r->had_metadata = 1;
+        r->offset = kafka_producer_RecordMetadata_offset(metadata);
+        r->partition = kafka_producer_RecordMetadata_partition(metadata);
+        const char *t = kafka_producer_RecordMetadata_topic(metadata);
+        if (t != NULL) {
+            strncpy(r->topic, t, sizeof(r->topic) - 1);
+        }
+        kafka_producer_RecordMetadata_destroy(metadata);
+    }
+    if (error != NULL) {
+        r->had_error = 1;
+        r->error_code = kafka_common_KafkaError_code(error);
+        kafka_common_KafkaError_destroy(error);
+    }
+    r->thread_id = pthread_self();
+    atomic_fetch_add(&r->fired, 1);
+}
+
+/* Operation (flush/close) completion callback. */
+static void on_operation(kafka_common_KafkaError_t *error, void *user_data) {
+    async_op_result_t *r = (async_op_result_t *)user_data;
+    if (error != NULL) {
+        r->had_error = 1;
+        kafka_common_KafkaError_destroy(error);
+    }
+    r->thread_id = pthread_self();
+    atomic_fetch_add(&r->fired, 1);
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle tests
@@ -433,6 +511,182 @@ void test_record_metadata_getters_from_batch(void) {
 // main
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Async (callback-based) tests
+// ---------------------------------------------------------------------------
+
+void test_send_async_with_key_and_value(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t key[] = "my-key";
+    const uint8_t value[] = "my-value";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "async-topic", 3, -1,
+        key, (int32_t)sizeof(key) - 1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_EQUAL_INT64(0, result.offset);
+    TEST_ASSERT_EQUAL_INT32(3, result.partition);
+    TEST_ASSERT_EQUAL_STRING("async-topic", result.topic);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_async_null_key(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "value-only";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "topic", -1, -1,
+        NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_async_validation_error(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "v";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    /* NULL topic is a synchronous validation error: out_error is set and the
+     * callback is NOT invoked. */
+    kafka_producer_Producer_send_async(
+        producer, NULL, -1, -1,
+        NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NOT_NULL(err);
+
+    /* Give any (erroneously dispatched) callback a chance to fire, then assert
+     * none did. */
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    kafka_common_KafkaError_destroy(err);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_batch_async(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    const uint8_t v0[] = "v0";
+    const uint8_t v1[] = "v1";
+    const uint8_t v2[] = "v2";
+    kafka_producer_ProducerRecord_t records[3] = {
+        {"batch-topic", -1, -1, NULL, -1, v0, (int32_t)sizeof(v0) - 1},
+        {"batch-topic", -1, -1, NULL, -1, v1, (int32_t)sizeof(v1) - 1},
+        {"batch-topic", -1, -1, NULL, -1, v2, (int32_t)sizeof(v2) - 1},
+    };
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *out_errors[3] = {NULL, NULL, NULL};
+    int32_t accepted = kafka_producer_Producer_send_batch_async(
+        producer, records, 3, on_record, &result, out_errors);
+    TEST_ASSERT_EQUAL_INT32(3, accepted);
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_NULL(out_errors[i]);
+    }
+
+    /* The callback fires once per record. */
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 3));
+    TEST_ASSERT_EQUAL_INT(3, atomic_load(&result.fired));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_future_get_async(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "fv";
+
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+        producer, "fut-topic", 1, -1, NULL, -1, value, (int32_t)sizeof(value) - 1, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+
+    async_record_result_t result = {0};
+    kafka_producer_FutureRecordMetadata_get_async(future, on_record, &result);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, result.partition);
+    TEST_ASSERT_EQUAL_STRING("fut-topic", result.topic);
+
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_flush_async(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    async_op_result_t result = {0};
+    kafka_producer_Producer_flush_async(producer, on_operation, &result);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_close_async(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    async_op_result_t result = {0};
+    kafka_producer_Producer_close_async(producer, on_operation, &result);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_async_callbacks_single_thread(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "v";
+
+    /* Fire several async sends; all completions must run on the same dispatcher
+     * thread. */
+    async_record_result_t results[5];
+    memset(results, 0, sizeof(results));
+    for (int i = 0; i < 5; i++) {
+        kafka_common_KafkaError_t *err = NULL;
+        kafka_producer_Producer_send_async(
+            producer, "thread-topic", -1, -1, NULL, -1,
+            value, (int32_t)sizeof(value) - 1,
+            on_record, &results[i], &err);
+        TEST_ASSERT_NULL(err);
+    }
+
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_TRUE(wait_for(&results[i].fired, 1));
+    }
+    for (int i = 1; i < 5; i++) {
+        TEST_ASSERT_TRUE(pthread_equal(results[0].thread_id, results[i].thread_id));
+    }
+
+    kafka_producer_Producer_destroy(producer);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -470,6 +724,16 @@ int main(void) {
 
     /* RecordMetadata getters */
     RUN_TEST(test_record_metadata_getters_from_batch);
+
+    /* Async (callback-based) */
+    RUN_TEST(test_send_async_with_key_and_value);
+    RUN_TEST(test_send_async_null_key);
+    RUN_TEST(test_send_async_validation_error);
+    RUN_TEST(test_send_batch_async);
+    RUN_TEST(test_future_get_async);
+    RUN_TEST(test_flush_async);
+    RUN_TEST(test_close_async);
+    RUN_TEST(test_async_callbacks_single_thread);
 
     return UNITY_END();
 }

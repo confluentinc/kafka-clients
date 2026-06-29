@@ -59,9 +59,21 @@ add_executable(test_kafka_producer tests/test_kafka_producer.c)
 target_include_directories(test_kafka_producer PRIVATE ${RUST_INCLUDE_DIR})
 target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
 
+add_executable(test_mock_consumer tests/test_mock_consumer.c)
+target_include_directories(test_mock_consumer PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_mock_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
+add_executable(test_kafka_consumer tests/test_kafka_consumer.c)
+target_include_directories(test_kafka_consumer PRIVATE ${RUST_INCLUDE_DIR})
+# This test spawns a wakeup helper thread, so it needs pthread explicitly in
+# addition to ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_kafka_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
+
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
+add_test(NAME mock_consumer COMMAND test_mock_consumer)
+add_test(NAME kafka_consumer COMMAND test_kafka_consumer)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).

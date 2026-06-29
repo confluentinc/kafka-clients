@@ -327,9 +327,9 @@ pub fn partition_response(partition: i32, error: Errors) -> PartitionData {
     pd.set_error_code(error.code());
     pd.set_high_watermark(INVALID_HIGH_WATERMARK);
     // Java sets records to MemoryRecords.EMPTY; the auto-generated Rust
-    // PartitionData uses Option<Vec<u8>>, so we leave it as `Some(vec![])`
+    // PartitionData uses Option<Bytes>, so we leave it as `Some(Bytes::new())`
     // to mirror that "empty but non-null" semantics.
-    pd.set_records(Some(Vec::new()));
+    pd.set_records(Some(bytes::Bytes::new()));
     pd
 }
 
@@ -454,7 +454,7 @@ mod tests {
     fn test_records_or_fail_borrows_bytes() {
         let bytes = vec![1u8, 2, 3, 4, 5];
         let mut p = PartitionData::new();
-        p.set_records(Some(bytes.clone()));
+        p.set_records(Some(bytes::Bytes::from(bytes.clone())));
         // Zero-copy borrow — the returned slice points into p.records.
         let borrowed = records_or_fail(&p);
         assert_eq!(&bytes[..], borrowed);
@@ -502,7 +502,7 @@ mod tests {
         let mut p = PartitionData::new();
         p.set_partition_index(index);
         p.set_high_watermark(offset + 1);
-        p.set_records(Some(records));
+        p.set_records(Some(bytes::Bytes::from(records)));
         p
     }
 
