@@ -12,23 +12,28 @@
 
 | codec | backend | msg/s | MiB/s | CPU% | RSS MB | p99 lat | avg lat | **eff (msg/s/1%CPU)** |
 |---|---|--:|--:|--:|--:|--:|--:|--:|
-| **none** | rust-native | 288,612 | 564 | 115 | 147 | 515 | 213 | **2,508** |
+| **none** | rust-native | 288,612 | 564 | 115 | 147 | 515 | 213 | 2,508 |
 | | librdkafka | 287,324 | 561 | 172 | 359 | 254 | 129 | 1,667 |
-| **lz4** | rust-native | 432,378 | 844 | 189 | 107 | 137 | 22 | **2,288** |
+| | java | 287,222 | 561 | 67 | 1,793 | — | — | **4,280** |
+| **lz4** | rust-native | 432,378 | 844 | 189 | 107 | 137 | 22 | 2,288 |
 | | librdkafka | 505,983 | 988 | 306 | 2,466 | 91 | 44 | 1,652 |
-| **snappy** | rust-native | 444,261 | 868 | 176 | 160 | 298 | 143 | **2,518** |
+| | java | 546,169 | 1,067 | 120 | 2,846 | — | — | **4,555** |
+| **snappy** | rust-native | 444,261 | 868 | 176 | 160 | 298 | 143 | 2,518 |
 | | librdkafka | 489,244 | 956 | 307 | 2,286 | 98 | 49 | 1,595 |
-| **zstd** | rust-native | 269,718 | 527 | 151 | 161 | 33 | 14 | **1,790** |
+| | java | 424,167 | 828 | 94 | 2,494 | — | — | **4,493** |
+| **zstd** | rust-native | 269,718 | 527 | 151 | 161 | 33 | 14 | 1,790 |
 | | librdkafka | 477,330 | 932 | 523 | 1,112 | 108 | 56 | 913 |
+| | java | 250,443 | 489 | 134 | 718 | — | — | **1,875** |
 | **gzip** | rust-native | 30,889 | 60 | 106 | 63 | 22 | 8 | 292 |
-| | librdkafka | 248,827 | 486 | 776 | 419 | 286 | 130 | **321** |
+| | librdkafka | 248,827 | 486 | 776 | 419 | 286 | 130 | 321 |
+| | java | 45,340 | 89 | 112 | 380 | — | — | **406** |
 
-**CPU efficiency (msg/s per 1% CPU):** Rust is MORE efficient than librdkafka on every codec
-**except gzip** — none 1.5× (2508 vs 1667), lz4 1.4×, snappy 1.6×, **zstd 2.0×** (1790 vs 913).
-**gzip inverts** (rust 292 < lib 321): the only codec where Rust loses on both throughput *and*
-per-CPU efficiency — `flate2`/miniz_oxide pure-Rust deflate vs native zlib. **RSS:** Rust lean
-(60–161 MB) vs librdkafka 359 MB–2.5 GB (balloons with throughput). Latency = max-rate
-(backpressure-dominated), not a clean codec signal — use a fixed sub-ceiling rate for real latency.
+**CPU efficiency (msg/s per 1% CPU) — full 3-way:** **Java is the *most* CPU-efficient producer**
+on none/lz4/snappy (eff 4280–4555), **Rust 2nd** (2288–2518), **librdkafka least** (1595–1667).
+On zstd, Java ≈ Rust (1875 ≈ 1790) ≫ librdkafka (913). On gzip all are poor (Java 406 > lib 321
+> Rust 292). So Rust beats librdkafka per-CPU on every codec except gzip, but **Java beats both**.
+**RSS — Rust dramatically leanest** (60–161 MB) vs librdkafka 359 MB–2.5 GB vs **Java 0.7–2.8 GB (JVM)**.
+**Latency** = max-rate (backpressure), not a clean codec signal — Java max-rate latency omitted.
 
 ## Mechanism — single-thread compression caps the Rust producer
 Rust (like Java) compresses on its **single Sender task**; librdkafka parallelizes
