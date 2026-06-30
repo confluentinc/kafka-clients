@@ -45,12 +45,30 @@ msgs) excluded, 30-min measured. **Config:** `fetch.min.bytes=1`,
   (112 vs 94 = 1.19×). The Rust consumer runs **~1.2× librdkafka CPU** at 300 MB/s in its
   default config (crc-on + metrics) vs librdkafka default (crc-off).
 - **Latency tied** (p50 3–4, p99 15–17). **Rust RSS leaner** (38–43 vs 61 MB).
-- The earlier "84% librdkafka last week vs 92% now" (both crc-off ARM 2.13.0, same cluster)
-  is run-to-run/cluster-state variance, not a setup/version/producer-count difference — the
-  same ±10% envelope librdkafka swung across all runs (84 / 92 / 94). This is exactly why the
-  three arms are run in one session and the *gap* is read, not the absolute.
+
+## Producer-count effect (matched 1-vs-4 producer, same cluster/config)
+The 4-producer run above used 4 parallel producers; last week's 84% librdkafka used 1.
+A controlled 1-producer run settles whether producer count drives the librdkafka number:
+
+| config        | librdkafka (crc-off) | Rust-improved (crc-on+metrics) | gap          |
+|---------------|---------------------:|-------------------------------:|-------------:|
+| **4 producers** | 92.1%              | 111.9%                         | +19.8 (1.21×)|
+| **1 producer**  | **86.0%**          | **110.7%**                     | **+24.7 (1.29×)**|
+
+- **Producer count affects librdkafka, NOT Rust.** librdkafka drops **92→86%** with 1
+  producer (fewer/larger, more-regular server-side batches → less per-message work);
+  **Rust stays flat at ~111%** (110.7 vs 111.9). So the **84% last week was the 1-producer
+  operating point** (86% reproduces it) — it was producer count, not pure variance as first
+  thought. (Earlier I attributed 84→92 to variance; this test corrects that.)
+- **The gap therefore widens to ~1.29× at 1 producer** (vs 1.21× at 4). Rust's CPU is
+  dominated by per-poll machinery + TLS + allocator/HashMap that don't shrink with batch
+  size; the per-batch fetch-decode it could amortize is only ~3–4% (see `OPTIMIZATION-ANALYSIS.md`).
+- Latency stayed tied (p50 3–4, p99 14–15); Rust RSS 25 MB vs librdkafka 46 MB.
+- Implication: a fair librdkafka-vs-Rust comparison must **fix the producer count**; absolute
+  CPU is sensitive to it (and to cluster state), so read the same-session gap.
 
 ## Files
-- `rdk.log` / `rust_baseline.log` / `rust_improved.log` — interval trends + summaries
+- `rdk.log` / `rust_baseline.log` / `rust_improved.log` — 4-producer arms (interval trends + summaries)
+- `rdk_1prod.log` / `rust_improved_1prod.log` — 1-producer arms
 - `*_cpu.csv` — /proc CPU% + RSS every 10 s
 - `run.log` — driver timeline
