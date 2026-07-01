@@ -19,6 +19,7 @@
 
 pub mod api_keys;
 pub mod byte_buffer_accessor;
+pub mod bytes_reader;
 pub mod errors;
 pub mod message;
 pub mod message_size_accumulator;
@@ -31,6 +32,7 @@ pub mod writable;
 
 pub use api_keys::ApiKeys;
 pub use byte_buffer_accessor::ByteBufferAccessor;
+pub use bytes_reader::BytesReader;
 pub use errors::Errors;
 pub use message::{ApiMessage, Message};
 pub use message_size_accumulator::MessageSizeAccumulator;

@@ -39,9 +39,11 @@ COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafk
 COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
 COPY bindings/python/producer.py /workspace/bindings/python/producer.py
+COPY bindings/python/consumer.py /workspace/bindings/python/consumer.py
 
 # Single source of truth for the wire schema: the proto crate.
 COPY multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
+COPY multilanguage-test-server/proto/consumer_service.proto /workspace/proto/consumer_service.proto
 
 # Build _confluentkafka.so. setup.py reads CONFLUENT_KAFKA_LIB_DIR for
 # the Rust shared lib location.
@@ -50,14 +52,15 @@ RUN cd /workspace/bindings/python && \
     pip install --no-cache-dir setuptools wheel && \
     python setup.py build_ext --inplace
 
-# Generate proto stubs (producer_service_pb2.py + _pb2_grpc.py).
+# Generate proto stubs for both services (consumer imports producer, so
+# both are generated under the same -Iproto path).
 RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
     cd /workspace && \
     python -m grpc_tools.protoc \
         -Iproto \
         --python_out=/workspace/bindings/python \
         --grpc_python_out=/workspace/bindings/python \
-        proto/producer_service.proto
+        proto/producer_service.proto proto/consumer_service.proto
 
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts.
@@ -75,8 +78,13 @@ WORKDIR /app
 COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
 COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
+COPY --from=builder /workspace/bindings/python/consumer.py /app/consumer.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/producer_service_pb2.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
+COPY --from=builder /workspace/bindings/python/consumer_service_pb2.py /app/consumer_service_pb2.py
+COPY --from=builder /workspace/bindings/python/consumer_service_pb2_grpc.py /app/consumer_service_pb2_grpc.py
+# grpc_server.py imports the shared translation helpers from grpc_translate.py.
+COPY bindings/python/grpc_translate.py /app/grpc_translate.py
 COPY bindings/python/grpc_server.py /app/grpc_server.py
 
 # The Python extension was linked with rpath pointing at the original

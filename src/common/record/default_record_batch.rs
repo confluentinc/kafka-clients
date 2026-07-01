@@ -1299,7 +1299,7 @@ mod tests {
         assert!(batch.is_valid());
 
         // Also verify via MemoryRecords iteration
-        let records2 = MemoryRecords::new(batch.buffer().to_vec());
+        let records2 = MemoryRecords::new(batch.buffer().to_vec().into());
         let batches: Vec<_> = records2.batches().collect();
         assert_eq!(1, batches.len());
         assert_eq!(last_offset, batches[0].last_offset());
@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!(leader_epoch, batch.partition_leader_epoch());
         assert!(batch.is_valid());
 
-        let records2 = MemoryRecords::new(batch.buffer().to_vec());
+        let records2 = MemoryRecords::new(batch.buffer().to_vec().into());
         let batches: Vec<_> = records2.batches().collect();
         assert_eq!(1, batches.len());
         assert_eq!(leader_epoch, batches[0].partition_leader_epoch());
@@ -1362,7 +1362,7 @@ mod tests {
         assert_eq!(log_append_time, batch.max_timestamp());
         assert!(batch.is_valid());
 
-        let records2 = MemoryRecords::new(batch.buffer().to_vec());
+        let records2 = MemoryRecords::new(batch.buffer().to_vec().into());
         let batches: Vec<_> = records2.batches().collect();
         assert_eq!(1, batches.len());
         assert_eq!(log_append_time, batches[0].max_timestamp());

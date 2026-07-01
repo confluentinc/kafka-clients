@@ -32,6 +32,48 @@ use std::io::{self, Write};
 /// # Errors
 /// Returns an error if the varint doesn't terminate after 5 bytes.
 pub fn read_unsigned_varint(buffer: &[u8]) -> Result<(u32, usize), String> {
+    // Fast path: when at least the maximum encoded length (5 bytes for a 32-bit
+    // value) is available, a single up-front length check lets the loop read
+    // each byte without re-checking bounds. The byte-for-byte logic is
+    // identical to the slow path below — same values, same consumed sizes.
+    if buffer.len() >= 5 {
+        let mut tmp = buffer[0] as i8;
+        if tmp >= 0 {
+            return Ok((tmp as u32, 1));
+        }
+        let mut result = (tmp & 0x7F) as u32;
+
+        tmp = buffer[1] as i8;
+        if tmp >= 0 {
+            result |= (tmp as u32) << 7;
+            return Ok((result, 2));
+        }
+        result |= ((tmp & 0x7F) as u32) << 7;
+
+        tmp = buffer[2] as i8;
+        if tmp >= 0 {
+            result |= (tmp as u32) << 14;
+            return Ok((result, 3));
+        }
+        result |= ((tmp & 0x7F) as u32) << 14;
+
+        tmp = buffer[3] as i8;
+        if tmp >= 0 {
+            result |= (tmp as u32) << 21;
+            return Ok((result, 4));
+        }
+        result |= ((tmp & 0x7F) as u32) << 21;
+
+        tmp = buffer[4] as i8;
+        result |= (tmp as u32) << 28;
+        if tmp < 0 {
+            return Err(format!("Varint is too long, value so far: {}", result));
+        }
+        return Ok((result, 5));
+    }
+
+    // Slow path: fewer than 5 bytes available; keep the per-byte bounds checks
+    // so a truncated varint yields "Incomplete varint" rather than a panic.
     if buffer.is_empty() {
         return Err("Buffer is empty".to_string());
     }
@@ -153,6 +195,31 @@ pub fn read_unsigned_varlong(buffer: &[u8]) -> Result<(u64, usize), String> {
     let mut shift = 0;
     let mut pos = 0;
 
+    // Fast path: when at least the maximum encoded length (10 bytes for a
+    // 64-bit value) is available, a single up-front length check lets the loop
+    // read each byte without re-checking bounds. The byte-for-byte logic is
+    // identical to the slow path below — same values, same consumed sizes, and
+    // the same `shift > 63` overflow error.
+    if buffer.len() >= 10 {
+        loop {
+            let b = buffer[pos] as u64;
+            pos += 1;
+
+            if (b & 0x80) != 0 {
+                value |= (b & 0x7F) << shift;
+                shift += 7;
+                if shift > 63 {
+                    return Err(format!("Varlong is too long, value so far: {}", value));
+                }
+            } else {
+                value |= b << shift;
+                return Ok((value, pos));
+            }
+        }
+    }
+
+    // Slow path: fewer than 10 bytes available; keep the per-byte bounds check
+    // so a truncated varlong yields "Incomplete varlong" rather than a panic.
     loop {
         if pos >= buffer.len() {
             return Err("Incomplete varlong".to_string());
@@ -680,6 +747,85 @@ mod tests {
         let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
         let result = read_unsigned_varlong(&buf);
         assert!(result.is_err(), "Expected error for overlong varlong");
+    }
+
+    /// Truncated varints must be rejected with "Incomplete varint" on the
+    /// short-buffer (slow) path rather than panicking. Covers every
+    /// continuation length up to (but not including) the 5-byte fast-path
+    /// threshold.
+    #[test]
+    fn test_truncated_varint_slow_path() {
+        // Empty buffer.
+        assert!(read_unsigned_varint(&[]).is_err());
+        // Continuation bit set but no following byte, for lengths 1..=4.
+        for len in 1..5usize {
+            let buf = vec![0x80u8; len];
+            let result = read_unsigned_varint(&buf);
+            assert!(result.is_err(), "Expected error for truncated varint of len {}", len);
+            assert_eq!(result.unwrap_err(), "Incomplete varint");
+        }
+    }
+
+    /// Truncated varlongs must be rejected with "Incomplete varlong" on the
+    /// short-buffer (slow) path rather than panicking. Covers every
+    /// continuation length up to (but not including) the 10-byte fast-path
+    /// threshold.
+    #[test]
+    fn test_truncated_varlong_slow_path() {
+        assert!(read_unsigned_varlong(&[]).is_err());
+        for len in 1..10usize {
+            let buf = vec![0x80u8; len];
+            let result = read_unsigned_varlong(&buf);
+            assert!(result.is_err(), "Expected error for truncated varlong of len {}", len);
+            assert_eq!(result.unwrap_err(), "Incomplete varlong");
+        }
+    }
+
+    /// The fast path (buffer >= max encoded length) and the slow path
+    /// (buffer == exact encoded length) must decode identical values and
+    /// consumed sizes for the same encoding. Exercises every value width by
+    /// padding the encoded bytes with trailing junk to trigger the fast path.
+    #[test]
+    fn test_fast_and_slow_path_agree() {
+        let varint_values = [
+            0u32,
+            1,
+            127,
+            128,
+            16383,
+            16384,
+            2097151,
+            2097152,
+            268435455,
+            268435456,
+            u32::MAX,
+        ];
+        for &v in &varint_values {
+            let mut exact = Vec::new();
+            write_unsigned_varint(v, &mut exact).unwrap();
+            // Slow path: buffer is the exact encoding (len < 5 unless 5-byte value).
+            let (slow_val, slow_size) = read_unsigned_varint(&exact).unwrap();
+            // Fast path: pad to >= 5 bytes with non-continuation junk.
+            let mut padded = exact.clone();
+            padded.resize(8, 0x00);
+            let (fast_val, fast_size) = read_unsigned_varint(&padded).unwrap();
+            assert_eq!(slow_val, v);
+            assert_eq!(fast_val, v);
+            assert_eq!(slow_size, fast_size, "size mismatch for varint value {}", v);
+        }
+
+        let varlong_values = [0i64, 1, -1, 100, -100, 17179869184, -17179869185, i64::MAX, i64::MIN];
+        for &v in &varlong_values {
+            let mut exact = Vec::new();
+            write_varlong(v, &mut exact).unwrap();
+            let (slow_val, slow_size) = read_varlong(&exact).unwrap();
+            let mut padded = exact.clone();
+            padded.resize(12, 0x00);
+            let (fast_val, fast_size) = read_varlong(&padded).unwrap();
+            assert_eq!(slow_val, v);
+            assert_eq!(fast_val, v);
+            assert_eq!(slow_size, fast_size, "size mismatch for varlong value {}", v);
+        }
     }
 
     /// Translated from ByteUtilsTest.testDouble.

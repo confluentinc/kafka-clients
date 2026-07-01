@@ -1049,7 +1049,11 @@ struct RequestBatchInfo {
     /// The topic-partition for this batch.
     tp: TopicPartition,
     /// The serialized record data (already built from MemoryRecordsBuilder).
-    records_data: Option<Vec<u8>>,
+    ///
+    /// Held as a refcounted [`bytes::Bytes`] so the batch buffer travels from
+    /// the builder through to the wire send without an intermediate copy
+    /// (consumer-threading.md §27 write-path symmetry).
+    records_data: Option<bytes::Bytes>,
 }
 
 #[cfg(test)]
@@ -1439,7 +1443,7 @@ mod tests {
     #[test]
     fn test_request_batch_info() {
         let tp = TopicPartition::new("topic".to_string(), 0);
-        let info = RequestBatchInfo { tp: tp.clone(), records_data: Some(vec![1, 2, 3]) };
+        let info = RequestBatchInfo { tp: tp.clone(), records_data: Some(bytes::Bytes::from(vec![1, 2, 3])) };
         assert_eq!(info.tp, tp);
         assert_eq!(info.records_data.as_ref().unwrap().len(), 3);
     }
