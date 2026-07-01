@@ -384,6 +384,18 @@ pub type kafka_producer_Producer_flush_callback_t =
 /// Completion callback for [`kafka_producer_Producer_close_async`].
 pub type kafka_producer_Producer_close_callback_t =
     unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_Producer_partitions_for_async`]. On
+/// success `list` is a non-null [`kafka_consumer_PartitionInfoList_t`] (free with
+/// [`kafka_consumer_PartitionInfoList_destroy`]) and `error` is null; on failure
+/// `list` is null and `error` is non-null. The caller owns whichever is non-null.
+/// (Named after the consumer sibling `..._partitions_for_callback_t` rather than
+/// the `..._partitions_for_async_callback_t` that CLAUDE.md §3 would suggest, for
+/// consistency with `kafka_consumer_Consumer_partitions_for_callback_t`.)
+pub type kafka_producer_Producer_partitions_for_callback_t = unsafe extern "C" fn(
+    *mut kafka_consumer_PartitionInfoList_t,
+    *mut kafka_common_KafkaError_t,
+    *mut std::ffi::c_void,
+);
 
 /// Owned per-record completion payload, fired by the dispatcher thread.
 struct RecordCompletion {
@@ -2050,6 +2062,93 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_async(
     user_data: *mut std::ffi::c_void,
 ) {
     flush_or_close_async(producer, callback, user_data, true);
+}
+
+/// Owned `partitions_for` completion payload, fired by the dispatcher thread.
+struct PartitionInfoListCompletion {
+    callback: kafka_producer_Producer_partitions_for_callback_t,
+    user_data: *mut std::ffi::c_void,
+    list: *mut kafka_consumer_PartitionInfoList_t,
+    error: *mut kafka_common_KafkaError_t,
+}
+// SAFETY: the raw pointers are owned handles moved to the dispatcher thread; the
+// C user is responsible for the thread-safety of `user_data`.
+unsafe impl Send for PartitionInfoListCompletion {}
+impl PartitionInfoListCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread.
+    unsafe fn fire(self) {
+        unsafe { (self.callback)(self.list, self.error, self.user_data) };
+    }
+}
+
+/// Value-callback target (function pointer + opaque `user_data`) for
+/// `partitions_for_async`, wrapped so it can cross the tokio task / dispatcher
+/// thread boundary. See [`RecordCallbackTarget`].
+#[derive(Clone, Copy)]
+struct PartitionInfoListCallbackTarget {
+    callback: kafka_producer_Producer_partitions_for_callback_t,
+    user_data: *mut std::ffi::c_void,
+}
+// SAFETY: the C user owns the thread-safety of `user_data`; the function pointer
+// is trivially shareable.
+unsafe impl Send for PartitionInfoListCallbackTarget {}
+
+/// Returns the partition metadata for a topic asynchronously, invoking
+/// `callback` on completion (the async counterpart of
+/// [`kafka_producer_Producer_partitions_for`]).
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread
+/// with a non-null [`kafka_consumer_PartitionInfoList_t`] and null error on
+/// success, or a null list and non-null [`kafka_common_KafkaError_t`] on
+/// failure. The caller owns whichever handle is non-null.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null (null reported via `callback`);
+/// `topic` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
+    producer: *mut kafka_producer_Producer_t,
+    topic: *const c_char,
+    callback: kafka_producer_Producer_partitions_for_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    if producer.is_null() {
+        unsafe {
+            callback(
+                std::ptr::null_mut(),
+                box_error(KafkaError::new(Errors::InvalidRequest)),
+                user_data,
+            )
+        };
+        return;
+    }
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+
+    let handle = unsafe { producer_handle(producer) };
+    let completion = handle.completion_tx.clone();
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+    let ptr = producer as usize;
+    let target = PartitionInfoListCallbackTarget { callback, user_data };
+
+    runtime.spawn(async move {
+        let target = target;
+        // Brief lock to extend a reference to the inner producer; the guard is
+        // dropped before the `.await` (CLAUDE.md §9.6).
+        let result = match unsafe { producer_static_ref(ptr) } {
+            ProducerStaticRef::Kafka(k) => k.partitions_for(&topic_str).await,
+            ProducerStaticRef::Mock(m) => m.partitions_for(&topic_str).await,
+        };
+        let (list, error) = match result {
+            Ok(infos) => (box_partition_info_list(infos), std::ptr::null_mut()),
+            Err(e) => (std::ptr::null_mut(), box_error(e)),
+        };
+        let completion_payload =
+            PartitionInfoListCompletion { callback: target.callback, user_data: target.user_data, list, error };
+        let job: CompletionJob = Box::new(move || unsafe { completion_payload.fire() });
+        enqueue_or_run_inline(&completion, job);
+    });
 }
 
 // ---------------------------------------------------------------------------

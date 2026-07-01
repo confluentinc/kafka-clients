@@ -760,13 +760,56 @@ static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
+// ---- async producer op trampolines -----------------------------------------
+// These sit here so they precede the producer wrappers that reference them
+// (fire_handle_cb / consumer_op_trampoline live later in the file, after the
+// consumer section, so we can't reuse them from the producer wrappers above).
 
+// cb(error_int): void-returning producer async op (flush, close). Mirrors the
+// consumer's consumer_op_trampoline.
+static void producer_op_trampoline(kafka_common_KafkaError_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// cb(list_int, error_int): producer partitions_for async. The list handle is a
+// kafka_consumer_PartitionInfoList_t (shared with the consumer FFI) that Python
+// drains via PartitionInfoList_drain.
+static void producer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_t* list,
+                                               kafka_common_KafkaError_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "KK",
+        (unsigned long long)(uintptr_t)list,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// Close is split into three Python-visible steps so the Rust-side close can be
+// awaited/interrupted from Python exactly like flush, instead of blocking in a
+// C-level wait:
+//   1. Producer_shutdown   — stop + join the C batching threads (blocking C
+//                            join; GIL released), fire pending space waiters,
+//                            tear down the C mutexes/cnds, drop the py_producer
+//                            self-reference. Does NOT touch the Rust producer.
+//   2. Producer_close_async — drive kafka_producer_Producer_close_async; the
+//                            Python wrapper waits on it via _run_sync /
+//                            _run_async (interruptible), like flush.
+//   3. Producer_destroy    — free the Rust producer handle and the C struct.
+// The Python Producer.close() / AsyncProducer.close() orchestrate the three in
+// order (idempotency is guarded Python-side by self.closed).
+
+static PyObject* py_Producer_shutdown(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
         return NULL;
     }
-
     Producer* producer = (Producer*)producer_ptr;
 
     if (producer->closed) {
@@ -797,10 +840,38 @@ static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
     cnd_destroy(&producer->pending_batches_available_cnd);
     mtx_destroy(&producer->pending_batches_mutex);
     Py_DECREF(producer->py_producer);
-    kafka_producer_Producer_close(producer->producer, NULL);
-    kafka_producer_Producer_destroy(producer->producer);
-    PyMem_Free(producer);
 
+    Py_RETURN_NONE;
+}
+
+// Drive the Rust-side close asynchronously; cb(error_int) fires on the
+// dispatcher thread. The Python wrapper waits via _run_sync / _run_async so a
+// stuck close stays interruptible on the main thread (like flush). Must be
+// called after Producer_shutdown (the C batching threads are already joined).
+static PyObject* py_Producer_close_async(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) {
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+    Py_INCREF(cb);
+    kafka_producer_Producer_close_async(producer->producer, producer_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+// Free the Rust producer handle and the C struct. Call after the close future
+// (Producer_close_async) has completed.
+static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+    Py_BEGIN_ALLOW_THREADS
+    kafka_producer_Producer_destroy(producer->producer);
+    Py_END_ALLOW_THREADS
+    PyMem_Free(producer);
     Py_RETURN_NONE;
 }
 
@@ -886,6 +957,33 @@ static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
     return Py_BuildValue("KK",
         (unsigned long long)(uintptr_t)list,
         (unsigned long long)(uintptr_t)err);
+}
+
+// Producer flush (async): submit and return; cb(error_int) fires on the
+// dispatcher thread. The Python wrapper waits (threading.Event / asyncio.Future)
+// so no Rust block_on parks the calling thread — mirrors the consumer.
+static PyObject* py_Producer_flush_async(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    Py_INCREF(cb);
+    kafka_producer_Producer_flush_async(producer->producer, producer_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+// Producer partitions_for (async): submit and return; cb(list_int, error_int)
+// fires on the dispatcher thread.
+static PyObject* py_Producer_partitions_for_async(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    const char* topic;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsO", &producer_ptr, &topic, &cb)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    Py_INCREF(cb);
+    kafka_producer_Producer_partitions_for_async(producer->producer, topic,
+        producer_partitions_for_trampoline, cb);
+    Py_RETURN_NONE;
 }
 
 // RecordMetadata destroy and copy functions
@@ -1999,10 +2097,19 @@ static PyMethodDef ProducerNativeMethods[] = {
      "space is already available"},
     {"Producer_test_set_paused", py_Producer_test_set_paused, METH_VARARGS,
      "Test-only: pause/resume the send task to exercise backpressure"},
-    {"Producer_close", py_Producer_close, METH_VARARGS, "Close batching producer"},
+    {"Producer_shutdown", py_Producer_shutdown, METH_VARARGS,
+     "Stop/join the C batching threads (step 1 of close)"},
+    {"Producer_close_async", py_Producer_close_async, METH_VARARGS,
+     "Async Rust-side close; cb(error_int) (step 2 of close)"},
+    {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
+     "Free the Rust handle + C struct (step 3 of close)"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
     {"Producer_partitions_for", py_Producer_partitions_for, METH_VARARGS,
      "Partition metadata for a topic; returns (PartitionInfoList_handle, error)"},
+    {"Producer_flush_async", py_Producer_flush_async, METH_VARARGS,
+     "Async flush; cb(error_int)"},
+    {"Producer_partitions_for_async", py_Producer_partitions_for_async, METH_VARARGS,
+     "Async partitions_for; cb(PartitionInfoList_handle_int, error_int)"},
     {"MockProducer_complete_next", py_MockProducer_complete_next, METH_VARARGS,
      "Complete the next pending send successfully"},
     {"MockProducer_error_next", py_MockProducer_error_next, METH_VARARGS,

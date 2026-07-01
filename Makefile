@@ -60,7 +60,7 @@ build-c: submodules build-rust
 	cmake --build bindings/c/build
 
 init-venv:
-	python3 -m venv venv
+	[ -d venv ] || python3 -m venv venv
 
 build-python: submodules init-venv build-rust
 	@(. venv/bin/activate && \
@@ -86,6 +86,7 @@ devel-build-python: submodules init-venv devel-build-rust
 # and confluent_kafka.h are present under target/release/.
 build-grpc-images: build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
@@ -93,7 +94,7 @@ build-grpc-images: build
 # Run this before `make build` on a new checkout.
 init:
 	@git submodule update --init --recursive
-	@python3 -m venv venv
+	@[ -d venv ] || python3 -m venv venv
 	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
 
 test: test-multilanguage test-c test-python

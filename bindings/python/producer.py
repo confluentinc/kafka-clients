@@ -135,6 +135,44 @@ class _ProducerBase:
             raise TypeError(
                 "producer_record must be an instance of ProducerRecord")
 
+    # ---- resolve / free pairs for the async-FFI ops (flush, partitions_for) --
+    # These drive Producer_flush_async / Producer_partitions_for_async, whose
+    # trampolines deliver the raw C handles as Python ints (see the consumer's
+    # _ConsumerBase for the same pattern). ``resolve`` runs on completion and
+    # consumes the handles (drain frees the PartitionInfoList, ``_from_c`` frees
+    # the error); ``free`` runs only when the event loop is gone before delivery.
+    @staticmethod
+    def _resolve_void(payload):
+        (error,) = payload
+        if error:
+            raise KafkaError._from_c(error)
+        return None
+
+    @staticmethod
+    def _free_void(payload):
+        (error,) = payload
+        if error:
+            _lib.KafkaError_destroy(error)
+
+    @staticmethod
+    def _resolve_partitions(payload):
+        list_handle, error = payload
+        if error:
+            if list_handle:
+                _lib.PartitionInfoList_drain(list_handle)  # drain frees the handle
+            raise KafkaError._from_c(error)
+        import consumer as _kc
+        raw = _lib.PartitionInfoList_drain(list_handle)
+        return [_kc._to_partition_info(t) for t in raw]
+
+    @staticmethod
+    def _free_partitions(payload):
+        list_handle, error = payload
+        if error:
+            _lib.KafkaError_destroy(error)
+        if list_handle:
+            _lib.PartitionInfoList_drain(list_handle)
+
 
 class _MockProducerMixin:
     """Mock-only operations shared by :class:`MockProducer` and
@@ -231,30 +269,58 @@ class Producer(_ProducerBase):
                 space.result()
         return fut
 
+    def _run_sync(self, submit, resolve):
+        """Submit an async FFI op and wait on an interruptible event.
+
+        Mirrors the sync Consumer's ``_run_sync``: the calling thread never
+        parks inside a native ``block_on`` — it waits on a ``threading.Event``
+        (which releases the GIL so the producer's dispatcher thread can run the
+        completion callback). The producer has no ``wakeup``, so there is no
+        abort path; we simply wait for the callback to fire."""
+        box = {}
+        done = threading.Event()
+
+        def cb(*payload):
+            box["payload"] = payload
+            done.set()
+
+        submit(cb)
+        done.wait()
+        return resolve(box["payload"])
+
     def flush(self):
         """Flush all pending records."""
-        err = _lib.Producer_flush(self.c_producer)
-        if err != 0:
-            raise KafkaError._from_c(err)
+        self._run_sync(
+            lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
+            self._resolve_void,
+        )
 
     def partitions_for(self, topic):
         """Return partition metadata for ``topic`` as a list of PartitionInfo.
 
         Reuses the consumer binding's PartitionInfoList drain + conversion
         (the FFI returns the same shared handle type)."""
-        import consumer as _kc
-        list_handle, err = _lib.Producer_partitions_for(self.c_producer, topic)
-        if err != 0:
-            raise KafkaError._from_c(err)
-        raw = _lib.PartitionInfoList_drain(list_handle)
-        return [_kc._to_partition_info(t) for t in raw]
+        return self._run_sync(
+            lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
+            self._resolve_partitions,
+        )
 
     def close(self):
         if self.closed:
             return
         self.closed = True
         self._cancel()
-        _lib.Producer_close(self.c_producer)
+        # Split teardown (see _confluentkafka.c): join the C batching threads,
+        # then drive the Rust-side close through the interruptible _run_sync
+        # path (same as flush), then free. Keeping the Rust close in _run_sync
+        # means a stuck close stays responsive to KeyboardInterrupt on the main
+        # thread rather than blocking in a native wait.
+        _lib.Producer_shutdown(self.c_producer)
+        self._run_sync(
+            lambda cb: _lib.Producer_close_async(self.c_producer, cb),
+            self._resolve_void,
+        )
+        _lib.Producer_destroy(self.c_producer)
 
 
 class AsyncProducer(_ProducerBase):
@@ -398,13 +464,46 @@ class AsyncProducer(_ProducerBase):
                 await space
         return ret
 
+    async def _run_async(self, submit, resolve, free):
+        """Submit an async FFI op and ``await`` its completion on the event loop.
+
+        Mirrors the async Consumer's ``_run_async``: the completion callback runs
+        on the producer's dispatcher thread and hops onto the loop via
+        ``call_soon_threadsafe`` (asyncio futures are not thread-safe). If the
+        loop is already closed we can't schedule, so the C handles are freed
+        inline via ``free`` to avoid leaking them."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def deliver(payload):
+            if not fut.done():
+                fut.set_result(payload)
+
+        def cb(*payload):
+            if loop.is_closed():
+                free(payload)
+                return
+            loop.call_soon_threadsafe(deliver, payload)
+
+        submit(cb)
+        payload = await fut
+        return resolve(payload)
+
     async def flush(self):
         """Flush all pending records."""
-        loop = asyncio.get_running_loop()
-        err = await loop.run_in_executor(
-            None, _lib.Producer_flush, self.c_producer)
-        if err != 0:
-            raise KafkaError._from_c(err)
+        await self._run_async(
+            lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
+            self._resolve_void,
+            self._free_void,
+        )
+
+    async def partitions_for(self, topic):
+        """Return partition metadata for ``topic`` as a list of PartitionInfo."""
+        return await self._run_async(
+            lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
+            self._resolve_partitions,
+            self._free_partitions,
+        )
 
     async def close(self):
         if self.closed:
@@ -412,11 +511,17 @@ class AsyncProducer(_ProducerBase):
         self.closed = True
         self._cancel()
         loop = asyncio.get_running_loop()
-        # Producer_close joins the C background threads (blocking); run it off
-        # the event loop so the loop stays free to drain any in-flight
-        # call_soon_threadsafe completions while close is in progress.
-        await loop.run_in_executor(
-            None, _lib.Producer_close, self.c_producer)
+        # Split teardown (see _confluentkafka.c): the C batching-thread join and
+        # the final free are blocking C calls, so run them off the event loop;
+        # the Rust-side close is awaited via the async FFI (_run_async) so it is
+        # cooperative with the loop and cancellable, like flush.
+        await loop.run_in_executor(None, _lib.Producer_shutdown, self.c_producer)
+        await self._run_async(
+            lambda cb: _lib.Producer_close_async(self.c_producer, cb),
+            self._resolve_void,
+            self._free_void,
+        )
+        await loop.run_in_executor(None, _lib.Producer_destroy, self.c_producer)
 
 
 class KafkaProducer(Producer):

@@ -193,6 +193,56 @@ mod grpc_backends {
         }
     }
 
+    /// Backend that drives the *asyncio-native* bindings/python client
+    /// (`AsyncKafkaProducer` / `AsyncKafkaConsumer`) through a gRPC server
+    /// running in the `confluent-kafka-rust/python-async-grpc-server:dev`
+    /// Docker image. Identical wiring to [`PythonGrpcFactory`] — only the
+    /// backend label (used in logs) differs.
+    pub struct PythonAsyncGrpcFactory {
+        channel: Channel,
+    }
+
+    impl PythonAsyncGrpcFactory {
+        pub fn new(channel: Channel) -> Self {
+            Self { channel }
+        }
+    }
+
+    impl ProducerBackendFactory for PythonAsyncGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+            MultilanguageProducer::new(self.channel.clone(), config, "python_async").await
+        }
+
+        fn name(&self) -> &'static str {
+            "python_async"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
+
+    impl ConsumerBackendFactory for PythonAsyncGrpcFactory {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), config, "python_async").await?,
+            ))
+        }
+
+        fn name(&self) -> &'static str {
+            "python_async"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
+
     /// Backend that drives the public C FFI through a gRPC server running
     /// in the `confluent-kafka-rust/c-grpc-server:dev` Docker image (a
     /// thin grpc++ wrapper that calls `kafka_producer_*`).
@@ -242,4 +292,4 @@ mod grpc_backends {
 
 #[cfg(feature = "multilanguage-tests")]
 #[allow(unused_imports)] // Used only by the `integration` test binary
-pub use grpc_backends::{CGrpcFactory, PythonGrpcFactory};
+pub use grpc_backends::{CGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory};

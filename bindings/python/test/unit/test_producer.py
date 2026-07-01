@@ -150,6 +150,14 @@ def test_flush():
         p.flush()  # Should not raise
 
 
+def test_partitions_for():
+    # Exercises the async-FFI path (Producer_partitions_for_async) waited on by
+    # the sync Producer's threading.Event. The mock has no topics, so the result
+    # is an empty list rather than an error.
+    with MockProducer(auto_complete=True) as p:
+        assert p.partitions_for("test-topic") == []
+
+
 def test_close():
     p = MockProducer(auto_complete=True)
     future = p.send(ProducerRecord("test-topic", b"v"))
@@ -423,6 +431,13 @@ async def test_async_flush():
     async with AsyncMockProducer(auto_complete=True) as p:
         await p.send(ProducerRecord("test-topic", b"v"))
         await p.flush()  # Should not raise
+
+
+async def test_async_partitions_for():
+    # Exercises the async-FFI path awaited on the event loop
+    # (Producer_partitions_for_async + _run_async). Empty mock -> empty list.
+    async with AsyncMockProducer(auto_complete=True) as p:
+        assert await p.partitions_for("test-topic") == []
 
 
 async def test_async_close():
