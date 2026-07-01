@@ -56,6 +56,7 @@ global_job_config:
 
 blocks:
   - name: Run translation-agent
+    dependencies: []
     task:
       env_vars:
         # Override in the Semaphore project's "Environment Variables" or
@@ -109,6 +110,17 @@ blocks:
               fi
               echo "PR build -- running 'make verify' directly in Semaphore env"
               make verify
+  - name: "R2 Code Review"
+    dependencies: []
+    run:
+      # run on all pull requests except changes in `/.deployed-versions/`
+      when: "pull_request =~ '.+' and change_in('/', {exclude: ['/.deployed-versions/']})"
+    task:
+      jobs:
+        - name: "R2 Code Review"
+          commands:
+            # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
+            - r2 code-review --verbose --timeout=15m || true
 
 promotions:
   - name: Approve plan and implement
