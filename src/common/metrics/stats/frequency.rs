@@ -21,6 +21,7 @@
 use std::fmt;
 
 use crate::common::MetricName;
+use crate::common::utils::double_to_string;
 
 /// A named frequency metric identifying a [`Frequencies`] bucket by its center
 /// value.
@@ -51,6 +52,11 @@ impl Frequency {
 
 impl fmt::Display for Frequency {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Frequency(name={}, centerValue={})", self.name, self.center_value)
+        write!(
+            f,
+            "Frequency(name={}, centerValue={})",
+            self.name,
+            double_to_string(self.center_value)
+        )
     }
 }

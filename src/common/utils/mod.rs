@@ -79,6 +79,34 @@ pub fn murmur2(data: &[u8]) -> i32 {
     h
 }
 
+/// Renders a floating-point value as the decimal string used in metric and
+/// quota-violation message text.
+///
+/// A finite value with no fractional part is rendered with a trailing `.0`
+/// (so `5` becomes `"5.0"`); other finite values use their shortest
+/// round-tripping decimal form. Non-finite values are spelled `"Infinity"`,
+/// `"-Infinity"`, and `"NaN"`.
+///
+/// This is minimal native infrastructure (in the same spirit as the metrics
+/// `TimeUnit`): it targets the value magnitudes those messages actually produce
+/// (well under `1e7`) and intentionally does not switch to scientific notation
+/// for very large or very small magnitudes.
+pub(crate) fn double_to_string(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
+    } else if value == value.trunc() {
+        format!("{value:.1}")
+    } else {
+        format!("{value}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +135,22 @@ mod tests {
         assert_eq!(murmur2(b"21"), murmur2(b"21"));
         assert_eq!(murmur2(b"foobar"), murmur2(b"foobar"));
         assert_eq!(murmur2(b"a]b[c"), murmur2(b"a]b[c"));
+    }
+
+    #[test]
+    fn test_double_to_string() {
+        // Finite integral values gain a trailing ".0".
+        assert_eq!(double_to_string(5.0), "5.0");
+        assert_eq!(double_to_string(-60.0), "-60.0");
+        assert_eq!(double_to_string(0.0), "0.0");
+        assert_eq!(double_to_string(1000.0), "1000.0");
+        // Non-integral finite values use the shortest decimal form.
+        assert_eq!(double_to_string(2.5), "2.5");
+        assert_eq!(double_to_string(5.6), "5.6");
+        // Non-finite values use their spelled-out forms.
+        assert_eq!(double_to_string(f64::INFINITY), "Infinity");
+        assert_eq!(double_to_string(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(double_to_string(f64::NAN), "NaN");
     }
 
     #[test]

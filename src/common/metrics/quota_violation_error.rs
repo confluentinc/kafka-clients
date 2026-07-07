@@ -20,6 +20,7 @@ use std::fmt;
 
 use crate::common::metric::Metric;
 use crate::common::metrics::KafkaMetric;
+use crate::common::utils::double_to_string;
 
 /// Raised when a sensor records a value that causes a metric to exceed the
 /// bounds configured as its quota.
@@ -59,8 +60,8 @@ impl fmt::Display for QuotaViolationError {
             f,
             "QuotaViolationError: '{}' violated quota. Actual: {}, Threshold: {}",
             self.metric.metric_name(),
-            self.value,
-            self.bound
+            double_to_string(self.value),
+            double_to_string(self.bound)
         )
     }
 }
@@ -96,7 +97,7 @@ mod tests {
         assert_eq!(err.bound(), 5.0);
         let msg = err.to_string();
         assert!(
-            msg.contains("violated quota. Actual: 5.6, Threshold: 5"),
+            msg.contains("violated quota. Actual: 5.6, Threshold: 5.0"),
             "unexpected message: {msg}"
         );
     }

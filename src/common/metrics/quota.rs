@@ -18,6 +18,8 @@
 
 use std::fmt;
 
+use crate::common::utils::double_to_string;
+
 /// An upper or lower bound for a metric.
 #[derive(Clone, Copy, Debug)]
 pub struct Quota {
@@ -65,7 +67,12 @@ impl PartialEq for Quota {
 
 impl fmt::Display for Quota {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", if self.upper { "upper=" } else { "lower=" }, self.bound)
+        write!(
+            f,
+            "{}{}",
+            if self.upper { "upper=" } else { "lower=" },
+            double_to_string(self.bound)
+        )
     }
 }
 
@@ -96,7 +103,7 @@ mod tests {
     fn test_equality_and_display() {
         assert_eq!(Quota::upper_bound(5.0), Quota::new(5.0, true));
         assert_ne!(Quota::upper_bound(5.0), Quota::lower_bound(5.0));
-        assert_eq!(Quota::upper_bound(5.0).to_string(), "upper=5");
+        assert_eq!(Quota::upper_bound(5.0).to_string(), "upper=5.0");
         assert_eq!(Quota::lower_bound(2.5).to_string(), "lower=2.5");
     }
 }

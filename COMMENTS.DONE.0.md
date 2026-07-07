@@ -1,0 +1,7 @@
+# Critic 0 — Milestone 9 Phase 0a — resolved
+
+## Issue 1 (RESOLVED): `f64` Display drops the trailing `.0` — text diverges from Java's `double` string form
+- **Introduced by**: the `double`-in-`Display`/message family across `a747461` (`quota.rs`), `2d941c6` (`quota_violation_error.rs`), `de4221e` (`cumulative_sum.rs`), `28625b5` (`token_bucket.rs`), `5eb8905` (`frequency.rs`, `frequencies.rs`, `histogram.rs`).
+- **Original report**: Rust `write!("{}", some_f64)` renders an integral double without a trailing `.0` (`5.0` → `"5"`) and prints `"inf"` where Java prints `"Infinity"`; the `QuotaViolationError` message is user-facing and Phase 0b asserts its content.
+- **Fix**: added `crate::common::utils::double_to_string` (minimal native `Double.toString`-style formatter: finite integral → trailing `.0`; other finite → shortest decimal; `Infinity`/`-Infinity`/`NaN` spellings; documented to target magnitudes < 1e7, no scientific notation). Applied it to every `f64`-in-message site: `Quota::Display`, `QuotaViolationError::Display`, `Frequency::Display`, `Frequencies::new` validation messages, `Histogram::Display` (infinity label), and — same latent pattern, for consistency — `CumulativeSum::Display` and `TokenBucket::Display`. Updated the `quota.rs` test to assert `"upper=5.0"` and the `quota_violation_error.rs` test to assert `"Threshold: 5.0"`; added a `double_to_string` unit test covering integral/non-integral/Infinity/NaN.
+- **Verification**: build + `cargo test --lib` (2073 passed) + format-check + lint all clean.

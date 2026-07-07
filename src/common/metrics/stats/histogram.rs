@@ -18,6 +18,8 @@
 
 use std::fmt;
 
+use crate::common::utils::double_to_string;
+
 /// A histogram over a fixed set of bins determined by a [`BinScheme`].
 #[derive(Debug)]
 pub struct Histogram {
@@ -79,7 +81,7 @@ impl fmt::Display for Histogram {
         for i in 0..self.hist.len() - 1 {
             write!(f, "{:.10}:{:.0},", self.bin_scheme.from_bin(i as i32), self.hist[i])?;
         }
-        write!(f, "{}:{:.0}}}", f64::INFINITY, self.hist[self.hist.len() - 1])
+        write!(f, "{}:{:.0}}}", double_to_string(f64::INFINITY), self.hist[self.hist.len() - 1])
     }
 }
 

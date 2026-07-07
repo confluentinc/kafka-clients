@@ -20,6 +20,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::common::metrics::{Measurable, MeasurableStat, MetricConfig, Stat};
+use crate::common::utils::double_to_string;
 
 /// A non-sampled cumulative total maintained over all time.
 #[derive(Debug, Default)]
@@ -63,7 +64,7 @@ impl MeasurableStat for CumulativeSum {}
 
 impl fmt::Display for CumulativeSum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CumulativeSum(total={})", self.total)
+        write!(f, "CumulativeSum(total={})", double_to_string(self.total))
     }
 }
 

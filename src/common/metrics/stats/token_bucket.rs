@@ -21,6 +21,7 @@ use std::fmt;
 
 use crate::common::metrics::internals::metrics_utils::convert;
 use crate::common::metrics::{Measurable, MeasurableStat, MetricConfig, Stat, TimeUnit};
+use crate::common::utils::double_to_string;
 
 /// A [`MeasurableStat`] implementing a token-bucket algorithm.
 ///
@@ -100,7 +101,9 @@ impl fmt::Display for TokenBucket {
         write!(
             f,
             "TokenBucket(unit={:?}, tokens={}, lastUpdateMs={})",
-            self.unit, self.tokens, self.last_update_ms
+            self.unit,
+            double_to_string(self.tokens),
+            self.last_update_ms
         )
     }
 }

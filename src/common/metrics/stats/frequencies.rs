@@ -23,6 +23,7 @@ use crate::common::metrics::stats::histogram::{BinScheme, ConstantBinScheme, His
 use crate::common::metrics::stats::sampled_stat::{SampledStat, SampledStatBase, impl_sampled_stat_traits};
 use crate::common::metrics::stats::{Frequency, Sample};
 use crate::common::metrics::{CompoundStat, Measurable, MeasurableStat, MetricConfig, NamedMeasurable, Stat};
+use crate::common::utils::double_to_string;
 use crate::common::{KafkaError, MetricName};
 
 /// A [`CompoundStat`] representing a normalized distribution, with a
@@ -62,7 +63,9 @@ impl Frequencies {
     pub fn new(buckets: i32, min: f64, max: f64, frequencies: Vec<Frequency>) -> Result<Self, KafkaError> {
         if max < min {
             return Err(KafkaError::illegal_argument(format!(
-                "The maximum value {max} must be greater than the minimum value {min}"
+                "The maximum value {} must be greater than the minimum value {}",
+                double_to_string(max),
+                double_to_string(min)
             )));
         }
         if buckets < 1 {
@@ -74,8 +77,10 @@ impl Frequencies {
         for freq in &frequencies {
             if min > freq.center_value() || max < freq.center_value() {
                 return Err(KafkaError::illegal_argument(format!(
-                    "The frequency centered at '{}' is not within the range [{min},{max}]",
-                    freq.center_value()
+                    "The frequency centered at '{}' is not within the range [{},{}]",
+                    double_to_string(freq.center_value()),
+                    double_to_string(min),
+                    double_to_string(max)
                 )));
             }
         }
