@@ -375,6 +375,11 @@ impl Metrics {
 
     /// Builds a metric name from a template and tags, verifying the runtime tag
     /// keys (plus config defaults) match the template's tag names.
+    ///
+    /// On a mismatch the error lists the offending key sets as `[a, b]`. The
+    /// runtime keys are sorted (they come from an unordered set, so sorting is
+    /// what keeps the message deterministic); the template keys are shown in
+    /// their declared order.
     pub fn metric_instance_tags(
         &self,
         template: &MetricNameTemplate,
@@ -384,11 +389,14 @@ impl Metrics {
         runtime_tag_keys.extend(self.core.config.tags().keys().map(String::as_str));
         let template_tag_keys: HashSet<&str> = template.tags().iter().map(String::as_str).collect();
         if runtime_tag_keys != template_tag_keys {
+            let mut runtime_sorted: Vec<&str> = runtime_tag_keys.iter().copied().collect();
+            runtime_sorted.sort_unstable();
+            let template_ordered: Vec<&str> = template.tags().iter().map(String::as_str).collect();
             return Err(KafkaError::illegal_argument(format!(
-                "For '{}', runtime-defined metric tags do not match the tags in the template. Runtime = {:?} Template = {:?}",
+                "For '{}', runtime-defined metric tags do not match the tags in the template. Runtime = [{}] Template = [{}]",
                 template.name(),
-                runtime_tag_keys,
-                template_tag_keys
+                runtime_sorted.join(", "),
+                template_ordered.join(", "),
             )));
         }
         Ok(build_metric_name(
@@ -704,11 +712,17 @@ mod tests {
         let n2 = metrics.metric_name_tags("name", "group", "description", tags);
         assert_eq!(n1, n2, "metric names created in two different ways should be equal");
 
+        let err = metrics
+            .metric_name_key_values("name", "group", "description", &["key1"])
+            .unwrap_err();
         assert!(
-            metrics
-                .metric_name_key_values("name", "group", "description", &["key1"])
-                .is_err(),
-            "an odd number of key/value tags should be rejected"
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert!(
+            err.message().contains("keyValue needs to be specified in pairs"),
+            "unexpected message: {}",
+            err.message()
         );
     }
 
@@ -909,7 +923,18 @@ mod tests {
         let p = metrics.sensor("parent").unwrap();
         let c1 = metrics.sensor_with_parents("child1", vec![p.clone()]).unwrap();
         let c2 = metrics.sensor_with_parents("child2", vec![p.clone()]).unwrap();
-        assert!(metrics.sensor_with_parents("gc", vec![c1, c2]).is_err());
+        let Err(err) = metrics.sensor_with_parents("gc", vec![c1, c2]) else {
+            panic!("expected a circular-dependency error");
+        };
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert!(
+            err.message().contains("Circular dependency in sensors"),
+            "unexpected message: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -917,12 +942,13 @@ mod tests {
         let metrics = Metrics::new();
         let parent = metrics.sensor("parent").unwrap();
         let child = metrics.sensor_with_parents("child", vec![parent.clone()]).unwrap();
-        let _ = child;
 
-        assert_eq!(
-            metrics.children_sensors().get(parent.name()).map(|c| c.len()),
-            Some(1),
-            "parent should have one child before removal"
+        let before = metrics.children_sensors();
+        let before_children = before.get(parent.name()).expect("parent should have a child list");
+        assert_eq!(before_children.len(), 1, "parent should have exactly one child before removal");
+        assert!(
+            Arc::ptr_eq(&before_children[0], &child),
+            "the registered child should be the created child sensor"
         );
 
         metrics.remove_sensor("child");
@@ -1161,12 +1187,19 @@ mod tests {
             .unwrap()
             .add_metric(metrics.metric_name("test", "grp1"), Avg::new())
             .unwrap();
+        let err = metrics
+            .sensor("test2")
+            .unwrap()
+            .add_metric(metrics.metric_name("test", "grp1"), CumulativeSum::new())
+            .unwrap_err();
         assert!(
-            metrics
-                .sensor("test2")
-                .unwrap()
-                .add_metric(metrics.metric_name("test", "grp1"), CumulativeSum::new())
-                .is_err()
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert!(
+            err.message().contains("already exists"),
+            "unexpected message: {}",
+            err.message()
         );
     }
 
@@ -1533,9 +1566,15 @@ mod tests {
         let n2 = metrics.metric_instance_tags(&metric2, tags).unwrap();
         assert_eq!(n1, n2, "metric names created in two different ways should be equal");
 
+        let err = metrics.metric_instance(&metric1, &["key1"]).unwrap_err();
         assert!(
-            metrics.metric_instance(&metric1, &["key1"]).is_err(),
-            "an odd number of key/value tags should be rejected"
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert!(
+            err.message().contains("keyValue needs to be specified in pairs"),
+            "unexpected message: {}",
+            err.message()
         );
 
         let mut parent_tags = IndexMap::new();
@@ -1555,21 +1594,31 @@ mod tests {
         assert_eq!(filled_out_tags.get("parent-tag"), Some(&"parent-tag-value".to_string()));
         assert_eq!(filled_out_tags.get("child-tag"), Some(&"child-tag-value".to_string()));
 
+        let err = inherited
+            .metric_instance_tags(&metric_with_inherited_tags, parent_tags)
+            .unwrap_err();
         assert!(
-            inherited
-                .metric_instance_tags(&metric_with_inherited_tags, parent_tags)
-                .is_err(),
-            "child metrics not defined at runtime should be rejected"
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert_eq!(
+            err.message(),
+            "For 'inherited.tags', runtime-defined metric tags do not match the tags in the template. Runtime = [parent-tag] Template = [parent-tag, child-tag]"
         );
 
         let mut runtime_tags = IndexMap::new();
         runtime_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
         runtime_tags.insert("tag-not-in-template".to_string(), "unexpected-value".to_string());
+        let err = inherited
+            .metric_instance_tags(&metric_with_inherited_tags, runtime_tags)
+            .unwrap_err();
         assert!(
-            inherited
-                .metric_instance_tags(&metric_with_inherited_tags, runtime_tags)
-                .is_err(),
-            "a runtime tag not in the template should be rejected"
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert_eq!(
+            err.message(),
+            "For 'inherited.tags', runtime-defined metric tags do not match the tags in the template. Runtime = [child-tag, parent-tag, tag-not-in-template] Template = [parent-tag, child-tag]"
         );
     }
 
@@ -1799,6 +1848,10 @@ mod tests {
         let alive = AtomicBool::new(true);
 
         std::thread::scope(|scope| {
+            // Worker liveness (that none of the record/read/report threads has
+            // failed) is guaranteed structurally: a panic or poisoned-lock in any
+            // spawned worker propagates when `scope` joins, failing the test — an
+            // equal-or-stronger check than polling each worker for "not done".
             scope.spawn(|| {
                 let mut rng = rand::rng();
                 while alive.load(Ordering::SeqCst) {
