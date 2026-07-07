@@ -29,6 +29,7 @@ pub mod quota;
 pub mod quota_violation_error;
 pub mod sensor;
 pub mod stat;
+pub mod stats;
 pub mod time_unit;
 
 pub use compound_stat::{CompoundStat, NamedMeasurable};
