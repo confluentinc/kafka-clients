@@ -28,6 +28,7 @@ pub mod kafka_future;
 pub mod memory;
 pub mod metric_name;
 pub mod metric_name_template;
+pub mod metrics;
 pub mod network;
 pub mod node;
 pub mod partition_info;
