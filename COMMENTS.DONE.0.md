@@ -13,6 +13,13 @@
 - **Fix**: `Max::update`/`combine` now use a local `nan_max` (returns `NaN` if either operand is `NaN`, else `f64::max`); `Min` uses the symmetric `nan_min`. Added a per-stat regression test recording a `NaN` and asserting `measure()` is `NaN`, and that a subsequent finite record leaves it `NaN` (NaN propagates through `Math.max`/`Math.min`), verified against `Max.java`/`Min.java`.
 - **Verification**: build + `cargo test --lib` (2075 passed) + format-check + lint all clean.
 
+## Issue 3 (RESOLVED): `double_to_string` did not reproduce Java `Double.toString` scientific notation
+- **Introduced by**: fixup `2867ad6` (of `a747461`), which added `double_to_string` with a plain-decimal-only implementation and a "well under 1e7" doc caveat.
+- **Original report**: the helper never switched to scientific notation, so `Quota::upper_bound(1e7).to_string()` → `"upper=10000000.0"` vs Java `"upper=1.0E7"`, and a 10 MB/s byte-rate quota bound (`10485760.0`) in a `QuotaViolationError` → `"Threshold: 10485760.0"` vs Java `"1.048576E7"`. Phase 0b (SensorTest/MetricsTest) asserts such quota-violation messages.
+- **Fix**: extended `double_to_string` to full Java `Double.toString(double)` semantics — plain decimal for magnitude in `[1e-3, 1e7)` (trailing `.0` for integrals), computerized scientific notation `<mantissa>E<exp>` (mantissa in `[1, 10)` always carrying a decimal point) otherwise, `Infinity`/`-Infinity`/`NaN`, and `-0.0` preserved. Replaced the doc caveat. Added a table-driven test covering both sides of both thresholds (`9999999.0`/`1e7`, `0.001`/`0.0001`), negatives (`-60.0`, `-2.5e10`), `-0.0`, and the two concrete reproductions (`1e7` → `"1.0E7"`, `10485760.0` → `"1.048576E7"`), each expected value being the exact JDK `Double.toString` output.
+- **Fixup commit**: `<this fixup>` (fixup! of `a747461`).
+- **Verification**: build + `cargo test --lib` (2075 passed) + format-check + lint all clean.
+
 ---
 
 ## Verified clean (from the round-1 review — recorded for reference)

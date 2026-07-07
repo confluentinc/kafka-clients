@@ -79,31 +79,58 @@ pub fn murmur2(data: &[u8]) -> i32 {
     h
 }
 
-/// Renders a floating-point value as the decimal string used in metric and
-/// quota-violation message text.
+/// Renders a floating-point value as its canonical decimal string, the form
+/// used in metric and quota-violation message text.
 ///
-/// A finite value with no fractional part is rendered with a trailing `.0`
-/// (so `5` becomes `"5.0"`); other finite values use their shortest
-/// round-tripping decimal form. Non-finite values are spelled `"Infinity"`,
-/// `"-Infinity"`, and `"NaN"`.
-///
-/// This is minimal native infrastructure (in the same spirit as the metrics
-/// `TimeUnit`): it targets the value magnitudes those messages actually produce
-/// (well under `1e7`) and intentionally does not switch to scientific notation
-/// for very large or very small magnitudes.
+/// Finite values whose magnitude is in `[1e-3, 1e7)` use plain decimal
+/// notation, with a trailing `.0` appended to integral values (so `5` renders
+/// as `"5.0"`). Values outside that magnitude range use computerized
+/// scientific notation `<mantissa>E<exponent>`, where the mantissa lies in
+/// `[1, 10)` and always carries a decimal point (`"1.0E7"`, `"1.048576E7"`,
+/// `"1.0E-4"`, `"-2.5E10"`). Infinities render as `"Infinity"` /
+/// `"-Infinity"`, not-a-number as `"NaN"`, and negative zero is preserved as
+/// `"-0.0"`.
 pub(crate) fn double_to_string(value: f64) -> String {
     if value.is_nan() {
-        "NaN".to_string()
-    } else if value.is_infinite() {
-        if value > 0.0 {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 {
             "Infinity".to_string()
         } else {
             "-Infinity".to_string()
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0".to_string()
+        } else {
+            "0.0".to_string()
+        };
+    }
+
+    let magnitude = value.abs();
+    if (1e-3..1e7).contains(&magnitude) {
+        // Plain decimal notation; Rust's shortest form omits the trailing `.0`
+        // for integral values, so add it back.
+        let plain = format!("{value}");
+        if plain.contains('.') {
+            plain
+        } else {
+            format!("{plain}.0")
         }
-    } else if value == value.trunc() {
-        format!("{value:.1}")
     } else {
-        format!("{value}")
+        // Computerized scientific notation: a `[1, 10)` mantissa that always
+        // carries a decimal point, then an upper-case exponent with no `+`
+        // sign or leading zeros (both already the case for Rust's `{:e}`).
+        let scientific = format!("{value:e}");
+        let (mantissa, exponent) = scientific.split_once('e').expect("scientific format contains 'e'");
+        let mantissa = if mantissa.contains('.') {
+            mantissa.to_string()
+        } else {
+            format!("{mantissa}.0")
+        };
+        format!("{mantissa}E{exponent}")
     }
 }
 
@@ -139,15 +166,32 @@ mod tests {
 
     #[test]
     fn test_double_to_string() {
-        // Finite integral values gain a trailing ".0".
-        assert_eq!(double_to_string(5.0), "5.0");
-        assert_eq!(double_to_string(-60.0), "-60.0");
-        assert_eq!(double_to_string(0.0), "0.0");
-        assert_eq!(double_to_string(1000.0), "1000.0");
-        // Non-integral finite values use the shortest decimal form.
-        assert_eq!(double_to_string(2.5), "2.5");
-        assert_eq!(double_to_string(5.6), "5.6");
-        // Non-finite values use their spelled-out forms.
+        // Each expected string is the exact `java.lang.Double.toString` output.
+        let cases: &[(f64, &str)] = &[
+            // Plain decimal, integral -> trailing ".0".
+            (5.0, "5.0"),
+            (-60.0, "-60.0"),
+            (1000.0, "1000.0"),
+            // Plain decimal, non-integral.
+            (2.5, "2.5"),
+            (5.6, "5.6"),
+            // Zeros, sign preserved.
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            // Upper threshold (1e7): just below is plain, at/above is scientific.
+            (9_999_999.0, "9999999.0"),
+            (1e7, "1.0E7"),
+            // The two concrete reproductions from Issue 3.
+            (10_485_760.0, "1.048576E7"),
+            (-2.5e10, "-2.5E10"),
+            // Lower threshold (1e-3): at is plain, below is scientific.
+            (0.001, "0.001"),
+            (0.0001, "1.0E-4"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(&double_to_string(*input), expected, "double_to_string({input})");
+        }
+
         assert_eq!(double_to_string(f64::INFINITY), "Infinity");
         assert_eq!(double_to_string(f64::NEG_INFINITY), "-Infinity");
         assert_eq!(double_to_string(f64::NAN), "NaN");
