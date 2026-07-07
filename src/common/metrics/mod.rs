@@ -14,17 +14,35 @@
 
 //! Metrics framework (org.apache.kafka.common.metrics).
 
+pub mod compound_stat;
+pub mod gauge;
 pub(crate) mod internals;
+pub mod kafka_metric;
 pub mod kafka_metrics_context;
+pub mod measurable;
+pub mod measurable_stat;
 pub mod metric_config;
+pub mod metric_value_provider;
 pub mod metrics_context;
+pub mod metrics_reporter;
 pub mod quota;
+pub mod quota_violation_error;
 pub mod sensor;
+pub mod stat;
 pub mod time_unit;
 
+pub use compound_stat::{CompoundStat, NamedMeasurable};
+pub use gauge::Gauge;
+pub use kafka_metric::KafkaMetric;
 pub use kafka_metrics_context::KafkaMetricsContext;
+pub use measurable::Measurable;
+pub use measurable_stat::MeasurableStat;
 pub use metric_config::MetricConfig;
+pub use metric_value_provider::{MetricValue, MetricValueProvider};
 pub use metrics_context::MetricsContext;
+pub use metrics_reporter::MetricsReporter;
 pub use quota::Quota;
+pub use quota_violation_error::QuotaViolationError;
 pub use sensor::RecordingLevel;
+pub use stat::Stat;
 pub use time_unit::TimeUnit;
