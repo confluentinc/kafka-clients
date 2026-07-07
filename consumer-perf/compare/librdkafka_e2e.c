@@ -349,6 +349,18 @@ static void rebalance_cb(rd_kafka_t *rk, rd_kafka_resp_err_t err,
     }
 }
 
+/* --------------------------- stats cb --------------------------------- */
+/* librdkafka only computes/serializes statistics when BOTH statistics.interval.ms>0
+ * AND a stats callback is registered. This minimal cb just counts invocations and
+ * returns 0 (librdkafka frees the JSON); the measured cost is librdkafka generating
+ * + serializing the stats JSON every interval — the analog of Rust/Java metrics. */
+static volatile long g_stats_cb_count = 0;
+static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
+    (void)rk; (void)json; (void)json_len; (void)opaque;
+    g_stats_cb_count++;
+    return 0; /* 0 => librdkafka frees json */
+}
+
 static int current_assignment_count(rd_kafka_t *rk) {
     rd_kafka_topic_partition_list_t *parts = NULL;
     if (rd_kafka_assignment(rk, &parts) != RD_KAFKA_RESP_ERR_NO_ERROR)
@@ -407,6 +419,7 @@ static rd_kafka_t *build_consumer(const args_t *a, char *errstr,
 #undef SET
 
     rd_kafka_conf_set_rebalance_cb(conf, rebalance_cb);
+    rd_kafka_conf_set_stats_cb(conf, stats_cb);
 
     rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_CONSUMER, conf, errstr, errstr_size);
     /* On success rd_kafka_new takes ownership of conf. */
