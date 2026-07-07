@@ -111,3 +111,12 @@ Auto compact when reaching 60% of the maximum context and continue the running t
 ## Permissions
 Read from `.claude/settings.local.json` the auto approved commands and always use those
 unless it's not possible.
+
+## Semaphore CI/CD
+
+See [.semaphore/MCP.md](.semaphore/MCP.md) for Semaphore tool usage.
+
+Key rules:
+- Cache org/project IDs in `.semaphore/config.json`
+- Download test results once (URLs expire)
+- Use `mode="summary"` to reduce API calls
