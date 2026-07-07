@@ -19,6 +19,14 @@
 use crate::common::metrics::MetricConfig;
 use crate::common::metrics::stats::sampled_stat::{SampledStat, SampledStatBase, impl_sampled_stat_traits};
 
+/// Returns the lesser of two values, propagating `NaN` if either is `NaN`.
+///
+/// `f64::min` instead returns the non-`NaN` operand, which would silently drop
+/// a recorded `NaN`.
+fn nan_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) }
+}
+
 /// A [`SampledStat`] that reports the minimum over its samples.
 #[derive(Debug)]
 pub struct Min {
@@ -49,14 +57,14 @@ impl SampledStat for Min {
 
     fn update(&mut self, sample_index: usize, _config: &MetricConfig, value: f64, _time_ms: i64) {
         let sample = &mut self.base.samples_mut()[sample_index];
-        sample.value = sample.value.min(value);
+        sample.value = nan_min(sample.value, value);
     }
 
     fn combine(&self, _config: &MetricConfig, _now: i64) -> f64 {
         let mut min = f64::MAX;
         let mut count: i64 = 0;
         for sample in self.base.samples() {
-            min = min.min(sample.value);
+            min = nan_min(min, sample.value);
             count += sample.event_count;
         }
         if count == 0 { f64::NAN } else { min }
@@ -79,5 +87,17 @@ mod tests {
         min.record(&config, 2.0, 0);
         min.record(&config, 5.0, 0);
         assert_eq!(min.measure(&config, 0), 2.0);
+    }
+
+    #[test]
+    fn test_nan_propagates() {
+        let config = MetricConfig::new();
+        let mut min = Min::new();
+        min.record(&config, f64::NAN, 0);
+        assert!(min.measure(&config, 0).is_nan());
+        // NaN propagates through Math.min, so a later finite value does not
+        // clear the poisoned sample.
+        min.record(&config, 5.0, 0);
+        assert!(min.measure(&config, 0).is_nan());
     }
 }

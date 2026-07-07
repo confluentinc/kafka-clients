@@ -19,6 +19,14 @@
 use crate::common::metrics::MetricConfig;
 use crate::common::metrics::stats::sampled_stat::{SampledStat, SampledStatBase, impl_sampled_stat_traits};
 
+/// Returns the greater of two values, propagating `NaN` if either is `NaN`.
+///
+/// `f64::max` instead returns the non-`NaN` operand, which would silently drop
+/// a recorded `NaN`.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
+}
+
 /// A [`SampledStat`] that reports the maximum over its samples.
 #[derive(Debug)]
 pub struct Max {
@@ -49,14 +57,14 @@ impl SampledStat for Max {
 
     fn update(&mut self, sample_index: usize, _config: &MetricConfig, value: f64, _time_ms: i64) {
         let sample = &mut self.base.samples_mut()[sample_index];
-        sample.value = sample.value.max(value);
+        sample.value = nan_max(sample.value, value);
     }
 
     fn combine(&self, _config: &MetricConfig, _now: i64) -> f64 {
         let mut max = f64::NEG_INFINITY;
         let mut count: i64 = 0;
         for sample in self.base.samples() {
-            max = max.max(sample.value);
+            max = nan_max(max, sample.value);
             count += sample.event_count;
         }
         if count == 0 { f64::NAN } else { max }
@@ -79,5 +87,17 @@ mod tests {
         max.record(&config, 9.0, 0);
         max.record(&config, 5.0, 0);
         assert_eq!(max.measure(&config, 0), 9.0);
+    }
+
+    #[test]
+    fn test_nan_propagates() {
+        let config = MetricConfig::new();
+        let mut max = Max::new();
+        max.record(&config, f64::NAN, 0);
+        assert!(max.measure(&config, 0).is_nan());
+        // NaN propagates through Math.max, so a later finite value does not
+        // clear the poisoned sample.
+        max.record(&config, 5.0, 0);
+        assert!(max.measure(&config, 0).is_nan());
     }
 }
