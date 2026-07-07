@@ -224,7 +224,11 @@ impl Measurable for FrequencyMeasurable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metric::Metric;
+    use crate::common::metrics::Metrics;
     use crate::common::metrics::stats::MockTime;
+    use crate::common::metrics::test_support::{FakeMetricsReporter, MockClock};
+    use crate::common::metrics::{MetricValue, MetricsReporter};
 
     const DELTA: f64 = 0.0001;
 
@@ -308,5 +312,99 @@ mod tests {
         }
         assert!((false_metric.lock().unwrap().measure(&config, time.milliseconds()) - 0.40).abs() < DELTA);
         assert!((true_metric.lock().unwrap().measure(&config, time.milliseconds()) - 0.60).abs() < DELTA);
+    }
+
+    fn strategy_metrics(clock: &MockClock) -> Metrics {
+        Metrics::new_with_expiration(
+            config(),
+            vec![Arc::new(FakeMetricsReporter) as Arc<dyn MetricsReporter>],
+            clock.time_source(),
+            true,
+        )
+    }
+
+    fn metric_value(metrics: &Metrics, name: &str) -> f64 {
+        match metrics.metric(&metric_name(name)).expect("metric is registered").metric_value() {
+            MetricValue::Double(d) => d,
+            other => panic!("expected a double metric value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_with_metrics_strategy1() {
+        let clock = MockClock::new();
+        let metrics = strategy_metrics(&clock);
+        let frequencies = Frequencies::new(
+            4,
+            1.0,
+            4.0,
+            vec![freq("1", 1.0), freq("2", 2.0), freq("3", 3.0), freq("4", 4.0)],
+        )
+        .unwrap();
+        let sensor = metrics.sensor_with_config("test", config()).unwrap();
+        sensor.add_compound(frequencies).unwrap();
+
+        // Record 100 events uniformly across the buckets. The compound stat was
+        // moved into the sensor, so recording flows through the sensor's only
+        // registered stat.
+        for i in 0..100 {
+            sensor.record((i % 4 + 1) as f64).unwrap();
+        }
+        assert!((metric_value(&metrics, "1") - 0.25).abs() < DELTA);
+        assert!((metric_value(&metrics, "2") - 0.25).abs() < DELTA);
+        assert!((metric_value(&metrics, "3") - 0.25).abs() < DELTA);
+        assert!((metric_value(&metrics, "4") - 0.25).abs() < DELTA);
+    }
+
+    #[test]
+    fn test_with_metrics_strategy2() {
+        let clock = MockClock::new();
+        let metrics = strategy_metrics(&clock);
+        let frequencies = Frequencies::new(
+            4,
+            1.0,
+            4.0,
+            vec![freq("1", 1.0), freq("2", 2.0), freq("3", 3.0), freq("4", 4.0)],
+        )
+        .unwrap();
+        let sensor = metrics.sensor_with_config("test", config()).unwrap();
+        sensor.add_compound(frequencies).unwrap();
+
+        // Record 100 events split evenly between the first two buckets.
+        for i in 0..100 {
+            sensor.record((i % 2 + 1) as f64).unwrap();
+        }
+        assert!((metric_value(&metrics, "1") - 0.50).abs() < DELTA);
+        assert!((metric_value(&metrics, "2") - 0.50).abs() < DELTA);
+        assert!((metric_value(&metrics, "3") - 0.00).abs() < DELTA);
+        assert!((metric_value(&metrics, "4") - 0.00).abs() < DELTA);
+    }
+
+    #[test]
+    fn test_with_metrics_strategy3() {
+        let clock = MockClock::new();
+        let metrics = strategy_metrics(&clock);
+        let frequencies = Frequencies::new(
+            4,
+            1.0,
+            4.0,
+            vec![freq("1", 1.0), freq("2", 2.0), freq("3", 3.0), freq("4", 4.0)],
+        )
+        .unwrap();
+        let sensor = metrics.sensor_with_config("test", config()).unwrap();
+        sensor.add_compound(frequencies).unwrap();
+
+        // Record 50 events split between the first two buckets, then 50 in the
+        // fourth bucket.
+        for i in 0..50 {
+            sensor.record((i % 2 + 1) as f64).unwrap();
+        }
+        for _ in 0..50 {
+            sensor.record(4.0).unwrap();
+        }
+        assert!((metric_value(&metrics, "1") - 0.25).abs() < DELTA);
+        assert!((metric_value(&metrics, "2") - 0.25).abs() < DELTA);
+        assert!((metric_value(&metrics, "3") - 0.00).abs() < DELTA);
+        assert!((metric_value(&metrics, "4") - 0.50).abs() < DELTA);
     }
 }

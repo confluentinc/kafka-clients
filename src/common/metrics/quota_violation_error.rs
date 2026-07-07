@@ -17,6 +17,7 @@
 //! Translated from `org.apache.kafka.common.metrics.QuotaViolationException`.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::common::metric::Metric;
 use crate::common::metrics::KafkaMetric;
@@ -24,9 +25,14 @@ use crate::common::utils::double_to_string;
 
 /// Raised when a sensor records a value that causes a metric to exceed the
 /// bounds configured as its quota.
+///
+/// The offending metric is held behind an `Arc` shared with the registry
+/// rather than owned by value: the same [`KafkaMetric`] instance is already
+/// reachable through the sensor and the metrics map, and returning (or cloning)
+/// this error must not deep-copy its value provider, configuration, and clock.
 #[derive(Clone, Debug)]
 pub struct QuotaViolationError {
-    metric: KafkaMetric,
+    metric: Arc<KafkaMetric>,
     value: f64,
     bound: f64,
 }
@@ -34,7 +40,7 @@ pub struct QuotaViolationError {
 impl QuotaViolationError {
     /// Creates a quota-violation error for the given metric, observed value,
     /// and violated bound.
-    pub fn new(metric: KafkaMetric, value: f64, bound: f64) -> Self {
+    pub fn new(metric: Arc<KafkaMetric>, value: f64, bound: f64) -> Self {
         Self { metric, value, bound }
     }
 
@@ -86,12 +92,12 @@ mod tests {
 
     #[test]
     fn test_fields_and_display() {
-        let metric = KafkaMetric::new(
+        let metric = Arc::new(KafkaMetric::new(
             MetricName::new("m", "g", "d", indexmap::IndexMap::new()),
             MetricValueProvider::from_gauge(ConstGauge(MetricValue::Double(1.0))),
             MetricConfig::new(),
             Arc::new(|| 0),
-        );
+        ));
         let err = QuotaViolationError::new(metric, 5.6, 5.0);
         assert_eq!(err.value(), 5.6);
         assert_eq!(err.bound(), 5.0);
