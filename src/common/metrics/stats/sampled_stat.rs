@@ -17,13 +17,14 @@
 //! Translated from `org.apache.kafka.common.metrics.stats.SampledStat`.
 
 use crate::common::metrics::metric_config::DEFAULT_NUM_SAMPLES;
+use crate::common::metrics::stats::histogram::Histogram;
 use crate::common::metrics::{MeasurableStat, MetricConfig, TimeUnit};
 
 /// A single sample within a [`SampledStat`].
 ///
 /// Fields are public because the concrete statistics update them directly, as
 /// the Java subclasses do.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Sample {
     /// The value a reset returns this sample to.
     pub initial_value: f64,
@@ -37,6 +38,8 @@ pub struct Sample {
     pub value: f64,
     /// An explicit per-sample window; `-1` means the config window applies.
     pub time_window_ms: i64,
+    /// An optional histogram, used by the percentile and frequency statistics.
+    pub histogram: Option<Histogram>,
 }
 
 impl Sample {
@@ -49,6 +52,7 @@ impl Sample {
             last_event_ms: now,
             value: initial_value,
             time_window_ms: -1,
+            histogram: None,
         }
     }
 
@@ -61,6 +65,7 @@ impl Sample {
             last_event_ms: now,
             value: initial_value,
             time_window_ms,
+            histogram: None,
         }
     }
 
@@ -70,6 +75,9 @@ impl Sample {
         self.start_time_ms = now;
         self.last_event_ms = now;
         self.value = self.initial_value;
+        if let Some(histogram) = &mut self.histogram {
+            histogram.clear();
+        }
     }
 
     /// Whether this sample's window is complete at `time_ms`.
@@ -85,7 +93,7 @@ impl Sample {
 
 /// The shared state of a [`SampledStat`]: the ring of samples plus the window
 /// configuration.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SampledStatBase {
     initial_value: f64,
     current: usize,
