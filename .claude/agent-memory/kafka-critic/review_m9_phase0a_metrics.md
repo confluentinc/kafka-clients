@@ -1,6 +1,6 @@
 ---
 name: review-m9-phase0a-metrics
-description: M9 Phase 0a common.metrics review — reusable float-formatting and NaN-semantics translation bug classes, plus deviation-verification heuristics
+description: M9 Phase 0a+0b common.metrics review — float-formatting/NaN bug classes, reporter fault-isolation, collection-toString parity, plus deviation-verification heuristics
 metadata:
   type: project
 ---
@@ -22,12 +22,11 @@ diff for `write!`/`format!` with an `f64`/`f32` arg in Display/error paths; watc
 translated tests that *encode the divergent output* with exact-equality (Phase 0a's
 `quota.rs:99` asserted `"upper=5"`, matching Rust not Java). Faithful parity needs a
 Java-`Double.toString`-style helper.
-**Fix landed (2867ad6):** `common::utils::double_to_string` — integral→trailing `.0`,
-`Infinity`/`-Infinity`/`NaN` spelled out. **KNOWN RESIDUAL (my Issue 3, low, non-blocking):**
-it does NOT do Java's scientific notation for `|x|>=1e7` or non-integral `|x|<1e-3`.
-Reachable via `Quota::upper_bound(1e7)`→`"upper=10000000.0"` (Java `"1.0E7"`) and, in
-**Phase 0b**, `QuotaViolationError` with a ≥10 MB/s byte-rate quota bound. Re-check this
-when Phase 0b makes `QuotaViolationError` live/asserted.
+**Fix landed & RESOLVED:** `common::utils::double_to_string` (2867ad6 = integral `.0`;
+35ce114 = full scientific notation). Verified Java-`Double.toString`-faithful: decimal in
+`[1e-3,1e7)`, else `<mantissa>E<exp>` (mantissa carries `.0`, exp upper-case no `+`);
+`1e7`→`"1.0E7"`, `10485760.0`→`"1.048576E7"`, `0.0001`→`"1.0E-4"`. Issue 3 (my earlier
+"known residual") is closed. Any NEW `f64`-in-message site should route through this helper.
 
 **2. `f64::max`/`f64::min` drop NaN; Java `Math.max`/`Math.min` propagate it.**
 Rust's IEEE minNum/maxNum returns the non-NaN operand; Java returns NaN. So a NaN
@@ -51,3 +50,43 @@ flag it (low severity unless NaN inputs are plausible). Same caveat for any floa
 **Not worth reporting (avoided as FP):** FQCN prefixes in messages (no Rust reflection);
 `getClass()` suffixes dropped from error text; test-skips that are unrepresentable in
 Rust's type system (null-provider, `unmodifiableMap().clear()` — Rust returns `&Map`).
+
+---
+
+**Phase 0b (Metrics registry + Sensor) — verdict READY, 3 LOW findings.** New reusable
+bug classes worth checking in future translations:
+
+**3. Reporter/listener fault isolation.** Java often wraps each callback in a per-element
+loop in `try/catch(Exception){ log; continue; }` (e.g. `Metrics.registerMetric`/`removeMetric`/
+`close` calling `metricChange`/`metricRemoval`/`close`). If the Rust trait method returns
+`()` (as `MetricsReporter` does), a faulting impl can only PANIC, which propagates and
+aborts the op + skips remaining reporters — losing Java's isolation. Flag it (LOW) when the
+plugin surface is public. Filed as Issue 4; fix deferred to Phase 5 reporter-surface work
+(fallible callbacks or `catch_unwind`). Pattern generalizes to any listener/interceptor loop.
+
+**4. `{:?}` on a Rust collection in an error message ≠ Java `toString`.** `format!("{:?}",
+hashset)` → `{"a", "b"}` (braces+quotes) vs Java `Set.toString()` → `[a, b]`. Diverges in
+any translated message that interpolates a collection (Issue 5, `metric_instance` tag-mismatch).
+LOW when unasserted + set is unordered anyway, but it's a real message-contract divergence.
+
+**5. `assertThrows(SpecificException.class,…)` → bare `.is_err()`** loses the failure-kind
+check when the Rust method returns the broad `KafkaError` (many variants). Prefer
+`matches!(err, KafkaError::IllegalArgument(_))` or `err.message().contains(...)`. LOW when
+only one Err path is reachable in-context (Issue 6, 6 sites). Per DoD "not just is_err()".
+
+**Phase 0b heuristics that paid off / non-issues confirmed:**
+- Java `synchronized(this)` + inner `synchronized(metricLock)` → Rust single state `Mutex`
+  + per-stat `Arc<Mutex>`. Deadlock-free iff readers lock ONLY the stat (never state) and
+  record locks state→stat (never the reverse). The `LockingReporter` concurrency test pins it.
+- Java collection-view getter (`Metrics.metrics()` returns the live `ConcurrentMap`) → Rust
+  snapshot `HashMap`: acceptable adaptation, behaviorally equal for get/size at a point in time.
+- Lambda overload binding: `(config,now)->int` binds to `Measurable` (widened `double`), NOT
+  the empty marker `MetricValueProvider` and NOT `Gauge` (no such `addMetric` overload). Verify
+  by checking which overloads exist + which interface is a functional interface.
+- `toHtmlTable` skip is fine: JMX-dependent (`JmxReporter.getMBeanName`) + only doc-gen `main()`
+  callers, never in tests/KIP-714 closure.
+- Stress-test iteration cut (10000→1000) is fine when the worker threads spin continuously
+  (wall-clock-bounded, not iteration-bounded) — deadlock/race still surfaces; only churn drops.
+- `MockClock` vs Java `MockTime`: SensorTest/TokenBucketTest construct MockTime with
+  `autoTickMs=0` (manual advance), so Rust manual-advance matches; start-time (0 vs
+  currentTimeMillis) is benign when tests use time DIFFERENCES or explicit timestamps.
