@@ -22,9 +22,6 @@ use crate::common::KafkaError;
 use crate::common::metrics::TimeUnit;
 
 /// Converts the provided time from milliseconds into the requested unit.
-// Used by the rate statistics (`Rate`, `TokenBucket`), which land in a later
-// unit of this phase.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn convert(time_ms: i64, unit: TimeUnit) -> f64 {
     let time_ms = time_ms as f64;
     match unit {
