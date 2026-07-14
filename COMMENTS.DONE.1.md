@@ -442,3 +442,24 @@ Both blocking findings from the Phase 6 review are fixed (fixups `225dd26`,
 
 Verify: `cargo build`, `cargo test --lib` (2250 pass / 1 ignore / 0 fail),
 `cargo xtask format`, `cargo xtask lint` — all green.
+
+---
+
+# Critic 1 — Phase 6 fixup RE-REVIEW regression — RESOLVED
+
+## RESOLVED: `collect()` in-place restructuring clobbered `acquisition_lock_timeout_ms` on an empty collect
+- **Fixup**: `daf4c47` (fixup! `373f307` — the ShareConsumerImpl impl commit; the
+  regression was introduced by the in-place `collect` restructuring in `225dd26`).
+- **Resolution**: `collect`'s first (non-renewal) branch now assigns
+  `self.current_fetch = fetch` ONLY when the freshly collected fetch is non-empty,
+  matching Java's `poll` guard (`ShareConsumerImpl.java:628-629`). An empty collect
+  leaves `current_fetch` untouched, so it retains the `acquisition_lock_timeout_ms`
+  from the last non-empty fetch (which survives `take_records` /
+  `take_acknowledged_records`). Renewal-state handling is unchanged (branch gated on
+  `!has_renewals()`). Added
+  `test_acquisition_lock_timeout_retained_across_empty_poll`: poll returns records
+  (asserts `Some(30_000)`), then an empty poll still returns `Some(30_000)` (would be
+  `None` under the regressed code).
+
+Verify: `cargo build`, `cargo test --lib` (2251 pass / 1 ignore / 0 fail),
+`cargo xtask format`, `cargo xtask lint` — all green.
