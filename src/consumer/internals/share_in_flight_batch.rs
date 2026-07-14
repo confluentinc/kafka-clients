@@ -169,6 +169,20 @@ impl<K, V> ShareInFlightBatch<K, V> {
         self.in_flight_records.values().collect()
     }
 
+    /// Drains the in-flight records out of the batch, transferring ownership
+    /// to the caller in offset order.
+    ///
+    /// There is no direct Java analog. Java's `ShareFetch.records()` reads the
+    /// in-flight records non-destructively (Java `ConsumerRecord`s are shared
+    /// reference types). Because `ConsumerRecord` is not `Clone` in Rust
+    /// (receive-path zero-copy contract, §27), delivering owned records to the
+    /// user requires moving them out. Used by [`ShareFetch::take_records`].
+    ///
+    /// [`ShareFetch::take_records`]: super::share_fetch::ShareFetch::take_records
+    pub(crate) fn take_in_flight_records(&mut self) -> Vec<ConsumerRecord<K, V>> {
+        std::mem::take(&mut self.in_flight_records).into_values().collect()
+    }
+
     /// Number of in-flight records. Mirrors Java's package-private `numRecords()`.
     pub(crate) fn num_records(&self) -> usize {
         self.in_flight_records.len()

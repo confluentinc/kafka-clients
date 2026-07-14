@@ -75,3 +75,5 @@
 - [Phase 39 Critic round-1](phase39_critic_round1_patterns.md) — conditional maybeWrapAsKafkaException at process_background_events, de-flake by removing records, Issue-3 → PLAN.md
 - [Phase 40 integration public-API](phase40_integration_public_api_notes.md) — PlaintextConsumerTest surface, interceptor-injection gap, offsets_for_times non-nullable deviation
 - [Milestone 9 Phase 1 share wire](milestone9_phase1_share_wire.md) — KIP-932 wire+session: stale generator specs vs kafka/ 4.2, blocker classes reused later, dead_code precedent, null-struct=0xFF
+- [Milestone 9 Phase 2 ack core](milestone9_phase2_ack_core.md) — KIP-932 ack callback trait (async_trait), catch_unwind handler, ShareInFlightBatch move semantics (ConsumerRecord not Clone)
+- [Milestone 9 Phase 3 share fetch path](milestone9_phase3_share_fetch_path.md) — ShareFetch/ShareCompletedFetch/ShareFetchBuffer/ShareFetchCollector; acquired-record interleave, eager-consume+re-parse cursor, ShareFetchException carrier, ConsumerMetadata deviation
