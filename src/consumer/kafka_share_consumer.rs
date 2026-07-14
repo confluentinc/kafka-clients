@@ -207,21 +207,27 @@ mod tests {
         }
     }
 
-    /// `new_share_consumer` (and therefore `KafkaShareConsumer::new`) returns
-    /// `unsupported_version` until the Phase-7 production pipeline is wired.
-    #[test]
-    fn factory_returns_unsupported_until_production_pipeline() {
+    /// `KafkaShareConsumer::new` builds a working production pipeline (Phase 7).
+    /// It no longer returns `unsupported_version`; the consumer constructs,
+    /// spawns its bg task, and closes cleanly (subscribe/join/fetch/ack
+    /// round-trips are covered by the mod-level smoke test + integration tests).
+    #[tokio::test]
+    async fn factory_builds_working_consumer() {
         use std::collections::HashMap as StdHashMap;
 
         let mut props = StdHashMap::new();
         props.insert("group.id".to_string(), "g".to_string());
-        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        // Unreachable bootstrap — construction + close do not require a broker.
+        props.insert("bootstrap.servers".to_string(), "localhost:59998".to_string());
+        props.insert("request.timeout.ms".to_string(), "1000".to_string());
+        props.insert("default.api.timeout.ms".to_string(), "1000".to_string());
         let config = crate::consumer::ShareConsumerConfig::from_properties(&props).unwrap();
-        let result: Result<KafkaShareConsumer<String, String>, KafkaError> =
-            KafkaShareConsumer::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
-        match result {
-            Ok(_) => panic!("expected unsupported_version until Phase-7 production pipeline"),
-            Err(e) => assert!(e.to_string().contains("not yet wired"), "got: {e}"),
-        }
+        let mut consumer: KafkaShareConsumer<String, String> =
+            KafkaShareConsumer::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
+                .expect("KafkaShareConsumer::new must build a working pipeline");
+        tokio::time::timeout(Duration::from_secs(10), consumer.close())
+            .await
+            .expect("close within 10s")
+            .expect("close ok");
     }
 }
