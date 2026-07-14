@@ -54,6 +54,7 @@ pub(crate) mod request_managers;
 pub(crate) mod request_state;
 pub(crate) mod share_acquire_mode;
 pub(crate) mod share_fetch_config;
+pub(crate) mod share_session_handler;
 pub(crate) mod subscription_state;
 pub(crate) mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
