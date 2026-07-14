@@ -112,5 +112,5 @@ Where each rule file lives:
 |---|---|---|
 | Shared | `bindings/CLAUDE.md` | Cross-binding mental model + conventions (§1–2) |
 | Language rulebook | `bindings/<lang>/CLAUDE.md` | The language's concrete realization: bridge/FFI mechanism, naming, async/error/resource mappings |
-| Language deep-dives | `bindings/<lang>/.claude/rules/*.md` | Heavy sub-topics referenced by the rulebook (e.g. FFI marshalling & ownership) |
+| Language deep-dives | `bindings/<lang>/.claude/rules/*.md` | Heavy sub-topics referenced by the rulebook (e.g. FFI marshalling & ownership) + any process rules the binding needs |
 | Language agents | `bindings/<lang>/.claude/agents/*.md` | The binding's own Actor/Critic — self-contained personas |
