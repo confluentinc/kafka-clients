@@ -222,6 +222,16 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// `RequestManager`; the Rust `entries()` skips it (the same Arc is
     /// shared with the heartbeat manager) so we call `reconcile` here.
     membership: Option<Arc<ConsumerMembershipManager>>,
+    /// Share-group membership manager (KIP-932). Driven exactly like
+    /// [`Self::membership`] but for the share protocol: because
+    /// `share_membership` is Arc-shared with the `ShareHeartbeatRequestManager`
+    /// and skipped from `RequestManagers::entries()`, the bg loop drives its
+    /// `reconcile` (and its pending fenced/fatal/stale transitions) explicitly
+    /// in Phase 2.4/2.5. Mutually exclusive with [`Self::membership`] — a given
+    /// consumer instance is either a KIP-848 consumer or a KIP-932 share
+    /// consumer, never both. Set via [`Self::set_share_membership`] by the
+    /// production share ctor.
+    share_membership: Option<Arc<super::share_membership_manager::ShareMembershipManager>>,
     /// Erased handles for notifiable+completable events that may still
     /// be in flight. Populated during `process_application_events`,
     /// pruned by `is_done()` checks at the post-poll arm. Mirrors the
@@ -282,6 +292,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             last_poll_time_ms: 0,
             time,
             membership,
+            share_membership: None,
             notifiable_handles: Vec::new(),
             poll_results_before_scratch: Vec::new(),
             poll_results_after_scratch: Vec::new(),
@@ -302,6 +313,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// signal to exit the bg-task loop.
     pub(crate) fn running_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.running)
+    }
+
+    /// Installs the KIP-932 share-group membership manager so the bg loop
+    /// drives its `reconcile` + pending transitions in Phase 2.4/2.5. Called by
+    /// the production share ctor (`new_share_consumer`) before spawning the
+    /// thread. Java's share `ConsumerNetworkThread` receives the
+    /// `ShareMembershipManager` through the `RequestManagers`; the Rust
+    /// container skips it from `entries()` (Arc-shared with the share
+    /// heartbeat), so it is threaded here instead — the direct analog of the
+    /// `membership` field for the KIP-848 consumer.
+    pub(crate) fn set_share_membership(
+        &mut self,
+        share_membership: Option<Arc<super::share_membership_manager::ShareMembershipManager>>,
+    ) {
+        self.share_membership = share_membership;
     }
 
     /// Java: `maximumTimeToWait()` — read-only accessor exposed to the
@@ -574,6 +600,68 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             && let Err(e) = membership.reconcile(current_time_ms, false).await
         {
             log::warn!("Membership reconcile failed: {}", e);
+        }
+
+        // ──── Phase 2.4s/2.5s: drive the SHARE membership state machine ────
+        //
+        // KIP-932 analog of Phase 2.4 + 2.5 for the share consumer. Because
+        // `share_membership` is Arc-shared with the `ShareHeartbeatRequestManager`
+        // and skipped from `RequestManagers::entries()` (like `consumer_membership`),
+        // the bg loop must drive it explicitly or the share membership state
+        // machine never advances and the consumer never joins the share group.
+        //
+        // Order mirrors Java's share `RequestManagers.entries()`
+        // (`shareHeartbeat → shareMembership → shareConsume`): the share
+        // heartbeat (polled in `entries()` above) has already classified any
+        // pending response; here we (1) propagate the member id the share
+        // membership generated into the `ShareConsumeRequestManager` — Java's
+        // `shareMembershipManager.registerStateListener(shareConsumeRequestManager)`
+        // (`RequestManagers.java:382`) — then (2) drain the heartbeat's pending
+        // fenced/fatal/stale transitions, then (3) drive `reconcile(now)`, all
+        // BEFORE the `share_consume` manager acts on the assignment in Phase 2.6.
+        if let Some(share_membership) = self.share_membership.as_ref() {
+            // (1) member-id propagation (listener analog — see method docs).
+            {
+                let mut rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard.propagate_share_member_id(share_membership);
+            }
+            // (2) pending fenced/fatal/stale transitions from the share heartbeat.
+            let pending = {
+                let mut rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard.take_pending_share_membership_transitions()
+            };
+            for transition in pending {
+                use super::share_heartbeat_request_manager::PendingMembershipTransition;
+                match transition {
+                    PendingMembershipTransition::Fenced => {
+                        if let Err(e) = share_membership.transition_to_fenced(current_time_ms).await {
+                            log::warn!("share transition_to_fenced (driven from heartbeat) failed: {}", e);
+                        }
+                    },
+                    PendingMembershipTransition::Fatal(err) => {
+                        log::error!("Driving share membership.transition_to_fatal from heartbeat: {}", err);
+                        if let Err(e) = share_membership.transition_to_fatal(current_time_ms).await {
+                            log::warn!("share transition_to_fatal (driven from heartbeat) failed: {}", e);
+                        }
+                    },
+                    PendingMembershipTransition::Stale => {
+                        if let Err(e) = share_membership.transition_to_stale(current_time_ms).await {
+                            log::warn!("share transition_to_stale (driven from heartbeat) failed: {}", e);
+                        }
+                    },
+                }
+            }
+            // (3) reconcile (share `reconcile` takes no can_commit — share
+            // groups do not commit offsets, §Phase-4).
+            if let Err(e) = share_membership.reconcile(current_time_ms).await {
+                log::warn!("Share membership reconcile failed: {}", e);
+            }
         }
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
