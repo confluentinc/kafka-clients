@@ -2245,6 +2245,7 @@ mod tests {
         ack_handler: ShareAcknowledgementEventHandler,
         clock: Arc<MockClock>,
         metadata: Arc<ShareConsumerMetadata>,
+        collector_metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         completed_acknowledgements: Vec<IndexMap<TopicIdPartition, Acknowledgements>>,
         renewed_records: HashSet<i64>,
@@ -2268,7 +2269,7 @@ mod tests {
             let metadata = Arc::new(ShareConsumerMetadata::new(
                 0,
                 1_000,
-                i64::MAX,
+                300_000,
                 false,
                 subscriptions.clone(),
                 ClusterResourceListeners::new(),
@@ -2287,7 +2288,7 @@ mod tests {
             let collector_metadata = Arc::new(ConsumerMetadata::new(
                 0,
                 1_000,
-                i64::MAX,
+                300_000,
                 false,
                 false,
                 subscriptions.clone(),
@@ -2298,7 +2299,7 @@ mod tests {
                 Box::new(ByteArrayDeserializer),
             ));
             let collector = ShareFetchCollector::new(
-                collector_metadata,
+                collector_metadata.clone(),
                 subscriptions.clone(),
                 share_fetch_config.clone(),
                 deserializers,
@@ -2327,6 +2328,7 @@ mod tests {
                 ack_handler,
                 clock,
                 metadata,
+                collector_metadata,
                 subscriptions,
                 completed_acknowledgements: Vec::new(),
                 renewed_records: HashSet::new(),
@@ -2393,6 +2395,24 @@ mod tests {
             self.metadata
                 .metadata_arc()
                 .update_with_current_request_version(&with_epoch, false, self.now());
+        }
+
+        /// Subscribe + assign without applying a metadata update (mirrors a
+        /// Java subscription change: `subscribeToShareGroup` +
+        /// `assignFromSubscribed`, followed by a separate `client.updateMetadata`).
+        fn resubscribe(&mut self, partitions: &[TopicPartition]) {
+            let mut guard = self.subscriptions.lock().unwrap();
+            let topics: HashSet<String> = partitions.iter().map(|p| p.topic().to_string()).collect();
+            guard.subscribe_to_share_group(topics).unwrap();
+            guard.assign_from_subscribed(partitions).unwrap();
+        }
+
+        /// Assign without changing subscription (mirrors `assignFromSubscribed`
+        /// alone — used when the share-group subscription already covers the
+        /// topic).
+        fn reassign(&mut self, partitions: &[TopicPartition]) {
+            let mut guard = self.subscriptions.lock().unwrap();
+            guard.assign_from_subscribed(partitions).unwrap();
         }
 
         /// Applies a metadata update with the given number of nodes and topic
@@ -2560,6 +2580,34 @@ mod tests {
 
         fn has_completed_fetches(&self) -> bool {
             self.mgr.has_completed_fetches()
+        }
+
+        /// Whether a metadata update was requested on EITHER the manager's
+        /// metadata (top-level fetch errors) or the collector's metadata
+        /// (partition-level errors are surfaced during `collect`). Java uses a
+        /// single `Metadata`; this harness holds two instances (see `build`),
+        /// so the OR is a faithful stand-in.
+        fn update_requested(&self) -> bool {
+            self.metadata.update_requested() || self.collector_metadata.update_requested()
+        }
+
+        fn time_to_next_update(&self) -> i64 {
+            let now = self.now();
+            self.metadata
+                .time_to_next_update(now)
+                .min(self.collector_metadata.time_to_next_update(now))
+        }
+
+        fn collect_fetch_err(&mut self) -> KafkaError {
+            self.collect_fetch().expect_err("expected error")
+        }
+
+        /// Mirrors Java's `assertEmptyFetch` — the latest fetch has no records
+        /// and is empty.
+        fn assert_empty_fetch(&mut self) {
+            let mut fetch = self.collect_fetch().expect("collect ok");
+            assert!(fetch.records().is_empty());
+            assert!(fetch.is_empty());
         }
 
         /// Mirrors Java's `sendFetchAndVerifyResponse` (tip0, no ack error).
@@ -3484,5 +3532,560 @@ mod tests {
         assert_eq!(2, h.completed_acknowledgements.len());
         assert_eq!(1, h.completed_acknowledgements[0].len());
         assert_eq!(1, h.completed_acknowledgements[1].len());
+    }
+
+    #[test]
+    fn test_fetch_error() {
+        let mut h = Harness::default();
+        let tp0 = h.tp(0);
+        h.assign_from_subscribed(std::slice::from_ref(&tp0));
+        h.send_fetch_and_verify(build_records(1, 3, 1), Vec::new(), Errors::NotLeaderOrFollower);
+        let recs = h.fetch_records();
+        assert!(!recs.contains_key(&tp0));
+    }
+
+    #[test]
+    fn test_unknown_topic_id_error() {
+        let mut h = Harness::default();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        let tip0 = h.tip(0);
+        h.deliver_fetch(fetch_response_with_top_level_error(&tip0, Errors::UnknownTopicId));
+        h.assert_empty_fetch();
+        assert_eq!(0, h.time_to_next_update());
+    }
+
+    #[test]
+    fn test_handle_fetch_response_error() {
+        // (error, hasTopLevelError, shouldRequestMetadataUpdate)
+        let cases = [
+            (Errors::NotLeaderOrFollower, false, true),
+            (Errors::UnknownTopicOrPartition, false, true),
+            (Errors::UnknownTopicId, true, true),
+            (Errors::InconsistentTopicId, false, true),
+            (Errors::FencedLeaderEpoch, false, true),
+            (Errors::UnknownLeaderEpoch, false, false),
+        ];
+        for (error, has_top_level, should_request_update) in cases {
+            let mut h = Harness::default();
+            h.assign_from_subscribed(&[h.tp(0)]);
+            assert_eq!(1, h.send_fetches());
+            let tip0 = h.tip(0);
+            let resp = if has_top_level {
+                fetch_response_with_top_level_error(&tip0, error)
+            } else {
+                full_fetch_response(&tip0, build_records(1, 3, 1), Vec::new(), error)
+            };
+            h.deliver_fetch(resp);
+            h.assert_empty_fetch();
+            if should_request_update {
+                assert!(h.update_requested(), "should have requested metadata update for {error:?}");
+            } else {
+                assert!(!h.update_requested(), "should not have requested metadata update for {error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fetch_disconnected() {
+        let mut h = Harness::default();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        // Disconnect: the transport surfaces `NetworkException` (Rust has no
+        // distinct `DisconnectException`).
+        h.deliver_fetch_failure(KafkaError::new(Errors::NetworkException));
+        h.assert_empty_fetch();
+    }
+
+    #[test]
+    fn test_corrupt_message_error() {
+        let mut h = Harness::default();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        let tip0 = h.tip(0);
+        h.deliver_fetch(full_fetch_response(
+            &tip0,
+            build_records(1, 1, 1),
+            acquired_records(1, 1),
+            Errors::CorruptMessage,
+        ));
+        assert!(h.has_completed_fetches());
+        // Triggers the exception on collect.
+        assert!(h.collect_fetch().is_err());
+    }
+
+    #[test]
+    fn test_unauthorized_topic() {
+        let mut h = Harness::default();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        let tip0 = h.tip(0);
+        h.deliver_fetch(full_fetch_response(
+            &tip0,
+            build_records(1, 3, 1),
+            Vec::new(),
+            Errors::TopicAuthorizationFailed,
+        ));
+        let err = h.collect_fetch_err();
+        assert_eq!(Errors::TopicAuthorizationFailed, err.error());
+    }
+
+    #[test]
+    fn test_multiple_topics_fetch() {
+        let mut h = Harness::default();
+        let tp0 = h.tp(0);
+        let t2p0 = h.t2p0();
+        let tip0 = h.tip(0);
+        let t2ip0 = h.t2ip0();
+        h.assign_from_subscribed(&[tp0.clone(), t2p0.clone()]);
+        assert_eq!(1, h.send_fetches());
+
+        let response_data = vec![
+            (
+                tip0.clone(),
+                partition_data_for_fetch(
+                    &tip0,
+                    build_records(1, 3, 1),
+                    acquired_records(1, 3),
+                    Errors::None,
+                    Errors::None,
+                ),
+            ),
+            (
+                t2ip0.clone(),
+                partition_data_for_fetch(
+                    &t2ip0,
+                    build_records(1, 3, 1),
+                    Vec::new(),
+                    Errors::TopicAuthorizationFailed,
+                    Errors::None,
+                ),
+            ),
+        ];
+        h.deliver_fetch(ShareFetchResponse::of(Errors::None, 0, response_data, &[], 0));
+        assert!(h.has_completed_fetches());
+
+        let fetch = h.collect_fetch().expect("first collect ok");
+        assert_eq!(1, fetch.records().len());
+        assert_eq!(3, fetch.records().get(&tp0).unwrap().len());
+        assert!(!fetch.records().contains_key(&t2p0));
+        drop(fetch);
+        // Second topic-partition failed authorization.
+        assert_eq!(Errors::TopicAuthorizationFailed, h.collect_fetch_err().error());
+    }
+
+    #[test]
+    fn test_multiple_topics_fetch_error() {
+        let mut h = Harness::default();
+        let tp0 = h.tp(0);
+        let t2p0 = h.t2p0();
+        let tip0 = h.tip(0);
+        let t2ip0 = h.t2ip0();
+        h.assign_from_subscribed(&[tp0.clone(), t2p0.clone()]);
+        assert_eq!(1, h.send_fetches());
+
+        let response_data = vec![
+            (
+                t2ip0.clone(),
+                partition_data_for_fetch(
+                    &t2ip0,
+                    build_records(1, 3, 1),
+                    Vec::new(),
+                    Errors::TopicAuthorizationFailed,
+                    Errors::None,
+                ),
+            ),
+            (
+                tip0.clone(),
+                partition_data_for_fetch(
+                    &tip0,
+                    build_records(1, 3, 1),
+                    acquired_records(1, 3),
+                    Errors::None,
+                    Errors::None,
+                ),
+            ),
+        ];
+        h.deliver_fetch(ShareFetchResponse::of(Errors::None, 0, response_data, &[], 0));
+        assert!(h.has_completed_fetches());
+
+        // The first call throws because the auth error is seen with no records ready.
+        assert_eq!(Errors::TopicAuthorizationFailed, h.collect_fetch_err().error());
+        // A second iteration returns the records.
+        let fetch = h.collect_fetch().expect("second collect ok");
+        assert_eq!(1, fetch.records().len());
+        assert_eq!(3, fetch.records().get(&tp0).unwrap().len());
+        assert!(!fetch.records().contains_key(&t2p0));
+    }
+
+    #[test]
+    fn test_share_fetch_invalid_response() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let t2ip0 = h.t2ip0();
+        h.resubscribe(&[h.tp(0)]);
+        h.update_metadata(1, &[(TOPIC_NAME.to_string(), 1)].into_iter().collect());
+
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+        // A response for a partition we did not request is ignored.
+        h.deliver_fetch(full_fetch_response(
+            &t2ip0,
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+        assert!(!h.has_completed_fetches());
+    }
+
+    #[test]
+    fn test_close_should_be_idempotent() {
+        let mut h = Harness::default();
+        // Java verifies closeInternal is invoked once via a Mockito spy; the
+        // Rust manager guards with an internal flag, so we assert repeated
+        // close() calls do not panic and remain a no-op after the first.
+        h.mgr.close();
+        h.mgr.close();
+        h.mgr.close();
+    }
+
+    #[test]
+    fn test_commit_async_with_subscription_change() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        let t2ip0 = h.t2ip0();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.resubscribe(&[h.t2p0()]);
+        h.update_metadata(1, &[(TOPIC_NAME_2.to_string(), 1)].into_iter().collect());
+
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+        assert!(
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .is_none()
+        );
+
+        // We should send a fetch to the newly subscribed partition.
+        assert_eq!(1, h.send_fetches());
+        h.deliver_fetch(full_fetch_response(
+            &t2ip0,
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+        assert!(h.has_completed_fetches());
+    }
+
+    #[test]
+    fn test_commit_sync_with_subscription_change() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        let t2ip0 = h.t2ip0();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.resubscribe(&[h.t2p0()]);
+        h.update_metadata(1, &[(TOPIC_NAME_2.to_string(), 1)].into_iter().collect());
+
+        let _f = h.mgr.commit_sync(single_node_acks(&tip0, 0, acks), h.deadline(100));
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+        assert!(
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .is_none()
+        );
+
+        assert_eq!(1, h.send_fetches());
+        h.deliver_fetch(full_fetch_response(
+            &t2ip0,
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+        assert!(h.has_completed_fetches());
+    }
+
+    #[test]
+    fn test_close_with_subscription_change() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.resubscribe(&[h.t2p0()]);
+        h.update_metadata(1, &[(TOPIC_NAME_2.to_string(), 1)].into_iter().collect());
+
+        h.mgr.acknowledge_on_close(single_node_acks(&tip0, 0, acks), h.deadline(100));
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+        assert!(
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .is_none()
+        );
+
+        // As we are closing, we would not send any more fetches.
+        assert_eq!(0, h.send_fetches());
+    }
+
+    #[test]
+    fn test_share_fetch_with_subscription_change() {
+        let mut h = Harness::default();
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Release,
+                AcknowledgeType::Accept,
+            ],
+        );
+        // Send acknowledgements via ShareFetch (piggyback).
+        h.mgr.fetch(single_node_acks(&tip0, 0, acks));
+        h.fetch_records();
+
+        h.resubscribe(&[h.t2p0()]);
+        h.update_metadata(1, &[(TOPIC_NAME_2.to_string(), 1)].into_iter().collect());
+
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+        // metrics (acknowledgementSendTotal) deferred to KIP-714.
+    }
+
+    #[test]
+    fn test_server_disconnected_on_share_acknowledge() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+        h.fetch_records();
+
+        let acks = get_acknowledgements(1, &[AcknowledgeType::Accept, AcknowledgeType::Accept]);
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        assert_eq!(1, h.send_acknowledgements());
+
+        let mut acks2 = Acknowledgements::empty();
+        acks2.add(3, AcknowledgeType::Reject);
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks2), h.deadline(DEFAULT_API_TIMEOUT_MS));
+
+        // Disconnect on the in-flight acknowledge (Rust: NetworkException).
+        h.deliver_ack_failure(KafkaError::new(Errors::NetworkException));
+        assert_eq!(
+            Errors::NetworkException,
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .unwrap()
+                .error()
+        );
+        h.completed_acknowledgements.clear();
+
+        assert_eq!(
+            1,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+
+        // Wait for backoff before sending the next request.
+        h.clock.sleep(RETRY_BACKOFF_MS);
+        assert_eq!(0, h.send_acknowledgements());
+        // Remaining acknowledgements cleared as the share session epoch was reset to 0.
+        assert!(h.mgr.request_states(0).is_none());
+        assert_eq!(
+            Errors::ShareSessionNotFound,
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .unwrap()
+                .error()
+        );
+
+        // A normal fetch shows nodesWithPendingRequests is empty.
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+        h.deliver_fetch(full_fetch_response(
+            &tip0,
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+        assert!(h.has_completed_fetches());
+    }
+
+    #[test]
+    fn test_share_acknowledge_invalid_response() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        let t2ip0 = h.t2ip0();
+        h.resubscribe(&[h.tp(0)]);
+        h.update_metadata(1, &[(TOPIC_NAME.to_string(), 1)].into_iter().collect());
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+        h.fetch_records();
+
+        let mut acks = Acknowledgements::empty();
+        acks.add(1, AcknowledgeType::Accept);
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        assert_eq!(1, h.send_acknowledgements());
+
+        // A top-level error retries the acknowledgements regardless of the
+        // topic-partitions in the response.
+        let resp = ShareAcknowledgeResponse::of(
+            Errors::LeaderNotAvailable,
+            0,
+            vec![(t2ip0.clone(), ack_partition_data(&t2ip0, Errors::None))],
+            &[],
+            0,
+        );
+        h.deliver_ack(resp);
+        assert_eq!(
+            1,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_incomplete_acknowledgements_count(&tip0)
+        );
+
+        h.clock.sleep((1.5 * RETRY_BACKOFF_MS as f64) as i64);
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&t2ip0, Errors::None));
+
+        // Expected partitions missing from the response fail with InvalidRecordState.
+        assert_eq!(
+            Errors::InvalidRecordState,
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .unwrap()
+                .error()
+        );
+    }
+
+    #[test]
+    fn test_acknowledge_error_message_propagated_from_fetch_response() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+        h.fetch_records();
+
+        let mut acks = Acknowledgements::empty();
+        acks.add(1, AcknowledgeType::Accept);
+        h.mgr.fetch(single_node_acks(&tip0, 0, acks));
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+
+        let ack_error_message = "ack failure with broker context";
+        let mut pd = partition_data_for_fetch(
+            &tip0,
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+            Errors::UnknownServerError,
+        );
+        pd.acknowledge_error_message = Some(ack_error_message.to_string());
+        h.deliver_fetch(ShareFetchResponse::of(Errors::None, 0, vec![(tip0.clone(), pd)], &[], 0));
+
+        assert!(h.has_completed_fetches());
+        h.fetch_records();
+
+        assert_eq!(1, h.completed_acknowledgements.len());
+        let ack_exception = h.completed_acknowledgements[0]
+            .get(&tip0)
+            .unwrap()
+            .get_acknowledge_exception()
+            .unwrap();
+        assert_eq!(ack_error_message, ack_exception.message());
+    }
+
+    #[test]
+    fn test_piggyback_acknowledgements_in_flight() {
+        let mut h = Harness::default();
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(1, &[AcknowledgeType::Accept, AcknowledgeType::Accept]);
+        h.fetch_records();
+        h.mgr.fetch(single_node_acks(&tip0, 0, acks));
+
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+        // metrics (acknowledgementSendTotal) deferred to KIP-714.
+
+        let mut acks2 = Acknowledgements::empty();
+        acks2.add(3, AcknowledgeType::Accept);
+        h.mgr.fetch(single_node_acks(&tip0, 0, acks2));
+
+        h.deliver_fetch(full_fetch_response(
+            &tip0,
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+        assert!(h.has_completed_fetches());
+        h.fetch_records();
+
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
     }
 }
