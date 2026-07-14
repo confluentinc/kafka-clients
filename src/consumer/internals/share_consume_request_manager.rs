@@ -630,6 +630,9 @@ enum PendingShareCompletion {
         fetch_target: Node,
         request_data: ShareAcknowledgeRequestData,
         error: KafkaError,
+        /// Completion time captured when the failure resolved in the forwarder
+        /// (Java: `handler().completionTimeMs()`), NOT drain time.
+        response_completion_time_ms: i64,
     },
 }
 
@@ -771,6 +774,13 @@ impl ShareConsumeRequestManager {
     /// (Phase 6); this inherent method lets the manager be seeded directly.
     pub(crate) fn on_member_epoch_updated(&mut self, _member_epoch: Option<i32>, member_id: &str) {
         self.member_id = Uuid::from_string(member_id).ok();
+    }
+
+    /// Test accessor for the current member id — used to assert that the bg
+    /// loop's `propagate_share_member_id` (Phase 7) observably took effect.
+    #[cfg(test)]
+    pub(crate) fn member_id_for_test(&self) -> Option<Uuid> {
+        self.member_id
     }
 
     /// Corresponds to Java's `sessionHandler(int)`.
@@ -1039,6 +1049,13 @@ impl ShareConsumeRequestManager {
             };
             let tx = self.pending_completion_tx.clone();
             let notify = Arc::clone(&notify);
+            // Clone the time source so the forwarder can stamp the actual
+            // completion time on a ShareAcknowledge failure (Java uses
+            // `handler().completionTimeMs()` for BOTH success and failure; the
+            // forwarder resolves exactly when the delegate fired on_failure, so
+            // reading the clock here matches that instant — drain-time would be
+            // up to one poll iteration late).
+            let time = Arc::clone(&self.time);
             tokio::spawn(async move {
                 let completion = match meta {
                     PendingRequestMeta::Fetch { node, request_data } => match response_rx.await {
@@ -1085,16 +1102,21 @@ impl ShareConsumeRequestManager {
                                     fetch_target: node,
                                     request_data,
                                     error: KafkaError::new(Errors::UnknownServerError),
+                                    response_completion_time_ms: completion_time_ms,
                                 },
                             }
                         },
-                        Ok(Err(err)) => {
-                            PendingShareCompletion::AckFailure { fetch_target: node, request_data, error: err }
+                        Ok(Err(err)) => PendingShareCompletion::AckFailure {
+                            fetch_target: node,
+                            request_data,
+                            error: err,
+                            response_completion_time_ms: time.milliseconds(),
                         },
                         Err(_recv) => PendingShareCompletion::AckFailure {
                             fetch_target: node,
                             request_data,
                             error: KafkaError::new(Errors::NetworkException),
+                            response_completion_time_ms: time.milliseconds(),
                         },
                     },
                 };
@@ -1138,12 +1160,17 @@ impl ShareConsumeRequestManager {
                         response_completion_time_ms,
                     );
                 },
-                PendingShareCompletion::AckFailure { fetch_target, request_data, error } => {
+                PendingShareCompletion::AckFailure {
+                    fetch_target,
+                    request_data,
+                    error,
+                    response_completion_time_ms,
+                } => {
                     self.handle_share_acknowledge_failure(
                         &fetch_target,
                         &request_data,
                         &error,
-                        self.time.milliseconds(),
+                        response_completion_time_ms,
                     );
                 },
             }
