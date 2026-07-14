@@ -4486,6 +4486,26 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_default_record_batch() {
+        let mut h = Harness::default();
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        h.deliver_fetch(full_fetch_response(
+            &tip0,
+            corrupt_records(0, 1),
+            acquired_records(0, 1),
+            Errors::None,
+        ));
+
+        // The first collect throws (corrupt batch); the exception is cleared
+        // once thrown, so the second collect returns an empty fetch.
+        assert!(h.collect_fetch().is_err());
+        let mut fetch = h.collect_fetch().expect("exception cleared");
+        assert!(fetch.is_empty());
+    }
+
+    #[test]
     fn test_share_fetch_with_renew_acknowledgement() {
         let mut h = Harness::default();
         let tp0 = h.tp(0);
