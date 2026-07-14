@@ -200,7 +200,11 @@ impl<K, V> ShareFetch<K, V> {
         &mut self,
         record: &ConsumerRecord<K, V>,
         ack_type: AcknowledgeType,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), KafkaError>
+    where
+        K: Clone,
+        V: Clone,
+    {
         for (tip, batch) in &mut self.batches {
             if tip.topic() == record.topic() && tip.partition() == record.partition() {
                 return batch.acknowledge(record, ack_type);

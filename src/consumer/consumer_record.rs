@@ -60,7 +60,18 @@ pub const NULL_SIZE: i32 = -1;
 /// The cost is paid only by callers that opt in to `PartialEq` types
 /// (e.g. tests using `i32` keys); users with non-`PartialEq` `K`/`V`
 /// continue to work because the bounds are gated by the derive.
-#[derive(PartialEq, Eq)]
+///
+/// # Clone
+///
+/// `Clone` is derived (gated on `K: Clone, V: Clone`). It imposes NO cost on
+/// the zero-copy receive path (CLAUDE.md §27): a `derive` never copies on its
+/// own, and neither the producer send path nor the regular consumer poll path
+/// clones a `ConsumerRecord`. The share consumer clones a record ONLY on the
+/// rare `acknowledge(_, RENEW)` path (KIP-932 renewal), where Java re-delivers
+/// the same record object on a subsequent `poll`; Rust ownership requires a
+/// clone to reconstruct the renewed record while the original is owned by the
+/// user. See `ShareInFlightBatch::acknowledge` / `take_acknowledged_records`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConsumerRecord<K, V> {
     topic: Arc<str>,
     partition: i32,
