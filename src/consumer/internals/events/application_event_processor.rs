@@ -1273,21 +1273,44 @@ impl ApplicationEventProcessor {
         handle: super::completable_event::CompletableEventHandle<()>,
     ) {
         let deadline_ms = handle.deadline_ms();
-        let mut rm_guard = self.lock_request_managers();
-        let Some(scrm) = rm_guard.share_consume.as_mut() else {
-            handle.complete_exceptionally(KafkaError::illegal_state(
-                "Group membership manager not present when processing an acknowledge-on-close event",
-            ));
-            return;
+        let close_rx = {
+            let mut rm_guard = self.lock_request_managers();
+            let Some(scrm) = rm_guard.share_consume.as_mut() else {
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "Group membership manager not present when processing an acknowledge-on-close event",
+                ));
+                return;
+            };
+            // Dispatch the close acknowledge; the manager completes its shared
+            // close future when the response arrives. Take the paired receiver
+            // so we can bridge that completion to this event's handle (Java:
+            // `future.whenComplete(complete(event.future()))`).
+            let _close_future = scrm.acknowledge_on_close(acknowledgements_map, deadline_ms);
+            scrm.take_close_future_rx()
         };
-        // The manager owns the returned `ShareFuture` (no receiver), which it
-        // completes when the SHARE_ACKNOWLEDGE-on-close response arrives. The
-        // ShareFuture→event-handle bridge is part of the deferred production bg
-        // pipeline (Phase 7); here we dispatch the request and complete the
-        // event handle so the app-side close path proceeds.
-        let _close_future = scrm.acknowledge_on_close(acknowledgements_map, deadline_ms);
-        drop(rm_guard);
-        handle.complete(());
+        match close_rx {
+            Some(rx) => {
+                tokio::spawn(async move {
+                    match rx.await {
+                        Ok(Ok(())) => {
+                            handle.complete(());
+                        },
+                        Ok(Err(err)) => {
+                            handle.complete_exceptionally(err);
+                        },
+                        Err(_) => {
+                            handle.complete_exceptionally(KafkaError::timeout(
+                                "Share acknowledge-on-close request manager dropped the response channel",
+                            ));
+                        },
+                    }
+                });
+            },
+            None => {
+                // The receiver was already taken (only one close is expected);
+                // the reaper enforces the deadline on the event handle.
+            },
+        }
     }
 
     /// Java: `process(ShareAcknowledgementCommitCallbackRegistrationEvent)`.

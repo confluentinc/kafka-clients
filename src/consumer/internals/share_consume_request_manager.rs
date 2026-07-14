@@ -709,6 +709,19 @@ impl ShareConsumeRequestManager {
         Arc::clone(&self.close_future)
     }
 
+    /// Takes the awaitable receiver paired with the shared `close` future.
+    ///
+    /// The `close_future` (a shared [`ShareFuture`]) is completed by the
+    /// manager when the SHARE_ACKNOWLEDGE-on-close response arrives (or the
+    /// member-id is null / the manager is done). The paired
+    /// `oneshot::Receiver` created alongside it at construction lets the
+    /// `ApplicationEventProcessor` `.await` that completion and bridge it to the
+    /// `ShareAcknowledgeOnCloseEvent` handle (Java: `future.whenComplete(...)`).
+    /// Returns `None` if already taken (only one waiter is expected).
+    pub(crate) fn take_close_future_rx(&mut self) -> Option<oneshot::Receiver<Result<(), KafkaError>>> {
+        self.close_future_rx.take()
+    }
+
     /// Corresponds to Java's `partitionsToFetch()`.
     fn partitions_to_fetch(&self) -> Vec<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
