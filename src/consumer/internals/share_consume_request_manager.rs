@@ -470,7 +470,7 @@ impl AcknowledgeRequestState {
     /// session-not-found error prevents them from being sent.
     ///
     /// Corresponds to Java's `handleAcknowledgeShareSessionNotFound()`.
-    fn handle_acknowledge_share_session_not_found(&mut self) {
+    fn handle_acknowledge_share_session_not_found(&mut self, now_ms: i64) {
         let use_incomplete = !self.incomplete_acknowledgements.is_empty();
         let map = if use_incomplete {
             std::mem::take(&mut self.incomplete_acknowledgements)
@@ -481,11 +481,19 @@ impl AcknowledgeRequestState {
             acks.complete(errors_to_exception(Errors::ShareSessionNotFound));
             self.result_handler.complete(tip, Some(acks), self.request_type, true, None);
         }
-        self.processing_complete();
+        self.processing_complete(now_ms);
     }
 
     /// Corresponds to Java's `processingComplete()`.
-    fn processing_complete(&mut self) {
+    ///
+    /// `now_ms` is the manager's current clock time — it MUST be the real
+    /// current time so `maybe_reset_timer_and_request_state` sets the reused
+    /// (commitAsync) state's deadline to `now + timeout` (Java's
+    /// `timer.updateAndReset(timeoutMs)`). Passing `0` here would set the
+    /// deadline to `timeout_ms` in absolute wall-clock terms, making the reused
+    /// state instantly expired in production and failing retries with
+    /// `REQUEST_TIMED_OUT`.
+    fn processing_complete(&mut self, now_ms: i64) {
         self.process_pending_in_flight_acknowledgements(KafkaError::with_message(
             Errors::InvalidRecordState,
             INVALID_RESPONSE,
@@ -493,7 +501,7 @@ impl AcknowledgeRequestState {
         self.result_handler.complete_if_empty();
         self.is_processed = true;
         // Only reset the timer for reusable commitAsync states.
-        self.maybe_reset_timer_and_request_state(0);
+        self.maybe_reset_timer_and_request_state(now_ms);
     }
 
     /// Fail any existing in-flight acknowledgements with the given exception
@@ -1204,7 +1212,7 @@ impl ShareConsumeRequestManager {
             return (None, false);
         }
 
-        let request = Self::build_ack_request(state, node_id, ctx);
+        let request = Self::build_ack_request(state, node_id, ctx, current_time_ms);
         let Some(request) = request else {
             return (None, false);
         };
@@ -1218,6 +1226,7 @@ impl ShareConsumeRequestManager {
         state: &mut AcknowledgeRequestState,
         node_id: i32,
         ctx: &mut AckBuildCtx<'_>,
+        current_time_ms: i64,
     ) -> Option<UnsentRequest> {
         let session_handler = ctx.session_handlers.get_mut(&node_id)?;
 
@@ -1252,7 +1261,7 @@ impl ShareConsumeRequestManager {
         let node_to_send = ctx.metadata.fetch().node_by_id(node_id).cloned();
 
         let Some(request_builder) = request_builder else {
-            state.handle_acknowledge_share_session_not_found();
+            state.handle_acknowledge_share_session_not_found(current_time_ms);
             return None;
         };
 
@@ -1952,7 +1961,7 @@ impl ShareConsumeRequestManager {
                     }
                 }
                 state.on_successful_attempt(response_completion_time_ms);
-                state.processing_complete();
+                state.processing_complete(response_completion_time_ms);
             } else {
                 let handled = match session_handlers.get_mut(&node_id) {
                     Some(handler) => handler.handle_acknowledge_response(&response, request_version),
@@ -1967,7 +1976,7 @@ impl ShareConsumeRequestManager {
                         state.move_all_to_incomplete_acks();
                     } else {
                         state.process_pending_in_flight_acknowledgements(KafkaError::new(resp_error));
-                        state.processing_complete();
+                        state.processing_complete(response_completion_time_ms);
                     }
                 } else {
                     let mut should_retry = false;
@@ -2060,10 +2069,36 @@ impl ShareConsumeRequestManager {
                         continue;
                     };
                     // metrics: deferred to KIP-714 (recordFailedAcknowledgements)
+                    //
+                    // Java uses `Errors.forException(error)` here. For a
+                    // transport disconnect, Java's error is a `DisconnectException`,
+                    // which is NOT in `Errors`' exception map, so `forException`
+                    // returns `UNKNOWN_SERVER_ERROR` (a NON-retriable error) — the
+                    // acknowledge callback then observes `UnknownServerException`.
+                    //
+                    // This Rust client has no distinct `DisconnectException`: the
+                    // network layer surfaces a disconnect uniformly as
+                    // `Errors::NetworkException` (see
+                    // `NetworkClientDelegate::on_complete`), which IS retriable.
+                    // `error.error()` therefore yields `NetworkException` here, so
+                    // an ACK-path disconnect delivers a *retriable* callback
+                    // exception rather than Java's non-retriable
+                    // `UnknownServerException`.
+                    //
+                    // This divergence is acceptable: (a) the manager does not
+                    // auto-retry acknowledge failures based on the callback
+                    // exception's retriability (the acks are completed and the
+                    // request state finishes via `processing_complete`), so the
+                    // control flow is identical; the flag is informational only.
+                    // (b) It stays consistent with the FETCH-path disconnect
+                    // (Java `DisconnectException`, also retriable) which this
+                    // client likewise maps to `NetworkException`. Distinguishing a
+                    // disconnect from a genuine `NetworkException` would require a
+                    // dedicated disconnect error type the codebase does not have.
                     state.handle_acknowledge_error_code(tip, error.error(), request_data.is_renew_ack, None);
                 }
             }
-            state.processing_complete();
+            state.processing_complete(response_completion_time_ms);
         }
 
         // finally
@@ -2135,7 +2170,7 @@ impl ShareConsumeRequestManager {
             ));
         } else {
             state.on_successful_attempt(response_completion_time_ms);
-            state.processing_complete();
+            state.processing_complete(response_completion_time_ms);
         }
     }
 
@@ -2429,6 +2464,23 @@ mod tests {
                 counts,
                 &|_| Some(VALID_LEADER_EPOCH),
                 &ids,
+            );
+            self.metadata
+                .metadata_arc()
+                .update_with_current_request_version(&resp, false, self.now());
+        }
+
+        /// Applies a metadata update with no topics and no topic IDs (Java's
+        /// `metadataUpdateWithIds(1, emptyMap, tp -> epoch, null, false)`), so
+        /// the previously-known topic's leader / topic-id disappear.
+        fn update_metadata_no_topics(&self) {
+            let resp = metadata_update_with_ids(
+                "kafka-cluster",
+                1,
+                &HashMap::new(),
+                &HashMap::new(),
+                &|_| Some(VALID_LEADER_EPOCH),
+                &HashMap::new(),
             );
             self.metadata
                 .metadata_arc()
@@ -4178,6 +4230,77 @@ mod tests {
         assert!(!h.has_completed_fetches());
     }
 
+    /// Regression for the `processing_complete(0)` bug: a reused commitAsync
+    /// request-state whose timer is reset on a successful attempt must have its
+    /// deadline set to `now + timeout`, not `timeout` (absolute). At a
+    /// production-like wall-clock time, the buggy reset made the reused state
+    /// instantly expired, so the next retriable error timed the acks out with
+    /// `REQUEST_TIMED_OUT` instead of retrying. This test fails against the
+    /// `maybe_reset_timer_and_request_state(0)` version.
+    #[test]
+    fn test_reused_async_state_deadline_uses_current_time() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        // Advance to a production-like wall-clock time BEFORE any state is built.
+        h.clock.sleep(1_700_000_000_000);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 6, 1), acquired_records(1, 6), Errors::None);
+
+        // First commitAsync succeeds → the async state is RESET (deadline :=
+        // now + timeout). timeout is comfortably larger than the backoff so the
+        // subsequent retry cannot expire for the RIGHT reason.
+        let acks = get_acknowledgements(1, &[AcknowledgeType::Accept, AcknowledgeType::Accept]);
+        h.commit_async(single_node_acks(&tip0, 0, acks), h.deadline(5000));
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .is_none()
+        );
+        h.completed_acknowledgements.clear();
+
+        // Reuse the (reset) async state with a fresh commitAsync.
+        let acks2 = get_acknowledgements(3, &[AcknowledgeType::Accept, AcknowledgeType::Reject]);
+        h.commit_async(single_node_acks(&tip0, 0, acks2), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        assert_eq!(1, h.send_acknowledgements());
+
+        // A retriable error moves the acks to incomplete for retry.
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::RequestTimedOut));
+        assert_eq!(
+            2,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_incomplete_acknowledgements_count(&tip0)
+        );
+
+        // After the backoff the request MUST retry — with the buggy reset(0)
+        // the reused state's deadline is ~5000ms absolute, so maybe_expire fires
+        // at production time and the acks fail with REQUEST_TIMED_OUT.
+        h.clock.sleep(3 * RETRY_BACKOFF_MS);
+        assert_eq!(
+            1,
+            h.send_acknowledgements(),
+            "reused async state expired prematurely (deadline not now+timeout)"
+        );
+        assert_eq!(0, h.completed_acknowledgements.len(), "should retry, not time out");
+        assert_eq!(
+            2,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+    }
+
     #[test]
     fn test_retry_acknowledgements_multiple_commit_async() {
         let mut h = Harness::default();
@@ -4362,6 +4485,53 @@ mod tests {
         // Acknowledgements not added on the initial (new-session) ShareFetch.
         assert_eq!(0, data.topics[0].partitions[0].acknowledgement_batches.len());
 
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+        assert_eq!(
+            Errors::InvalidShareSessionEpoch,
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledge_exception()
+                .unwrap()
+                .error()
+        );
+    }
+
+    #[test]
+    fn test_piggyback_acknowledgements_on_initial_share_session_error_subscription_change() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+        h.fetch_records();
+
+        // Broker restart, no leader change → resets the share session epoch to 0.
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+        h.deliver_fetch(fetch_response_with_top_level_error(&tip0, Errors::ShareSessionNotFound));
+
+        // Metadata update with no topics in the response.
+        h.update_metadata_no_topics();
+
+        // Acknowledgements for the initial fetch from tip0 are stored now.
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.fetch(single_node_acks(&tip0, 0, acks));
+        assert_eq!(0, h.completed_acknowledgements.len());
+
+        // Next fetch would not include any acknowledgements.
+        let poll = h.send_fetches_return_poll_result();
+        assert_eq!(0, poll.len());
+
+        // Waiting acknowledgements for tip0 fail with INVALID_SHARE_SESSION_EPOCH
+        // (the share session epoch is 0 after the reset).
         assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
         assert_eq!(
             Errors::InvalidShareSessionEpoch,
