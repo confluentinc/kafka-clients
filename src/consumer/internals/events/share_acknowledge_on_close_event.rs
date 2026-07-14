@@ -66,4 +66,10 @@ impl ShareAcknowledgeOnCloseEvent {
     pub(crate) fn handle(&self) -> &CompletableEventHandle<()> {
         &self.handle
     }
+
+    /// Consumes the event, returning the acknowledgements map and the owned
+    /// completion handle. Used by the `ApplicationEventProcessor`.
+    pub(crate) fn into_parts(self) -> (IndexMap<TopicIdPartition, NodeAcknowledgements>, CompletableEventHandle<()>) {
+        (self.acknowledgements_map, self.handle)
+    }
 }

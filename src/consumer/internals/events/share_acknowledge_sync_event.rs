@@ -71,4 +71,17 @@ impl ShareAcknowledgeSyncEvent {
     pub(crate) fn handle(&self) -> &CompletableEventHandle<ShareAcknowledgeSyncResult> {
         &self.handle
     }
+
+    /// Consumes the event, returning the acknowledgements map and the owned
+    /// completion handle. Used by the `ApplicationEventProcessor` to dispatch
+    /// the acks to the request manager and bridge the manager's response future
+    /// to this event's handle.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        IndexMap<TopicIdPartition, NodeAcknowledgements>,
+        CompletableEventHandle<ShareAcknowledgeSyncResult>,
+    ) {
+        (self.acknowledgements_map, self.handle)
+    }
 }
