@@ -447,7 +447,8 @@ where
 
         if self.current_fetch.is_empty() && !self.current_fetch.has_renewals() {
             let mut fetch = self.fetch_collector.collect(&self.fetch_buffer)?;
-            if fetch.is_empty() {
+            let fetch_is_empty = fetch.is_empty();
+            if fetch_is_empty {
                 // Check for acknowledgements from control records (GAP) and send them.
                 let control_record_acknowledgements = fetch.take_acknowledged_records();
                 if !control_record_acknowledgements.is_empty() {
@@ -469,7 +470,15 @@ where
             if !acks_to_send.is_empty() {
                 self.send_share_acknowledge_async_event(acks_to_send);
             }
-            self.current_fetch = fetch;
+            // Java assigns `currentFetch = fetch` ONLY when the fetch is
+            // non-empty (`ShareConsumerImpl.java:628-629`); an empty collect
+            // leaves `currentFetch` untouched so it retains its
+            // `acquisitionLockTimeoutMs` (and any other state) from the prior
+            // non-empty fetch. Clobbering it with a fresh empty fetch would make
+            // `acquisition_lock_timeout_ms()` regress to `None`.
+            if !fetch_is_empty {
+                self.current_fetch = fetch;
+            }
             return Ok(());
         } else if self.current_fetch.has_renewals() {
             // Move any renewed records back into in-flight records.
@@ -1431,6 +1440,37 @@ mod tests {
         fx.consumer
             .acknowledge(recs[0])
             .expect("post-renew ACCEPT on re-delivered record must succeed");
+    }
+
+    /// After a poll returns records (setting the acquisition-lock timeout), a
+    /// later poll that finds no new data must NOT clobber the retained timeout —
+    /// Java assigns `currentFetch = fetch` only when the fetch is non-empty
+    /// (`ShareConsumerImpl.java:628-629`), so `acquisition_lock_timeout_ms()`
+    /// keeps returning the last `Some(t)`. Regression test for the in-place
+    /// `collect` restructuring (would return `None` if `current_fetch` were
+    /// overwritten with an empty fetch).
+    #[tokio::test]
+    async fn test_acquisition_lock_timeout_retained_across_empty_poll() {
+        let mut fx = build_fixture("group-id", ShareAcknowledgementMode::IMPLICIT);
+        subscribe_ok(&mut fx, &["test-topic"]).await;
+
+        push_fetch(&fx, fetch_with_records("test-topic", 0, &[0, 1]));
+        let records = fx.consumer.poll(Duration::from_millis(100)).await.expect("first poll ok");
+        assert_eq!(records.count(), 2);
+        assert_eq!(
+            fx.consumer.acquisition_lock_timeout_ms().unwrap(),
+            DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS,
+            "timeout set after a records poll"
+        );
+
+        // Second poll finds no new data (collector queue empty → empty fetch).
+        let records = fx.consumer.poll(Duration::from_millis(100)).await.expect("second poll ok");
+        assert!(records.is_empty(), "no new records");
+        assert_eq!(
+            fx.consumer.acquisition_lock_timeout_ms().unwrap(),
+            DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS,
+            "an empty poll must NOT clobber the retained acquisition-lock timeout"
+        );
     }
 
     #[tokio::test]
