@@ -46,6 +46,7 @@ use super::coordinator_request_manager::CoordinatorRequestManager;
 use super::fetch_request_manager::FetchRequestManager;
 use super::offsets_request_manager::OffsetsRequestManager;
 use super::request_manager::RequestManager;
+use super::share_consume_request_manager::ShareConsumeRequestManager;
 use super::topic_metadata_request_manager::TopicMetadataRequestManager;
 
 /// Container holding all consumer request managers. The bg task
@@ -109,6 +110,15 @@ pub(crate) struct RequestManagers {
     /// fetchRequestManager` (always present). `Option<_>` for the same
     /// reason as `offsets`.
     pub(crate) fetch: Option<FetchRequestManager>,
+    /// Share-consumer request manager (KIP-932). Java:
+    /// `Optional<ShareConsumeRequestManager> shareConsumeRequestManager`,
+    /// populated only by the share-consumer constructor
+    /// (`RequestManagers.java:105`). When present it is iterated in
+    /// [`Self::entries`] after `fetch`. The full share bg-loop wiring
+    /// (`ShareHeartbeatRequestManager` / `ShareMembershipManager` slots and a
+    /// dedicated `for_share` constructor) lands with the share consumer in a
+    /// later phase; this slot registers the manager so it can be polled.
+    pub(crate) share_consume: Option<ShareConsumeRequestManager>,
     /// Auxiliary slot for dyn-dispatched managers — used by tests to
     /// inject spy/fake managers without expanding the concrete-field
     /// list. The production constructor `new(...)` leaves this empty;
@@ -150,6 +160,7 @@ impl RequestManagers {
             consumer_membership,
             offsets,
             fetch,
+            share_consume: None,
             dyn_managers: Vec::new(),
             closed: false,
         }
@@ -170,6 +181,7 @@ impl RequestManagers {
             consumer_membership: None,
             offsets: None,
             fetch: None,
+            share_consume: None,
             dyn_managers,
             closed: false,
         }
@@ -215,6 +227,7 @@ impl RequestManagers {
             consumer_membership: _,
             offsets,
             fetch,
+            share_consume,
             dyn_managers,
             closed: _,
         } = self;
@@ -234,6 +247,11 @@ impl RequestManagers {
         }
         if let Some(f) = fetch.as_mut() {
             list.push(f as &mut dyn RequestManager);
+        }
+        // Share-consumer manager (KIP-932), iterated after `fetch`
+        // (`RequestManagers.java:127` places `shareConsumeRequestManager` last).
+        if let Some(s) = share_consume.as_mut() {
+            list.push(s as &mut dyn RequestManager);
         }
         for m in dyn_managers.iter_mut() {
             list.push(m.as_mut());

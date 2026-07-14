@@ -57,6 +57,7 @@ pub(crate) mod request_state;
 pub(crate) mod share_acknowledgement_mode;
 pub(crate) mod share_acquire_mode;
 pub(crate) mod share_completed_fetch;
+pub(crate) mod share_consume_request_manager;
 pub(crate) mod share_consumer_metadata;
 pub(crate) mod share_fetch;
 pub(crate) mod share_fetch_buffer;
