@@ -34,7 +34,7 @@ this rulebook links them explicitly (never rely on nested auto-loading).
 | G1 Orientation | ✅ below | this file |
 | G2 Porting workflow | ✅ below | this file |
 | G3 FFI boundary contracts | ✅ done | `.claude/rules/python-ffi.md` |
-| G4 API shape & design | ▢ forthcoming | this file (+ a rule file if it grows) |
+| G4 API shape & design | ✅ done | this file |
 | G5 Build / run / verify | ▢ forthcoming | this file |
 | G6 Governance & review | ▢ forthcoming | `.claude/agents/*.md` |
 
@@ -360,3 +360,61 @@ error-model *rules* (→ G3); the serializer/interceptor decision (→ G4); deep
 build / packaging / version-matrix (→ G5 — only the regen + `make build`
 commands appear here); test-coverage conventions like allocation budgets and
 parity depth (→ G5/G6 — G2 keeps only "test with Mock + parity" as a step).
+
+---
+
+# G4 · API shape & design
+
+Design-guidance altitude: G4 states the **shape target** (a firm rule) and the
+**design decision points** a port must resolve — each with a recommended
+default. Following the repo precedent (`consumer-threading.md §28`), the rulebook
+gives defaults and requires a rationale for deviations; it does **not** pre-decide
+the open calls abstractly. **The implementing agent makes each call in context
+and records why** (in the phase PLAN, a COMMENTS.DONE entry, or a code comment) —
+these questions belong to whoever ports the feature, not to a decision made up
+front divorced from it.
+
+## 4.1 The shape target (firm)
+
+  - **Mirror the Java public API shape** of the client being wrapped —
+    `Producer<K,V>` → `send(ProducerRecord) → Future[RecordMetadata]`,
+    method-style getters (`RecordMetadata.offset()`), `MockProducer`. The
+    consumer will mirror `KafkaConsumer` (`poll`, `subscribe`, `commit_*`); the
+    share consumer, `KafkaShareConsumer` (`acknowledge`, …).
+  - **Do NOT adopt the ecosystem client's shape.** No confluent-kafka-python
+    `produce()` / `poll()` / `flush()` delivery-callback model, no
+    `value_serializer=` constructor kwargs.
+  - **Python casing:** PascalCase classes, snake_case methods; keep the Java
+    method names (`send`, `flush`, `close`, `partitions_for`).
+
+This one is non-negotiable — identical shape across bindings is the whole point
+(`bindings/CLAUDE.md §2`).
+
+## 4.2 Design decision points (resolve at implementation, record rationale)
+
+Each is a fork a port hits. Take the default unless the feature argues otherwise;
+if you deviate, record why.
+
+| Decision point | Recommended default | Decide when |
+|---|---|---|
+| Serializer / deserializer abstraction | A Python-side `Serializer` / `Deserializer` protocol that produces / consumes `bytes`; the C ABI stays bytes-only. Raw-bytes-only is an acceptable interim. Avoid a per-record serializer callback through the ABI (hot-path C↔Python, against `CLAUDE.md §11`). | porting key/value (de)serialization |
+| Interceptors (`ProducerInterceptor` / `ConsumerInterceptor`) | Defer; reserve the Java-shaped name so adding it later is non-breaking. If added, run per record in Python. | a concrete user need surfaces |
+| Config value coercion | Coerce non-string dict values to `str` in the Python layer (accept ints / bools), matching Java / ecosystem ergonomics. | wiring a client constructor |
+
+**Why defer rather than pre-decide:** these depend on the concrete feature and
+the state of the ABI at that time; baking answers now, divorced from a port,
+risks locking a shape the feature doesn't want. The default is the lean, not a
+verdict.
+
+## 4.3 Config mapping (mechanism — firm)
+
+  - `dict` → per-entry `ProducerProperties_put(k, v)`; keys are the **Java dotted
+    names** (`bootstrap.servers` is required). Values follow the 4.2 coercion
+    decision.
+  - Classic-/consumer-only config keys are **accepted silently** (repo policy —
+    match Java, no Rust-side rejection).
+  - `key.serializer` / `value.serializer` handling follows the 4.2 serializer
+    decision (today the ABI pins `ByteArraySerializer`, so they are inert).
+
+**What G4 deliberately excludes:** the cross-layer symbol naming (→ G2 §2.5); the
+boundary correctness rules (→ G3); build / packaging / test commands (→ G5).
