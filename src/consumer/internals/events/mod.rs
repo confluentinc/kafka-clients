@@ -39,3 +39,15 @@ pub(crate) mod background_event_handler;
 pub(crate) mod completable_event;
 pub(crate) mod completable_event_reaper;
 pub(crate) mod event_processor;
+// Share-consumer (KIP-932) events. The share application-event processor that
+// consumes these lands in a later phase; the types are defined here now.
+pub(crate) mod share_acknowledge_async_event;
+pub(crate) mod share_acknowledge_on_close_event;
+pub(crate) mod share_acknowledge_sync_event;
+pub(crate) mod share_acknowledgement_commit_callback_registration_event;
+pub(crate) mod share_acknowledgement_event;
+pub(crate) mod share_acknowledgement_event_handler;
+pub(crate) mod share_fetch_event;
+pub(crate) mod share_poll_event;
+pub(crate) mod share_subscription_change_event;
+pub(crate) mod share_unsubscribe_event;
