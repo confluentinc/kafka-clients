@@ -86,20 +86,15 @@ realization lives in its own `bindings/<lang>/CLAUDE.md`.
    to the host's convention. Names stay recognizable across bindings.
 3. **Async model** — Map Java's `Future` / blocking calls to the host's nearest
    async idiom, preserving the same semantics.
-4. **Error model** — Map the C ABI error (code / message / retriable / fatal) to
-   the host's native error type, preserving Kafka's error classification.
-5. **Resource lifecycle & ownership** — Give every opaque handle deterministic
+4. **Resource lifecycle & ownership** — Give every opaque handle deterministic
    cleanup in the host idiom, and honor the ABI's ownership contract (who frees
    what).
-6. **Zero-copy at the boundary** — Add no *extra* copies of key/value/header
+5. **Zero-copy at the boundary** — Add no *extra* copies of key/value/header
    bytes when crossing the ABI; pass by reference where the buffer's lifetime
    allows, and copy only when lifetime forces it.
-7. **Shape, not logic** — Bindings add **no Kafka behavior**; all logic stays in
+6. **Shape, not logic** — Bindings add **no Kafka behavior**; all logic stays in
    the Rust core (see §1.2).
-8. **Java-faithful tie-breaker** — When the host idiom and the Java shape
-   conflict, default to the Java-faithful choice; deviate only when a host idiom
-   is overwhelmingly expected, and document why.
-9. **Review ground truth** — Review a binding against the **C ABI header** and
+7. **Review ground truth** — Review a binding against the **C ABI header** and
    the **Kafka Java public API** — not against Java implementation logic.
 
 ---
@@ -112,5 +107,5 @@ Where each rule file lives:
 |---|---|---|
 | Shared | `bindings/CLAUDE.md` | Cross-binding mental model + conventions (§1–2) |
 | Language rulebook | `bindings/<lang>/CLAUDE.md` | The language's concrete realization: bridge/FFI mechanism, naming, async/error/resource mappings |
-| Language deep-dives | `bindings/<lang>/.claude/rules/*.md` | Heavy sub-topics referenced by the rulebook (e.g. FFI marshalling & ownership) |
+| Language deep-dives | `bindings/<lang>/.claude/rules/*.md` | Heavy sub-topics referenced by the rulebook (e.g. FFI marshalling & ownership) + any process rules the binding needs |
 | Language agents | `bindings/<lang>/.claude/agents/*.md` | The binding's own Actor/Critic — self-contained personas |
