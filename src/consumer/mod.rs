@@ -938,4 +938,52 @@ mod share_pipeline_smoke_tests {
             .expect("close did not complete within 10s")
             .expect("close should succeed");
     }
+
+    // ── ShareConsumerImplTest deferred-ctor cases now reachable via the real
+    //    factory. Java wraps all construction failures as
+    //    "Failed to construct Kafka share consumer". ────────────────────────
+
+    fn build_with_group_id(group_id: Option<&str>) -> Result<(), KafkaError> {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:59999".to_string());
+        if let Some(g) = group_id {
+            props.insert("group.id".to_string(), g.to_string());
+        }
+        let config = ShareConsumerConfig::from_properties(&props).expect("config parse");
+        super::new_share_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
+            .map(|_| ())
+    }
+
+    /// Java `ShareConsumerImplTest.testGroupIdNull`.
+    #[test]
+    fn test_group_id_null() {
+        let err = build_with_group_id(None).expect_err("null group.id must fail construction");
+        assert_eq!(err.message(), "Failed to construct Kafka share consumer");
+    }
+
+    /// Java `ShareConsumerImplTest.testGroupIdEmpty`.
+    #[test]
+    fn test_group_id_empty() {
+        let err = build_with_group_id(Some("")).expect_err("empty group.id must fail construction");
+        assert_eq!(err.message(), "Failed to construct Kafka share consumer");
+    }
+
+    /// Java `ShareConsumerImplTest.testGroupIdOnlyWhitespaces`.
+    #[test]
+    fn test_group_id_only_whitespaces() {
+        let err = build_with_group_id(Some("       ")).expect_err("whitespace group.id must fail construction");
+        assert_eq!(err.message(), "Failed to construct Kafka share consumer");
+    }
+
+    // Deferred `ShareConsumerImplTest` ctor cases (NOT translatable here):
+    //   * `testFailConstructor` — triggers the ctor failure via an invalid
+    //     `metric.reporters` class. Rust has no reflective metric-reporter
+    //     loading (KIP-714 metrics deferred), so the trigger does not exist.
+    //   * `testConstructorFailsOnNetworkClientConstructorFailure` — triggers
+    //     failure via a SASL JAAS `LoginModule` that cannot be found. Rust's
+    //     SASL is config-driven (PLAIN only) with no JAAS `LoginModule`
+    //     reflection, so this specific failure mode does not exist.
+    //   Both assert the "Failed to construct Kafka share consumer" wrapper +
+    //   a Java-specific cause chain; the wrapper behavior is covered by the
+    //   three group-id tests above.
 }
