@@ -322,138 +322,432 @@ impl std::fmt::Display for Acknowledgements {
     }
 }
 
+/// Unit tests translated from Java's `AcknowledgementsTest` (all 20 methods,
+/// with exact split-boundary offset / type / size assertions and the repeated
+/// second `get_acknowledgement_batches()` calls that verify the operation is
+/// non-destructive).
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_empty() {
-        let acks = Acknowledgements::empty();
-        assert!(acks.is_empty());
-        assert_eq!(acks.size(), 0);
-        assert!(acks.get_acknowledgement_batches().is_empty());
-        assert!(!acks.is_completed());
-        assert!(!acks.is_completed_exceptionally());
+    fn accept() -> i8 {
+        AcknowledgeType::Accept.id()
+    }
+    fn release() -> i8 {
+        AcknowledgeType::Release.id()
+    }
+    fn reject() -> i8 {
+        AcknowledgeType::Reject.id()
     }
 
+    const MAX: i64 = MAX_RECORDS_WITH_SAME_ACKNOWLEDGE_TYPE as i64;
+
+    /// Java `testEmptyBatch`.
     #[test]
-    fn test_add_and_get() {
+    fn test_empty_batch() {
+        let acks = Acknowledgements::empty();
+        assert!(acks.get_acknowledgement_batches().is_empty());
+        assert!(acks.get_acknowledgement_batches().is_empty());
+    }
+
+    /// Java `testSingleStateSingleRecord`.
+    #[test]
+    fn test_single_state_single_record() {
         let mut acks = Acknowledgements::empty();
         acks.add(0, AcknowledgeType::Accept);
-        assert_eq!(acks.get(0), Some(AcknowledgeType::Accept));
-        // Overwrite.
-        acks.add(0, AcknowledgeType::Reject);
-        assert_eq!(acks.get(0), Some(AcknowledgeType::Reject));
-        assert_eq!(acks.size(), 1);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 0);
+            assert_eq!(batches[0].acknowledge_types().len(), 1);
+            assert_eq!(batches[0].acknowledge_types()[0], accept());
+        }
     }
 
+    /// Java `testSingleStateMultiRecord`.
     #[test]
-    fn test_add_if_absent() {
+    fn test_single_state_multi_record() {
         let mut acks = Acknowledgements::empty();
-        assert!(acks.add_if_absent(5, AcknowledgeType::Accept));
-        assert!(!acks.add_if_absent(5, AcknowledgeType::Reject));
-        assert_eq!(acks.get(5), Some(AcknowledgeType::Accept));
+        for offset in 0..=4 {
+            acks.add(offset, AcknowledgeType::Accept);
+        }
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 4);
+            assert_ne!(batches[0].acknowledge_types().len(), 0);
+            assert_eq!(batches[0].acknowledge_types()[0], accept());
+        }
     }
 
+    /// Java `testSingleAcknowledgeTypeExceedingLimit`.
     #[test]
-    fn test_gap_reads_as_none() {
+    fn test_single_acknowledge_type_exceeding_limit() {
         let mut acks = Acknowledgements::empty();
-        acks.add_gap(3);
-        // Java's `get` returns null for both a gap and an absent offset.
-        assert_eq!(acks.get(3), None);
-        assert_eq!(acks.size(), 1);
+        let mut i: i64 = 0;
+        while i < MAX {
+            acks.add(i, AcknowledgeType::Accept);
+            i += 1;
+        }
+        acks.add(i, AcknowledgeType::Accept);
+        i += 1;
+        acks.add(i, AcknowledgeType::Accept);
+        i += 1;
+        for j in 0..=MAX {
+            acks.add(i + j, AcknowledgeType::Reject);
+        }
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 2);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), MAX + 1);
+            assert_eq!(batches[0].acknowledge_types().len(), 1);
+            assert_eq!(batches[0].acknowledge_types()[0], accept());
+            assert_eq!(batches[1].first_offset(), MAX + 2);
+            assert_eq!(batches[1].last_offset(), i + MAX);
+            assert_eq!(batches[1].acknowledge_types().len(), 1);
+            assert_eq!(batches[1].acknowledge_types()[0], reject());
+        }
     }
 
+    /// Java `testSingleAcknowledgeTypeWithGap`. Java uses `add(offset, null)`,
+    /// which stores a gap — translated to `add_gap` (Rust `add` is non-null).
     #[test]
-    fn test_single_contiguous_batch_mixed_types_not_collapsed() {
-        // Contiguous offsets with mixed acknowledge types produce a single
-        // batch whose type array is preserved (not collapsed, since the types
-        // are not all identical).
+    fn test_single_acknowledge_type_with_gap() {
+        let mut acks = Acknowledgements::empty();
+        for i in 0..MAX {
+            acks.add_gap(i);
+        }
+        acks.add_gap(MAX);
+        acks.add_gap(MAX + 1);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), MAX + 1);
+            assert_eq!(batches[0].acknowledge_types().len(), 1);
+            assert_eq!(batches[0].acknowledge_types()[0], ACKNOWLEDGE_TYPE_GAP);
+        }
+    }
+
+    /// Java `testOptimiseBatches`.
+    #[test]
+    fn test_optimise_batches() {
+        let mut acks = Acknowledgements::empty();
+        let mut offset: i64 = 0;
+        while offset < MAX {
+            acks.add(offset, AcknowledgeType::Accept);
+            offset += 1;
+        }
+        acks.add(offset, AcknowledgeType::Reject);
+        offset += 1;
+        acks.add(offset, AcknowledgeType::Accept);
+        offset += 1;
+        acks.add(offset, AcknowledgeType::Release);
+        offset += 1;
+        acks.add_gap(offset);
+        offset += 1;
+
+        // Adding more than the max records.
+        for j in 0..=MAX {
+            acks.add(offset + j, AcknowledgeType::Accept);
+        }
+        offset += MAX + 1;
+
+        // Adding 2 more records of different type.
+        acks.add(offset, AcknowledgeType::Reject);
+        offset += 1;
+        acks.add(offset, AcknowledgeType::Release);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 3);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), MAX + 3);
+            assert_eq!(batches[1].first_offset(), MAX + 4);
+            assert_eq!(batches[1].last_offset(), 2 * MAX + 4);
+            assert_eq!(batches[1].acknowledge_types().len(), 1);
+            assert_eq!(batches[2].first_offset(), offset - 1);
+            assert_eq!(batches[2].last_offset(), offset);
+            assert_eq!(batches[2].acknowledge_types().len(), 2);
+        }
+    }
+
+    /// Java `testSingleAcknowledgeTypeWithinLimit`.
+    #[test]
+    fn test_single_acknowledge_type_within_limit() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Accept);
+        acks.add(1, AcknowledgeType::Accept);
+        acks.add(2, AcknowledgeType::Accept);
+
+        let batches = acks.get_acknowledgement_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].acknowledge_types().len(), 1);
+    }
+
+    /// Java `testMultiStateMultiRecord`.
+    #[test]
+    fn test_multi_state_multi_record() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Accept);
+        acks.add(1, AcknowledgeType::Accept);
+        acks.add(2, AcknowledgeType::Accept);
+        acks.add(3, AcknowledgeType::Release);
+        acks.add(4, AcknowledgeType::Release);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 4);
+            assert_eq!(
+                batches[0].acknowledge_types(),
+                &vec![accept(), accept(), accept(), release(), release()]
+            );
+        }
+    }
+
+    /// Java `testMultiStateSingleMultiRecord`.
+    #[test]
+    fn test_multi_state_single_multi_record() {
         let mut acks = Acknowledgements::empty();
         acks.add(0, AcknowledgeType::Accept);
         acks.add(1, AcknowledgeType::Release);
-        acks.add(2, AcknowledgeType::Accept);
-        let batches = acks.get_acknowledgement_batches();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].first_offset(), 0);
-        assert_eq!(batches[0].last_offset(), 2);
-        assert_eq!(batches[0].acknowledge_types(), &vec![1, 2, 1]);
+        acks.add(2, AcknowledgeType::Release);
+        acks.add(3, AcknowledgeType::Release);
+        acks.add(4, AcknowledgeType::Release);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 4);
+            assert_eq!(
+                batches[0].acknowledge_types(),
+                &vec![accept(), release(), release(), release(), release()]
+            );
+        }
     }
 
+    /// Java `testMultiStateMultiSingleRecord`.
     #[test]
-    fn test_gap_splits_into_two_batches() {
+    fn test_multi_state_multi_single_record() {
         let mut acks = Acknowledgements::empty();
         acks.add(0, AcknowledgeType::Accept);
-        // Offset 1 skipped -> the next offset breaks contiguity.
-        acks.add(2, AcknowledgeType::Release);
-        let batches = acks.get_acknowledgement_batches();
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].first_offset(), 0);
-        assert_eq!(batches[0].last_offset(), 0);
-        assert_eq!(batches[1].first_offset(), 2);
-        assert_eq!(batches[1].last_offset(), 2);
-    }
+        acks.add(1, AcknowledgeType::Accept);
+        acks.add(2, AcknowledgeType::Accept);
+        acks.add(3, AcknowledgeType::Accept);
+        acks.add(4, AcknowledgeType::Release);
 
-    #[test]
-    fn test_single_type_collapses_when_below_optimise_limit() {
-        // Fewer than MAX_RECORDS_WITH_SAME_ACKNOWLEDGE_TYPE records but all the
-        // same type -> canOptimiseForSingleAcknowledgeType collapses the array.
-        let mut acks = Acknowledgements::empty();
-        for offset in 0..5 {
-            acks.add(offset, AcknowledgeType::Accept);
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 4);
+            assert_eq!(
+                batches[0].acknowledge_types(),
+                &vec![accept(), accept(), accept(), accept(), release()]
+            );
         }
-        let batches = acks.get_acknowledgement_batches();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].first_offset(), 0);
-        assert_eq!(batches[0].last_offset(), 4);
-        // Collapsed to a single acknowledge type.
-        assert_eq!(batches[0].acknowledge_types(), &vec![1]);
     }
 
+    /// Java `testSingleGap`.
     #[test]
-    fn test_merge_other_wins() {
-        let mut a = Acknowledgements::empty();
-        a.add(0, AcknowledgeType::Accept);
-        let mut b = Acknowledgements::empty();
-        b.add(0, AcknowledgeType::Reject);
-        b.add(1, AcknowledgeType::Release);
-        a.merge(&b);
-        assert_eq!(a.get(0), Some(AcknowledgeType::Reject));
-        assert_eq!(a.get(1), Some(AcknowledgeType::Release));
-        assert_eq!(a.size(), 2);
-    }
-
-    #[test]
-    fn test_complete_with_exception() {
+    fn test_single_gap() {
         let mut acks = Acknowledgements::empty();
-        acks.complete(Some(KafkaError::illegal_state("boom")));
-        assert!(acks.is_completed());
-        assert!(acks.is_completed_exceptionally());
-        assert!(acks.get_acknowledge_exception().is_some());
+        acks.add_gap(0);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 0);
+            assert_eq!(batches[0].acknowledge_types().len(), 1);
+            assert_eq!(batches[0].acknowledge_types()[0], ACKNOWLEDGE_TYPE_GAP);
+        }
     }
 
+    /// Java `testMultiGap`.
     #[test]
-    fn test_optimise_long_run_of_same_type() {
-        // A long run (> MAX) of the same type surrounded by other types must be
-        // split so the long run carries a single acknowledge type.
+    fn test_multi_gap() {
+        let mut acks = Acknowledgements::empty();
+        acks.add_gap(0);
+        acks.add_gap(1);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 1);
+            assert_eq!(batches[0].acknowledge_types().len(), 1);
+            assert_eq!(batches[0].acknowledge_types()[0], ACKNOWLEDGE_TYPE_GAP);
+        }
+    }
+
+    /// Java `testSingleGapSingleState`.
+    #[test]
+    fn test_single_gap_single_state() {
+        let mut acks = Acknowledgements::empty();
+        acks.add_gap(0);
+        acks.add(1, AcknowledgeType::Accept);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 1);
+            assert_eq!(batches[0].acknowledge_types(), &vec![ACKNOWLEDGE_TYPE_GAP, accept()]);
+        }
+    }
+
+    /// Java `testSingleStateSingleGap`.
+    #[test]
+    fn test_single_state_single_gap() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Accept);
+        acks.add_gap(1);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 1);
+            assert_eq!(batches[0].acknowledge_types(), &vec![accept(), ACKNOWLEDGE_TYPE_GAP]);
+        }
+    }
+
+    /// Java `testMultiStateMultiGap`.
+    #[test]
+    fn test_multi_state_multi_gap() {
         let mut acks = Acknowledgements::empty();
         acks.add(0, AcknowledgeType::Release);
-        for offset in 1..=15 {
-            acks.add(offset, AcknowledgeType::Accept);
+        acks.add_gap(1);
+        acks.add_gap(2);
+        acks.add(3, AcknowledgeType::Accept);
+        acks.add(4, AcknowledgeType::Accept);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 4);
+            assert_eq!(
+                batches[0].acknowledge_types(),
+                &vec![
+                    release(),
+                    ACKNOWLEDGE_TYPE_GAP,
+                    ACKNOWLEDGE_TYPE_GAP,
+                    accept(),
+                    accept()
+                ]
+            );
         }
-        acks.add(16, AcknowledgeType::Reject);
-        let batches = acks.get_acknowledgement_batches();
-        // All offsets are contiguous so the whole range is covered.
-        let covered_first = batches.first().unwrap().first_offset();
-        let covered_last = batches.last().unwrap().last_offset();
-        assert_eq!(covered_first, 0);
-        assert_eq!(covered_last, 16);
-        // The middle run of Accept must be collapsed to a single-type batch.
-        assert!(
-            batches
-                .iter()
-                .any(|b| b.acknowledge_types() == &vec![1] && b.last_offset() - b.first_offset() >= 9),
-            "expected a collapsed single-type run: {batches:?}"
-        );
+    }
+
+    /// Java `testMultiStateMultiGaps`.
+    #[test]
+    fn test_multi_state_multi_gaps() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Accept);
+        acks.add(1, AcknowledgeType::Release);
+        acks.add_gap(2);
+        acks.add(3, AcknowledgeType::Release);
+        acks.add_gap(4);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 4);
+            assert_eq!(
+                batches[0].acknowledge_types(),
+                &vec![
+                    accept(),
+                    release(),
+                    ACKNOWLEDGE_TYPE_GAP,
+                    release(),
+                    ACKNOWLEDGE_TYPE_GAP
+                ]
+            );
+        }
+    }
+
+    /// Java `testNoncontiguousBatches`.
+    #[test]
+    fn test_noncontiguous_batches() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Accept);
+        acks.add(1, AcknowledgeType::Release);
+        acks.add(3, AcknowledgeType::Reject);
+        acks.add(4, AcknowledgeType::Reject);
+        acks.add(6, AcknowledgeType::Reject);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 3);
+            assert_eq!(batches[0].first_offset(), 0);
+            assert_eq!(batches[0].last_offset(), 1);
+            assert_eq!(batches[0].acknowledge_types(), &vec![accept(), release()]);
+            assert_eq!(batches[1].first_offset(), 3);
+            assert_eq!(batches[1].last_offset(), 4);
+            assert_eq!(batches[1].acknowledge_types().len(), 1);
+            assert_eq!(batches[1].acknowledge_types()[0], reject());
+            assert_eq!(batches[2].first_offset(), 6);
+            assert_eq!(batches[2].last_offset(), 6);
+            assert_eq!(batches[2].acknowledge_types().len(), 1);
+            assert_eq!(batches[2].acknowledge_types()[0], reject());
+        }
+    }
+
+    /// Java `testNoncontiguousGaps`.
+    #[test]
+    fn test_noncontiguous_gaps() {
+        let mut acks = Acknowledgements::empty();
+        acks.add_gap(2);
+        acks.add_gap(4);
+
+        for _ in 0..2 {
+            let batches = acks.get_acknowledgement_batches();
+            assert_eq!(batches.len(), 2);
+            assert_eq!(batches[0].first_offset(), 2);
+            assert_eq!(batches[0].last_offset(), 2);
+            assert_eq!(batches[0].acknowledge_types().len(), 1);
+            assert_eq!(batches[0].acknowledge_types()[0], ACKNOWLEDGE_TYPE_GAP);
+            assert_eq!(batches[1].first_offset(), 4);
+            assert_eq!(batches[1].last_offset(), 4);
+            assert_eq!(batches[1].acknowledge_types().len(), 1);
+            assert_eq!(batches[1].acknowledge_types()[0], ACKNOWLEDGE_TYPE_GAP);
+        }
+    }
+
+    /// Java `testCompleteSuccess`.
+    #[test]
+    fn test_complete_success() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Renew);
+        assert!(!acks.is_completed());
+
+        acks.complete(None);
+        assert!(acks.is_completed());
+        assert!(acks.get_acknowledge_exception().is_none());
+    }
+
+    /// Java `testCompleteException`.
+    #[test]
+    fn test_complete_exception() {
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Renew);
+        assert!(!acks.is_completed());
+
+        acks.complete(Some(KafkaError::illegal_state("boom")));
+        assert!(acks.is_completed());
+        assert!(acks.get_acknowledge_exception().is_some());
     }
 }

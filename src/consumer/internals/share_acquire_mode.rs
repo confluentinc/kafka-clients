@@ -25,6 +25,15 @@ use crate::common::KafkaError;
 /// The acquire mode controls the fetch behavior of a share consumer.
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.internals.ShareAcquireMode`.
+///
+/// deferred: the Java nested `ShareAcquireMode.Validator` (implements
+/// `ConfigDef.Validator`) is not translated here because the project has no
+/// `ConfigDef::Validator` trait yet. It (and its `ensureValid`/`toString`
+/// tests) belong to the `share.acquire.mode` config-wiring phase (Phase 6),
+/// where the `ConfigDef` validation surface is introduced. Until then, an
+/// invalid `share.acquire.mode` is rejected by [`ShareAcquireMode::of`] when
+/// [`super::share_fetch_config::ShareFetchConfig::from_consumer_config`] parses
+/// the config value — same rejection, later point than Java.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ShareAcquireMode {
     /// Batch-optimized acquisition.
@@ -106,21 +115,34 @@ mod tests {
         assert_eq!(ShareAcquireMode::RecordLimit.name(), "record_limit");
     }
 
+    /// Java `ShareAcquireModeTest.testFromString`. The Java `of(null)` case has
+    /// no Rust analogue (`of` takes a non-null `&str`), so it is omitted; the
+    /// empty-string case (`of("")`) is covered and must be rejected. The
+    /// `Validator`-based `testValidator`/`testValidatorToString` are deferred
+    /// with the type (see the deferral note on [`ShareAcquireMode`]).
     #[test]
-    fn test_of_case_insensitive() {
+    fn test_from_string() {
         assert_eq!(
             ShareAcquireMode::of("batch_optimized").unwrap(),
             ShareAcquireMode::BatchOptimized
         );
+        assert_eq!(
+            ShareAcquireMode::of("BATCH_OPTIMIZED").unwrap(),
+            ShareAcquireMode::BatchOptimized
+        );
+        assert_eq!(ShareAcquireMode::of("record_limit").unwrap(), ShareAcquireMode::RecordLimit);
         assert_eq!(ShareAcquireMode::of("RECORD_LIMIT").unwrap(), ShareAcquireMode::RecordLimit);
-    }
-
-    #[test]
-    fn test_of_invalid() {
-        let err = ShareAcquireMode::of("nope").expect_err("invalid mode must be rejected");
+        let invalid = ShareAcquireMode::of("invalid_mode").expect_err("invalid mode must be rejected");
         assert!(
-            err.to_string().contains("must either be 'batch_optimized' or 'record_limit'"),
-            "got: {err}"
+            invalid
+                .to_string()
+                .contains("must either be 'batch_optimized' or 'record_limit'"),
+            "got: {invalid}"
+        );
+        let empty = ShareAcquireMode::of("").expect_err("empty mode must be rejected");
+        assert!(
+            empty.to_string().contains("must either be 'batch_optimized' or 'record_limit'"),
+            "got: {empty}"
         );
     }
 
