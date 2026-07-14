@@ -49,9 +49,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use indexmap::IndexMap;
 use log::{debug, error, trace};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::protocol::Errors;
+use crate::common::requests::abstract_response::ConcreteResponse;
 use crate::common::requests::{ShareAcknowledgeResponse, ShareFetchResponse};
 use crate::common::utils::LogContext;
 use crate::common::{KafkaError, Node, TopicIdPartition, TopicPartition, Uuid};
@@ -595,6 +596,57 @@ impl Tuple {
     }
 }
 
+/// Envelope for routing a `ShareFetch` / `ShareAcknowledge` request completion
+/// (or its transport-level failure) from the spawned response forwarder back to
+/// the bg task's next [`RequestManager::poll`] drain.
+///
+/// The response body bytes (`ShareFetchResponse` record buffer) travel by
+/// **ownership** through the channel — never copied (`consumer-threading.md`
+/// §27). This mirrors [`super::fetch_request_manager::PendingFetchCompletion`].
+enum PendingShareCompletion {
+    /// Broker returned a `ShareFetchResponse`.
+    FetchResponse {
+        fetch_target: Node,
+        request_data: ShareFetchRequestData,
+        response: ShareFetchResponse,
+        request_version: i16,
+    },
+    /// Transport-level failure (disconnect / decode mismatch) for a ShareFetch.
+    FetchFailure {
+        fetch_target: Node,
+        request_data: ShareFetchRequestData,
+        error: KafkaError,
+    },
+    /// Broker returned a `ShareAcknowledgeResponse`.
+    AckResponse {
+        fetch_target: Node,
+        request_data: ShareAcknowledgeRequestData,
+        response: ShareAcknowledgeResponse,
+        request_version: i16,
+        response_completion_time_ms: i64,
+    },
+    /// Transport-level failure for a ShareAcknowledge.
+    AckFailure {
+        fetch_target: Node,
+        request_data: ShareAcknowledgeRequestData,
+        error: KafkaError,
+    },
+}
+
+/// Metadata recorded at request-build time so the spawned response forwarder
+/// knows how to route the eventual response. Kept in a per-poll parallel list
+/// in the same order as the `UnsentRequest`s pushed onto the `PollResult`.
+enum PendingRequestMeta {
+    Fetch {
+        node: Node,
+        request_data: ShareFetchRequestData,
+    },
+    Ack {
+        node: Node,
+        request_data: ShareAcknowledgeRequestData,
+    },
+}
+
 /// `ShareConsumeRequestManager` — responsible for generating `ShareFetch` and
 /// `ShareAcknowledge` requests.
 pub(crate) struct ShareConsumeRequestManager {
@@ -623,6 +675,23 @@ pub(crate) struct ShareConsumeRequestManager {
     is_acknowledgement_commit_callback_registered: Arc<AtomicBool>,
     topic_names_map: HashMap<IdAndPartition, String>,
     closed: bool,
+    /// Response-routing channel (Phase 7). Each request's spawned forwarder
+    /// sends its resolved [`PendingShareCompletion`] here; the next
+    /// [`RequestManager::poll`] drains it into `handle_share_*`. Java runs the
+    /// equivalent `whenComplete` lambda on the network thread; Rust serializes
+    /// the `&mut self` dispatch through `poll` instead.
+    pending_completion_tx: mpsc::UnboundedSender<PendingShareCompletion>,
+    pending_completion_rx: mpsc::UnboundedReceiver<PendingShareCompletion>,
+    /// When `Some`, `poll` attaches a spawned response forwarder to every
+    /// emitted `UnsentRequest` and wakes the bg task via this `Notify` when a
+    /// response is ready. Left `None` in unit tests (which drive
+    /// `handle_share_*` directly), so no forwarder is spawned and a dropped
+    /// request sender cannot inject a spurious failure — mirrors
+    /// `FetchRequestManager::completion_notify` being production-only.
+    completion_notify: Option<Arc<Notify>>,
+    /// Per-poll scratch of request metadata, in the same order as the
+    /// `PollResult`'s `unsent_requests`. Drained by `attach_forwarders`.
+    pending_request_meta: Vec<PendingRequestMeta>,
 }
 
 impl ShareConsumeRequestManager {
@@ -640,6 +709,7 @@ impl ShareConsumeRequestManager {
         retry_backoff_max_ms: i64,
     ) -> Self {
         let (close_handle, close_rx) = CompletableEventHandle::new(i64::MAX);
+        let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
         Self {
             time,
             log_context,
@@ -665,7 +735,21 @@ impl ShareConsumeRequestManager {
             is_acknowledgement_commit_callback_registered: Arc::new(AtomicBool::new(false)),
             topic_names_map: HashMap::new(),
             closed: false,
+            pending_completion_tx,
+            pending_completion_rx,
+            completion_notify: None,
+            pending_request_meta: Vec::new(),
         }
+    }
+
+    /// Wires the production response-routing notify (Phase 7). When set, `poll`
+    /// spawns one forwarder per emitted `UnsentRequest` that routes the
+    /// response back through [`Self::drain_pending_completions`], and wakes the
+    /// bg task via `notify` so the next `run_once` drains it promptly. Called
+    /// only by the production ctor — unit tests leave it unset and drive the
+    /// `handle_share_*` handlers directly.
+    pub(crate) fn set_completion_notify(&mut self, notify: Arc<Notify>) {
+        self.completion_notify = Some(notify);
     }
 
     fn is_share_acquire_mode_record_limit(&self) -> bool {
@@ -891,6 +975,22 @@ impl ShareConsumeRequestManager {
 
     /// Corresponds to Java's `poll(long currentTimeMs)`.
     pub(crate) fn poll(&mut self, current_time_ms: i64) -> PollResult {
+        // Phase 7: drain any responses routed back by prior requests' spawned
+        // forwarders BEFORE building new requests, so state-update happens
+        // first (mirrors `FetchRequestManager::poll`). No-op in unit tests
+        // (no forwarder is ever spawned when `completion_notify` is unset).
+        self.drain_pending_completions();
+        let mut result = self.poll_body(current_time_ms);
+        // Attach production response forwarders to the emitted requests (or
+        // clear the per-poll meta scratch when routing is disabled).
+        self.attach_forwarders(&mut result);
+        result
+    }
+
+    /// The request-building body of `poll` (Java's `poll`), split out so the
+    /// public [`Self::poll`] can bracket it with the Phase-7 response-routing
+    /// drain / forwarder attachment.
+    fn poll_body(&mut self, current_time_ms: i64) -> PollResult {
         if self.member_id.is_none() {
             if self.closing && !self.close_future.is_done() {
                 self.close_future.complete(());
@@ -908,6 +1008,146 @@ impl ShareConsumeRequestManager {
         }
 
         self.poll_fetch()
+    }
+
+    /// Attaches a spawned response forwarder to each emitted `UnsentRequest`
+    /// (production routing), or clears the per-poll meta scratch when routing
+    /// is disabled (unit tests). The `pending_request_meta` list is in the same
+    /// order as `result.unsent_requests`, so they are zipped 1:1.
+    ///
+    /// Java runs a `whenComplete((clientResponse, error) -> ...)` lambda on the
+    /// network thread; each forwarder is the Rust analog — it awaits the
+    /// request's response receiver, converts it to a [`PendingShareCompletion`]
+    /// and routes it back through [`Self::drain_pending_completions`] on the
+    /// next `poll`. One `tokio::spawn` per request (per-broker batch), NOT
+    /// per-record (CLAUDE.md §11); the `ShareFetchResponse` record buffer
+    /// travels by ownership through the channel, never copied (§27).
+    fn attach_forwarders(&mut self, result: &mut PollResult) {
+        let meta = std::mem::take(&mut self.pending_request_meta);
+        let Some(notify) = self.completion_notify.clone() else {
+            // Routing disabled (unit tests): drop the meta, spawn nothing.
+            return;
+        };
+        debug_assert_eq!(
+            meta.len(),
+            result.unsent_requests.len(),
+            "pending_request_meta must be 1:1 with the emitted unsent_requests"
+        );
+        for (unsent, meta) in result.unsent_requests.iter_mut().zip(meta) {
+            let Some(response_rx) = unsent.take_response_receiver() else {
+                continue;
+            };
+            let tx = self.pending_completion_tx.clone();
+            let notify = Arc::clone(&notify);
+            tokio::spawn(async move {
+                let completion = match meta {
+                    PendingRequestMeta::Fetch { node, request_data } => match response_rx.await {
+                        Ok(Ok(mut client_response)) => {
+                            let request_version = client_response.request_header().api_version();
+                            match client_response.take_response_body() {
+                                Some(ConcreteResponse::ShareFetch(response)) => PendingShareCompletion::FetchResponse {
+                                    fetch_target: node,
+                                    request_data,
+                                    response,
+                                    request_version,
+                                },
+                                _ => PendingShareCompletion::FetchFailure {
+                                    fetch_target: node,
+                                    request_data,
+                                    error: KafkaError::new(Errors::UnknownServerError),
+                                },
+                            }
+                        },
+                        Ok(Err(err)) => {
+                            PendingShareCompletion::FetchFailure { fetch_target: node, request_data, error: err }
+                        },
+                        Err(_recv) => PendingShareCompletion::FetchFailure {
+                            fetch_target: node,
+                            request_data,
+                            error: KafkaError::new(Errors::NetworkException),
+                        },
+                    },
+                    PendingRequestMeta::Ack { node, request_data } => match response_rx.await {
+                        Ok(Ok(mut client_response)) => {
+                            let request_version = client_response.request_header().api_version();
+                            let completion_time_ms = client_response.received_time_ms();
+                            match client_response.take_response_body() {
+                                Some(ConcreteResponse::ShareAcknowledge(response)) => {
+                                    PendingShareCompletion::AckResponse {
+                                        fetch_target: node,
+                                        request_data,
+                                        response,
+                                        request_version,
+                                        response_completion_time_ms: completion_time_ms,
+                                    }
+                                },
+                                _ => PendingShareCompletion::AckFailure {
+                                    fetch_target: node,
+                                    request_data,
+                                    error: KafkaError::new(Errors::UnknownServerError),
+                                },
+                            }
+                        },
+                        Ok(Err(err)) => {
+                            PendingShareCompletion::AckFailure { fetch_target: node, request_data, error: err }
+                        },
+                        Err(_recv) => PendingShareCompletion::AckFailure {
+                            fetch_target: node,
+                            request_data,
+                            error: KafkaError::new(Errors::NetworkException),
+                        },
+                    },
+                };
+                // Receiver lives as long as the manager; ignore the send error
+                // in case the manager was dropped during a shutdown race.
+                let _ = tx.send(completion);
+                // Wake the bg task so the next `run_once` drains this completion
+                // promptly instead of waiting for the network poll's
+                // `maximumTimeToWait`.
+                notify.notify_one();
+            });
+        }
+    }
+
+    /// Drains the [`PendingShareCompletion`] channel into
+    /// `handle_share_fetch_*` / `handle_share_acknowledge_*`. Called at the top
+    /// of [`Self::poll`]. Java runs the equivalent work inside the network
+    /// thread's `whenComplete` lambda; Rust runs it here to keep all
+    /// `&mut self` access serialized through `poll`.
+    fn drain_pending_completions(&mut self) {
+        while let Ok(completion) = self.pending_completion_rx.try_recv() {
+            match completion {
+                PendingShareCompletion::FetchResponse { fetch_target, request_data, response, request_version } => {
+                    self.handle_share_fetch_success(&fetch_target, &request_data, response, request_version);
+                },
+                PendingShareCompletion::FetchFailure { fetch_target, request_data, error } => {
+                    self.handle_share_fetch_failure(&fetch_target, &request_data, &error);
+                },
+                PendingShareCompletion::AckResponse {
+                    fetch_target,
+                    request_data,
+                    response,
+                    request_version,
+                    response_completion_time_ms,
+                } => {
+                    self.handle_share_acknowledge_success(
+                        &fetch_target,
+                        &request_data,
+                        response,
+                        request_version,
+                        response_completion_time_ms,
+                    );
+                },
+                PendingShareCompletion::AckFailure { fetch_target, request_data, error } => {
+                    self.handle_share_acknowledge_failure(
+                        &fetch_target,
+                        &request_data,
+                        &error,
+                        self.time.milliseconds(),
+                    );
+                },
+            }
+        }
     }
 
     /// The fetch-building half of `poll`, mirroring the second part of Java's
@@ -934,6 +1174,7 @@ impl ShareConsumeRequestManager {
             share_fetch_config,
             subscriptions,
             group_id,
+            pending_request_meta,
             ..
         } = self;
 
@@ -1081,7 +1322,9 @@ impl ShareConsumeRequestManager {
             };
             trace!("Building ShareFetch request to send to node {node_id}");
             nodes_with_pending_requests.insert(node_id);
-            requests.push(UnsentRequest::new(Box::new(builder), Some(node)));
+            let request_data = builder.data().clone();
+            requests.push(UnsentRequest::new(Box::new(builder), Some(node.clone())));
+            pending_request_meta.push(PendingRequestMeta::Fetch { node, request_data });
         }
 
         PollResult::with_requests(requests)
@@ -1100,6 +1343,7 @@ impl ShareConsumeRequestManager {
             share_fetch_config,
             closing,
             close_future,
+            pending_request_meta,
             ..
         } = self;
 
@@ -1127,8 +1371,9 @@ impl ShareConsumeRequestManager {
                 let (req, sent) =
                     Self::maybe_build_request(tuple.async_request.as_mut(), current_time_ms, true, node_id, &mut ctx);
                 is_async_sent = sent;
-                if let Some(r) = req {
-                    unsent_requests.push(r);
+                if let Some((unsent, data, node)) = req {
+                    unsent_requests.push(unsent);
+                    pending_request_meta.push(PendingRequestMeta::Ack { node, request_data: data });
                 }
             }
 
@@ -1152,8 +1397,9 @@ impl ShareConsumeRequestManager {
                         node_id,
                         &mut ctx,
                     );
-                    if let Some(r) = req {
-                        unsent_requests.push(r);
+                    if let Some((unsent, data, node)) = req {
+                        unsent_requests.push(unsent);
+                        pending_request_meta.push(PendingRequestMeta::Ack { node, request_data: data });
                     }
                 } else {
                     let queue_len = acknowledge_request_states
@@ -1170,8 +1416,9 @@ impl ShareConsumeRequestManager {
                         let tuple = acknowledge_request_states.get_mut(&node_id).expect("tuple present");
                         let state = tuple.sync_request_queue.as_mut().and_then(|q| q.get_mut(i));
                         let (req, _) = Self::maybe_build_request(state, current_time_ms, false, node_id, &mut ctx);
-                        if let Some(r) = req {
-                            unsent_requests.push(r);
+                        if let Some((unsent, data, node)) = req {
+                            unsent_requests.push(unsent);
+                            pending_request_meta.push(PendingRequestMeta::Ack { node, request_data: data });
                         }
                     }
                 }
@@ -1196,13 +1443,14 @@ impl ShareConsumeRequestManager {
     /// Corresponds to Java's `maybeBuildRequest`. Returns the built request (if
     /// any) and whether the async request was considered "sent" (only
     /// meaningful when `on_commit_async` is `true`).
+    #[allow(clippy::type_complexity)]
     fn maybe_build_request(
         state: Option<&mut AcknowledgeRequestState>,
         current_time_ms: i64,
         _on_commit_async: bool,
         node_id: i32,
         ctx: &mut AckBuildCtx<'_>,
-    ) -> (Option<UnsentRequest>, bool) {
+    ) -> (Option<(UnsentRequest, ShareAcknowledgeRequestData, Node)>, bool) {
         let Some(state) = state else { return (None, true) };
         if (!state.is_close_request() && state.is_empty()) || (state.is_close_request() && state.is_processed) {
             return (None, true);
@@ -1234,13 +1482,15 @@ impl ShareConsumeRequestManager {
         (Some(request), true)
     }
 
-    /// Corresponds to Java's `AcknowledgeRequestState.buildRequest`.
+    /// Corresponds to Java's `AcknowledgeRequestState.buildRequest`. Returns the
+    /// built request together with the request data + target node so the
+    /// caller can attach a response forwarder (Phase 7 response routing).
     fn build_ack_request(
         state: &mut AcknowledgeRequestState,
         node_id: i32,
         ctx: &mut AckBuildCtx<'_>,
         current_time_ms: i64,
-    ) -> Option<UnsentRequest> {
+    ) -> Option<(UnsentRequest, ShareAcknowledgeRequestData, Node)> {
         let session_handler = ctx.session_handlers.get_mut(&node_id)?;
 
         // If this is the closing request, close the share session by setting
@@ -1292,7 +1542,9 @@ impl ShareConsumeRequestManager {
             state.acknowledgements_to_send.clear();
         }
 
-        Some(UnsentRequest::new(Box::new(request_builder), Some(node)))
+        let request_data = request_builder.data().clone();
+        let unsent = UnsentRequest::new(Box::new(request_builder), Some(node.clone()));
+        Some((unsent, request_data, node))
     }
 
     /// Corresponds to Java's `checkAndRemoveCompletedAcknowledgements`.
@@ -5124,5 +5376,69 @@ mod tests {
         // waits since it has no acks to send).
         assert_eq!(1, h.send_fetches());
         assert!(!h.has_completed_fetches());
+    }
+
+    /// Phase-7 response-routing test: with `set_completion_notify` wired (the
+    /// production path), `poll` attaches a spawned forwarder to the emitted
+    /// `ShareFetch` request. Completing the request's handler with a
+    /// `ShareFetchResponse` must route the response back through the next
+    /// `poll`'s `drain_pending_completions` into `handle_share_fetch_success`,
+    /// making the fetched records observable in the `ShareFetchBuffer`. This is
+    /// the unit-level analog of `FetchRequestManager::test_response_routing_*`.
+    #[tokio::test]
+    async fn test_response_routing_fetch_success_path() {
+        use crate::client_response::ClientResponse;
+        use crate::common::requests::RequestHeader;
+
+        let notify = Arc::new(Notify::new());
+        let mut h = Harness::default();
+        h.mgr.set_completion_notify(Arc::clone(&notify));
+        h.assign_from_subscribed(&[h.tp(0)]);
+        let tip = h.tip(0);
+
+        // Ask for records, then poll to emit a ShareFetch request with a
+        // spawned response forwarder.
+        h.mgr.fetch(IndexMap::new());
+        let pr = h.mgr.poll(h.now());
+        assert_eq!(1, pr.unsent_requests.len(), "expected one ShareFetch request");
+        let unsent = pr.unsent_requests.into_iter().next().unwrap();
+
+        // Complete the request as the network client would.
+        let records = build_records(0, 5, 0);
+        let response = full_fetch_response(&tip, records, acquired_records(0, 5), Errors::None);
+        let version = ApiKeys::SHARE_FETCH.latest_version();
+        let header = RequestHeader::new(&ApiKeys::SHARE_FETCH, version, "client", 0).expect("header");
+        let client_response = ClientResponse::new(
+            header,
+            None,
+            "0",
+            h.now(),
+            h.now(),
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ShareFetch(response)),
+        );
+        unsent.handler().on_complete(client_response);
+        drop(unsent);
+
+        // The forwarder routes the response onto the channel; the next `poll`
+        // drains it into `handle_share_fetch_success`, which adds the completed
+        // fetch to the buffer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let _ = h.mgr.poll(h.now());
+            if h.mgr.has_completed_fetches() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("response routing did not deliver the ShareFetch response to the buffer");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            h.mgr.has_completed_fetches(),
+            "handle_share_fetch_success must add the completed fetch to the ShareFetchBuffer"
+        );
     }
 }
