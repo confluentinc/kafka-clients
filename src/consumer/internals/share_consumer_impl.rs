@@ -53,11 +53,13 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use tokio::sync::Notify;
 
 use crate::common::{KafkaError, TopicIdPartition, Uuid};
 use crate::consumer::acknowledge_type::AcknowledgeType;
@@ -127,6 +129,88 @@ pub(crate) trait ShareApplicationEventHandler: Send + Sync {
 
     /// Java: `applicationEventHandler.close(Duration)`.
     async fn close(&self, timeout_ms: i64);
+}
+
+/// Production [`ShareApplicationEventHandler`] used by `new_share_consumer`.
+///
+/// Wraps the same channel + wakeup + bg-task-close machinery the KIP-848
+/// `AsyncKafkaConsumer` uses. Java's `ShareConsumerImpl` holds a real
+/// `ApplicationEventHandler` directly; Rust's `ShareConsumerImpl` takes the
+/// mockable [`ShareApplicationEventHandler`] trait, so this struct is the
+/// production impl behind it.
+pub(crate) struct ProductionShareApplicationEventHandler {
+    /// The shared channel-side adapter that pushes [`ApplicationEvent`]s onto
+    /// the bg-task's application-event channel and pokes the selector-wakeup
+    /// notify (Java's `wakeupNetworkThread()` on every `add`).
+    application_event_handler:
+        Arc<crate::consumer::internals::events::application_event_handler::ApplicationEventHandler>,
+    /// Mirror of the bg task's `cachedMaximumTimeToWait`.
+    max_time_to_wait_ms: Arc<AtomicI64>,
+    /// Selector-wakeup notify shared with the bg task's `run_once` `select!`;
+    /// fired by [`Self::wakeup_network_thread`].
+    event_notify: Arc<Notify>,
+    /// Erased handle to the bg task, used by [`Self::close`] to signal shutdown
+    /// and join. `tokio::sync::Mutex` because `await_join` is `&mut` + async
+    /// and the trait method is `&self`.
+    network_thread_close: tokio::sync::Mutex<crate::consumer::async_kafka_consumer::NetworkThreadCloseHandle>,
+}
+
+impl ProductionShareApplicationEventHandler {
+    pub(crate) fn new(
+        application_event_handler: Arc<
+            crate::consumer::internals::events::application_event_handler::ApplicationEventHandler,
+        >,
+        max_time_to_wait_ms: Arc<AtomicI64>,
+        event_notify: Arc<Notify>,
+        network_thread_close: crate::consumer::async_kafka_consumer::NetworkThreadCloseHandle,
+    ) -> Self {
+        Self {
+            application_event_handler,
+            max_time_to_wait_ms,
+            event_notify,
+            network_thread_close: tokio::sync::Mutex::new(network_thread_close),
+        }
+    }
+}
+
+#[async_trait]
+impl ShareApplicationEventHandler for ProductionShareApplicationEventHandler {
+    fn add(&self, event: ApplicationEvent, enqueued_ms: i64) {
+        // Java's `add` throws if the queue is closed; here a send error means
+        // the bg task has already shut down. Completable events left
+        // unanswered resolve on the app side via a dropped-sender error
+        // (mapped to a timeout in `ShareConsumerImpl`).
+        if let Err(e) = self.application_event_handler.add(event, enqueued_ms) {
+            log::debug!("Failed to enqueue share application event: {e}");
+        }
+    }
+
+    fn maximum_time_to_wait(&self) -> i64 {
+        self.max_time_to_wait_ms.load(Ordering::Acquire)
+    }
+
+    fn wakeup_network_thread(&self) {
+        // Java: `networkClientDelegate.wakeup()` → `Selector.wakeup()`. Poking
+        // the shared notify makes the bg task's in-progress network poll return
+        // at a safe boundary (consumer-threading.md §10).
+        self.event_notify.notify_one();
+    }
+
+    async fn close(&self, timeout_ms: i64) {
+        let mut guard = self.network_thread_close.lock().await;
+        guard.signal_close();
+        guard.wakeup();
+        // Bound the join so `close` cannot hang if the bg task is stuck; the
+        // acknowledge/leave-group steps already awaited with their own timeout
+        // before this call.
+        let join = guard.await_join();
+        let dur = Duration::from_millis(timeout_ms.max(0) as u64);
+        match tokio::time::timeout(dur, join).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => log::warn!("Share consumer network task terminated with error: {e}"),
+            Err(_) => log::warn!("Timed out waiting for the share consumer network task to stop"),
+        }
+    }
 }
 
 /// Fetch-collection seam — the Rust translation of Java's mockable
