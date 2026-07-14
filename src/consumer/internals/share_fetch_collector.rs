@@ -453,7 +453,37 @@ mod tests {
         ShareCompletedFetch::new(0, h.topic_a_partition0.clone(), pd, DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS)
     }
 
+    /// Builds a [`ShareCompletedFetch`] on a distinct partition whose batch has
+    /// a broken CRC (a byte in the records region is flipped), so that
+    /// `ensure_valid` fails under `check_crcs = true`.
+    fn build_corrupt_completed_fetch() -> ShareCompletedFetch {
+        let tip = TopicIdPartition::new(Uuid::random_uuid(), TopicPartition::new("topic-a".to_string(), 1));
+        let simple: Vec<SimpleRecord> = (0..5)
+            .map(|i| SimpleRecord::new(0, Some(b"key".to_vec()), Some(format!("value-{i}").into_bytes()), vec![]))
+            .collect();
+        let mut records =
+            MemoryRecords::with_records_at_offset(2, 0, Compression::none(), TimestampType::CreateTime, &simple)
+                .buffer()
+                .to_vec();
+        // Flip the last byte (in the CRC-covered records region) so the stored
+        // batch CRC no longer matches the recomputed one.
+        let last = records.len() - 1;
+        records[last] ^= 0xFF;
+
+        let mut pd = PartitionData::new();
+        pd.partition_index = 1;
+        pd.records = Some(records);
+        pd.acquired_records = acquired_records(0, 5);
+        ShareCompletedFetch::new(0, tip, pd, DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS)
+    }
+
     /// Translated from `ShareFetchCollectorTest.testFetchNormal`.
+    ///
+    /// Java also asserts the `ShareCompletedFetch` lifecycle across the two
+    /// collects (`isInitialized()` true, `isConsumed()` false, then true). Those
+    /// assertions are dropped here because the `cf` is moved into the buffer's
+    /// next-in-line slot (owned, not a shared reference we can inspect); the
+    /// observable substitute is `has_next_in_line_fetch()`.
     #[test]
     fn test_fetch_normal() {
         let record_count = DEFAULT_MAX_POLL_RECORDS;
@@ -644,28 +674,73 @@ mod tests {
         .into_iter()
         .collect();
 
-        // A representative "other" error (Java iterates all Errors.values()
-        // minus the handled set; here we pick one that is clearly unhandled).
-        let other = Errors::InvalidRecordState;
-        assert!(!handled.contains(&other), "test error must be unhandled");
+        // Sweep every Kafka error code; skip the handled ones. Each remaining
+        // (unhandled) error must hit the catch-all `IllegalState` arm — this is
+        // the defensive check Java's parameterization provides (a newly added
+        // error code must not be silently miscategorized). Rust's `Errors` has
+        // no all-variants iterator, so we sweep by code via `Errors::for_code`
+        // (out-of-range codes collapse to `UnknownServerError`, which is
+        // handled and skipped), covering the same set Java iterates.
+        let mut asserted_any = false;
+        for code in 0..=130_i16 {
+            let error = Errors::for_code(code);
+            if handled.contains(&error) {
+                continue;
+            }
+            let h = build_dependencies(DEFAULT_MAX_POLL_RECORDS);
+            subscribe_and_assign(&h);
+            let completed_fetch = build_completed_fetch(&h, DEFAULT_RECORD_COUNT, Some(error));
+            h.fetch_buffer.add([completed_fetch]);
+            let err = h
+                .collector
+                .collect(&h.fetch_buffer)
+                .expect_err("unexpected error must propagate");
+            assert!(
+                matches!(err.cause(), KafkaError::IllegalState(_)),
+                "error {error:?} (code {code}): expected IllegalState, got: {:?}",
+                err.cause()
+            );
+            assert!(
+                err.cause().message().contains("Unexpected error code"),
+                "error {error:?}: got: {}",
+                err.cause().message()
+            );
+            asserted_any = true;
+        }
+        assert!(asserted_any, "sweep must cover at least one unhandled error code");
+    }
 
+    /// Regression for Critic Phase-3 Finding 1: a corrupt / CRC-failed batch
+    /// encountered AFTER good records were already collected must be swallowed
+    /// (Java's `catch (KafkaException e) { if (fetch.isEmpty()) throw e; }`,
+    /// `ShareFetchCollector.java:121-125`), returning the good records and
+    /// deferring the retriable corrupt error — NOT propagated as an error that
+    /// drops the good records.
+    ///
+    /// Scenario: partition A (valid, 5 records) and partition B (a CRC-corrupt
+    /// batch) with `check_crcs = true`. `collect` processes A first (records
+    /// enter `fetch`), then B's `fetch_records` fails validation with an empty
+    /// in-flight batch → `reject_record_batch` + `set_exception`. Because the
+    /// error is now classified as `Errors::CorruptMessage` (not `IllegalState`),
+    /// the collector swallows it (fetch is non-empty) and returns A's records.
+    ///
+    /// Before the fix, the corrupt error was mapped to `illegal_state`, which
+    /// the collector's `is_illegal_state` escape treated as always-propagating,
+    /// so `collect` returned `Err` and dropped A's already-collected records.
+    #[test]
+    fn test_corrupt_batch_after_good_records_is_swallowed() {
         let h = build_dependencies(DEFAULT_MAX_POLL_RECORDS);
         subscribe_and_assign(&h);
-        let completed_fetch = build_completed_fetch(&h, DEFAULT_RECORD_COUNT, Some(other));
-        h.fetch_buffer.add([completed_fetch]);
-        let err = h
-            .collector
-            .collect(&h.fetch_buffer)
-            .expect_err("unexpected error must propagate");
-        assert!(
-            matches!(err.cause(), KafkaError::IllegalState(_)),
-            "expected IllegalState, got: {:?}",
-            err.cause()
-        );
-        assert!(
-            err.cause().message().contains("Unexpected error code"),
-            "got: {}",
-            err.cause().message()
-        );
+
+        // Partition A: valid, 5 records.
+        let cf_a = build_completed_fetch(&h, 5, None);
+        // Partition B: a CRC-corrupt batch on a different partition.
+        let cf_b = build_corrupt_completed_fetch();
+
+        h.fetch_buffer.add([cf_a, cf_b]);
+
+        let mut fetch = h.collector.collect(&h.fetch_buffer).expect("corrupt error must be swallowed");
+        assert!(!fetch.is_empty(), "partition A's records must be returned");
+        assert_eq!(5, fetch.num_records());
     }
 }

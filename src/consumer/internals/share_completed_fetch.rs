@@ -51,6 +51,7 @@ use std::collections::HashSet;
 use log::error;
 
 use crate::common::header::internals::RecordHeaders;
+use crate::common::protocol::Errors;
 use crate::common::record::abstract_records::LOG_OVERHEAD;
 use crate::common::record::{
     DefaultRecord, DefaultRecordBatchRef, MemoryRecords, RecordBatch, RecordVersion, TimestampType,
@@ -556,14 +557,7 @@ impl ShareCompletedFetch {
                     meta.base_sequence,
                     log_append_time,
                 )
-                .map_err(|e| {
-                    KafkaError::illegal_state(format!(
-                        "Record batch for partition {} at offset {} is invalid, cause: {}",
-                        self.partition.topic_partition(),
-                        meta.base_offset,
-                        e
-                    ))
-                })?;
+                .map_err(|e| corrupt_record_error(self.partition.topic_partition().to_string(), meta.base_offset, e))?;
                 (record.offset(), consumed)
             };
 
@@ -760,22 +754,12 @@ impl ShareCompletedFetch {
                 let batch = DefaultRecordBatchRef::new(&buffer[header.batch_start..]);
                 if check_crcs && header.magic >= RecordVersion::V2.value() {
                     batch.ensure_valid().map_err(|e| {
-                        KafkaError::illegal_state(format!(
-                            "Record batch for partition {} at offset {} is invalid, cause: {}",
-                            self.partition.topic_partition(),
-                            header.meta.base_offset,
-                            e
-                        ))
+                        corrupt_record_error(self.partition.topic_partition().to_string(), header.meta.base_offset, e)
                     })?;
                 }
                 if header.is_compressed {
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        KafkaError::illegal_state(format!(
-                            "Record batch for partition {} at offset {} is invalid, cause: {}",
-                            self.partition.topic_partition(),
-                            header.meta.base_offset,
-                            e
-                        ))
+                        corrupt_record_error(self.partition.topic_partition().to_string(), header.meta.base_offset, e)
                     })?;
                     RecordSource::Owned(decompressed)
                 } else {
@@ -840,6 +824,33 @@ fn new_record_deserialization_error(
         offset,
         cause.message(),
     ))
+}
+
+/// Builds the error for a failed CRC / batch validation ("corrupt batch").
+///
+/// Uses [`Errors::CorruptMessage`] — NOT [`KafkaError::illegal_state`]. In Java
+/// the equivalent is `CorruptRecordException`, a regular `KafkaException` (via
+/// `RetriableException`/`ApiException`). This matters because
+/// [`ShareFetchCollector::collect`] treats [`KafkaError::IllegalState`] as
+/// *always-propagating* — that arm mirrors ONLY Java's `IllegalStateException`
+/// ("unexpected error code"). A corrupt-batch error must instead be *swallowed*
+/// when records were already collected, so the good records are returned and
+/// the retriable error deferred (Java's
+/// `catch (KafkaException e) { if (fetch.isEmpty()) throw e; }`,
+/// `ShareFetchCollector.java:121-125`).
+///
+/// NOTE: the pre-existing non-share `completed_fetch.rs` / `fetch_collector.rs`
+/// map CRC failures to `illegal_state` and share the same `is_illegal_state`
+/// escape, so the same divergence likely exists there. That is out of
+/// Milestone 9 scope and intentionally left untouched; a future cleanup should
+/// align both paths with this one.
+///
+/// [`ShareFetchCollector::collect`]: super::share_fetch_collector::ShareFetchCollector::collect
+fn corrupt_record_error(topic_partition: String, base_offset: i64, cause: impl std::fmt::Display) -> KafkaError {
+    KafkaError::with_message(
+        Errors::CorruptMessage,
+        format!("Record batch for partition {topic_partition} at offset {base_offset} is invalid, cause: {cause}"),
+    )
 }
 
 fn maybe_leader_epoch(leader_epoch: i32) -> Option<i32> {
