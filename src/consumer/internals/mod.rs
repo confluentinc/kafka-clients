@@ -20,6 +20,8 @@
 pub(crate) mod abstract_fetch;
 pub(crate) mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
+pub(crate) mod acknowledgement_batch;
+pub(crate) mod acknowledgements;
 pub(crate) mod auto_offset_reset_strategy;
 pub(crate) mod commit_request_manager;
 pub(crate) mod completed_fetch;
@@ -50,6 +52,8 @@ pub(crate) mod offsets_request_manager;
 pub(crate) mod request_manager;
 pub(crate) mod request_managers;
 pub(crate) mod request_state;
+pub(crate) mod share_acquire_mode;
+pub(crate) mod share_fetch_config;
 pub(crate) mod subscription_state;
 pub(crate) mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
