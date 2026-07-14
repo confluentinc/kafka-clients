@@ -299,6 +299,16 @@ impl ResultHandler {
     pub(crate) fn is_future_done(&self) -> bool {
         self.future.as_ref().is_some_and(|f| f.is_done())
     }
+
+    /// Test-only: decrement the pending-result counter, mirroring Java tests
+    /// that hold the shared `AtomicInteger resultCount` and call
+    /// `resultCount.decrementAndGet()` directly.
+    #[cfg(test)]
+    pub(crate) fn decrement_remaining_for_test(&self) {
+        if let Some(remaining) = &self.remaining_results {
+            remaining.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Represents a request to acknowledge delivery that can be retried or
@@ -2155,5 +2165,1324 @@ impl ShareConsumeRequestManager {
 impl RequestManager for ShareConsumeRequestManager {
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
         ShareConsumeRequestManager::poll(self, current_time_ms)
+    }
+}
+
+/// Unit tests translated from Java's `ShareConsumeRequestManagerTest`.
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicI64;
+
+    use super::*;
+    use crate::common::IsolationLevel;
+    use crate::common::compress::Compression;
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::record::{MemoryRecords, SimpleRecord, TimestampType};
+    use crate::common::requests::request_test_utils::metadata_update_with_ids;
+    use crate::common::serialization::Deserializer;
+    use crate::common::{Node, TopicPartition};
+    use crate::consumer::AcknowledgeType;
+    use crate::consumer::ConsumerRecord;
+    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
+    use crate::consumer::internals::deserializers::Deserializers;
+    use crate::consumer::internals::events::share_acknowledgement_event_handler::ShareAcknowledgementEventQueue;
+    use crate::consumer::internals::share_fetch::ShareFetch;
+    use crate::consumer::internals::share_fetch_collector::ShareFetchCollector;
+    use crate::consumer::internals::subscription_state::SubscriptionState;
+    use crate::share_acknowledge_response_data::PartitionData as AckPartitionData;
+    use crate::share_fetch_response_data::{AcquiredRecords, PartitionData as FetchPartitionData};
+
+    const TOPIC_NAME: &str = "test";
+    const TOPIC_NAME_2: &str = "test-2";
+    const GROUP_ID: &str = "test-group";
+    const VALID_LEADER_EPOCH: i32 = 0;
+    const RETRY_BACKOFF_MS: i64 = 100;
+    const DEFAULT_API_TIMEOUT_MS: i64 = 60_000;
+
+    /// Mirrors Java's `MockTime(1, 0, 0)` — an auto-ticking clock: every read
+    /// of `milliseconds()` returns the current value then advances by 1ms.
+    /// This nudges timers past exact backoff/deadline boundaries the same way
+    /// the Java tests rely on.
+    struct MockClock {
+        now: AtomicI64,
+    }
+    impl MockClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self { now: AtomicI64::new(0) })
+        }
+        fn sleep(&self, ms: i64) {
+            self.now.fetch_add(ms, Ordering::SeqCst);
+        }
+        /// Auto-ticking read (returns the current value, then advances by 1ms).
+        fn millis(&self) -> i64 {
+            self.now.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+    impl ShareConsumeTime for MockClock {
+        fn milliseconds(&self) -> i64 {
+            self.now.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    /// Byte-array deserializer (Java's `ByteArrayDeserializer`).
+    struct ByteArrayDeserializer;
+    impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+            Ok(data.to_vec())
+        }
+    }
+
+    type FetchedRecords = IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>>;
+
+    struct Harness {
+        mgr: ShareConsumeRequestManager,
+        collector: ShareFetchCollector<Vec<u8>, Vec<u8>>,
+        buffer: Arc<ShareFetchBuffer>,
+        ack_handler: ShareAcknowledgementEventHandler,
+        clock: Arc<MockClock>,
+        metadata: Arc<ShareConsumerMetadata>,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+        completed_acknowledgements: Vec<IndexMap<TopicIdPartition, Acknowledgements>>,
+        renewed_records: HashSet<i64>,
+        pending_fetches: Vec<(Node, ShareFetchRequestData, i16)>,
+        pending_acks: Vec<(Node, ShareAcknowledgeRequestData, i16)>,
+        topic_id: Uuid,
+        topic_id2: Uuid,
+    }
+
+    fn topic_ids(topic_id: Uuid, topic_id2: Uuid) -> HashMap<String, Uuid> {
+        let mut m = HashMap::new();
+        m.insert(TOPIC_NAME.to_string(), topic_id);
+        m.insert(TOPIC_NAME_2.to_string(), topic_id2);
+        m
+    }
+
+    impl Harness {
+        fn build(mode: ShareAcquireMode, member_id: Option<String>) -> Self {
+            let clock = MockClock::new();
+            let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+            let metadata = Arc::new(ShareConsumerMetadata::new(
+                0,
+                1_000,
+                i64::MAX,
+                false,
+                subscriptions.clone(),
+                ClusterResourceListeners::new(),
+            ));
+            let share_fetch_config =
+                ShareFetchConfig::new(1, i32::MAX, 0, 1000, i32::MAX, true, "", IsolationLevel::ReadUncommitted, mode);
+            let buffer = Arc::new(ShareFetchBuffer::new());
+            let ack_queue: ShareAcknowledgementEventQueue = Arc::new(Mutex::new(VecDeque::new()));
+            let ack_handler = ShareAcknowledgementEventHandler::new(ack_queue);
+
+            // The collector holds an `Arc<ConsumerMetadata>` (documented Phase-3
+            // deviation); it is only used for `request_metadata_update`, so a
+            // separate instance over the SAME subscriptions is behaviourally
+            // faithful for these tests (leadership/topic-id reads go through the
+            // manager's `ShareConsumerMetadata`).
+            let collector_metadata = Arc::new(ConsumerMetadata::new(
+                0,
+                1_000,
+                i64::MAX,
+                false,
+                false,
+                subscriptions.clone(),
+                ClusterResourceListeners::new(),
+            ));
+            let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> = Arc::new(Deserializers::new(
+                Box::new(ByteArrayDeserializer),
+                Box::new(ByteArrayDeserializer),
+            ));
+            let collector = ShareFetchCollector::new(
+                collector_metadata,
+                subscriptions.clone(),
+                share_fetch_config.clone(),
+                deserializers,
+            );
+
+            let mut mgr = ShareConsumeRequestManager::new(
+                clock.clone(),
+                LogContext::new("[ShareConsumeRequestManager]"),
+                GROUP_ID.to_string(),
+                metadata.clone(),
+                subscriptions.clone(),
+                share_fetch_config,
+                buffer.clone(),
+                ack_handler.clone(),
+                RETRY_BACKOFF_MS,
+                1000,
+            );
+            if let Some(mid) = member_id {
+                mgr.on_member_epoch_updated(None, &mid);
+            }
+
+            Self {
+                mgr,
+                collector,
+                buffer,
+                ack_handler,
+                clock,
+                metadata,
+                subscriptions,
+                completed_acknowledgements: Vec::new(),
+                renewed_records: HashSet::new(),
+                pending_fetches: Vec::new(),
+                pending_acks: Vec::new(),
+                topic_id: Uuid::random_uuid(),
+                topic_id2: Uuid::random_uuid(),
+            }
+        }
+
+        fn default() -> Self {
+            Self::build(ShareAcquireMode::BatchOptimized, Some(Uuid::random_uuid().to_string()))
+        }
+
+        fn tp(&self, partition: i32) -> TopicPartition {
+            TopicPartition::new(TOPIC_NAME.to_string(), partition)
+        }
+        fn tip(&self, partition: i32) -> TopicIdPartition {
+            TopicIdPartition::new(self.topic_id, self.tp(partition))
+        }
+        fn t2p0(&self) -> TopicPartition {
+            TopicPartition::new(TOPIC_NAME_2.to_string(), 0)
+        }
+        fn t2ip0(&self) -> TopicIdPartition {
+            TopicIdPartition::new(self.topic_id2, self.t2p0())
+        }
+
+        fn now(&self) -> i64 {
+            self.clock.millis()
+        }
+        fn deadline(&self, ms: i64) -> i64 {
+            crate::consumer::internals::events::completable_event::calculate_deadline_ms(self.now(), ms)
+        }
+
+        fn set_ack_callback_registered(&self, registered: bool) {
+            self.mgr.set_acknowledgement_commit_callback_registered(registered);
+        }
+
+        /// Mirrors `assignFromSubscribed(partitions)` — subscribe to the
+        /// share group, assign, then apply metadata with valid leaders.
+        fn assign_from_subscribed(&mut self, partitions: &[TopicPartition]) {
+            let counts_all: HashMap<String, i32> = [(TOPIC_NAME.to_string(), 2), (TOPIC_NAME_2.to_string(), 1)]
+                .into_iter()
+                .collect();
+            {
+                let mut guard = self.subscriptions.lock().unwrap();
+                let topics: HashSet<String> = partitions.iter().map(|p| p.topic().to_string()).collect();
+                guard.subscribe_to_share_group(topics).unwrap();
+                guard.assign_from_subscribed(partitions).unwrap();
+            }
+            let ids = topic_ids(self.topic_id, self.topic_id2);
+            let initial = metadata_update_with_ids("kafka-cluster", 1, &HashMap::new(), &counts_all, &|_| None, &ids);
+            self.metadata
+                .metadata_arc()
+                .update_with_current_request_version(&initial, false, self.now());
+            let with_epoch = metadata_update_with_ids(
+                "kafka-cluster",
+                1,
+                &HashMap::new(),
+                &counts_all,
+                &|_| Some(VALID_LEADER_EPOCH),
+                &ids,
+            );
+            self.metadata
+                .metadata_arc()
+                .update_with_current_request_version(&with_epoch, false, self.now());
+        }
+
+        /// Applies a metadata update with the given number of nodes and topic
+        /// partition counts (Java `client.updateMetadata` +
+        /// `metadata.updateWithCurrentRequestVersion`).
+        fn update_metadata(&self, num_nodes: i32, counts: &HashMap<String, i32>) {
+            let ids = topic_ids(self.topic_id, self.topic_id2);
+            let resp = metadata_update_with_ids(
+                "kafka-cluster",
+                num_nodes,
+                &HashMap::new(),
+                counts,
+                &|_| Some(VALID_LEADER_EPOCH),
+                &ids,
+            );
+            self.metadata
+                .metadata_arc()
+                .update_with_current_request_version(&resp, false, self.now());
+        }
+
+        fn node_by_id(&self, id: i32) -> Node {
+            self.metadata.fetch().node_by_id(id).cloned().expect("node present")
+        }
+
+        // ── event draining ───────────────────────────────────────────────
+        fn drain_ack_events(&mut self) {
+            for event in self.ack_handler.drain_events() {
+                self.completed_acknowledgements.push(event.acknowledgements_map().clone());
+                if event.check_for_renew_acknowledgements() {
+                    for acks in event.acknowledgements_map().values() {
+                        for offset in acks.get_acknowledgements_type_map().keys() {
+                            self.renewed_records.insert(*offset);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── poll capture / drive ──────────────────────────────────────────
+        #[allow(clippy::type_complexity)]
+        fn poll_and_capture(
+            &mut self,
+        ) -> (
+            Vec<(Node, ShareFetchRequestData, i16)>,
+            Vec<(Node, ShareAcknowledgeRequestData, i16)>,
+        ) {
+            let pr = self.mgr.poll(self.now());
+            let mut fetches = Vec::new();
+            let mut acks = Vec::new();
+            for mut req in pr.unsent_requests {
+                let node = req.node().cloned().expect("node set");
+                let concrete = req.request_builder_mut().expect("builder").build().expect("build");
+                match concrete {
+                    crate::common::requests::ConcreteRequest::ShareFetch(r) => {
+                        fetches.push((node, r.data().clone(), r.version()));
+                    },
+                    crate::common::requests::ConcreteRequest::ShareAcknowledge(r) => {
+                        acks.push((node, r.data().clone(), r.version()));
+                    },
+                    other => panic!("unexpected request {other:?}"),
+                }
+            }
+            self.drain_ack_events();
+            (fetches, acks)
+        }
+
+        fn send_fetches(&mut self) -> usize {
+            self.mgr.fetch(IndexMap::new());
+            let (f, a) = self.poll_and_capture();
+            let n = f.len() + a.len();
+            self.pending_fetches.extend(f);
+            self.pending_acks.extend(a);
+            n
+        }
+
+        fn send_fetches_return_poll_result(&mut self) -> Vec<(Node, ShareFetchRequestData, i16)> {
+            self.mgr.fetch(IndexMap::new());
+            let (f, a) = self.poll_and_capture();
+            self.pending_fetches.extend(f.clone());
+            self.pending_acks.extend(a);
+            f
+        }
+
+        fn send_acknowledgements(&mut self) -> usize {
+            let (f, a) = self.poll_and_capture();
+            let n = f.len() + a.len();
+            self.pending_fetches.extend(f);
+            self.pending_acks.extend(a);
+            n
+        }
+
+        fn deliver_fetch(&mut self, response: ShareFetchResponse) {
+            let (node, data, version) = self.pending_fetches.remove(0);
+            let version = ApiKeys::SHARE_FETCH.latest_version().max(version);
+            self.mgr.handle_share_fetch_success(&node, &data, response, version);
+            self.drain_ack_events();
+        }
+
+        fn deliver_fetch_from(&mut self, response: ShareFetchResponse, node_id: i32) {
+            let idx = self
+                .pending_fetches
+                .iter()
+                .position(|(n, _, _)| n.id() == node_id)
+                .expect("pending fetch");
+            let (node, data, version) = self.pending_fetches.remove(idx);
+            self.mgr.handle_share_fetch_success(&node, &data, response, version);
+            self.drain_ack_events();
+        }
+
+        fn deliver_fetch_failure(&mut self, error: KafkaError) {
+            let (node, data, _version) = self.pending_fetches.remove(0);
+            self.mgr.handle_share_fetch_failure(&node, &data, &error);
+            self.drain_ack_events();
+        }
+
+        fn deliver_fetch_failure_from(&mut self, node_id: i32, error: KafkaError) {
+            let idx = self
+                .pending_fetches
+                .iter()
+                .position(|(n, _, _)| n.id() == node_id)
+                .expect("pending fetch");
+            let (node, data, _version) = self.pending_fetches.remove(idx);
+            self.mgr.handle_share_fetch_failure(&node, &data, &error);
+            self.drain_ack_events();
+        }
+
+        fn deliver_ack(&mut self, response: ShareAcknowledgeResponse) {
+            let (node, data, version) = self.pending_acks.remove(0);
+            self.mgr
+                .handle_share_acknowledge_success(&node, &data, response, version, self.now());
+            self.drain_ack_events();
+        }
+
+        fn deliver_ack_from(&mut self, response: ShareAcknowledgeResponse, node_id: i32) {
+            let idx = self
+                .pending_acks
+                .iter()
+                .position(|(n, _, _)| n.id() == node_id)
+                .expect("pending ack");
+            let (node, data, version) = self.pending_acks.remove(idx);
+            self.mgr
+                .handle_share_acknowledge_success(&node, &data, response, version, self.now());
+            self.drain_ack_events();
+        }
+
+        fn deliver_ack_failure(&mut self, error: KafkaError) {
+            let (node, data, _version) = self.pending_acks.remove(0);
+            self.mgr.handle_share_acknowledge_failure(&node, &data, &error, self.now());
+            self.drain_ack_events();
+        }
+
+        // ── collect ───────────────────────────────────────────────────────
+        fn collect_fetch(&mut self) -> Result<ShareFetch<Vec<u8>, Vec<u8>>, KafkaError> {
+            self.collector.collect(&self.buffer).map_err(|e| e.cause().clone())
+        }
+
+        fn fetch_records(&mut self) -> FetchedRecords {
+            let mut fetch = self.collect_fetch().expect("collect ok");
+            if fetch.is_empty() {
+                IndexMap::new()
+            } else {
+                fetch.take_records()
+            }
+        }
+
+        fn has_completed_fetches(&self) -> bool {
+            self.mgr.has_completed_fetches()
+        }
+
+        /// Mirrors Java's `sendFetchAndVerifyResponse` (tip0, no ack error).
+        fn send_fetch_and_verify(&mut self, records: Vec<u8>, acquired: Vec<AcquiredRecords>, error: Errors) {
+            self.send_fetch_and_verify_ack(records, acquired, error, Errors::None);
+        }
+
+        /// Mirrors Java's `sendFetchAndVerifyResponse` with an ack error.
+        fn send_fetch_and_verify_ack(
+            &mut self,
+            records: Vec<u8>,
+            acquired: Vec<AcquiredRecords>,
+            error: Errors,
+            acknowledge_error: Errors,
+        ) {
+            assert_eq!(1, self.send_fetches());
+            assert!(!self.has_completed_fetches());
+            let tip0 = self.tip(0);
+            let resp = full_fetch_response_ack(&tip0, records, acquired, error, acknowledge_error);
+            self.deliver_fetch(resp);
+            assert!(self.has_completed_fetches());
+        }
+    }
+
+    // ── response / acknowledgement builders ────────────────────────────────
+
+    fn build_records(base_offset: i64, count: i32, first_message_id: i64) -> Vec<u8> {
+        let simple: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                SimpleRecord::new(
+                    0,
+                    Some(b"key".to_vec()),
+                    Some(format!("value-{}", first_message_id + i as i64).into_bytes()),
+                    vec![],
+                )
+            })
+            .collect();
+        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
+            .buffer()
+            .to_vec()
+    }
+
+    fn acquired_records(first_offset: i64, count: i64) -> Vec<AcquiredRecords> {
+        let mut ar = AcquiredRecords::new();
+        ar.first_offset = first_offset;
+        ar.last_offset = first_offset + count - 1;
+        ar.delivery_count = 1;
+        vec![ar]
+    }
+
+    fn partition_data_for_fetch(
+        tip: &TopicIdPartition,
+        records: Vec<u8>,
+        acquired: Vec<AcquiredRecords>,
+        error: Errors,
+        acknowledge_error: Errors,
+    ) -> FetchPartitionData {
+        let mut pd = FetchPartitionData::new();
+        pd.partition_index = tip.partition();
+        pd.error_code = error.code();
+        pd.acknowledge_error_code = acknowledge_error.code();
+        pd.records = Some(records);
+        pd.acquired_records = acquired;
+        pd
+    }
+
+    fn full_fetch_response(
+        tip: &TopicIdPartition,
+        records: Vec<u8>,
+        acquired: Vec<AcquiredRecords>,
+        error: Errors,
+    ) -> ShareFetchResponse {
+        full_fetch_response_ack(tip, records, acquired, error, Errors::None)
+    }
+
+    fn full_fetch_response_ack(
+        tip: &TopicIdPartition,
+        records: Vec<u8>,
+        acquired: Vec<AcquiredRecords>,
+        error: Errors,
+        acknowledge_error: Errors,
+    ) -> ShareFetchResponse {
+        let pd = partition_data_for_fetch(tip, records, acquired, error, acknowledge_error);
+        ShareFetchResponse::of(Errors::None, 0, vec![(tip.clone(), pd)], &[], 0)
+    }
+
+    fn fetch_response_with_top_level_error(tip: &TopicIdPartition, error: Errors) -> ShareFetchResponse {
+        let mut pd = FetchPartitionData::new();
+        pd.partition_index = tip.partition();
+        pd.error_code = error.code();
+        ShareFetchResponse::of(error, 0, vec![(tip.clone(), pd)], &[], 0)
+    }
+
+    fn ack_partition_data(tip: &TopicIdPartition, error: Errors) -> AckPartitionData {
+        let mut pd = AckPartitionData::new();
+        pd.partition_index = tip.partition();
+        pd.error_code = error.code();
+        pd
+    }
+
+    fn full_acknowledge_response(tip: &TopicIdPartition, error: Errors) -> ShareAcknowledgeResponse {
+        ShareAcknowledgeResponse::of(Errors::None, 0, vec![(tip.clone(), ack_partition_data(tip, error))], &[], 0)
+    }
+
+    fn empty_acknowledge_response() -> ShareAcknowledgeResponse {
+        ShareAcknowledgeResponse::of(Errors::None, 0, vec![], &[], 0)
+    }
+
+    fn get_acknowledgements(start_index: i64, types: &[AcknowledgeType]) -> Acknowledgements {
+        let mut acks = Acknowledgements::empty();
+        for (i, &t) in types.iter().enumerate() {
+            acks.add(start_index + i as i64, t);
+        }
+        acks
+    }
+
+    fn node_acks(node_id: i32, acks: Acknowledgements) -> IndexMap<TopicIdPartition, NodeAcknowledgements> {
+        // helper unused placeholder — see per-test construction
+        let _ = (node_id, acks);
+        IndexMap::new()
+    }
+
+    fn single_node_acks(
+        tip: &TopicIdPartition,
+        node_id: i32,
+        acks: Acknowledgements,
+    ) -> IndexMap<TopicIdPartition, NodeAcknowledgements> {
+        let mut m = IndexMap::new();
+        m.insert(tip.clone(), NodeAcknowledgements::new(node_id, acks));
+        m
+    }
+
+    /// Asserts two acknowledgement maps carry the same offset→type entries.
+    fn assert_acks_eq(actual: &Acknowledgements, expected: &Acknowledgements) {
+        assert_eq!(actual.get_acknowledgements_type_map(), expected.get_acknowledgements_type_map());
+    }
+
+    // ── tests ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fetch_normal() {
+        let mut h = Harness::default();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        h.deliver_fetch(full_fetch_response(
+            &h.tip(0),
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+        assert!(h.has_completed_fetches());
+
+        let records = h.fetch_records();
+        assert!(records.contains_key(&h.tp(0)));
+        assert_eq!(3, records.get(&h.tp(0)).unwrap().len());
+    }
+
+    #[test]
+    fn test_fetch_with_acquired_records() {
+        let mut h = Harness::default();
+        h.assign_from_subscribed(&[h.tp(0)]);
+        assert_eq!(1, h.send_fetches());
+        h.deliver_fetch(full_fetch_response(
+            &h.tip(0),
+            build_records(1, 3, 1),
+            acquired_records(1, 1),
+            Errors::None,
+        ));
+
+        let records = h.fetch_records();
+        assert!(records.contains_key(&h.tp(0)));
+        // Only 1 record was acquired, so only 1 record is fetched.
+        assert_eq!(1, records.get(&h.tp(0)).unwrap().len());
+    }
+
+    #[test]
+    fn test_commit_sync() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetches();
+        h.deliver_fetch(full_fetch_response(
+            &h.tip(0),
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let expected = acks.clone();
+        let tip0 = h.tip(0);
+        let _future = h.mgr.commit_sync(single_node_acks(&tip0, 0, acks), h.deadline(2000));
+
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(h.has_completed_fetches());
+
+        assert_eq!(1, h.completed_acknowledgements.len());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_commit_async() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetches();
+        h.deliver_fetch(full_fetch_response(
+            &h.tip(0),
+            build_records(1, 3, 1),
+            acquired_records(1, 3),
+            Errors::None,
+        ));
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let expected = acks.clone();
+        let tip0 = h.tip(0);
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(h.has_completed_fetches());
+
+        assert_eq!(1, h.completed_acknowledgements.len());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_multiple_fetches() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tp0 = h.tp(0);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(std::slice::from_ref(&tp0));
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 1), Errors::None);
+
+        let recs = h.fetch_records();
+        assert!(recs.contains_key(&tp0));
+        assert_eq!(1, recs.get(&tp0).unwrap().len());
+
+        let mut a1 = Acknowledgements::empty();
+        a1.add(1, AcknowledgeType::Accept);
+        let exp1 = a1.clone();
+        h.mgr.fetch(single_node_acks(&tip0, 0, a1));
+        // metrics (acknowledgementSendTotal) deferred to KIP-714.
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(2, 1), Errors::None);
+
+        let recs = h.fetch_records();
+        assert!(recs.contains_key(&tp0));
+        assert_eq!(1, h.completed_acknowledgements.len());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &exp1);
+        h.completed_acknowledgements.clear();
+
+        let mut a2 = Acknowledgements::empty();
+        a2.add(2, AcknowledgeType::Reject);
+        let exp2 = a2.clone();
+        h.mgr.fetch(single_node_acks(&tip0, 0, a2));
+        // Preparing a response with an acknowledgement error.
+        h.send_fetch_and_verify_ack(build_records(1, 3, 1), Vec::new(), Errors::None, Errors::InvalidRecordState);
+
+        let recs = h.fetch_records();
+        assert!(recs.is_empty());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &exp2);
+    }
+
+    #[test]
+    fn test_acknowledge_on_close() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tp0 = h.tp(0);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[tp0]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let mut a1 = Acknowledgements::empty();
+        a1.add(1, AcknowledgeType::Accept);
+        // Piggyback acknowledgements
+        h.mgr.fetch(single_node_acks(&tip0, 0, a1.clone()));
+
+        // Remaining acknowledgements sent with close().
+        let a2 = get_acknowledgements(2, &[AcknowledgeType::Accept, AcknowledgeType::Reject]);
+        let mut merged = a1;
+        merged.merge(&a2);
+
+        let close_future = h.mgr.acknowledge_on_close(single_node_acks(&tip0, 0, a2), h.deadline(100));
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(1, h.completed_acknowledgements.len());
+        // All 3 offsets were acknowledged as part of the final ShareAcknowledge on close.
+        assert_eq!(
+            merged.get_acknowledgements_type_map(),
+            h.completed_acknowledgements[0]
+                .get(&tip0)
+                .unwrap()
+                .get_acknowledgements_type_map()
+        );
+        assert!(h.has_completed_fetches());
+
+        // Polling once more to complete the closeFuture.
+        h.send_fetches();
+        assert!(close_future.is_done());
+    }
+
+    #[test]
+    fn test_close_future_completed_when_member_id_is_null() {
+        let mut h = Harness::build(ShareAcquireMode::BatchOptimized, None);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        let close_future = h.mgr.acknowledge_on_close(IndexMap::new(), h.deadline(100));
+        assert!(!close_future.is_done());
+        // The subsequent poll completes the closeFuture as the memberId is null.
+        h.send_fetches();
+        assert!(close_future.is_done());
+    }
+
+    #[test]
+    fn test_acknowledge_on_close_with_pending_commit_async() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let expected = acks.clone();
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        h.mgr.acknowledge_on_close(IndexMap::new(), h.deadline(100));
+
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(h.has_completed_fetches());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &expected);
+        // The pending acknowledge-on-close stays queued behind the completed
+        // commit; Java prepares an empty ShareAcknowledge response for it, but a
+        // direct-driver harness does not re-poll the manager, so the close is
+        // not re-sent here (behaviourally identical to Java, whose second
+        // networkClientDelegate.poll() sends nothing either).
+    }
+
+    #[test]
+    fn test_acknowledge_on_close_with_pending_commit_sync() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let expected = acks.clone();
+        let _f = h.mgr.commit_sync(single_node_acks(&tip0, 0, acks), h.deadline(100));
+        h.mgr.acknowledge_on_close(IndexMap::new(), h.deadline(100));
+
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(h.has_completed_fetches());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &expected);
+        // The pending acknowledge-on-close stays queued behind the completed
+        // commit; Java prepares an empty ShareAcknowledge response for it, but a
+        // direct-driver harness does not re-poll the manager, so the close is
+        // not re-sent here (behaviourally identical to Java, whose second
+        // networkClientDelegate.poll() sends nothing either).
+    }
+
+    #[test]
+    fn test_result_handler_on_commit_async() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+
+        let rh = h.mgr.build_result_handler(None, None);
+
+        // Passing null acknowledgements means we do not send the background event.
+        rh.complete(tip0.clone(), None, AcknowledgeRequestType::CommitAsync, false, None);
+        h.drain_ack_events();
+        assert_eq!(0, h.completed_acknowledgements.len());
+
+        // COMMIT_SYNC with remaining=None still sends no event.
+        rh.complete(
+            tip0.clone(),
+            Some(acks.clone()),
+            AcknowledgeRequestType::CommitSync,
+            false,
+            None,
+        );
+        h.drain_ack_events();
+        assert_eq!(0, h.completed_acknowledgements.len());
+
+        // Non-null acknowledgements on COMMIT_ASYNC send the event.
+        rh.complete(tip0.clone(), Some(acks), AcknowledgeRequestType::CommitAsync, false, None);
+        h.drain_ack_events();
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+    }
+
+    #[test]
+    fn test_result_handler_on_commit_sync() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        let tip1 = h.tip(1);
+        let t2ip0 = h.t2ip0();
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+
+        let (fh, _rx) = CompletableEventHandle::new(i64::MAX);
+        let future = Arc::new(fh);
+        let rh = h.mgr.build_result_handler(Some(3), Some(Arc::clone(&future)));
+
+        rh.complete(
+            tip0.clone(),
+            Some(acks.clone()),
+            AcknowledgeRequestType::CommitSync,
+            false,
+            None,
+        );
+        h.drain_ack_events();
+        assert_eq!(0, h.completed_acknowledgements.len());
+        assert!(!future.is_done());
+
+        rh.complete(t2ip0, None, AcknowledgeRequestType::CommitSync, false, None);
+        h.drain_ack_events();
+        assert_eq!(0, h.completed_acknowledgements.len());
+        assert!(!future.is_done());
+
+        rh.complete(tip1.clone(), Some(acks), AcknowledgeRequestType::CommitSync, false, None);
+        h.drain_ack_events();
+        assert_eq!(1, h.completed_acknowledgements.len());
+        assert_eq!(2, h.completed_acknowledgements[0].len());
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+        assert_eq!(3, h.completed_acknowledgements[0].get(&tip1).unwrap().size());
+        assert!(future.is_done());
+    }
+
+    #[test]
+    fn test_result_handler_complete_if_empty() {
+        let h = Harness::default();
+        let (fh, _rx) = CompletableEventHandle::new(i64::MAX);
+        let future = Arc::new(fh);
+        let rh = h.mgr.build_result_handler(Some(1), Some(Arc::clone(&future)));
+
+        rh.complete_if_empty();
+        assert!(!future.is_done());
+
+        rh.decrement_remaining_for_test();
+        rh.complete_if_empty();
+        assert!(future.is_done());
+    }
+
+    #[test]
+    fn test_batching_acknowledge_request_states() {
+        let mut h = Harness::default();
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 6, 1), acquired_records(1, 6), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        let acks2 = get_acknowledgements(
+            4,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks2), h.deadline(DEFAULT_API_TIMEOUT_MS));
+
+        assert_eq!(
+            6,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+        assert_eq!(1, h.send_acknowledgements());
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+        assert_eq!(
+            6,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+    }
+
+    #[test]
+    fn test_pending_commit_async_before_commit_sync() {
+        let mut h = Harness::default();
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 6, 1), acquired_records(1, 6), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        let acks2 = get_acknowledgements(
+            4,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let _f = h.mgr.commit_sync(single_node_acks(&tip0, 0, acks2), h.deadline(60000));
+
+        assert_eq!(
+            3,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+        assert_eq!(1, h.mgr.request_states(0).unwrap().get_sync_request_queue().unwrap().len());
+        assert_eq!(
+            3,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+
+        assert_eq!(1, h.send_acknowledgements());
+        assert_eq!(
+            3,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_async_request()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+        assert_eq!(1, h.mgr.request_states(0).unwrap().get_sync_request_queue().unwrap().len());
+
+        assert_eq!(1, h.send_acknowledgements());
+        assert_eq!(
+            3,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+    }
+
+    #[test]
+    fn test_retry_acknowledgements() {
+        let mut h = Harness::default();
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 6, 1), acquired_records(1, 6), Errors::None);
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Release,
+                AcknowledgeType::Accept,
+            ],
+        );
+        let _f = h.mgr.commit_sync(single_node_acks(&tip0, 0, acks), 60000);
+        assert!(h.mgr.request_states(0).unwrap().get_async_request().is_none());
+        assert_eq!(1, h.mgr.request_states(0).unwrap().get_sync_request_queue().unwrap().len());
+        assert_eq!(
+            6,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_acknowledgements_to_send_count(&tip0)
+        );
+
+        assert_eq!(1, h.send_acknowledgements());
+        assert_eq!(
+            6,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::RequestTimedOut));
+        assert_eq!(
+            6,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_incomplete_acknowledgements_count(&tip0)
+        );
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+
+        // Wait for the backoff before sending the next request.
+        h.clock.sleep((1.5 * RETRY_BACKOFF_MS as f64) as i64);
+        assert_eq!(1, h.send_acknowledgements());
+        assert_eq!(
+            6,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_in_flight_acknowledgements_count(&tip0)
+        );
+        assert_eq!(
+            0,
+            h.mgr
+                .request_states(0)
+                .unwrap()
+                .get_sync_request_queue()
+                .unwrap()
+                .front()
+                .unwrap()
+                .get_incomplete_acknowledgements_count(&tip0)
+        );
+    }
+
+    #[test]
+    fn test_fatal_errors_acknowledgement_response() {
+        for error in [
+            Errors::FencedLeaderEpoch,
+            Errors::NotLeaderOrFollower,
+            Errors::UnknownTopicOrPartition,
+        ] {
+            let mut h = Harness::default();
+            h.set_ack_callback_registered(true);
+            let tip0 = h.tip(0);
+            h.assign_from_subscribed(&[h.tp(0)]);
+            h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+            let acks = get_acknowledgements(
+                1,
+                &[
+                    AcknowledgeType::Accept,
+                    AcknowledgeType::Accept,
+                    AcknowledgeType::Reject,
+                ],
+            );
+            h.mgr
+                .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+
+            assert_eq!(1, h.send_acknowledgements());
+            h.deliver_ack(full_acknowledge_response(&tip0, error));
+
+            // These errors are not retried; they are treated as fatal.
+            assert_eq!(
+                0,
+                h.mgr
+                    .request_states(0)
+                    .unwrap()
+                    .get_async_request()
+                    .unwrap()
+                    .get_in_flight_acknowledgements_count(&tip0)
+            );
+            assert_eq!(
+                0,
+                h.mgr
+                    .request_states(0)
+                    .unwrap()
+                    .get_async_request()
+                    .unwrap()
+                    .get_incomplete_acknowledgements_count(&tip0)
+            );
+            assert_eq!(1, h.completed_acknowledgements.len());
+            assert_eq!(3, h.completed_acknowledgements[0].get(&tip0).unwrap().size());
+        }
+    }
+
+    #[test]
+    fn test_callback_handler_config() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        h.assign_from_subscribed(&[h.tp(0)]);
+        h.send_fetch_and_verify(build_records(1, 3, 1), acquired_records(1, 3), Errors::None);
+
+        let acks = get_acknowledgements(1, &[AcknowledgeType::Accept, AcknowledgeType::Accept]);
+        let expected = acks.clone();
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(h.has_completed_fetches());
+        assert_acks_eq(h.completed_acknowledgements[0].get(&tip0).unwrap(), &expected);
+        h.completed_acknowledgements.clear();
+
+        // Callback handler no longer registered — no events delivered.
+        h.set_ack_callback_registered(false);
+        let mut acks2 = Acknowledgements::empty();
+        acks2.add(3, AcknowledgeType::Accept);
+        h.mgr
+            .commit_async(single_node_acks(&tip0, 0, acks2), h.deadline(DEFAULT_API_TIMEOUT_MS));
+        h.clock.sleep(RETRY_BACKOFF_MS);
+        assert_eq!(1, h.send_acknowledgements());
+        h.deliver_ack(full_acknowledge_response(&tip0, Errors::None));
+        assert!(h.has_completed_fetches());
+        assert_eq!(0, h.completed_acknowledgements.len());
+    }
+
+    #[test]
+    fn test_acknowledgement_commit_callback_multiple_partition_commit_async() {
+        let mut h = Harness::default();
+        h.set_ack_callback_registered(true);
+        let tip0 = h.tip(0);
+        let t2ip0 = h.t2ip0();
+        h.assign_from_subscribed(&[h.tp(0), h.t2p0()]);
+
+        assert_eq!(1, h.send_fetches());
+        assert!(!h.has_completed_fetches());
+
+        let mut response_data = vec![(
+            tip0.clone(),
+            partition_data_for_fetch(
+                &tip0,
+                build_records(1, 3, 1),
+                acquired_records(1, 3),
+                Errors::None,
+                Errors::None,
+            ),
+        )];
+        response_data.push((
+            t2ip0.clone(),
+            partition_data_for_fetch(
+                &t2ip0,
+                build_records(1, 3, 1),
+                acquired_records(1, 3),
+                Errors::None,
+                Errors::None,
+            ),
+        ));
+        h.deliver_fetch(ShareFetchResponse::of(Errors::None, 0, response_data, &[], 0));
+        assert!(h.has_completed_fetches());
+
+        let acks = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let acks2 = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let mut commit_acks = IndexMap::new();
+        commit_acks.insert(tip0.clone(), NodeAcknowledgements::new(0, acks));
+        commit_acks.insert(t2ip0.clone(), NodeAcknowledgements::new(0, acks2));
+        h.mgr.commit_async(commit_acks, h.deadline(DEFAULT_API_TIMEOUT_MS));
+
+        assert_eq!(1, h.send_acknowledgements());
+        let mut ack_resp = vec![(tip0.clone(), ack_partition_data(&tip0, Errors::None))];
+        ack_resp.push((t2ip0.clone(), ack_partition_data(&t2ip0, Errors::None)));
+        h.deliver_ack(ShareAcknowledgeResponse::of(Errors::None, 0, ack_resp, &[], 0));
+        assert!(h.has_completed_fetches());
+
+        // Callback invoked for both partitions.
+        assert_eq!(2, h.completed_acknowledgements.len());
+        assert_eq!(1, h.completed_acknowledgements[0].len());
+        assert_eq!(1, h.completed_acknowledgements[1].len());
     }
 }
