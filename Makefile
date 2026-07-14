@@ -45,7 +45,7 @@ devel-build-c: submodules devel-build-rust
 devel-build-python: submodules init-venv devel-build-rust
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
-.PHONY: all init build devel-build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python build-grpc-images test-multilanguage producer-perf-test producer-perf-test-c verify format-check lint clean
+.PHONY: all init build devel-build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python build-grpc-images test-multilanguage producer-perf-test producer-perf-test-c consumer-perf-test-python producer-perf-test-python verify format-check lint clean
 
 build: build-rust build-c build-python
 
@@ -60,7 +60,7 @@ build-c: submodules build-rust
 	cmake --build bindings/c/build
 
 init-venv:
-	python3 -m venv venv
+	[ -d venv ] || python3 -m venv venv
 
 build-python: submodules init-venv build-rust
 	@(. venv/bin/activate && \
@@ -86,6 +86,7 @@ devel-build-python: submodules init-venv devel-build-rust
 # and confluent_kafka.h are present under target/release/.
 build-grpc-images: build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
@@ -93,7 +94,7 @@ build-grpc-images: build
 # Run this before `make build` on a new checkout.
 init:
 	@git submodule update --init --recursive
-	@python3 -m venv venv
+	@[ -d venv ] || python3 -m venv venv
 	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
 
 test: test-multilanguage test-c test-python
@@ -117,6 +118,23 @@ producer-perf-test: build-rust
 # Built by `build-c` but intentionally not run under `make test-c`.
 producer-perf-test-c: build-c
 	./bindings/c/build/producer_perf_test
+
+# Env-driven Python consumer end-to-end latency benchmark (standalone). Mirrors
+# consumer-perf/compare/benchmark_e2e_latency.c. Needs a reachable broker via
+# BOOTSTRAP_SERVERS; set KAFKA_BIN to a Kafka bin dir to self-spawn load
+# (kafka-producer-perf-test.sh), otherwise runs consume-only. Select the backend
+# with CLIENT_VERSION (3 = Rust binding, default; 2 = librdkafka baseline). Set
+# ASYNC=True to drive the asyncio-native consumer of the selected backend
+# (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer) instead of the sync one.
+consumer-perf-test-python: build-python
+	@(. venv/bin/activate && \
+	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/consumer_performance_test.py)
+
+# Env-driven Python producer performance benchmark (standalone). Same env-var
+# contract as `producer-perf-test`.
+producer-perf-test-python: build-python
+	@(. venv/bin/activate && \
+	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
 
 test-c: build-c
 	cd bindings/c/build && ctest --output-on-failure

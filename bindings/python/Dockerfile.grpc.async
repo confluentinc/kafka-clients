@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Multi-stage Docker build for the *async* Python gRPC server image used by the
+# multilanguage integration test harness (the python_async backend). It is the
+# async twin of Dockerfile.grpc: identical builder stage, but the runtime runs
+# grpc_server_async.py (driving AsyncKafkaProducer / AsyncKafkaConsumer).
+#
+# Kept standalone (rather than `FROM confluent-kafka-rust/python-grpc-server:dev`)
+# so it has no build-ordering dependency on the sync image and can be rebuilt
+# independently. If you prefer to avoid recompiling _confluentkafka.so, an
+# alternative is to base this on the sync image and only add grpc_server_async.py.
+#
+# Build context MUST be the repo root because we copy from target/ and
+# multilanguage-test-server/. The Makefile target sets this for you:
+#   make -C bindings/python grpc-image-async
+#
+# Tags the result as confluent-kafka-rust/python-async-grpc-server:dev.
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build _confluentkafka.so against the prebuilt Rust shared lib
+# and generate the gRPC proto stubs. (Identical to Dockerfile.grpc.)
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY target/release/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
+COPY target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
+COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
+COPY bindings/python/setup.py /workspace/bindings/python/setup.py
+COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
+COPY bindings/python/producer.py /workspace/bindings/python/producer.py
+COPY bindings/python/consumer.py /workspace/bindings/python/consumer.py
+
+COPY multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
+COPY multilanguage-test-server/proto/consumer_service.proto /workspace/proto/consumer_service.proto
+
+ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/target/release
+RUN cd /workspace/bindings/python && \
+    pip install --no-cache-dir setuptools wheel && \
+    python setup.py build_ext --inplace
+
+RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
+    cd /workspace && \
+    python -m grpc_tools.protoc \
+        -Iproto \
+        --python_out=/workspace/bindings/python \
+        --grpc_python_out=/workspace/bindings/python \
+        proto/producer_service.proto proto/consumer_service.proto
+
+# ---------------------------------------------------------------------------
+# Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts, running
+# the async server.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+RUN pip install --no-cache-dir grpcio==1.66.* "protobuf>=4.0,<6.0"
+
+WORKDIR /app
+
+COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
+COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
+COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
+COPY --from=builder /workspace/bindings/python/consumer.py /app/consumer.py
+COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/producer_service_pb2.py
+COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
+COPY --from=builder /workspace/bindings/python/consumer_service_pb2.py /app/consumer_service_pb2.py
+COPY --from=builder /workspace/bindings/python/consumer_service_pb2_grpc.py /app/consumer_service_pb2_grpc.py
+# Shared translation helpers + the async server entrypoint.
+COPY bindings/python/grpc_translate.py /app/grpc_translate.py
+COPY bindings/python/grpc_server_async.py /app/grpc_server_async.py
+
+ENV LD_LIBRARY_PATH=/app
+
+EXPOSE 50051
+
+# The Rust BackendPool waits for "listening" on stderr — keep grpc_server_async.py
+# in sync with the BackendPool's WaitFor::message_on_stderr setting.
+CMD ["python", "/app/grpc_server_async.py"]

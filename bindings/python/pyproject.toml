@@ -18,7 +18,12 @@ dev = [
     "psutil",
     "matplotlib",
     "pytest",
+    "pytest-asyncio",
+    "testcontainers>=4.0",
 ]
 
 [tool.setuptools]
-py-modules = ["producer"]
+py-modules = ["producer", "consumer"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

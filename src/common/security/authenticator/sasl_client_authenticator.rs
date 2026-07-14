@@ -288,7 +288,7 @@ impl SaslClientAuthenticator {
     async fn send_sasl_client_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
         let sasl_token = self.create_sasl_token();
         let send: Box<dyn KafkaSend> = if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
-            Box::new(ByteBufferSend::size_prefixed(sasl_token))
+            Box::new(ByteBufferSend::size_prefixed(bytes::Bytes::from(sasl_token)))
         } else {
             let mut data = SaslAuthenticateRequestData::new();
             data.set_auth_bytes(sasl_token);
