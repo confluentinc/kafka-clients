@@ -157,3 +157,4 @@
 - [Milestone 9 Phase 2 ack core](milestone9_phase2_ack_core.md) — KIP-932 ack callback trait (async_trait), catch_unwind handler, ShareInFlightBatch move semantics (ConsumerRecord not Clone)
 - [Milestone 9 Phase 3 share fetch path](milestone9_phase3_share_fetch_path.md) — ShareFetch/ShareCompletedFetch/ShareFetchBuffer/ShareFetchCollector; acquired-record interleave, eager-consume+re-parse cursor, ShareFetchException carrier, ConsumerMetadata deviation
 - [Milestone 9 Phase 4 membership/heartbeat/metadata](milestone9_phase4_membership_heartbeat.md) — reuse Abstract*Manager unchanged, share simpler (no commit/static), §31 short-circuit makes reconcile sync in tests, SHARE_PROTOCOL_* arms
+- [Milestone 9 Phase 5 ShareConsumeRequestManager](milestone9_phase5_share_consume_request_manager.md) — &mut-self handle_* dispatch, per-node in-flight routing, shared ResultHandler, auto-tick MockClock + 1.5x backoff, deferred multinode/KIP-951 tests
