@@ -45,6 +45,23 @@ pub(crate) struct ShareInFlightBatch<K, V> {
     node_id: i32,
     partition: TopicIdPartition,
     in_flight_records: BTreeMap<i64, ConsumerRecord<K, V>>,
+    /// The set of offsets that are in flight (delivered but not yet
+    /// acknowledged-and-removed). This is the authoritative membership set for
+    /// [`Self::acknowledge`] / [`Self::acknowledge_all`] /
+    /// [`Self::check_all_in_flight_are_acknowledged`].
+    ///
+    /// # Deviation from Java
+    ///
+    /// Java's `ShareInFlightBatch` uses `inFlightRecords.keySet()` for these
+    /// checks because its `ConsumerRecord`s are shared reference types:
+    /// `ShareConsumerImpl.poll` hands the records to the user AND keeps them in
+    /// `inFlightRecords`. In Rust `ConsumerRecord` is not `Clone` (receive-path
+    /// zero-copy contract, §27), so `poll` MOVES the records out of the batch
+    /// via [`Self::take_in_flight_records`]. This `in_flight_offsets` set
+    /// survives that move, preserving offset-level in-flight tracking so
+    /// `acknowledge` (called with the user's now-owned record) still succeeds
+    /// and `check_all_in_flight_are_acknowledged` remains correct.
+    in_flight_offsets: BTreeSet<i64>,
     /// Lazily created, mirroring Java's nullable `renewingRecords`.
     renewing_records: Option<HashMap<i64, ConsumerRecord<K, V>>>,
     /// Lazily created, mirroring Java's nullable `renewedRecords`.
@@ -67,6 +84,7 @@ impl<K, V> ShareInFlightBatch<K, V> {
             node_id,
             partition,
             in_flight_records: BTreeMap::new(),
+            in_flight_offsets: BTreeSet::new(),
             renewing_records: None,
             renewed_records: None,
             acknowledged_records: BTreeSet::new(),
@@ -100,7 +118,7 @@ impl<K, V> ShareInFlightBatch<K, V> {
         record: &ConsumerRecord<K, V>,
         ack_type: AcknowledgeType,
     ) -> Result<(), KafkaError> {
-        if self.in_flight_records.contains_key(&record.offset()) {
+        if self.in_flight_offsets.contains(&record.offset()) {
             self.acknowledgements.add(record.offset(), ack_type);
             self.acknowledged_records.insert(record.offset());
             if ack_type == AcknowledgeType::Renew {
@@ -114,9 +132,10 @@ impl<K, V> ShareInFlightBatch<K, V> {
     /// Acknowledges all in-flight records with the given type (only those not
     /// already acknowledged). Mirrors Java's `acknowledgeAll(AcknowledgeType)`.
     pub(crate) fn acknowledge_all(&mut self, ack_type: AcknowledgeType) {
-        for offset in self.in_flight_records.keys() {
-            if self.acknowledgements.add_if_absent(*offset, ack_type) {
-                self.acknowledged_records.insert(*offset);
+        let offsets: Vec<i64> = self.in_flight_offsets.iter().copied().collect();
+        for offset in offsets {
+            if self.acknowledgements.add_if_absent(offset, ack_type) {
+                self.acknowledged_records.insert(offset);
             }
         }
         if ack_type == AcknowledgeType::Renew {
@@ -128,11 +147,12 @@ impl<K, V> ShareInFlightBatch<K, V> {
     ///
     /// Mirrors Java's `checkAllInFlightAreAcknowledged()`.
     pub(crate) fn check_all_in_flight_are_acknowledged(&self) -> bool {
-        self.in_flight_records.len() == self.acknowledged_records.len()
+        self.in_flight_offsets.len() == self.acknowledged_records.len()
     }
 
     /// Adds a record to the in-flight set. Mirrors Java's `addRecord(ConsumerRecord)`.
     pub(crate) fn add_record(&mut self, record: ConsumerRecord<K, V>) {
+        self.in_flight_offsets.insert(record.offset());
         self.in_flight_records.insert(record.offset(), record);
     }
 
@@ -152,6 +172,7 @@ impl<K, V> ShareInFlightBatch<K, V> {
     /// `Clone`; see receive-path zero-copy contract). The net state is
     /// identical — Java discards `other` after `merge` in practice.
     pub(crate) fn merge(&mut self, other: ShareInFlightBatch<K, V>) {
+        self.in_flight_offsets.extend(other.in_flight_offsets);
         self.in_flight_records.extend(other.in_flight_records);
         if other.check_for_renew_acknowledgements {
             self.check_for_renew_acknowledgements = true;
@@ -177,6 +198,11 @@ impl<K, V> ShareInFlightBatch<K, V> {
     /// reference types). Because `ConsumerRecord` is not `Clone` in Rust
     /// (receive-path zero-copy contract, §27), delivering owned records to the
     /// user requires moving them out. Used by [`ShareFetch::take_records`].
+    ///
+    /// The `in_flight_offsets` set is intentionally NOT cleared — offset-level
+    /// in-flight tracking survives the move so `acknowledge` (called with the
+    /// user's now-owned record) and `check_all_in_flight_are_acknowledged`
+    /// remain correct. See the `in_flight_offsets` field doc.
     ///
     /// [`ShareFetch::take_records`]: super::share_fetch::ShareFetch::take_records
     pub(crate) fn take_in_flight_records(&mut self) -> Vec<ConsumerRecord<K, V>> {
@@ -241,6 +267,10 @@ impl<K, V> ShareInFlightBatch<K, V> {
         // optimisation with identical end state).
         let acknowledged: Vec<i64> = self.acknowledged_records.iter().copied().collect();
         for offset in acknowledged {
+            // The offset leaves the in-flight set regardless of whether the
+            // record object is still held (it may have been moved out to the
+            // user via `take_in_flight_records`).
+            self.in_flight_offsets.remove(&offset);
             if let Some(record) = self.in_flight_records.remove(&offset)
                 && renew_offsets.contains(&offset)
                 && let Some(renewing) = self.renewing_records.as_mut()
@@ -313,6 +343,9 @@ impl<K, V> ShareInFlightBatch<K, V> {
     pub(crate) fn take_renewals(&mut self) {
         if let Some(renewed) = self.renewed_records.as_mut() {
             let drained: Vec<(i64, ConsumerRecord<K, V>)> = renewed.drain().collect();
+            for (offset, _) in &drained {
+                self.in_flight_offsets.insert(*offset);
+            }
             self.in_flight_records.extend(drained);
         }
     }
@@ -472,6 +505,32 @@ mod tests {
         assert!(batch.is_empty());
         batch.add_gap(0);
         assert!(!batch.is_empty());
+    }
+
+    #[test]
+    fn test_take_in_flight_records_retains_offset_tracking() {
+        // After the records are moved out to the user (drain path), the
+        // offset-level in-flight tracking survives so acknowledge/check work.
+        let mut batch: ShareInFlightBatch<String, String> = ShareInFlightBatch::new(1, tip(), None);
+        batch.add_record(record(0));
+        batch.add_record(record(1));
+
+        let taken = batch.take_in_flight_records();
+        assert_eq!(taken.len(), 2, "records moved out to the user");
+        assert_eq!(batch.num_records(), 0, "no record objects left in the batch");
+
+        // The offsets are still tracked in-flight, so acknowledging the
+        // user's now-owned records still succeeds.
+        assert!(!batch.check_all_in_flight_are_acknowledged());
+        batch.acknowledge(&record(0), AcknowledgeType::Accept).unwrap();
+        assert!(!batch.check_all_in_flight_are_acknowledged());
+        batch.acknowledge(&record(1), AcknowledgeType::Accept).unwrap();
+        assert!(batch.check_all_in_flight_are_acknowledged());
+
+        // take_acknowledged_records clears the offset tracking.
+        let acks = batch.take_acknowledged_records();
+        assert_eq!(acks.size(), 2);
+        assert!(batch.check_all_in_flight_are_acknowledged(), "0 in-flight == 0 acked");
     }
 
     #[test]
