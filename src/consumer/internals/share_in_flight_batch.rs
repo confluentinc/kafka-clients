@@ -62,6 +62,23 @@ pub(crate) struct ShareInFlightBatch<K, V> {
     /// `acknowledge` (called with the user's now-owned record) still succeeds
     /// and `check_all_in_flight_are_acknowledged` remains correct.
     in_flight_offsets: BTreeSet<i64>,
+    /// Clones of records acknowledged with [`AcknowledgeType::Renew`], keyed by
+    /// offset, captured at `acknowledge(_, RENEW)` time.
+    ///
+    /// # Why (RENEW re-delivery vs. zero-copy move-out)
+    ///
+    /// Java keeps every record object in `inFlightRecords` and, in
+    /// `takeAcknowledgedRecords`, moves the RENEW-acked object into
+    /// `renewingRecords` (`ShareInFlightBatch.java:124-127`); it is later
+    /// re-delivered by `poll`. In Rust, `poll` MOVES record objects out of the
+    /// batch to the user (`take_in_flight_records`, §27 zero-copy — no
+    /// per-record clone), so the object is gone by the time the user
+    /// acknowledges. To preserve Java's re-delivery, we capture a clone of the
+    /// record **only** when it is RENEW-acked — the rare path — leaving the hot
+    /// ACCEPT/RELEASE/REJECT path allocation-free (it records only the offset).
+    /// `take_acknowledged_records` then routes these captured records into
+    /// `renewing_records` exactly as Java routes `inFlightRecords`.
+    renew_records: HashMap<i64, ConsumerRecord<K, V>>,
     /// Lazily created, mirroring Java's nullable `renewingRecords`.
     renewing_records: Option<HashMap<i64, ConsumerRecord<K, V>>>,
     /// Lazily created, mirroring Java's nullable `renewedRecords`.
@@ -85,6 +102,7 @@ impl<K, V> ShareInFlightBatch<K, V> {
             partition,
             in_flight_records: BTreeMap::new(),
             in_flight_offsets: BTreeSet::new(),
+            renew_records: HashMap::new(),
             renewing_records: None,
             renewed_records: None,
             acknowledged_records: BTreeSet::new(),
@@ -117,12 +135,27 @@ impl<K, V> ShareInFlightBatch<K, V> {
         &mut self,
         record: &ConsumerRecord<K, V>,
         ack_type: AcknowledgeType,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), KafkaError>
+    where
+        K: Clone,
+        V: Clone,
+    {
         if self.in_flight_offsets.contains(&record.offset()) {
             self.acknowledgements.add(record.offset(), ack_type);
             self.acknowledged_records.insert(record.offset());
             if ack_type == AcknowledgeType::Renew {
                 self.check_for_renew_acknowledgements = true;
+                // Capture the record so it can be re-delivered after renewal
+                // (the original object was moved out to the user by
+                // `take_in_flight_records`). RENEW is the rare path; the hot
+                // ACCEPT/RELEASE/REJECT path does not clone. See `renew_records`.
+                if !self.in_flight_records.contains_key(&record.offset()) {
+                    self.renew_records.insert(record.offset(), record.clone());
+                }
+            } else {
+                // A non-RENEW ack for an offset previously RENEW-captured
+                // supersedes the renewal — drop the captured clone.
+                self.renew_records.remove(&record.offset());
             }
             return Ok(());
         }
@@ -271,12 +304,19 @@ impl<K, V> ShareInFlightBatch<K, V> {
             // record object is still held (it may have been moved out to the
             // user via `take_in_flight_records`).
             self.in_flight_offsets.remove(&offset);
-            if let Some(record) = self.in_flight_records.remove(&offset)
-                && renew_offsets.contains(&offset)
+            // Remove the record from wherever it lives: still in-flight (batch
+            // never drained) or the RENEW-captured clone (drained + RENEW-acked).
+            let in_flight = self.in_flight_records.remove(&offset);
+            let captured = self.renew_records.remove(&offset);
+            if renew_offsets.contains(&offset)
+                && let Some(record) = in_flight.or(captured)
                 && let Some(renewing) = self.renewing_records.as_mut()
             {
                 // `renewing_records` is `Some` because `check_for_renew_acknowledgements`
-                // is set whenever a RENEW acknowledgement was recorded.
+                // is set whenever a RENEW acknowledgement was recorded. Java
+                // moves `inFlightRecords.get(offset)` here; Rust uses the
+                // still-in-flight object if present, else the RENEW clone
+                // captured at `acknowledge(_, RENEW)` time.
                 renewing.insert(offset, record);
             }
         }

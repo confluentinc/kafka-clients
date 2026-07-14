@@ -236,8 +236,8 @@ where
 
 impl<K, V> ShareConsumerImpl<K, V>
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
 {
     /// Builds a `ShareConsumerImpl` from its assembled components. Mirrors the
     /// visible-for-testing constructor (see [`ShareConsumerComponents`]).
@@ -377,20 +377,19 @@ where
                 return Err(e);
             }
 
-            match self.poll_for_fetches(&mut timer).await {
-                Ok(mut fetch) => {
-                    if !fetch.is_empty() {
-                        self.current_fetch = fetch;
-                        self.handle_completed_acknowledgements().await;
-                        let records = self.current_fetch.take_records();
-                        return Ok(ConsumerRecords::new(records, HashMap::new()));
-                    }
-                },
-                Err(share_fetch_exception) => {
-                    let (share_fetch, cause) = share_fetch_exception.into_parts();
-                    self.current_fetch = share_fetch;
-                    return Err(cause);
-                },
+            // `poll_for_fetches` mutates `self.current_fetch` in place (Java's
+            // `collect` returns a reference to `currentFetch`). On error it
+            // carries the accumulated `ShareFetch` (Java's
+            // `ShareFetchException.shareFetch()`) which becomes `currentFetch`.
+            if let Err(share_fetch_exception) = self.poll_for_fetches(&mut timer).await {
+                let (share_fetch, cause) = share_fetch_exception.into_parts();
+                self.current_fetch = share_fetch;
+                return Err(cause);
+            }
+            if !self.current_fetch.is_empty() {
+                self.handle_completed_acknowledgements().await;
+                let records = self.current_fetch.take_records();
+                return Ok(ConsumerRecords::new(records, HashMap::new()));
             }
 
             // Throw any errors notified by the background thread.
@@ -407,15 +406,18 @@ where
         Ok(ConsumerRecords::empty())
     }
 
-    async fn poll_for_fetches(&mut self, timer: &mut Timer) -> Result<ShareFetch<K, V>, ShareFetchException<K, V>> {
+    /// Translates Java's `pollForFetches`. Mutates `self.current_fetch` in place
+    /// (the "collected fetch" IS `currentFetch`); the caller reads
+    /// `self.current_fetch` afterwards.
+    async fn poll_for_fetches(&mut self, timer: &mut Timer) -> Result<(), ShareFetchException<K, V>> {
         let poll_timeout = self.application_event_handler.maximum_time_to_wait().min(timer.remaining_ms());
 
         let acknowledgements_map = self.current_fetch.take_acknowledged_records();
 
         // If data is available already, return it immediately.
-        let mut fetch = self.collect(acknowledgements_map)?;
-        if !fetch.is_empty() {
-            return Ok(fetch);
+        self.collect(acknowledgements_map)?;
+        if !self.current_fetch.is_empty() {
+            return Ok(());
         }
 
         // Wait a bit — this is where we will fetch records. A wakeup interrupts
@@ -430,11 +432,17 @@ where
         self.collect(IndexMap::new())
     }
 
+    /// Translates Java's `collect`. Operates on `self.current_fetch` in place:
+    /// when `currentFetch` is empty and has no renewals it replaces it with a
+    /// fresh fetch from the collector; the renewal branch moves renewed records
+    /// back into `currentFetch`. (Java returns a reference to `currentFetch`;
+    /// Rust cannot return owned records without draining `currentFetch`, so the
+    /// caller reads `self.current_fetch` after this returns.)
     #[allow(clippy::result_large_err)]
     fn collect(
         &mut self,
         acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
-    ) -> Result<ShareFetch<K, V>, ShareFetchException<K, V>> {
+    ) -> Result<(), ShareFetchException<K, V>> {
         let mut acks_to_send = acknowledgements_map;
 
         if self.current_fetch.is_empty() && !self.current_fetch.has_renewals() {
@@ -461,7 +469,8 @@ where
             if !acks_to_send.is_empty() {
                 self.send_share_acknowledge_async_event(acks_to_send);
             }
-            return Ok(fetch);
+            self.current_fetch = fetch;
+            return Ok(());
         } else if self.current_fetch.has_renewals() {
             // Move any renewed records back into in-flight records.
             self.current_fetch.take_renewed_records();
@@ -480,9 +489,9 @@ where
         if !acks_to_send.is_empty() {
             self.send_share_acknowledge_async_event(acks_to_send);
         }
-        // Java returns `currentFetch`; Rust moves it out (replacing with empty)
-        // and the caller (`poll`) moves it back into `self.current_fetch`.
-        Ok(std::mem::replace(&mut self.current_fetch, ShareFetch::empty()))
+        // Java returns `currentFetch` unchanged in the renewal / else branch;
+        // Rust leaves `self.current_fetch` in place.
+        Ok(())
     }
 
     fn send_share_acknowledge_async_event(
@@ -900,8 +909,8 @@ where
 #[async_trait]
 impl<K, V> crate::consumer::share_consumer::ShareConsumer<K, V> for ShareConsumerImpl<K, V>
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
 {
     fn subscription(&self) -> Result<HashSet<String>, KafkaError> {
         ShareConsumerImpl::subscription(self)
@@ -1364,18 +1373,65 @@ mod tests {
         assert_eq!(new_records.count(), 2, "should receive 2 new records");
     }
 
-    /// Java `testExplicitModeRenewAndAcknowledgeOnPoll`. DEFERRED: renewal
-    /// requires the record OBJECT to survive being handed to the user (Java
-    /// shares references; the record must move poll1→renewing→renewed→poll3).
-    /// The Rust zero-copy drain path moves records out of the batch, so the
-    /// object cannot be renewed. Making `ConsumerRecord: Clone` and cloning on
-    /// every poll would add a per-record allocation on the fetch path, rejected
-    /// per CLAUDE.md §11/§27. Offset-level tracking (blocker 1) covers the
-    /// non-renewal explicit path; renewal is deferred with the object-survival
-    /// resolution.
+    /// Java `testExplicitModeRenewAndAcknowledgeOnPoll`. RENEW re-delivery is
+    /// implemented faithfully: `acknowledge(_, RENEW)` captures a clone of the
+    /// renewed record (the rare path; the hot ACCEPT path never clones —
+    /// §27/§11), which `take_acknowledged_records` routes into `renewing_records`
+    /// and `renew`/`take_renewals` cycle back into in-flight for re-delivery on
+    /// a later poll. Also asserts a post-renew `acknowledge(rec, ACCEPT)` on the
+    /// re-delivered record succeeds.
     #[tokio::test]
-    #[ignore = "renewal needs record-object survival past user handoff; incompatible with zero-copy drain (§27)"]
-    async fn test_explicit_mode_renew_and_acknowledge_on_poll() {}
+    async fn test_explicit_mode_renew_and_acknowledge_on_poll() {
+        let mut fx = build_fixture("group-id", ShareAcknowledgementMode::EXPLICIT);
+        subscribe_ok(&mut fx, &["test-topic"]).await;
+
+        // A single fixed topic-id-partition so the later renew event matches.
+        let tp = tip("test-topic", 0);
+        let mut batch = ShareInFlightBatch::new(0, tp.clone(), DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS);
+        batch.add_record(record("test-topic", 0, 0));
+        batch.add_record(record("test-topic", 0, 1));
+        let mut first_fetch = ShareFetch::empty();
+        first_fetch.add(tp.clone(), batch);
+        push_fetch(&fx, first_fetch);
+
+        // First poll returns the 2 records.
+        let records = fx.consumer.poll(Duration::from_millis(100)).await.expect("first poll ok");
+        assert_eq!(records.count(), 2, "should receive 2 records");
+        assert_eq!(
+            fx.consumer.acquisition_lock_timeout_ms().unwrap(),
+            DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS
+        );
+
+        // Renew offset 0, accept offset 1.
+        let recs: Vec<&ConsumerRecord<String, String>> = (&records).into_iter().collect();
+        fx.consumer.acknowledge_with_type(recs[0], AcknowledgeType::Renew).unwrap();
+        fx.consumer.acknowledge_with_type(recs[1], AcknowledgeType::Accept).unwrap();
+
+        // Second poll: offset 0 is renewing (awaiting the broker RENEW response),
+        // so no records are returned.
+        let records = fx.consumer.poll(Duration::from_millis(100)).await.expect("second poll ok");
+        assert_eq!(records.count(), 0, "renewing means no records yet");
+
+        // The broker RENEW response arrives via a ShareAcknowledgementEvent.
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, AcknowledgeType::Renew);
+        acks.complete(None);
+        let mut map = IndexMap::new();
+        map.insert(tp.clone(), acks);
+        fx.ack_handler.add(ShareAcknowledgementEvent::new(map, true, None));
+
+        // Third poll re-delivers the renewed record (offset 0).
+        let records = fx.consumer.poll(Duration::from_millis(100)).await.expect("third poll ok");
+        assert_eq!(records.count(), 1, "renewed record re-delivered");
+        let recs: Vec<&ConsumerRecord<String, String>> = (&records).into_iter().collect();
+        assert_eq!(recs[0].offset(), 0, "the re-delivered record is offset 0");
+
+        // A post-renew ACCEPT on the re-delivered record succeeds (would return
+        // Err("The record cannot be acknowledged.") if offset tracking had been dropped).
+        fx.consumer
+            .acknowledge(recs[0])
+            .expect("post-renew ACCEPT on re-delivered record must succeed");
+    }
 
     #[tokio::test]
     async fn test_subscribe_generates_event() {
