@@ -30,6 +30,7 @@ pub mod consumer_records;
 pub mod errors;
 pub mod group_protocol;
 pub mod interceptor;
+pub mod kafka_share_consumer;
 pub mod mock_consumer;
 pub mod mock_share_consumer;
 pub mod offset_and_metadata;
@@ -56,6 +57,7 @@ pub use errors::ConsumerError;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
 pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
+pub use kafka_share_consumer::KafkaShareConsumer;
 pub use mock_consumer::MockConsumer;
 pub use mock_share_consumer::MockShareConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
@@ -492,4 +494,57 @@ where
              set group.protocol=consumer (KIP-848).",
         )),
     }
+}
+
+/// Constructs a new share [`ShareConsumer`] (KIP-932) from a
+/// [`ShareConsumerConfig`] and explicit key/value
+/// [`Deserializer`](crate::common::serialization::Deserializer)s.
+///
+/// The Rust equivalent of Java's `ShareConsumerDelegateCreator.create(...)`.
+/// Per `consumer-threading.md` §2 the creator collapses to a direct
+/// `Box::new(ShareConsumerImpl)` (single delegate), mirroring how
+/// [`new_consumer`] collapses `ConsumerDelegateCreator`.
+///
+/// # Production wiring deferral (Phase 7)
+///
+/// A working `ShareConsumerImpl` requires the full production background
+/// pipeline — a `NetworkClient` (+ channel builder from `security.protocol`),
+/// a [`RequestManagers`](internals::request_managers::RequestManagers) populated
+/// with the share `ShareConsumeRequestManager` / `ShareHeartbeatRequestManager`
+/// / `ShareMembershipManager`, a `ConsumerNetworkThread` bg task, and a
+/// production [`ShareApplicationEventHandler`](internals::share_consumer_impl::ShareApplicationEventHandler)
+/// bridging `add`/`maximum_time_to_wait`/`wakeup_network_thread`/`close` to that
+/// task. That assembly is the same scale as `AsyncKafkaConsumer::new` and is
+/// exercised only by `KafkaShareConsumerTest` (MockClient full-pipeline
+/// round-trips), which is deferred to the integration phase (Phase 7),
+/// consistent with the deferred `AsyncKafkaConsumer` MockClient tests.
+///
+/// The consumer core ([`ShareConsumerImpl`](internals::share_consumer_impl::ShareConsumerImpl),
+/// fully translated and unit-tested via injectable seams) is constructed with
+/// [`ShareConsumerImpl::from_components`](internals::share_consumer_impl::ShareConsumerImpl::from_components)
+/// once those components are assembled. Until the Phase-7 assembly lands, this
+/// factory returns [`KafkaError::unsupported_version`] — analogous to the
+/// classic-protocol arm of [`new_consumer`].
+///
+/// # Errors
+///
+/// Returns [`KafkaError::unsupported_version`] until the production share
+/// background pipeline is wired (see above).
+pub fn new_share_consumer<K, V>(
+    config: ShareConsumerConfig,
+    _key_deserializer: Box<dyn Deserializer<K>>,
+    _value_deserializer: Box<dyn Deserializer<V>>,
+) -> Result<Box<dyn ShareConsumer<K, V>>, KafkaError>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    let _ = config;
+    Err(KafkaError::unsupported_version(
+        "The production KafkaShareConsumer background pipeline is not yet wired \
+         (NetworkClient + share RequestManagers + ConsumerNetworkThread); it lands \
+         with the share-consumer integration phase. The ShareConsumerImpl core is \
+         fully implemented and unit-tested; assemble it via \
+         ShareConsumerImpl::from_components, or use MockShareConsumer for testing.",
+    ))
 }
