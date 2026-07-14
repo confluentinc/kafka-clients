@@ -63,4 +63,9 @@ impl ShareSubscriptionChangeEvent {
     pub(crate) fn handle(&self) -> &CompletableEventHandle<()> {
         &self.handle
     }
+
+    /// Consumes the event, returning the owned completion handle.
+    pub(crate) fn into_handle(self) -> CompletableEventHandle<()> {
+        self.handle
+    }
 }
