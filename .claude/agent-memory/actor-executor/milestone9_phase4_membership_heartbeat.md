@@ -13,7 +13,21 @@ useful for later phases and cousins:
 and `AbstractHeartbeatRequestManager` (in `abstract_*.rs`) are already
 response-type-agnostic in their public API, so Share composes them
 unchanged, exactly like the Consumer variants. No edits to the shared
-abstractions were needed. `AbstractMembershipManager.metadata` is
+abstractions were needed.
+
+**BUT the `reconcile` pipeline is NOT in the abstraction** — despite Java
+placing `maybeReconcile` in `AbstractMembershipManager`, the Rust port
+hand-DUPLICATES the ~170-line reconcile into BOTH
+`consumer_membership_manager.rs` and `share_membership_manager.rs`
+(`abstract_membership_manager.rs` has no `reconcile`). So the share copy's
+revoked/added diff + short-circuit MUST be tested independently — don't
+write "shared pipeline" in a deferral rationale (Critic round-1 caught
+this). To assert exact revoked/added callback partitions you need a
+registered rebalance listener; `subscribe_to_share_group` takes none, so
+tests use `subscribe_topics(.., Some(listener))` (subscription type is
+immaterial to reconcile). Covered by
+`reconcile_new_partitions_assigned_and_revoked` +
+`_when_other_partitions_owned` + `reconciliation_skipped_when_same_assignment_received`. `AbstractMembershipManager.metadata` is
 `Arc<ConsumerMetadata>` and the Java `ShareMembershipManagerTest` itself
 uses `mock(ConsumerMetadata.class)` — so ShareMembershipManager passes
 `Arc<ConsumerMetadata>` (NOT ShareConsumerMetadata). ShareConsumerMetadata
