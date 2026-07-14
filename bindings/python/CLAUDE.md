@@ -33,7 +33,7 @@ this rulebook links them explicitly (never rely on nested auto-loading).
 |---|---|---|
 | G1 Orientation | ✅ below | this file |
 | G2 Porting workflow | ✅ below | this file |
-| G3 FFI boundary contracts | ▢ forthcoming | `.claude/rules/python-ffi.md` |
+| G3 FFI boundary contracts | ✅ done | `.claude/rules/python-ffi.md` |
 | G4 API shape & design | ▢ forthcoming | this file (+ a rule file if it grows) |
 | G5 Build / run / verify | ▢ forthcoming | this file |
 | G6 Governance & review | ▢ forthcoming | `.claude/agents/*.md` |
