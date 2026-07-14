@@ -35,8 +35,8 @@ this rulebook links them explicitly (never rely on nested auto-loading).
 | G2 Porting workflow | ✅ below | this file |
 | G3 FFI boundary contracts | ✅ done | `.claude/rules/python-ffi.md` |
 | G4 API shape & design | ✅ done | this file |
-| G5 Build / run / verify | ▢ forthcoming | this file |
-| G6 Governance & review | ▢ forthcoming | `.claude/agents/*.md` |
+| G5 Build / run / verify | ✅ done | this file |
+| G6 Governance & review | ✅ done | `.claude/agents/*.md` |
 
 ---
 
@@ -418,3 +418,147 @@ verdict.
 
 **What G4 deliberately excludes:** the cross-layer symbol naming (→ G2 §2.5); the
 boundary correctness rules (→ G3); build / packaging / test commands (→ G5).
+
+---
+
+# G5 · Build / run / verify
+
+Runbook altitude: the firm build order, the commands, how to run against a
+broker, and the test conventions — plus the packaging calls (deferred as
+decision-points, G4-style) and `make verify` as the definition of done.
+
+## 5.1 The build is a two-stage pipeline: Rust → Python (firm)
+
+The Python extension cannot compile until the Rust side has produced the shared
+library **and** the generated header:
+
+```
+cargo build --features ffi [--release]                       (build-rust)
+   ├─ target/<profile>/libconfluent_kafka.{so,a}   ← the ext links this
+   └─ target/include/confluent_kafka.h             ← cbindgen header the ext #includes
+                    │  (must exist first)
+                    ▼
+pip install -e .   (CONFLUENT_KAFKA_LIB_DIR=target/<profile>)  (build-python)
+```
+
+The root `Makefile` orchestrates it (`make build` = `build-rust` → `build-c` →
+`build-python`). **Gotcha:** `CONFLUENT_KAFKA_LIB_DIR` defaults to
+`target/release`; a debug build must point it at `target/debug` (the Makefile's
+`PROFILE=debug` does this). Never build Python before Rust — the header/lib will
+not exist yet.
+
+## 5.2 Commands
+
+| Goal | Command |
+|---|---|
+| Build everything (release) | `make build` |
+| Build Python fast, for iteration (debug) | `make devel-build-python` |
+| Regenerate the C header | falls out of `cargo build --features ffi` (`build.rs`) |
+| Unit tests (**no broker**) | `make test-python` → `pytest test/unit` (MockProducer) |
+| Rust tests | `make test-rust` |
+| Integration (broker via testcontainers) | `make test-integration` |
+| Multi-language gRPC harness (opt-in) | `make test-multilanguage` |
+| Format / lint | `cargo xtask format` / `cargo xtask lint` |
+| **DoD gate** | `make verify` (= `build` + `format-check` + `lint` + `test`) |
+
+## 5.3 Running against a broker
+
+Three tiers; there is **no checked-in `docker-compose`** — pick by need:
+
+  - **No broker** — `MockProducer` (what the unit tests use; also the way to
+    demo / iterate without infra).
+  - **Your own local broker** — `bootstrap.servers` is just a config key:
+    `KafkaProducer({"bootstrap.servers": "localhost:9092"})`.
+  - **Perf harness** — fully env-driven: `BOOTSTRAP_SERVERS` (+ `VALUE_SIZE`,
+    `LIMIT_RPS`, `TEST_DURATION_SECONDS`, `COMPRESSION_TYPE`, `TOPIC_NAME`,
+    `SASL_*`). It reads messages back for verification using the ecosystem
+    `confluent_kafka` Consumer as an independent checker.
+  - **Integration / multi-language tests** spin brokers up themselves via
+    **testcontainers** (needs Docker), rather than a compose file.
+
+## 5.4 Test conventions
+
+  - Unit tests hold a `MockProducer` (auto- or manual-complete), use
+    `with … as p`, and call `future.result(timeout=…)` — the timeout doubles as
+    the **deadlock regression guard** (G3 §1).
+  - Account for the C-ext batch interval (~10 ms) when timing assertions.
+  - `auto_complete=False` + `complete_next()` / `error_next()` gives
+    deterministic completion for assertions.
+  - Parity obligations: mirror the Java / Rust tests (`definition-of-done.md §3`),
+    **assert error-message content** (G3 §5), and add a per-record
+    **allocation-budget** test on the hot path (G3 §4, DoD §10).
+  - Layout: `test/unit/` (no broker) vs `test/performance/` (broker via env).
+
+## 5.5 Packaging & versions
+
+Firm now:
+
+  - `setuptools` + `wheel` backend; `requires-python = ">=3.10"`; ships the
+    compiled `_confluentkafka` extension + the `producer` module.
+  - `confluent-kafka` is a **dev / test-only** dependency (verifier + perf
+    baseline), never a runtime dependency.
+
+Decision points (resolve when we publish, record rationale — G4 style):
+
+| Decision point | Recommended default | Decide when |
+|---|---|---|
+| `abi3` / Limited API | Not now (version-specific wheels are fine pre-release); adopt `abi3` when wheel count matters. | preparing distribution |
+| manylinux wheels | Defer; build-from-source until distribution is in scope. | preparing distribution |
+| Free-threading wheels | Follow the G3 §2 policy — no `Py_mod_gil` slot yet, so no free-threaded wheels until that migration. | with the §2 migration |
+| Python upper bound | Leave open (`>=3.10`, no cap) unless a specific version breaks. | on a known incompatibility |
+| Public import name | Namespace it (a real package) before release — a top-level `producer` module is too generic. | preparing distribution |
+
+## 5.6 `make verify` is the definition of done
+
+`make verify` = `build` + `format-check` + `lint` + `test`. A port is not done
+until it passes (`definition-of-done.md`). `test-multilanguage` is deliberately
+**opt-in** — not part of `verify` until the harness is CI-stable.
+
+**What G5 deliberately excludes:** the porting steps (→ G2); the boundary
+correctness rules (→ G3); the API shape / design calls (→ G4); the Actor / Critic
+governance (→ G6).
+
+---
+
+# G6 · Governance & review
+
+Governance altitude: who builds and reviews this binding, and with what lens. The
+*process* is inherited from root `agent-roles.md`; the personas add the Python
+review expertise. The review *criteria* live in G3 (anti-patterns) and G5
+(`make verify`) — G6 points at them, it does not restate them.
+
+## 6.1 Personas
+
+  - **`python-actor`** (`.claude/agents/python-actor.md`) and **`python-critic`**
+    (`.claude/agents/python-critic.md`) inherit the Actor / Critic roles and the
+    `COMMENTS.<N>.md` loop from `agent-roles.md`. The Manager is the root
+    `project-manager` — coordination is client-agnostic.
+  - They exist because the root `actor-executor` / `kafka-critic` are
+    Rust-translation-shaped and don't know the CPython C-API.
+
+## 6.2 Review ground truth (firm)
+
+Review a change against the **C ABI header** (`confluent_kafka.h`) and the **Kafka
+Java public API shape** — **not** Rust internals, and **not** Java implementation
+logic (`bindings/CLAUDE.md §2`).
+
+## 6.3 The Critic's lens (Python-specific)
+
+refcount balance · GIL discipline · handle leak / double-free · buffer lifetime ·
+two-surface error model · "shape, not logic". The concrete checklist is the
+**"Anti-patterns to flag in review"** blocks in G3, the `make verify` gate (G5),
+and the decision tables (G2/G4). Two known traps to check every time: the
+`closed` / `send_completed` data race and the missing free-threading module slot.
+
+## 6.4 Mechanics
+
+  - Review comments: `bindings/python/COMMENTS.<N>.md`; resolved → `COMMENTS.DONE.<N>.md`.
+  - Agent memory: `bindings/python/.claude/agent-memory/<persona>/`.
+  - ⚠ **Nested-agent discovery is unverified.** If the harness does not
+    auto-register `bindings/python/.claude/agents/*.md` as subagents, either place
+    copies under the repo-root `.claude/agents/` or invoke an agent with these
+    persona files loaded explicitly. Confirm before relying on auto-invocation.
+
+**What G6 deliberately excludes:** the review criteria themselves (→ G3
+anti-patterns, G5 verify gate); the porting workflow (→ G2); the API-shape calls
+(→ G4).
