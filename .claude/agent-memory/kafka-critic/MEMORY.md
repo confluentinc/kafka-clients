@@ -64,3 +64,4 @@
 - [M9 Phase 2 ack core types](review_m9_phase2_patterns.md) — single-pass move rewrite equivalence via acknowledged_records set; standalone-exception-struct safe if caller uses .cause(); ownership-consuming merge/get forward risks; sync-callback drops retry loop
 - [M9 Phase 3 share fetch data path](review_m9_phase3_patterns.md) — CRC→illegal_state mislabels CorruptRecordException so collector escape-hatch propagates instead of swallowing (systemic w/ non-share); peek-then-reparse interleave equivalence
 - [M9 Phase 4 share membership/heartbeat/metadata](review_m9_phase4_patterns.md) — "shared pipeline" deferral false b/c reconcile is DUPLICATED per-subclass (grep abstract); no-auto-commit confirmed; UNSUPPORTED_VERSION reachable; epoch is i32 not i64
+- [M9 Phase 5 ShareConsumeRequestManager](review_m9_phase5_patterns.md) — reset_deadline(now=0) bug masked by near-zero MockClock; per-node ack-slot routing sound; single-node test hidden among multi-node deferrals
