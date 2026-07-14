@@ -31,10 +31,13 @@ pub mod errors;
 pub mod group_protocol;
 pub mod interceptor;
 pub mod mock_consumer;
+pub mod mock_share_consumer;
 pub mod offset_and_metadata;
 pub mod offset_and_timestamp;
 pub mod offset_commit_callback;
 pub mod offset_reset_strategy;
+pub mod share_consumer;
+pub mod share_consumer_config;
 pub mod subscription_pattern;
 
 pub(crate) mod internals;
@@ -54,11 +57,14 @@ pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
 pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
 pub use mock_consumer::MockConsumer;
+pub use mock_share_consumer::MockShareConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
 #[allow(deprecated)]
 pub use offset_reset_strategy::OffsetResetStrategy;
+pub use share_consumer::ShareConsumer;
+pub use share_consumer_config::ShareConsumerConfig;
 pub use subscription_pattern::SubscriptionPattern;
 
 // Re-export [`Deserializer`] at the consumer module root for API ergonomics.
