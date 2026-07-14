@@ -1614,6 +1614,203 @@ mod tests {
         (thread, membership)
     }
 
+    // ─── Phase 7: share-consumer bg-loop join wiring (test with teeth) ───
+
+    /// Builds a `ConsumerNetworkThread` wired for a KIP-932 share consumer via
+    /// `RequestManagers::for_share` + `set_share_membership` — the exact bg-loop
+    /// shape `new_share_consumer` produces. Returns the thread, the share
+    /// membership handle, and the shared `RequestManagers` (so the test can read
+    /// the `ShareConsumeRequestManager`'s propagated member id).
+    #[allow(clippy::type_complexity)]
+    fn make_share_thread() -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<crate::consumer::internals::share_membership_manager::ShareMembershipManager>,
+        Arc<Mutex<RequestManagers>>,
+    ) {
+        use crate::common::utils::LogContext;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::events::share_acknowledgement_event_handler::ShareAcknowledgementEventHandler;
+        use crate::consumer::internals::share_consume_request_manager::{
+            ShareConsumeRequestManager, ShareConsumeTime, SystemShareConsumeTime,
+        };
+        use crate::consumer::internals::share_consumer_metadata::ShareConsumerMetadata;
+        use crate::consumer::internals::share_fetch_buffer::ShareFetchBuffer;
+        use crate::consumer::internals::share_fetch_config::ShareFetchConfig;
+        use crate::consumer::internals::share_heartbeat_request_manager::ShareHeartbeatRequestManager;
+        use crate::consumer::internals::share_membership_manager::ShareMembershipManager;
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
+        let metadata = make_metadata(&config, subs.clone());
+        let share_metadata = Arc::new(ShareConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(bg_tx));
+
+        let coordinator = Arc::new(CoordinatorRequestManager::new(
+            config.retry_backoff_ms(),
+            config.retry_backoff_max_ms(),
+            "g".to_string(),
+        ));
+        let share_membership = Arc::new(ShareMembershipManager::new(
+            "g".to_string(),
+            None,
+            subs.clone(),
+            metadata.clone(),
+            beh.clone(),
+        ));
+        let share_heartbeat = ShareHeartbeatRequestManager::new(
+            1_000,
+            &config,
+            coordinator.clone(),
+            subs.clone(),
+            share_membership.clone(),
+            beh.clone(),
+        );
+        let time_src: Arc<dyn ShareConsumeTime> = Arc::new(SystemShareConsumeTime);
+        let share_consume = ShareConsumeRequestManager::new(
+            time_src,
+            LogContext::new("[share-test] "),
+            "g".to_string(),
+            share_metadata,
+            subs.clone(),
+            ShareFetchConfig::from_consumer_config(&config).unwrap(),
+            Arc::new(ShareFetchBuffer::new()),
+            ShareAcknowledgementEventHandler::default(),
+            config.retry_backoff_ms(),
+            config.retry_backoff_max_ms(),
+        );
+
+        let request_managers = Arc::new(Mutex::new(RequestManagers::for_share(
+            Some(coordinator),
+            share_consume,
+            share_heartbeat,
+            share_membership.clone(),
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let mut thread = ConsumerNetworkThread::new(
+            time as Arc<dyn ThreadTime>,
+            rx,
+            reaper,
+            processor,
+            delegate,
+            request_managers.clone(),
+            None, // KIP-848 consumer membership unused by a share consumer
+            wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
+        );
+        // The load-bearing Phase-7 wiring — the bg-loop analog of `mod.rs`'s
+        // `network_thread.set_share_membership(Some(...))`.
+        thread.set_share_membership(Some(share_membership.clone()));
+        (thread, share_membership, request_managers)
+    }
+
+    /// Build a `ShareGroupHeartbeatResponse` carrying the given assignment
+    /// (member epoch 1), mirroring `share_membership_manager`'s test helper.
+    fn share_group_heartbeat_response(
+        member_id: String,
+        assignment: Option<Vec<(crate::common::Uuid, Vec<i32>)>>,
+    ) -> crate::common::requests::ShareGroupHeartbeatResponse {
+        use crate::share_group_heartbeat_response_data::{
+            Assignment, ShareGroupHeartbeatResponseData, TopicPartitions,
+        };
+        let mut data = ShareGroupHeartbeatResponseData::new();
+        data.set_error_code(crate::common::protocol::Errors::None.code());
+        data.set_member_id(Some(member_id));
+        data.set_member_epoch(1);
+        data.set_heartbeat_interval_ms(5000);
+        if let Some(parts) = assignment {
+            let topic_partitions = parts
+                .into_iter()
+                .map(|(topic_id, partitions)| {
+                    let mut tp = TopicPartitions::new();
+                    tp.set_topic_id(topic_id).set_partitions(partitions);
+                    tp
+                })
+                .collect();
+            let mut a = Assignment::new();
+            a.set_topic_partitions(topic_partitions);
+            data.set_assignment(Some(a));
+        }
+        crate::common::requests::ShareGroupHeartbeatResponse::new(data)
+    }
+
+    /// Phase-7 join-wiring regression guard (test with teeth). Drives ONE
+    /// `run_once` iteration on a share-wired bg thread and asserts the two
+    /// load-bearing effects of the Phase-7 orchestration:
+    ///
+    ///   (a) `share_membership.reconcile(now)` is driven each iteration
+    ///       (Phase 2.5s) — the membership advances `Reconciling ->
+    ///       Acknowledging` on the assignment received just before the poll.
+    ///   (b) the member id is propagated into the `ShareConsumeRequestManager`
+    ///       (`propagate_share_member_id`, Phase 2.4s).
+    ///
+    /// This FAILS if either the `reconcile(now)` call or the
+    /// `propagate_share_member_id` call is removed from `run_once`, or if the
+    /// `set_share_membership` wiring (the bg-loop analog of `mod.rs`'s
+    /// `network_thread.set_share_membership(Some(...))`) is dropped — in every
+    /// case the `if let Some(share_membership)` block is skipped and neither
+    /// effect occurs (state stays `Reconciling`, member id stays `None`).
+    ///
+    /// Remaining broker-only gap (documented, not covered here): the production
+    /// `mod.rs` `set_share_membership` line's END-TO-END effect — an actual
+    /// group JOIN against a live broker — needs the deferred MockClient
+    /// request-matcher harness / a share-group-enabled broker (see
+    /// `KafkaShareConsumerTest`'s deferral). This test guards the mechanism that
+    /// line feeds; the smoke test guards that the production ctor wires it in.
+    #[tokio::test]
+    async fn run_once_drives_share_membership_reconcile_and_member_id_propagation() {
+        use crate::common::Uuid;
+        use crate::consumer::internals::member_state::MemberState;
+
+        let (mut thread, share_membership, rms) = make_share_thread();
+
+        // Bring the member to `Reconciling` with an (empty) assignment, exactly
+        // as a ShareGroupHeartbeat response would during a join.
+        share_membership.transition_to_joining().unwrap();
+        let member_id = share_membership.member_id();
+        let response = share_group_heartbeat_response(member_id.clone(), Some(vec![]));
+        share_membership.on_heartbeat_success(&response).unwrap();
+        assert_eq!(
+            share_membership.state(),
+            MemberState::Reconciling,
+            "precondition: an assignment was received, so the member is Reconciling"
+        );
+        assert_eq!(
+            rms.lock().unwrap().share_consume_member_id(),
+            None,
+            "precondition: member id not yet propagated to the share-consume manager"
+        );
+
+        // Drive one bg-loop iteration.
+        thread.run_once().await;
+
+        // (a) reconcile was driven this iteration (Phase 2.5s).
+        assert_eq!(
+            share_membership.state(),
+            MemberState::Acknowledging,
+            "run_once must drive share_membership.reconcile(now); Reconciling should advance to Acknowledging"
+        );
+        // (b) member id propagated into the ShareConsumeRequestManager (Phase 2.4s).
+        let expected = Uuid::from_string(&member_id).ok();
+        assert!(expected.is_some(), "membership must generate a valid member id");
+        assert_eq!(
+            rms.lock().unwrap().share_consume_member_id(),
+            expected,
+            "run_once must propagate the member id into the ShareConsumeRequestManager"
+        );
+    }
+
     // ─── Translated Java tests (Phase 10 commit 8/N) ───
 
     /// Java: `testEnsureCloseStopsRunningThread`. Verifies `isRunning()`
