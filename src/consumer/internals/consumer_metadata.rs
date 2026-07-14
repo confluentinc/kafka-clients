@@ -196,6 +196,28 @@ impl ConsumerMetadata {
         )
     }
 
+    /// Wraps an already-constructed shared [`Metadata`] rather than building a
+    /// new one. Used by the KIP-932 share-consumer production wiring
+    /// (`new_share_consumer`): the share consumer's single source of truth is a
+    /// [`super::share_consumer_metadata::ShareConsumerMetadata`] (whose
+    /// share-specific `retainTopic` / `newMetadataRequestBuilder` overrides are
+    /// baked into the shared `Metadata`), and the `NetworkClient` updates that
+    /// same `Metadata`. The `ShareMembershipManager` and `ShareFetchCollector`
+    /// require an `Arc<ConsumerMetadata>` (Rust has no `ShareConsumerMetadata
+    /// extends ConsumerMetadata` inheritance), so this constructor produces a
+    /// `ConsumerMetadata` view over the SAME `Arc<Metadata>` — all reads/writes
+    /// stay consistent with the `ShareConsumerMetadata` and the `NetworkClient`.
+    /// The wrapper installs no overrides of its own (they live on the shared
+    /// `Metadata`); its `transient_topics` set is unused by the share managers.
+    pub(crate) fn from_shared_metadata(
+        metadata: Arc<Metadata>,
+        subscription: Arc<Mutex<SubscriptionState>>,
+        allow_auto_topic_creation: bool,
+    ) -> Self {
+        let inner = Arc::new(Mutex::new(ConsumerMetadataInner { transient_topics: HashSet::new() }));
+        Self { metadata, inner, subscription, allow_auto_topic_creation }
+    }
+
     /// Translates Java's `allowAutoTopicCreation()`.
     pub(crate) fn allow_auto_topic_creation(&self) -> bool {
         self.allow_auto_topic_creation

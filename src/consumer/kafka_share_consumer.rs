@@ -65,6 +65,16 @@ where
     /// Java passes deserializers via `ShareConsumerConfig` reflection; Rust
     /// takes them explicitly (matching [`crate::consumer::new_consumer`]).
     ///
+    /// # Rust-specific divergence: `K: Clone, V: Clone`
+    ///
+    /// This constructor requires `K: Clone, V: Clone` because the underlying
+    /// [`ShareConsumerImpl`](crate::consumer::internals::share_consumer_impl::ShareConsumerImpl)
+    /// implements [`ShareConsumer`] only for `Clone` key/value types (the
+    /// KIP-932 RENEW acknowledgement path retains a record already moved to the
+    /// user). See [`crate::consumer::new_share_consumer`] for the full rationale.
+    /// This is an accepted, rarely-visible divergence from Java's unbounded
+    /// `ShareConsumer<K, V>`.
+    ///
     /// # Errors
     ///
     /// Returns the error from [`crate::consumer::new_share_consumer`].
@@ -72,7 +82,11 @@ where
         config: crate::consumer::ShareConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
         value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, KafkaError>
+    where
+        K: Clone,
+        V: Clone,
+    {
         let delegate = crate::consumer::new_share_consumer(config, key_deserializer, value_deserializer)?;
         Ok(Self { delegate })
     }

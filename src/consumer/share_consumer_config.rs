@@ -26,6 +26,7 @@ use std::collections::HashMap;
 
 use crate::common::KafkaError;
 use crate::consumer::consumer_config::ConsumerConfig;
+use crate::consumer::internals::share_acknowledgement_mode::ShareAcknowledgementMode;
 
 /// The share-consumer configuration.
 ///
@@ -33,6 +34,10 @@ use crate::consumer::consumer_config::ConsumerConfig;
 /// supported for a share group (Java `ShareConsumerConfig.SHARE_GROUP_UNSUPPORTED_CONFIGS`).
 pub struct ShareConsumerConfig {
     inner: ConsumerConfig,
+    /// Parsed `share.acknowledgement.mode` (Java `SHARE_ACKNOWLEDGEMENT_MODE_CONFIG`,
+    /// default `implicit`). Read by the `new_share_consumer` factory to seed
+    /// `ShareConsumerImpl`.
+    acknowledgement_mode: ShareAcknowledgementMode,
 }
 
 impl ShareConsumerConfig {
@@ -64,9 +69,26 @@ impl ShareConsumerConfig {
     /// Returns [`KafkaError::illegal_argument`] (the Rust analog of Java's
     /// `ConfigException`) if any share-group-unsupported config is present, or
     /// if [`ConsumerConfig::from_properties`] fails.
+    /// Java: `SHARE_ACKNOWLEDGEMENT_MODE_CONFIG` (`ConsumerConfig.java:375`).
+    pub(crate) const SHARE_ACKNOWLEDGEMENT_MODE_CONFIG: &'static str = "share.acknowledgement.mode";
+
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
         Self::check_unsupported_configs_pre_process(props)?;
-        Ok(Self { inner: ConsumerConfig::from_properties(props)? })
+        // Java default: `ShareAcknowledgementMode.IMPLICIT.name()`; the value is
+        // validated by `ShareAcknowledgementMode::from_string` (Java's
+        // `ShareAcknowledgementMode.Validator`), so an invalid value is a
+        // ConfigException → `illegal_argument`.
+        let ack_mode_str = props
+            .get(Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG)
+            .map(String::as_str)
+            .unwrap_or("implicit");
+        let acknowledgement_mode = ShareAcknowledgementMode::from_string(ack_mode_str)?;
+        Ok(Self { inner: ConsumerConfig::from_properties(props)?, acknowledgement_mode })
+    }
+
+    /// The parsed `share.acknowledgement.mode` (default `implicit`).
+    pub(crate) fn acknowledgement_mode(&self) -> ShareAcknowledgementMode {
+        self.acknowledgement_mode
     }
 
     /// Java: `checkUnsupportedConfigsPreProcess`.
