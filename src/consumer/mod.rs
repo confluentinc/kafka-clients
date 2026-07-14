@@ -18,6 +18,7 @@
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
 pub mod acknowledge_type;
+pub mod acknowledgement_commit_callback;
 pub mod async_kafka_consumer;
 pub mod close_options;
 pub mod consumer_config;
@@ -39,6 +40,7 @@ pub mod subscription_pattern;
 pub(crate) mod internals;
 
 pub use acknowledge_type::AcknowledgeType;
+pub use acknowledgement_commit_callback::AcknowledgementCommitCallback;
 pub use async_kafka_consumer::WakeupHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
