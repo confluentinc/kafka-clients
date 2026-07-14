@@ -48,6 +48,7 @@ use super::offsets_request_manager::OffsetsRequestManager;
 use super::request_manager::RequestManager;
 use super::share_consume_request_manager::ShareConsumeRequestManager;
 use super::share_heartbeat_request_manager::ShareHeartbeatRequestManager;
+use super::share_membership_manager::ShareMembershipManager;
 use super::topic_metadata_request_manager::TopicMetadataRequestManager;
 
 /// Container holding all consumer request managers. The bg task
@@ -113,12 +114,12 @@ pub(crate) struct RequestManagers {
     pub(crate) fetch: Option<FetchRequestManager>,
     /// Share-consumer request manager (KIP-932). Java:
     /// `Optional<ShareConsumeRequestManager> shareConsumeRequestManager`,
-    /// populated only by the share-consumer constructor
-    /// (`RequestManagers.java:105`). When present it is iterated in
-    /// [`Self::entries`] after `fetch`. The full share bg-loop wiring
-    /// (`ShareHeartbeatRequestManager` / `ShareMembershipManager` slots and a
-    /// dedicated `for_share` constructor) lands with the share consumer in a
-    /// later phase; this slot registers the manager so it can be polled.
+    /// populated only by the share-consumer constructor. In [`Self::entries`]
+    /// it is polled AFTER `share_heartbeat` (Java's share `entries` order is
+    /// `shareHeartbeat → shareMembership → shareConsume`,
+    /// `RequestManagers.java:123-128`) so the consume manager acts on
+    /// membership state already advanced by the heartbeat manager in the same
+    /// `run_once` iteration (§10).
     pub(crate) share_consume: Option<ShareConsumeRequestManager>,
     /// Share-group heartbeat manager (KIP-932). Java:
     /// `Optional<ShareHeartbeatRequestManager> shareHeartbeatRequestManager`,
@@ -130,6 +131,20 @@ pub(crate) struct RequestManagers {
     /// process `SharePoll` / `ShareSubscriptionChange` / `ShareUnsubscribe`
     /// events.
     pub(crate) share_heartbeat: Option<ShareHeartbeatRequestManager>,
+    /// KIP-932 share-group membership manager. Java:
+    /// `Optional<ShareMembershipManager> shareMembershipManager`, registered in
+    /// the share constructor's `entries` (`RequestManagers.java:126`).
+    ///
+    /// Held as `Arc` because [`ShareHeartbeatRequestManager`] also holds it
+    /// (both share the same state) — the direct analog of the
+    /// `consumer_membership`/`consumer_heartbeat` pairing. Like
+    /// `consumer_membership`, it is **skipped from [`Self::entries`]**: a
+    /// `&mut dyn RequestManager` cannot be produced from a shared `Arc<...>`
+    /// without refactoring `RequestManager::poll` to `&self`. The bg task drives
+    /// its reconcile separately (Java calls `ShareMembershipManager` reconcile
+    /// alongside the heartbeat); that share bg-loop reconcile wiring lands with
+    /// the production pipeline (Phase 7).
+    pub(crate) share_membership: Option<Arc<ShareMembershipManager>>,
     /// Auxiliary slot for dyn-dispatched managers — used by tests to
     /// inject spy/fake managers without expanding the concrete-field
     /// list. The production constructor `new(...)` leaves this empty;
@@ -173,6 +188,7 @@ impl RequestManagers {
             fetch,
             share_consume: None,
             share_heartbeat: None,
+            share_membership: None,
             dyn_managers: Vec::new(),
             closed: false,
         }
@@ -195,6 +211,7 @@ impl RequestManagers {
             fetch: None,
             share_consume: None,
             share_heartbeat: None,
+            share_membership: None,
             dyn_managers,
             closed: false,
         }
@@ -242,6 +259,10 @@ impl RequestManagers {
             fetch,
             share_consume,
             share_heartbeat,
+            // Arc-shared with `share_heartbeat` (see field doc); like
+            // `consumer_membership` it is skipped from `entries()` and its
+            // reconcile is driven separately.
+            share_membership: _,
             dyn_managers,
             closed: _,
         } = self;
@@ -262,15 +283,19 @@ impl RequestManagers {
         if let Some(f) = fetch.as_mut() {
             list.push(f as &mut dyn RequestManager);
         }
-        // Share-consumer manager (KIP-932), iterated after `fetch`
-        // (`RequestManagers.java:127` places `shareConsumeRequestManager` last).
-        if let Some(s) = share_consume.as_mut() {
-            list.push(s as &mut dyn RequestManager);
-        }
-        // Share-group heartbeat manager (KIP-932) — Java places
-        // `shareHeartbeatRequestManager` in `entries()`.
+        // Share managers (KIP-932). Java's share constructor builds `entries`
+        // as `coordinator → shareHeartbeat → shareMembership → shareConsume`
+        // (`RequestManagers.java:123-128`): heartbeat/membership advance the
+        // KIP-848 membership state within the same `run_once` iteration BEFORE
+        // the consume manager acts on it (§10), so `share_heartbeat` MUST be
+        // polled before `share_consume`. `share_membership` is Arc-shared with
+        // `share_heartbeat` and skipped here (like `consumer_membership`); its
+        // reconcile is driven separately by the bg loop (Phase 7).
         if let Some(h) = share_heartbeat.as_mut() {
             list.push(h as &mut dyn RequestManager);
+        }
+        if let Some(s) = share_consume.as_mut() {
+            list.push(s as &mut dyn RequestManager);
         }
         for m in dyn_managers.iter_mut() {
             list.push(m.as_mut());
