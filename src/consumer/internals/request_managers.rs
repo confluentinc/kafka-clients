@@ -236,6 +236,13 @@ impl RequestManagers {
         self.share_membership.clone()
     }
 
+    /// Test accessor: the `ShareConsumeRequestManager`'s current member id.
+    /// Used to assert the bg loop's `propagate_share_member_id` took effect.
+    #[cfg(test)]
+    pub(crate) fn share_consume_member_id(&self) -> Option<crate::common::Uuid> {
+        self.share_consume.as_ref().and_then(|s| s.member_id_for_test())
+    }
+
     /// Drains the share heartbeat manager's pending-membership-transition
     /// side-channel — the share analog of
     /// [`Self::take_pending_membership_transitions`]. Returns an empty `Vec`
