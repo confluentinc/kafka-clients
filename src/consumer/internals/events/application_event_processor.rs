@@ -1161,22 +1161,26 @@ impl ApplicationEventProcessor {
     // `ApplicationEventProcessor`. Fetch / acknowledge events dispatch to the
     // `share_consume` request manager (`shareConsumeRequestManager` in Java).
     //
-    // NOTE (Phase 6 scope): the share MEMBERSHIP / HEARTBEAT managers
-    // (`shareHeartbeatRequestManager` in Java) are not yet wired into
-    // `RequestManagers` — that lands with the production share bg pipeline
-    // (Phase 7). Until then, `SharePoll` is a no-op and the membership events
-    // (`ShareSubscriptionChange` / `ShareUnsubscribe`) take Java's
-    // `Optional.empty()` branch (`completeExceptionally`). `ShareConsumerImpl`
+    // The share MEMBERSHIP / HEARTBEAT managers are reached through the
+    // `share_heartbeat` slot's [`ShareHeartbeatRequestManager::membership_manager`]
+    // (Java: `requestManagers.shareHeartbeatRequestManager`). When that slot is
+    // `None` (e.g. a non-share consumer, or before the share bg pipeline is
+    // wired), these arms take Java's `Optional.empty()` branch. `ShareConsumerImpl`
     // unit tests exercise these paths through a test-double event handler, so
-    // the real processor arms here are only reached by the deferred integration
-    // test.
+    // the real processor arms here are reached by the (deferred) integration test.
 
     /// Java: `process(SharePollEvent)`.
-    fn process_share_poll(&mut self, _poll_time_ms: i64) {
-        // Java resets the share heartbeat manager's poll timer and calls
-        // `membershipManager().onConsumerPoll()`. The share heartbeat manager
-        // is not present in `RequestManagers` in this phase (see note above),
-        // so this is a no-op.
+    fn process_share_poll(&mut self, poll_time_ms: i64) {
+        // Java: `shareHeartbeatRequestManager.ifPresent(hrm -> {
+        //     hrm.membershipManager().onConsumerPoll(); hrm.resetPollTimer(pollTimeMs); })`.
+        let mut rm_guard = self.lock_request_managers();
+        if let Some(hrm) = rm_guard.share_heartbeat.as_mut() {
+            let membership = Arc::clone(hrm.membership_manager());
+            if let Err(e) = membership.on_consumer_poll() {
+                log::warn!("Share on_consumer_poll failed: {e}");
+            }
+            hrm.inner_mut().reset_poll_timer(poll_time_ms);
+        }
     }
 
     /// Java: `process(ShareFetchEvent)`.
@@ -1244,26 +1248,63 @@ impl ApplicationEventProcessor {
         topics: std::collections::HashSet<String>,
         handle: super::completable_event::CompletableEventHandle<()>,
     ) {
-        // Java: if `shareHeartbeatRequestManager` is empty, fail the future.
-        // The share heartbeat/membership manager is not in `RequestManagers`
-        // in this phase (see note above), so we always take this branch. When
-        // the production share bg pipeline lands, this becomes:
-        //   if subscriptions.subscribe_to_share_group(topics) { metadata.request_update_for_new_topics(); }
-        //   share_heartbeat.membership_manager().on_subscription_updated();
-        //   handle.complete(());
-        let _ = topics;
-        handle.complete_exceptionally(KafkaError::illegal_state(
-            "Group membership manager not present when processing a subscribe event",
-        ));
+        let membership = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .share_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        let Some(membership) = membership else {
+            handle.complete_exceptionally(KafkaError::illegal_state(
+                "Group membership manager not present when processing a subscribe event",
+            ));
+            return;
+        };
+        let changed = {
+            let mut subs = self.lock_subscriptions();
+            subs.subscribe_to_share_group(topics).unwrap_or(false)
+        };
+        if changed {
+            self.metadata.request_update_for_new_topics();
+        }
+        membership.on_subscription_updated();
+        handle.complete(());
     }
 
     /// Java: `process(ShareUnsubscribeEvent)`.
     fn process_share_unsubscribe(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
-        // See `process_share_subscription_change` — always the empty branch
-        // until the share heartbeat/membership manager is wired.
-        handle.complete_exceptionally(KafkaError::illegal_state(
-            "Group membership manager not present when processing an unsubscribe event",
-        ));
+        let membership = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .share_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        let Some(membership) = membership else {
+            handle.complete_exceptionally(KafkaError::illegal_state(
+                "Group membership manager not present when processing an unsubscribe event",
+            ));
+            return;
+        };
+        {
+            let mut subs = self.lock_subscriptions();
+            subs.unsubscribe();
+        }
+        // `leaveGroup()` is async; spawn a continuation that completes the
+        // event handle once the leave-group heartbeat has been sent (Java:
+        // `future.whenComplete(complete(event.future()))`).
+        let now_ms = current_time_ms_now();
+        tokio::spawn(async move {
+            match membership.leave_group(now_ms).await {
+                Ok(()) => {
+                    handle.complete(());
+                },
+                Err(err) => {
+                    handle.complete_exceptionally(err);
+                },
+            }
+        });
     }
 
     /// Java: `process(ShareAcknowledgeOnCloseEvent)`.
