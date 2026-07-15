@@ -3,16 +3,16 @@
 Deep-dive rules for marshalling across the C ABI (`confluent_kafka.h`,
 `kafka_producer_*` / `kafka_common_KafkaError_*`) from .NET via P/Invoke.
 Supplements `bindings/dotnet/CLAUDE.md`. Review ground truth is the **C ABI
-header** and the **Kafka Java public API**
+header** and the **Kafka Java public API**.
 
-Each numbered section is one decision: the **Rule**, **Why**, **How to apply**,
-**Anti-patterns**, and **Tests required**.
+Each section leads with **Decision** (the intent, one line), then **Rule**,
+**Why**, **Anti-patterns**, and **Tests required** (`consumer-threading.md` precedent).
 
 ## Thread topology & thread-safety (shared context)
 
-The whole-system picture that every numbered section below assumes. The C ABI
-hides all Kafka I/O on native threads **owned by the Rust core**; the binding
-adds only the caller threads and a single completion pump.
+The whole-system picture every section assumes. The C ABI hides all Kafka I/O on
+native threads **owned by the Rust core**; the binding adds only the caller
+threads and a single completion pump.
 
 ```
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
@@ -22,935 +22,492 @@ adds only the caller threads and a single completion pump.
    completion pump (1 bg thread):    │       │   Sender task (spawned once in _new):
      get_all(futures) ─block_on─────►│──────►│     NetworkClient + ONE async Selector
      ◄── per-message metadata/err ───│◄──────│       ↕ multiplexes ALL brokers (event-driven)
-   Dispose: join pump → flush/close  │       │   (runtime+task created in KafkaProducer_new,
-            → destroy handle         │       │    dropped on Producer_destroy)
+   Dispose: join pump → flush/close  │       │   (created in KafkaProducer_new, dropped on _destroy)
 ```
 
 **Rule:**
 
-  - Behind the C ABI, each real `KafkaProducer` owns a **multi-threaded tokio
-    runtime** (a small worker-thread pool) plus **one spawned Sender task** that
-    owns the network stack and does all Kafka protocol I/O over a **single async
-    Selector** (all brokers multiplexed — NOT one thread per broker). These
-    native threads are created in `kafka_producer_KafkaProducer_new` and torn
-    down by `kafka_producer_Producer_destroy`.
-  - On the .NET side there are only: the **caller thread(s)** and **exactly one
-    completion pump thread** (see §7). No per-send threads.
-  - **There is no mandatory poll loop.** The core self-drives its I/O; the pump
-    exists only to harvest per-message futures. If the pump stalls, sends still
-    flow to the broker — only result delivery back to .NET pauses.
-  - FFI calls may originate from any .NET thread. The core serializes them behind
-    the producer handle's internal `Mutex`, so concurrent `SendAsync` is safe —
-    but do NOT add your own lock around FFI calls (the core already locks).
-  - `Producer_send` / `_get*` call `block_on` on the **calling** .NET thread.
-    Because the runtime is multi-threaded, this parks only that one .NET thread;
-    the Sender keeps running on the runtime's worker threads. A blocked pump does
-    NOT stall sending.
-  - The one native → managed callback (`RecordMetadata_copy`) fires
-    **synchronously on the caller's (pump) thread** — not a foreign thread. Keep
-    its delegate alive and let no managed exception escape it into native (§6).
+  - Native side (per real `KafkaProducer`): a multi-thread tokio runtime + one
+    spawned Sender task doing all I/O over a **single async Selector** (all
+    brokers multiplexed — NOT thread-per-broker), created in `KafkaProducer_new`,
+    torn down by `Producer_destroy`.
+  - .NET side: caller thread(s) + **exactly one** completion pump (§7); no
+    per-send threads. **No poll loop** — the core self-drives, so a stalled pump
+    delays result delivery but not sending.
+  - FFI is callable from any .NET thread; the core serializes via the producer's
+    internal `Mutex`, so concurrent `SendAsync` is safe — don't add your own lock.
+  - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
+    the runtime's worker threads, so a blocked pump can't deadlock it.
+  - The one callback (`RecordMetadata_copy`) fires synchronously on the caller's
+    (pump) thread — not a foreign thread (§6).
 
-**Why:** This is Java's single-Selector NIO model translated to tokio
-(CLAUDE.md §8) — deliberately unlike librdkafka, which runs a "main" thread plus
-**one blocking thread per broker** and *requires* the app to pump
-`rd_kafka_poll` (confluent-kafka-dotnet does this with a `LongRunning`
-`callbackTask`). Consequences of the difference: our native thread count does
-**not** grow with cluster size; there is **no** poll loop to run; and results
-arrive as independent per-message futures, not through a shared delivery-report
-event queue. The multi-threaded runtime is also why `block_on` from a .NET
-thread is safe and cannot deadlock the Sender.
+**Why:** Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
+librdkafka (a thread per broker + a mandatory `rd_kafka_poll` loop, which
+confluent-kafka-dotnet services with a `LongRunning` `callbackTask`). So our
+native thread count is independent of cluster size, there is no poll loop, and
+the multi-thread runtime is what makes `block_on` from .NET deadlock-free.
 
-**How to apply:**
+**Anti-patterns:**
 
-  - Keep exactly one pump thread; never spawn a thread (or `Task.Run`) per send.
-  - Never dispose the producer `SafeHandle` while the pump may still touch
-    futures derived from it — join the pump first (§7, Dispose).
-  - Do not model a `confluent-kafka-dotnet`-style poll loop — there is no
-    `poll()` in this ABI, and nothing needs pumping to make progress.
-  - Do not hold a managed lock across any blocking FFI call (`_get_all`,
-    `_flush`, `_close`).
-  - The `RecordMetadata_copy` callback runs on the caller's (pump) thread; keep
-    its delegate rooted and exception-safe (§6).
-
-**Anti-patterns to flag in review:**
-
-  - A .NET "poll loop" thread modeled on `confluent-kafka-dotnet`'s
-    `callbackTask` — there is nothing to poll here.
-  - Assuming one native thread per broker, or that native thread count scales
-    with cluster size.
-  - Wrapping FFI calls in a binding-side lock "for safety" (double-locking; the
-    core already serializes via its `Mutex`).
-  - Assuming FFI calls are single-threaded, or that completions arrive on the
-    caller's thread.
+  - A `callbackTask`-style poll-loop thread — nothing to poll here.
+  - Assuming thread-per-broker, or native threads scaling with cluster size.
+  - A binding-side lock around FFI calls (double-locking; the core serializes).
 
 **Tests required:**
 
-  - Concurrent `SendAsync` from multiple .NET threads is safe and correct
-    (core `Mutex` serialization holds).
-  - A long-blocked pump (slow/paused broker) does not prevent new sends from
-    being accepted and enqueued (the self-driving runtime property).
-  - `Dispose` joins the pump before destroying the handle — no use-after-free
-    (shared with §7).
+  - Concurrent `SendAsync` from many .NET threads is correct (the `Mutex` holds).
+  - A long-blocked pump does not stop new sends being enqueued.
+  - `Dispose` joins the pump before destroying the handle (shared with §7).
 
 ---
 
 ## 1. P/Invoke declarations & type mapping
 
-All native calls go through one central `internal static class Native`. The
-binding **multi-targets `netstandard2.0` + `net8.0` + `net10.0`** — netstandard2.0
-is the floor (consumed by **.NET Framework 4.6.2** and .NET Core); net8.0 and
-net10.0 are first-class targets, not afterthoughts.
-
-We use **one uniform set of classic `[DllImport]` declarations across every
-target.** `[DllImport]` is fully supported on net8/net10 (it is not "the old
-way" — `[LibraryImport]` is only a source-generated optimization over the same
-P/Invoke machinery), so a single declaration set is the one mechanism valid
-across the whole matrix. Because netstandard2.0 / net462 is in that matrix, the
-interop features added later — source-generated `[LibraryImport]`, C# function
-pointers (`delegate* unmanaged`), `[UnmanagedCallersOnly]`,
-`UnmanagedType.LPUTF8Str`, and `Marshal.PtrToStringUTF8` — **must not be used**:
-they do not exist on the floor, and adopting them would fork the declarations.
-This is the same classic toolkit `confluent-kafka-dotnet` uses (it also supports
-net462), pointed at our fixed-width, handle-error ABI.
-
-**Deliberate non-goal:** a `[LibraryImport]` specialization under
-`#if NET7_0_OR_GREATER` for AOT/trimming on the modern TFMs. Our signatures are
-already mostly blittable (`IntPtr` / `int` / `long` + manual UTF-8 and pinning),
-so the gain is small and not worth maintaining two parallel declaration sets.
-Revisit only if NativeAOT becomes a hard requirement.
+**Decision:** One `internal static class Native` of classic `[DllImport(...,
+Cdecl)]` declarations, uniform across `netstandard2.0` + `net8.0` + `net10.0`.
+netstandard2.0 is the floor (covers .NET Framework 4.6.2), so the modern interop
+APIs — `[LibraryImport]`, `delegate* unmanaged`, `[UnmanagedCallersOnly]`,
+`UnmanagedType.LPUTF8Str`, `Marshal.PtrToStringUTF8` — are **off-limits** (they
+don't exist on the floor). Same classic toolkit as confluent-kafka-dotnet,
+pointed at our fixed-width, handle-error ABI.
 
 ### C ABI → C# type map
 
-| C ABI type (ours) | C# P/Invoke type | Notes |
+| C ABI type | C# | Notes |
 |---|---|---|
-| `int32_t` | `int` | 1:1 blittable. **Never `UIntPtr`/`nint`** — our ABI has no `size_t`. |
-| `int64_t` | `long` | 1:1 blittable. |
-| `bool` | `[MarshalAs(UnmanagedType.I1)] bool` | C `bool` is 1 byte; default marshals 4-byte Win32 `BOOL`. |
-| opaque `*_t *` | `IntPtr` (wrapped in a `SafeHandle` one layer up) | Never model the `_t` typedef as a C# struct. |
-| `const char *` **in** | `IntPtr` to a hand-pinned, NUL-terminated UTF-8 buffer | See UTF-8 rule below — no `LPStr`, no `LPUTF8Str`. |
-| `const char *` **out** (callee-owned) | `IntPtr` → our own `Utf8.PtrToString` | Never a `string` return (marshaller would free it). |
-| `const uint8_t *` + `int32_t len` | `IntPtr` (hand-pinned `byte[]`) + `int` | Zero-copy; call-scoped pin (§ zero-copy). |
-| `T **` out-param | `out IntPtr` | e.g. `out_error`. |
-| `T **` as array | `IntPtr[]` | e.g. `get_all` futures / out_metadata / out_errors. |
-| `struct ProducerRecord_t` | `[StructLayout(LayoutKind.Sequential)] struct`; array as `ProducerRecord_t[]` | Fixed-width ⇒ identical layout. |
-| `void (*cb)(...)` | a `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]` **delegate**, kept alive | No function pointers / `[UnmanagedCallersOnly]` on this floor. |
-| `void *` | `IntPtr` | Opaque `user_data` (a `GCHandle`). |
+| `int32_t` | `int` | **Never `UIntPtr`/`nint`** — our ABI has no `size_t`. |
+| `int64_t` | `long` | |
+| `bool` | `[MarshalAs(UnmanagedType.I1)] bool` | C `bool` is 1 byte; default marshals a 4-byte Win32 `BOOL`. |
+| opaque `*_t *` | `IntPtr` → `SafeHandle` above (§2) | Never a C# struct mirroring `_private[0]`. |
+| `const char *` in | `IntPtr` to a pinned NUL-terminated UTF-8 buffer (§3) | No `LPStr` (ANSI), no `LPUTF8Str`. |
+| `const char *` out (callee-owned) | `IntPtr` → `Utf8.PtrToString` (§3) | Never a `string` return — the marshaller would free it. |
+| `const uint8_t *` + `int32_t len` | `IntPtr` (pinned `byte[]`) + `int` (§4) | Zero-copy, call-scoped pin. |
+| `T **` out-param / array | `out IntPtr` / `IntPtr[]` | e.g. `out_error`; `get_all` arrays. |
+| `ProducerRecord_t` | `[StructLayout(LayoutKind.Sequential)] struct`, array `[]` | Fixed-width ⇒ identical layout. |
+| `void (*cb)(...)` / `void *` | Cdecl delegate, kept alive (§6) / `IntPtr` (`GCHandle`) | |
 
 **Rule:**
 
-  - Every declaration is
-    `[DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]`
-    on a `static extern` method in one `internal static class Native`. Cdecl
-    matches cbindgen's `extern "C"`. The bare name `"confluent_kafka"` resolves
-    to `confluent_kafka.dll` / `libconfluent_kafka.so` / `libconfluent_kafka.dylib`.
-  - Use the type map above verbatim. Sizes/lengths are `int`/`long`, **never**
-    `UIntPtr`/`nint`.
-  - `bool` is always `[MarshalAs(UnmanagedType.I1)]` (params and
-    `[return: ...]`).
-  - **UTF-8 strings are marshalled by hand.** Provide two helpers and use them
-    everywhere: `Utf8.Pin(string) -> (IntPtr ptr, GCHandle pin)` producing a
-    NUL-terminated UTF-8 buffer for input, and `Utf8.PtrToString(IntPtr) ->
-    string` (read bytes to the NUL, then `Encoding.UTF8.GetString`) for
-    callee-owned output. Do NOT use `[MarshalAs(UnmanagedType.LPStr)]` (ANSI —
-    corrupts non-ASCII topics) and do NOT reach for `LPUTF8Str` /
-    `Marshal.PtrToStringUTF8` (absent on netstandard2.0 & net462).
-  - Callbacks use a named `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`
-    delegate type. Keep the delegate instance alive (static field, or a field on
-    the owning object) for as long as native code can invoke it; a collected
-    delegate → call into freed memory.
-  - Opaque `*_t` handles are `IntPtr` tokens at the P/Invoke layer only; wrap
-    them in a `SafeHandle` at the next layer up (§ handle ownership). Never
-    declare a C# struct mirroring `_private[0]`.
-  - Prefer `kafka_producer_ProducerProperties_put` over `_from_configs` to avoid
-    marshalling a NUL-terminated `const char *const *` array.
+  - `[DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]`
+    (Cdecl matches cbindgen `extern "C"`; the bare name maps to
+    `confluent_kafka.dll` / `lib….so` / `lib….dylib`). One declaration set for all
+    TFMs — no per-TFM `#if`.
+  - Follow the type map verbatim: sizes are `int`/`long`, `bool` is `I1`, opaque
+    handles stay `IntPtr` here (wrapped in a `SafeHandle` one layer up, §2), UTF-8
+    strings and key/value bytes are marshalled by hand (§3, §4).
+  - Prefer `ProducerProperties_put` over `_from_configs` (avoids marshalling a
+    `const char *const *`).
 
-**Why:** net462 and netstandard2.0 predate the modern interop surface, so the
-classic `DllImport` toolkit is the only portable option — which is exactly why
-`confluent-kafka-dotnet` (also net462) uses `[DllImport(..., Cdecl)]`, delegate
-callbacks, and its own `Util.Marshal.PtrToStringUTF8` + `StringAsPinnedUTF8`
-rather than the built-in UTF-8 marshallers. We borrow their *mechanism* but not
-their *signatures*: our sizes are `int`/`long` (their librdkafka uses `size_t` →
-`UIntPtr`), and our errors are opaque handle out-params (theirs are an
-`ErrorCode` enum + `StringBuilder errstr` buffer). `bool` needs `I1` because the
-default marshals a 4-byte Win32 `BOOL`. Returned `const char*` must stay an
-`IntPtr` because auto string-marshalling of a return value assumes ownership and
-would free memory the core still owns.
+**Why:** the floor predates the modern interop surface, so classic `DllImport` is
+the only portable option — the same reason confluent-kafka-dotnet (also net462)
+hand-rolls its UTF-8 helpers. We borrow their *mechanism*, not their *signatures*:
+our sizes are `int`/`long` (not librdkafka's `size_t`→`UIntPtr`) and errors are
+opaque handle out-params (not an `ErrorCode` enum + `errstr` buffer). A
+`[LibraryImport]` `#if` specialization for AOT on modern TFMs is a deliberate
+non-goal — our signatures are already mostly blittable, not worth two sets.
 
-**How to apply:**
+**Anti-patterns:**
 
-  - Put `Native` and the `Utf8` helpers in one place, compiled for all target
-    frameworks (`<TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>`).
-    The same `[DllImport]` declarations serve every target — no per-TFM `#if`.
-  - `SendAsync`: `Utf8.Pin` the topic, `GCHandle`-pin key/value, pass
-    `out IntPtr outError`; free the pins after the call returns (§ zero-copy).
-  - Error path: read `kafka_common_KafkaError_code` (→ `int`) and
-    `_message` (→ `IntPtr` → `Utf8.PtrToString`), then `_destroy`.
-  - Native library discovery / RID-specific assets are a separate concern
-    (§ library loading). Note `NativeLibrary.SetDllImportResolver` does not exist
-    on net462, so custom probing there needs the preload approach.
-
-**Anti-patterns to flag in review:**
-
-  - Using `[LibraryImport]`, `delegate* unmanaged`, `[UnmanagedCallersOnly]`,
-    `UnmanagedType.LPUTF8Str`, or `Marshal.PtrToStringUTF8` — unavailable on
-    netstandard2.0 / net462.
-  - `[MarshalAs(UnmanagedType.LPStr)]` for a UTF-8 topic/config (ANSI
-    corruption).
-  - `UIntPtr` / `nint` for a length or count (copying librdkafka's `size_t`
-    habit).
-  - Marshalling a callee-owned `const char*` return as a C# `string`
-    (double-free / heap corruption).
-  - A callback delegate that can be GC-collected while native holds it.
-  - A C# `struct` mirroring an opaque `_t`; copying key/value bytes through a
-    marshaller instead of pinning (breaks zero-copy — CLAUDE.md §12).
-  - Omitting `CallingConvention.Cdecl` (works on x64 by luck, breaks on x86).
-  - Porting `confluent-kafka-dotnet`'s reflection-delegate loader / 3×
-    NativeMethods copies — unnecessary for our single ABI.
+  - `[LibraryImport]` / `delegate* unmanaged` / `[UnmanagedCallersOnly]` /
+    `LPUTF8Str` / `Marshal.PtrToStringUTF8` — unavailable on the floor.
+  - `[MarshalAs(LPStr)]` for UTF-8 (ANSI corruption); `UIntPtr`/`nint` for a
+    length; a callee-owned `const char*` return marshalled as `string`.
+  - Omitting `Cdecl` (works on x64 by luck, breaks on x86).
+  - Porting confluent-kafka-dotnet's reflection loader / 3× NativeMethods (§8).
 
 **Tests required:**
 
-  - A non-ASCII (UTF-8) topic round-trips correctly through `send` →
-    `RecordMetadata.Topic` (guards the manual UTF-8 marshalling; catches an
-    accidental `LPStr`).
-  - Each `bool`-returning function (`is_done` / `is_retriable` / `is_fatal`)
-    returns the correct value (guards a missing `I1`).
-  - The binding builds and its `Native` layer loads on every target framework —
-    **net462** (via netstandard2.0), **net8.0**, and **net10.0** (a TFM smoke
-    test) — proving the single `[DllImport]` set works across the matrix.
-  - Aggressive GC while callbacks are pending does not crash (guards delegate
-    keep-alive).
+  - A non-ASCII topic round-trips (guards manual UTF-8; catches `LPStr`).
+  - Each `bool`-returning fn (`is_done`/`is_retriable`/`is_fatal`) is correct
+    (guards a missing `I1`).
+  - `Native` loads on net462, net8.0, net10.0 (TFM smoke test).
 
 ---
 
 ## 2. Handle ownership & lifecycle (`SafeHandle`)
 
-Every opaque handle the ABI hands out is heap-allocated in Rust via
-`Box::into_raw` and must be returned to its matching `_destroy` exactly once, or
-it leaks; freeing it twice or using it after free corrupts memory. Handles fall
-into **two tiers** with different lifecycle strategies.
+**Decision:** Two tiers. **Long-lived** handles (producer, properties) → a
+`SafeHandle` that frees exactly once. **Transient** per-message handles (future /
+metadata / error) → read-and-free promptly on the pump; do **not** wrap them (a
+finalizable object per record is hot-path waste).
 
-### Ownership map
-
-| Handle | Created by | Lifetime | Freed by (C#) — *not consumed by anything else* |
-|---|---|---|---|
-| `Producer_t` | `KafkaProducer_new` / `MockProducer_new` | **long-lived** (one per client) | `SafeProducerHandle.ReleaseHandle` → `Producer_destroy`, via `Dispose` |
-| `ProducerProperties_t` | `ProducerProperties_new` / `_from_configs` | **transient** (construction only) | the binding, right after `KafkaProducer_new` returns — **not** consumed by it |
-| `FutureRecordMetadata_t` | `Producer_send` / `_send_batch` | **transient** (per send) | the pump: `FutureRecordMetadata_destroy_all` — **not** consumed by `get_all` |
-| `RecordMetadata_t` | `FutureRecordMetadata_get` / `_get_all` | **transient** (per result) | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
-| `KafkaError_t` | any `out_error` / error slot | **transient** (per error) | the reader: read `_code`/`_message`/…, then `KafkaError_destroy` |
+| Handle | Created by | Freed by (not consumed elsewhere) |
+|---|---|---|
+| `Producer_t` | `KafkaProducer_new` / `MockProducer_new` | `SafeProducerHandle.ReleaseHandle → Producer_destroy` (via `Dispose`) |
+| `ProducerProperties_t` | `ProducerProperties_new` / `_from_configs` | the binding, after `KafkaProducer_new` (not consumed by it) |
+| `FutureRecordMetadata_t` | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (not consumed by `get_all`) |
+| `RecordMetadata_t` | `_get` / `_get_all` | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
+| `KafkaError_t` | any `out_error` slot | the reader: read accessors, then `_destroy` |
 
 **Rule:**
 
-  - **Tier 1 — long-lived → `SafeHandle`.** Wrap the producer (and, if wrapped,
-    properties) in a `SafeHandle` subclass: `ownsHandle: true`, `IsInvalid =>
-    handle == IntPtr.Zero`, `ReleaseHandle()` calls the matching `_destroy` and
-    returns `true`. The runtime then guarantees the free runs **exactly once**,
-    even on exceptions.
-  - **Tier 2 — transient → read-and-free.** Do **not** wrap per-message handles
-    (`Future` / `RecordMetadata` / `Error`) in a `SafeHandle`. Free them
-    promptly and deterministically (in a `finally`) on the pump thread:
-    `RecordMetadata_copy` extracts all fields **and** frees in one call;
-    `KafkaError_destroy` after reading code/message; `FutureRecordMetadata_destroy_all`
-    after `get_all`. The managed `RecordMetadata` / `KafkaException` hold
-    **copied values**, never the handle (see §7).
-  - `ProducerProperties_t` is **not consumed** by `KafkaProducer_new` — the
-    binding still owns it and must free it after construction (success *or*
-    failure), independent of the producer's lifetime.
-  - `FutureRecordMetadata_get_all` does **not consume** the futures — you must
-    still `FutureRecordMetadata_destroy_all` them, or leak one handle per send.
-  - **Exactly-once:** after `get_all`, each index has exactly one non-null of
-    `{metadata, error}` — free that one, plus the future (separately). Never free
-    a handle twice; never touch it after freeing. `RecordMetadata_copy` frees the
-    handle itself, so do not also `_destroy` it. All `_destroy` fns are
-    null-safe, and `SafeHandle` skips `ReleaseHandle` when `IsInvalid`.
-  - **Parent outlives children:** every `Future` / `RecordMetadata` is derived
-    from the producer, so the producer must not be destroyed while any are live.
-    Enforce via `Dispose` ordering (stop sends → join the pump → *then* release
-    the producer handle — §7), not `DangerousAddRef` (we don't wrap the transient
-    handles).
-  - **Prefer explicit `Dispose` over the finalizer for the producer.**
-    `Producer_destroy` **blocks** (dropping the tokio runtime waits for the
-    Sender task to exit); blocking on the finalizer thread stalls finalization
-    and the order relative to the pump is nondeterministic. `Dispose` should
-    flush/close gracefully (`Producer_flush` → `Producer_close`) and join the
-    pump, *then* release the `SafeHandle`.
-  - Guard **use-after-dispose**: the managed producer wrapper throws
-    `ObjectDisposedException` once closed (mirrors `ThrowIfHandleClosed`).
+  - `SafeProducerHandle : SafeHandle` — `ownsHandle: true`, `IsInvalid => handle
+    == IntPtr.Zero`, `ReleaseHandle` calls `Producer_destroy`. Runtime frees
+    exactly once, even on exceptions.
+  - Transient handles: free in a `finally` on the pump; the managed
+    `RecordMetadata`/`KafkaException` hold **copied values**, never the handle
+    (§7). After `get_all`, each index has exactly one non-null of {metadata,
+    error} — free that one, plus the future via `_destroy_all`. All `_destroy`
+    are null-safe; `RecordMetadata_copy` frees its own handle (don't double-free).
+  - **Parent outlives children:** the producer must not be destroyed while the
+    pump holds futures from it — enforce via `Dispose` ordering (stop sends → join
+    pump → release handle, §7), not `DangerousAddRef`.
+  - **Prefer `Dispose` over the finalizer:** `Producer_destroy` blocks (drops the
+    runtime, waiting for the Sender), which is wrong on the finalizer thread.
+    `Dispose` flushes/closes and joins the pump first; guard use-after-dispose
+    with `ObjectDisposedException`.
 
-**Why:** `SafeHandle` is the robust form of "remember to call `_destroy`" — the
-runtime frees on `Dispose` or finalization exactly once, even through
-exceptions, and `IsInvalid == zero` matches our null-safe destroy and the ABI's
-"null = absent" convention. `confluent-kafka-dotnet` uses precisely this
-(`SafeHandleZeroIsInvalid` + `ReleaseHandle → rd_kafka_destroy`, child-first
-`Dispose`, `ThrowIfHandleClosed`). But a `SafeHandle` per **per-message** handle
-would allocate a finalizable object for every record on the throughput path —
-wasteful and contrary to the hot-path spirit — while their lifetime is trivially
-one pump cycle, so read-and-free is both cheaper and clearer. The finalizer
-caveat is real on both sides: their producer `ReleaseHandle` calls the blocking
-`rd_kafka_destroy`, ours calls the blocking `Producer_destroy` — neither belongs
-on the finalizer thread, so both rely on explicit `Dispose` doing the graceful
-work first.
+**Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
+through exceptions; `IsInvalid == zero` matches our null-safe destroy. This is
+confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern. But a per-message
+`SafeHandle` allocates a finalizable object per record, so transient handles are
+read-and-freed instead (their lifetime is one pump cycle). The blocking
+`Producer_destroy` is why the producer closes via `Dispose`, not the finalizer
+(their blocking `rd_kafka_destroy` has the same constraint).
 
-**How to apply:**
+**Anti-patterns:**
 
-  - `SafeProducerHandle : SafeHandle` — `base(IntPtr.Zero, ownsHandle: true)`,
-    `IsInvalid => handle == IntPtr.Zero`, `ReleaseHandle` →
-    `Native.kafka_producer_Producer_destroy(handle); return true;`. Wrap the
-    `IntPtr` returned by `KafkaProducer_new`/`MockProducer_new`.
-  - Build properties in a `using`/`try-finally`; call `ProducerProperties_destroy`
-    once `KafkaProducer_new` has returned (it copied what it needed).
-  - Pump completion per index: `RecordMetadata_copy` (extract+free) on success or
-    read + `KafkaError_destroy` on error; then `FutureRecordMetadata_destroy_all`
-    for the batch.
-  - `Dispose(bool disposing)`: stop accepting sends → join the pump → fault
-    pending `Task`s → `Producer_flush` + `Producer_close` → `producerHandle.Dispose()`
-    (triggers `ReleaseHandle`) → `GC.SuppressFinalize`.
-  - `ThrowIfDisposed()` at the top of every public method.
-
-**Anti-patterns to flag in review:**
-
-  - Scattering manual `Producer_destroy` calls instead of a `SafeHandle` (leaks
-    on exception paths).
-  - Wrapping per-message `Future`/`RecordMetadata`/`Error` in a `SafeHandle` (a
-    finalizable allocation per record — hot-path waste).
-  - Forgetting `FutureRecordMetadata_destroy_all` after `get_all` (one leaked
-    handle per send).
-  - Double-free: freeing both the `metadata` and `error` slot when only one is
-    set, or `_destroy`-ing a handle that `RecordMetadata_copy` already freed.
-  - Using any handle after `Dispose` (access violation) — guard with
-    `ObjectDisposedException`.
-  - Relying on the finalizer to destroy the producer (blocking destroy on the
-    finalizer thread; nondeterministic vs. the pump).
-  - Destroying the producer while the pump still holds futures derived from it
-    (use-after-free) — join first.
-  - Freeing the properties handle at the wrong time — before `KafkaProducer_new`
-    returns, or never.
+  - Manual scattered `Producer_destroy` instead of a `SafeHandle` (leaks on
+    exceptions); wrapping per-message handles in a `SafeHandle`.
+  - Forgetting `_destroy_all` after `get_all` (leak per send); double-free (both
+    slots, or a handle `RecordMetadata_copy` already freed).
+  - Relying on the finalizer for the producer; destroying it before joining the
+    pump (use-after-free).
 
 **Tests required:**
 
-  - Create and dispose many producers in a loop without leaking or crashing
-    (handle-lifecycle smoke).
-  - Send N records and verify every `Future`/`RecordMetadata`/`Error` handle is
-    freed (debug handle counter, or the mock with no growth) — specifically
-    covers `destroy_all` after `get_all`.
-  - Double-`Dispose()` is safe (release is idempotent / runs once).
-  - Any public method after `Dispose()` throws `ObjectDisposedException`, not a
-    crash.
-  - `Dispose()` with in-flight sends joins the pump before releasing the producer
-    handle — no use-after-free (shared with §7).
+  - Create/dispose many producers — no leak/crash; send N and assert the handle
+    count returns to baseline (covers `_destroy_all`).
+  - Double-`Dispose` is safe; a call after `Dispose` throws
+    `ObjectDisposedException`.
 
 ---
 
 ## 3. String marshalling (UTF-8)
 
-Every string that crosses the boundary is **UTF-8**: the core reads inputs via
-`CStr::from_ptr(...).to_string_lossy()` and returns outputs as pointers into
-cached UTF-8 `CString`s. netstandard2.0 / net462 lack `UnmanagedType.LPUTF8Str`
-and `Marshal.PtrToStringUTF8` (§1), so we hand-roll two helpers and route every
-string through them.
+**Decision:** Every boundary string is UTF-8, marshalled by hand (the floor lacks
+`LPUTF8Str` / `Marshal.PtrToStringUTF8`, §1): input via `Utf8.Pin` (encode + NUL +
+pin), callee-owned output via `Utf8.PtrToString` (NUL-scan + `GetString`).
 
-### String touchpoints
-
-| Direction | ABI site(s) | C type | Helper |
-|---|---|---|---|
-| **In** (C# → C) | topic (`Producer_send`, `ProducerRecord_t.topic`), config key/value (`ProducerProperties_put` / `_from_configs`), error message (`MockProducer_error_next`) | `const char *` | `Utf8.Pin` (encode + NUL + pin) |
-| **Out** — handle-owned, valid until `_destroy` | `KafkaError_message`, `RecordMetadata_topic` | `const char *` | `Utf8.PtrToString` |
-| **Out** — callback-scoped, valid only during the call | `topic` arg of the `RecordMetadata_copy` callback | `const char *` | `Utf8.PtrToString`, **inside** the callback |
+| Direction | Sites | Helper |
+|---|---|---|
+| In | topic, config key/value, `error_next` message | `Utf8.Pin` |
+| Out — valid until `_destroy` | `KafkaError_message`, `RecordMetadata_topic` | `Utf8.PtrToString` |
+| Out — valid only during the callback | `RecordMetadata_copy` `topic` | `Utf8.PtrToString`, inside the callback |
 
 **Rule:**
 
-  - **Input:** encode with a `StringAsPinnedUTF8`-style helper —
-    `Encoding.UTF8.GetBytes(str)` → copy into `new byte[len + 1]` (the extra
-    zero byte is the NUL terminator) → pin via `GCHandle` → pass
-    `AddrOfPinnedObject()`; **unpin in a `finally`/`using`** after the call.
-    String marshalling necessarily **copies** (an encoding conversion) — that is
-    fine for small topic/config strings and is **not** the zero-copy path (§4
-    governs key/value bytes).
-  - **Output:** read a callee-owned `const char *` with a hand-rolled
-    `PtrToStringUTF8(IntPtr)` — scan to the NUL byte, then
-    `Encoding.UTF8.GetString(ptr, len)`; return `null` for a null pointer. This
-    needs `unsafe`. A `#if NET6_0_OR_GREATER` fast path
-    (`MemoryMarshal.CreateReadOnlySpanFromNullTerminated`) is optional — it is
-    internal to the helper and does **not** fork the P/Invoke declarations.
-  - **Copy before free / before the callback returns.** Output pointers are
-    *borrowed*: `KafkaError_message` / `RecordMetadata_topic` are valid only
-    until the owning handle is `_destroy`ed, and the `RecordMetadata_copy`
-    callback's `topic` is valid only for the duration of the callback. Always
-    `PtrToStringUTF8` into a managed `string` first. **Never store or return the
-    raw pointer.**
-  - **Never** `[MarshalAs(UnmanagedType.LPStr)]` (ANSI — corrupts non-ASCII) or
-    `LPWStr` (UTF-16 — wrong width); **never** `LPUTF8Str` /
+  - Input: `Encoding.UTF8.GetBytes` → `new byte[len+1]` (trailing zero = NUL) →
+    pin → pass `AddrOfPinnedObject`; unpin in `finally`. Marshalling copies (an
+    encoding conversion) — fine for small topic/config, and **not** the zero-copy
+    path (§4).
+  - Output: read a callee-owned `const char*` with `Utf8.PtrToString` (needs
+    `unsafe`; a `#if NET6_0_OR_GREATER` span fast path is an internal
+    optimization). **Copy before free / before the callback returns** — the
+    pointer dies with the handle; never store the raw pointer.
+  - Never `[MarshalAs(LPStr)]` (ANSI) or `LPWStr` (UTF-16); never `LPUTF8Str` /
     `Marshal.PtrToStringUTF8` (absent on the floor).
-  - Topic / config keys must not contain an interior NUL — the core reads to the
-    first NUL (`CStr`) and would silently truncate. (Kafka names can't contain
-    NUL; validate only if being defensive.)
 
-**Why:** UTF-8 is the contract on both sides, and the core's
-`to_string_lossy()` means invalid bytes are silently replaced, **not** rejected
-— so an ANSI `LPStr` mistake corrupts topic/key names quietly rather than
-erroring (and hides entirely for ASCII-only tests). Hand-rolled helpers are
-mandatory because the floor TFMs predate the built-in UTF-8 marshallers — the
-same reason `confluent-kafka-dotnet` ships `Util.Marshal.StringAsPinnedUTF8` +
-`PtrToStringUTF8` (its net6 branch uses the span fast path; its netstandard2.0
-branch walks to the NUL — we mirror that). The copy-before-free rule follows
-from the core caching output strings inside the handle: the pointer dies with
-the handle.
+**Why:** UTF-8 is the contract both ways, and the core reads input with
+`to_string_lossy` — invalid bytes are silently *replaced*, not rejected, so an
+`LPStr` mistake corrupts non-ASCII topics quietly (and hides in ASCII-only
+tests). Hand-rolled helpers are the same reason confluent-kafka-dotnet ships
+`StringAsPinnedUTF8` + `PtrToStringUTF8`. Copy-before-free follows from output
+strings living in the handle's cached `CString`.
 
-**How to apply:**
+**Anti-patterns:**
 
-  - Provide the two helpers §1/§2 already reference:
-    `Utf8.Pin(string) : IDisposable { IntPtr Ptr; }` (encode + NUL + pin; `Free`
-    on `Dispose`) and `Utf8.PtrToString(IntPtr) : string?` (NUL-scan +
-    `GetString`).
-  - Send path: `using var t = Utf8.Pin(topic);` then pass `t.Ptr`; pin config
-    strings the same way when using `_put`.
-  - Error path: `Utf8.PtrToString(Native.kafka_common_KafkaError_message(err))`
-    **before** `Native.kafka_common_KafkaError_destroy(err)`.
-  - `RecordMetadata`: prefer `RecordMetadata_copy`; `Utf8.PtrToString` the
-    `topic` argument **inside** the callback (the pointer dies when it returns).
-
-**Anti-patterns to flag in review:**
-
-  - `[MarshalAs(UnmanagedType.LPStr)]` / `LPWStr` for any string; `LPUTF8Str` /
-    `Marshal.PtrToStringUTF8` (unavailable on the floor).
-  - Marshalling a `const char *` **return** as a C# `string` (the marshaller
-    frees callee-owned memory — §1).
-  - Storing/returning an output pointer, or reading it after the owning handle is
-    destroyed; reading the callback `topic` pointer after the callback returns.
+  - `LPStr` / `LPWStr` for any string; a `const char*` return marshalled as
+    `string`.
+  - Reading an output pointer after its handle (or the callback) is gone.
   - Assuming ASCII (works until a non-ASCII topic corrupts silently).
-  - Routing key/value bytes through the string/byte marshaller instead of pinning
-    (that's §4, zero-copy).
 
 **Tests required:**
 
-  - A non-ASCII (multi-byte UTF-8) value round-trips unchanged through each
-    direction: topic (in → `RecordMetadata.Topic` out), a config value, and an
-    error message — guards both directions and catches an accidental `LPStr`.
-  - `PtrToStringUTF8(IntPtr.Zero)` returns `null`.
-  - Empty string, and a string whose multi-byte character sits at the buffer
-    boundary, marshal correctly.
-  - Reading `RecordMetadata.Topic` after the record is materialized returns the
-    correct value (implicitly exercises copy-before-free).
+  - A non-ASCII value round-trips through topic (in → out), a config value, and an
+    error message.
+  - `PtrToStringUTF8(IntPtr.Zero)` → `null`; a multi-byte char at the buffer
+    boundary marshals correctly.
 
 ---
 
 ## 4. Zero-copy & buffer lifetime (pinning)
 
-CLAUDE.md §12 forbids copying key/value bytes on the send path; that contract
-extends into the binding. The user's `byte[]` must reach the core **without an
-intermediate managed copy** — pin it and pass its address as `IntPtr` + `int`.
+**Decision:** Pass key/value as `IntPtr` (address of the user's `byte[]`) + `int
+len` with **no intermediate copy**, pinned **only for the send call** — the pin
+is call-scoped, not Task-scoped.
 
-**The load-bearing fact (verified in the core):** the key/value bytes are
-serialized and **copied into the batch buffer synchronously during the send
-call** — `Producer_send` → `block_on(send())` → `do_send_bytes` →
-`RecordAccumulator::append` → `ProducerBatch::try_append` →
-`MemoryRecordsBuilder::append`, which writes the bytes directly into the batch's
-`Vec<u8>` (`default_record.rs` `copy_from_slice`; memory_records_builder: "Records
-already written directly into self.buffer"). `block_on` drives that to
-completion **before `Producer_send` returns.** Therefore the pin is
-**call-scoped, not Task-scoped**: the core holds no reference to the user's
-buffer after the FFI call returns.
+**Verified fact:** the core copies key/value into the batch buffer *synchronously
+during the send call* — `Producer_send → block_on(send()) → …
+RecordAccumulator::append → MemoryRecordsBuilder::append` writes the bytes into
+the batch's `Vec<u8>`, and `block_on` finishes before `Producer_send` returns. So
+the core holds no reference to the user buffer afterward (CLAUDE.md §12).
 
 **Rule:**
 
-  - Pass key/value as `IntPtr` (address of the user's own `byte[]`) + `int len`.
-    Do **not** copy into an intermediate buffer.
-  - **Pin only for the duration of the `Producer_send` / `_send_batch` FFI call,
-    then unpin.** Do NOT keep the pin alive until the returned `Task`/future
-    completes — the core already copied the bytes; holding the pin longer just
-    pins GC memory per in-flight message and fragments the heap.
-  - Prefer a **`fixed` block** for the single-send path (stack-scoped, no
-    allocation; the synchronous call fits exactly inside the `fixed` scope). Use
-    `GCHandle.Alloc(arr, GCHandleType.Pinned)` + `AddrOfPinnedObject()` + a
-    `finally { Free(); }` where `fixed` does not fit (e.g. the N buffers of a
-    `_send_batch`).
-  - For `_send_batch`, every record's key **and** value must stay pinned for the
-    whole `send_batch` call (each is copied during that call).
-  - Encode the ABI sentinels explicitly: **absent** key/value → `IntPtr.Zero`
-    + `len = -1`; **empty** → a valid pointer + `len = 0`. Never conflate the
-    two.
-  - **This call-scoped rule depends on §7's inline-send decision** — because
-    `Producer_send` runs on the caller's thread, the copy completes before it
-    returns. A deferred-send design (a background send thread, as in the Python
-    binding) would have to hold the buffer until the deferred send runs;
-    call-scoped pinning would be a use-after-free there.
-
-**Why:** verified above — the borrow of the user's buffer ends when the send
-call returns, so a call-scoped pin is exactly sufficient and Task-scoped pinning
-is both unnecessary and harmful (per-message pinned objects fragment the GC
-heap under load). This mirrors `confluent-kafka-dotnet`, which pins the array
-around `produceva` with `MSG_F_COPY` (librdkafka copies during the call) and
-`Free()`s in a `finally`. Any intermediate managed→native copy
-(`Marshal.AllocHGlobal` + `Marshal.Copy`, `Span.ToArray()`, a copying
-marshaller) would add exactly the per-message allocation CLAUDE.md §12 exists to prevent.
-
-**How to apply:**
-
-  - Single send (cheapest):
+  - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; use
+    `GCHandle.Alloc(Pinned)` + `finally Free()` where `fixed` doesn't fit (the N
+    buffers of `_send_batch`, all pinned for the whole call). Unpin right after
+    the call — never hold a pin across the returned `Task` (per-message pinned
+    objects fragment the GC heap).
+  - Sentinels: absent → `IntPtr.Zero` + `len -1`; empty → valid pointer + `len 0`.
+    A `fixed` over `null` yields a null pointer, so gate length on `null`:
     ```csharp
-    fixed (byte* k = key)     // null → k == null
-    fixed (byte* v = value)
-    {
-        future = Native.kafka_producer_Producer_send(
-            handle, topicPtr, partition, timestamp,
-            (IntPtr)k, key   is null ? -1 : key.Length,
-            (IntPtr)v, value is null ? -1 : value.Length,
-            out err);
-    }
+    fixed (byte* k = key)   // key null → k == null
+        future = Native.kafka_producer_Producer_send(handle, topicPtr, partition,
+            timestamp, (IntPtr)k, key is null ? -1 : key.Length, /* value… */ out err);
     ```
-    Translate `null` → (`IntPtr.Zero`, `-1`) explicitly; a `fixed` over `null`
-    yields a null pointer, so gate the length on `null`, not on the pointer.
-  - Batch send: `GCHandle`-pin each record's key/value, fill the
-    `ProducerRecord_t[]`, call `_send_batch`, then `Free()` every pin in a
-    `finally`.
-  - Unpin (`fixed` scope exit / `GCHandle.Free`) immediately after the call
-    returns. Never hold a pin across the returned `Task`.
+  - This call-scoped rule depends on §7's inline-send decision; a deferred-send
+    design (a background send thread, as in the Python binding) would have to hold
+    the buffer until the deferred send runs.
 
-**Anti-patterns to flag in review:**
+**Why:** the borrow ends when the send call returns, so a call-scoped pin is
+exactly sufficient; Task-scoped pinning is unnecessary and fragments the heap.
+Mirrors confluent-kafka-dotnet (pin around `produceva` with `MSG_F_COPY`, `Free`
+in `finally`). Any intermediate copy (`AllocHGlobal`+`Copy`, `ToArray()`) is the
+per-message allocation CLAUDE.md §12 exists to prevent.
 
-  - Any intermediate copy of key/value: `Marshal.AllocHGlobal` + `Marshal.Copy`,
-    `arr.ToArray()`, `span.ToArray()`, or a marshaller that copies binary.
-  - Keeping the pin alive until the `Task` completes (per-message pinned objects
-    → GC heap fragmentation; unnecessary since the core copied during the call).
-  - Forgetting to unpin / `Free()` (a permanent pin — worse than a leak).
-  - Conflating empty (`len 0`) with absent (`len -1`).
-  - Pinning a buffer then mutating/resizing the array (the address may move).
-  - Routing key/value through the UTF-8 string helpers (§3) — those copy.
+**Anti-patterns:**
+
+  - Any intermediate copy of key/value; keeping the pin alive until the `Task`
+    completes; forgetting to unpin (a permanent pin).
+  - Conflating empty (`0`) with absent (`-1`); mutating/resizing a pinned array.
 
 **Tests required:**
 
-  - **Mutation-after-send** (proves the copy happened during the call): send a
-    value, then immediately mutate the caller's `byte[]`; the produced record is
-    unchanged. This is the external proof that call-scoped pinning is safe.
-  - **Allocation budget** (mirrors the core's hot-path allocation test / DoD
-    §10): sending a large value adds no value-sized managed allocation beyond the
-    user's own buffer — i.e. no intermediate copy.
-  - Absent (`len -1`) vs empty (`len 0`) key and value each produce the correct
-    record.
-  - Batch send with a mix of null / empty / large key & values is correct and
-    leaves nothing pinned afterward.
+  - **Mutation-after-send**: mutate the caller's `byte[]` right after `send`; the
+    produced record is unchanged (proves the copy happened during the call).
+  - **Allocation budget** (DoD §10): a large value adds no value-sized managed
+    allocation.
+  - Absent vs empty key/value each produce the correct record.
 
 ---
 
 ## 5. Error model (operational vs. precondition)
 
-Two distinct error categories cross this boundary, handled differently:
+**Decision:** Two surfaces. **Core (operational) errors** cross as a
+`kafka_common_KafkaError_t` handle → one flat `KafkaException` (code + retriable +
+fatal + message), mirroring the Python sibling. **Precondition errors** (bad
+argument / state) are validated in the binding *before* the FFI call and raise
+standard .NET exceptions — never `KafkaException`.
 
-  - **Kafka operational errors** — reported by the core through the
-    `kafka_common_KafkaError_t *` handle → a single flat `KafkaException`.
-  - **Precondition (argument/state) errors** — programmer mistakes (null topic,
-    closed producer, negative partition) caught in the binding **before** the FFI call
-    → standard .NET argument/state exceptions, **never** `KafkaException`.
+| `KafkaError_*` accessor | → C# |
+|---|---|
+| `_code` (i16 widened) | `int Code` |
+| `_message` (UTF-8, handle-owned) | `Message` via `Utf8.PtrToString` (§3) |
+| `_is_retriable` / `_is_fatal` | `IsRetriable` / `IsFatal` |
+| `_destroy` | free after reading |
 
-### 5a. Kafka operational errors: null-handle → `KafkaException`
+**Rule:**
 
-The ABI signals these with an opaque `kafka_common_KafkaError_t *`: **null =
-success, non-null = error** — via an `out_error` out-param (`KafkaProducer_new`,
-`Producer_send`, `flush`, `close`) or an `out_errors[]` array (`send_batch`,
-`get_all`). Read the accessors, then free the handle.
+  - **Operational:** null out-param = success, non-null = error.
+    `KafkaException.FromHandle` reads the accessors (message **before** free),
+    then `_destroy` in a `finally` — freed exactly once even if construction
+    throws (§2, §3); the exception holds copied values, not the handle. Sync
+    failures `throw`; async send failures fault the `Task` (§7) — same
+    `FromHandle`. Keep it **one flat `KafkaException` for now** (the ABI exposes
+    only code/retriable/fatal); typed subclasses can be added under it later,
+    non-breakingly.
+  - **Precondition:** validate before any pin/marshal/P/Invoke and throw
+    `ArgumentNullException` (null topic/record/config),
+    `ArgumentOutOfRangeException` (a **negative partition** — the ABI silently
+    maps negative to "unset", so the binding must reject it — or a negative
+    timeout), or `ObjectDisposedException` / `InvalidOperationException` (closed
+    producer). **Mandatory**, not optional: the ABI doesn't validate preconditions
+    (CLAUDE.md §3) and some functions `assert!`/panic on violation — a panic
+    across FFI is UB.
 
-| ABI accessor | Type | → C# |
-|---|---|---|
-| `KafkaError_code` | `int32_t` (Kafka protocol code, i16 widened) | `int Code` |
-| `KafkaError_message` | `const char *` (UTF-8, handle-owned) | `Message`, via `Utf8.PtrToString` (§3) |
-| `KafkaError_is_retriable` | `bool` | `IsRetriable` property |
-| `KafkaError_is_fatal` | `bool` | `IsFatal` property |
-| `KafkaError_destroy` | — | free after reading (§2) |
+**Why:** a flat `KafkaException` matches what the ABI exposes and the Python
+sibling. Preconditions are a separate surface because they are programmer errors,
+not Kafka outcomes — Java raises `IllegalArgument`/`IllegalState`, Python
+`ValueError`/`TypeError`, confluent-kafka-dotnet `ArgumentException`, all before
+the native call. Ours must too, *and must* because the ABI would otherwise panic.
 
-**Model — one flat `KafkaException` (for now).** A single
-`KafkaException : Exception` carrying `Code` / `IsRetriable` / `IsFatal` (+
-`Message`), mirroring the Python sibling's `KafkaError`. Do **not** build a
-per-code typed hierarchy now: the ABI only exposes code + retriable + fatal, and
-the reference sibling (Python) is flat, so a flat model keeps the bindings
-consistent and avoids a large `Errors`-enum `code → Type` table. This is
-deliberately *"for now"* — specific Java-named subclasses (e.g.
-`RecordTooLargeException`) can be added later **under** the same `KafkaException`
-base, non-breakingly, if a concrete need for catch-by-type appears.
+**Anti-patterns:**
 
-**Rule (operational):**
-
-  - After every fallible call, check the error slot: `IntPtr.Zero` = success;
-    non-null = build a `KafkaException` and dispose the handle.
-  - `KafkaException.FromHandle(IntPtr err)`: read `_code`, `_message` (via
-    `Utf8.PtrToString`, **before** freeing — §3), `_is_retriable`, `_is_fatal`
-    into managed fields, then `KafkaError_destroy` in a `finally` so the handle
-    is freed **exactly once**, even if construction throws (§2). The exception
-    holds **copied values**, never the handle.
-  - **Sync failures** (`KafkaProducer_new`, immediate `Producer_send`, `flush`,
-    `close`) `throw`. **Async send failures** (the future resolves to an error)
-    are read by the pump from `out_errors[i]` and **fault the `Task`** with the
-    same exception (§7). Both paths go through the same `FromHandle`.
-  - Do **not** fabricate attributes the ABI does not expose. `txn_requires_abort`
-    exists in the core but is **not** in the producer ABI surface; adding
-    transactions later needs a new accessor first.
-  - Do **not** adopt `confluent-kafka-dotnet`'s librdkafka-shaped `Error` /
-    `ErrorCode` object — expose `Code` as a plain `int` property.
-
-### 5b. Precondition (argument/state) errors: validate in the binding
-
-**Rule (precondition):**
-
-  - Validate arguments and state in the managed binding **before** any pin /
-    marshal / P/Invoke, throwing standard .NET exceptions — **never**
-    `KafkaException`:
-    - `ArgumentNullException` — null topic / record / config (and a null
-      key/value buffer when its length says present).
-    - `ArgumentException` / `ArgumentOutOfRangeException` — a **negative
-      partition** (the ABI silently maps any negative to the "unset" sentinel, so
-      the binding must reject it or the value is silently dropped), a negative
-      timeout, or otherwise malformed args.
-    - `ObjectDisposedException` / `InvalidOperationException` — producer already
-      closed / disposed.
-  - This is **mandatory**, not a nicety: the C ABI **does not validate
-    preconditions** (CLAUDE.md §3 — *"Don't check for failing programming
-    preconditions like NULLs on required parameters"*), and some ABI functions
-    **`assert!`/panic on violation** (e.g. `send_batch`) — a Rust panic unwinding
-    across the FFI boundary is **undefined behavior**. The managed binding is the
-    safety net that stops bad input before it reaches native code.
-
-**Why (both):** a flat `KafkaException` matches exactly what the ABI exposes
-(code + retriable + fatal) and the Python sibling, so the bindings stay
-consistent without a per-code table — and it can grow into typed subclasses
-later. Preconditions are a *separate* category because they are programmer
-errors, not Kafka outcomes: Java raises `IllegalArgumentException` /
-`IllegalStateException` / NPE (never `KafkaException`), Python raises
-`ValueError` / `TypeError` / `RuntimeError`, and `confluent-kafka-dotnet` raises
-`ArgumentException` / `InvalidOperationException` — all in the high-level layer,
-before the native call. Ours must too, and *must* because the ABI would
-otherwise panic (UB). The read-before-free / destroy-exactly-once discipline is
-the §2/§3 ownership contract applied to the error handle.
-
-**How to apply:**
-
-  - `KafkaException : Exception { public int Code; public bool IsRetriable;
-    public bool IsFatal; }`; `static KafkaException FromHandle(IntPtr err)` reads
-    the accessors (message **before** free) and frees in a `finally`.
-  - Operational — sync: `if (err != IntPtr.Zero) throw KafkaException.FromHandle(err);`;
-    async: the pump does `tcs.SetException(KafkaException.FromHandle(errs[i]));`.
-  - Precondition — guard at the top of every public method **before** touching
-    the ABI: `ThrowIfDisposed();`, then null/range checks. (On the netstandard2.0
-    floor `ArgumentNullException.ThrowIfNull` may be unavailable — use an explicit
-    `if (x is null) throw new ArgumentNullException(nameof(x));`.)
-
-**Anti-patterns to flag in review:**
-
-  - *(operational)* Not checking the error slot; leaking the handle or destroying
-    it **before** reading `_message` (use-after-free — §3); `FromHandle` that can
-    throw before `KafkaError_destroy` (leak — wrap in `try/finally`).
-  - *(operational)* A `confluent-kafka-dotnet`-style `Error` + `ErrorCode`
-    object, or fabricating attributes (`txn_requires_abort`) the ABI doesn't
-    expose.
-  - *(operational)* Building a per-code `KafkaException` hierarchy now — we chose
-    flat "for now"; that's over-engineering vs. the Python sibling.
-  - *(precondition)* Relying on the ABI to reject null / bad args (it may
-    **panic → UB**); throwing `KafkaException` for a programmer error; validating
-    **after** the P/Invoke instead of before.
+  - Not checking the out-param; leaking the error handle or reading `_message`
+    after `_destroy`; a `FromHandle` that can throw before its `_destroy`.
+  - A confluent-kafka-dotnet-style `Error`/`ErrorCode` object; a per-code
+    hierarchy now (over-engineering vs the Python sibling).
+  - Relying on the ABI to reject bad args (→ panic/UB); throwing `KafkaException`
+    for a programmer error; validating after the P/Invoke.
 
 **Tests required:**
 
-  - *(operational)* A sync failure (invalid config to `KafkaProducer_new`, or a
-    record-too-large `send`) throws `KafkaException` with the correct `Code`,
-    `Message`, `IsRetriable`, `IsFatal`.
-  - *(operational)* An async send failure faults the `Task` with a matching
-    `KafkaException` (drive via the mock `error_next`).
-  - *(operational)* The error handle is destroyed exactly once even on the throw
-    path (no leak); a non-ASCII message round-trips (ties to §3).
-  - *(precondition)* Null topic / record → `ArgumentNullException`; use after
-    `Dispose` → `ObjectDisposedException`; negative partition → `ArgumentException` /
-    `ArgumentOutOfRangeException` — each thrown **before** any native call (fails
-    even with no live producer handle).
+  - A sync failure throws `KafkaException` with the right code/message/flags; an
+    async failure faults the `Task` (via mock `error_next`); the handle is freed
+    exactly once; a non-ASCII message round-trips.
+  - Null topic/record → `ArgumentNullException`; post-`Dispose` →
+    `ObjectDisposedException`; negative partition → `ArgumentOutOfRangeException` —
+    each before any native call.
 
 ---
 
 ## 6. Callback & delegate marshalling
 
-The one callback in the producer ABI is **`RecordMetadata_copy`**, a C function
-pointer (`void (*cb)(...)` + `void *user_data`) that the core invokes
-**synchronously** to hand back all of a record's metadata in a single crossing.
-Using it is optional — the binding may instead call the individual accessors
-(`RecordMetadata_offset` / `_partition` / `_topic` / `_timestamp` + `_destroy`)
-and skip callbacks entirely. This section governs the callback form.
+**Decision:** The ABI's one callback (`RecordMetadata_copy`) is synchronous;
+marshal it as a kept-alive `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic —
+no function pointers on the floor), keep the body no-throw, and pass context via a
+`GCHandle` in `user_data`. Using it is optional — the per-field accessors
+(`_offset`/`_partition`/`_topic`/`_timestamp` + `_destroy`) avoid callbacks
+entirely.
 
-On the netstandard2.0 / net462 floor there are **no** C# function pointers
-(`delegate* unmanaged`) and **no** `[UnmanagedCallersOnly]` (§1), so the callback
-is a classic **delegate** typed `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`
-— exactly what `confluent-kafka-dotnet` (also net462) does.
-
-The callback:
+The callback fires **synchronously on the caller's (pump) thread** and returns
+before `RecordMetadata_copy` does; its `topic` pointer is valid **only during the
+call** (the core frees the handle right after — §3):
 
     void cb(int64_t offset, int32_t partition, const char* topic, int64_t timestamp, void* user_data)
 
-  - fires **synchronously**, on the **caller's** thread (the completion pump), and
-    returns *before* `RecordMetadata_copy` returns;
-  - the `topic` pointer is valid **only during the callback** — the core destroys
-    the handle (and its cached `CString`) immediately after (§3).
-
 **Rule:**
 
-  - Declare the callback as a named delegate type with
-    `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`. Its parameters must be
-    **blittable**: `int64_t → long`, `int32_t → int`, `const char* → IntPtr`,
-    `void* → IntPtr`. Do **not** type `topic` as `string` — take `IntPtr` and
-    `Utf8.PtrToString` it **inside** the callback, within its validity window (§3).
-  - **Keep the delegate instance alive** across the call. The GC tracks managed
-    references, **not** the native thunk; a collected delegate → a call into freed
-    memory → crash. Hold a real reference — a `static readonly` field for the
-    stateless callback (never a bare lambda the GC could reclaim mid-call). Because
-    the callback is synchronous, rooting it across the single `RecordMetadata_copy`
-    call suffices.
-  - **No managed exception may unwind into native.** A managed exception crossing
-    back into the Rust frame is **undefined behavior**. Wrap the callback body in
-    `try/catch`; stash any failure in the context and re-surface it on the caller's
-    thread **after** `RecordMetadata_copy` returns (or swallow + log) — never let
-    it propagate. (The field copies don't throw; `Utf8.PtrToString` is the only
-    real risk.) Python's callback does this via `PyErr_Print`.
-  - **`user_data` carries the managed context.** Pass a `GCHandle`
-    (`GCHandle.ToIntPtr`) over the target object as `user_data`; recover it in the
-    callback (`GCHandle.FromIntPtr`, cast `.Target`); **free it exactly once**,
-    after the call returns.
-  - **Cdecl** (matches cbindgen `extern "C"`). The callback runs on the caller's
-    (pump) thread — no foreign-thread concern for this synchronous callback.
+  - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
+    blittable params (`long`/`int`/`IntPtr`/`IntPtr`). Take `topic` as `IntPtr`
+    and `Utf8.PtrToString` it *inside* the callback (§3) — never `string`. Hold
+    the delegate in a `static readonly` field so the GC can't collect it while
+    native holds the thunk.
+  - The body is a **no-throw boundary**: `try/catch` it all (a managed exception
+    unwinding into Rust is UB); stash any failure and re-surface it after the call
+    returns. (Python does this via `PyErr_Print`.)
+  - Pass a `GCHandle` over the target as `user_data` (`ToIntPtr` → recover with
+    `FromIntPtr` → `Free()` exactly once after the call). Shape:
+    `RecordMetadata_copy(md, s_copyCb, GCHandle.ToIntPtr(gch))`.
 
-**Why:** netstandard2.0 / net462 lack function pointers and
-`[UnmanagedCallersOnly]`, so a classic `[UnmanagedFunctionPointer(Cdecl)]`
-delegate is the only portable mechanism — the same pattern
-`confluent-kafka-dotnet` uses (`DeliveryReportDelegate` et al., kept alive in
-fields). The GC only sees managed references, so an un-rooted delegate can be
-collected while native still holds its thunk pointer → crash; hence the
-keep-alive rule. A managed exception unwinding through a native frame is UB (the
-CLR cannot propagate through Rust), so the callback must be a no-throw boundary.
-`user_data` is C's only per-invocation context channel, so a `GCHandle` is the
-bridge to the managed target. The `topic` window follows §3: it points into the
-handle's cached `CString`, which the core frees the instant the callback returns.
+**Why:** the floor (netstandard2.0/net462) has no function pointers or
+`[UnmanagedCallersOnly]`, so a kept-alive Cdecl delegate is the only portable
+mechanism — the pattern confluent-kafka-dotnet uses. The GC sees only managed
+refs, not the native thunk (→ keep-alive); the CLR can't propagate an exception
+through a Rust frame (→ no-throw); `user_data` is C's only per-call context
+channel (→ `GCHandle`).
 
-**How to apply:**
+**Anti-patterns:**
 
-  - `[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void
-    RecordMetadataCopyCallback(long offset, int partition, IntPtr topic, long
-    timestamp, IntPtr userData);` held as a `static readonly` field.
-  - Allocate a `GCHandle` over the managed target, call
-    `RecordMetadata_copy(md, s_copyCb, GCHandle.ToIntPtr(gch))`; inside `s_copyCb`
-    (in a `try/catch`) recover the target, `Utf8.PtrToString(topic)`, and populate
-    it; after the call returns, `gch.Free()` and re-surface any stashed exception.
-
-**Anti-patterns to flag in review:**
-
-  - `delegate* unmanaged` / `[UnmanagedCallersOnly]` (unavailable on the floor).
-  - A delegate instance with no rooted reference (collectible while native holds
-    the thunk) → crash; passing a bare lambda inline.
-  - Letting an exception escape the callback into native (UB) — must `try/catch`.
-  - Typing `topic` as `string` instead of `IntPtr` + `Utf8.PtrToString`; storing
-    or using the `topic` pointer after the callback returns (handle already
-    destroyed — §3).
-  - Omitting `CallingConvention.Cdecl`.
+  - A delegate with no rooted reference (or a bare inline lambda) — collectible
+    mid-call → crash.
+  - An exception escaping the callback into native (UB).
+  - `topic` typed as `string`, or its pointer read/stored after the callback
+    returns (handle already freed — §3).
   - Leaking or double-freeing the `user_data` `GCHandle`.
 
 **Tests required:**
 
-  - `RecordMetadata_copy` delivers the correct offset / partition / topic /
-    timestamp; a **non-ASCII** topic read inside the callback is correct (ties §3).
-  - An exception thrown inside the callback body is caught, does **not** crash the
-    process or unwind into native, and is re-surfaced to the caller after the call.
-  - Aggressive GC while the callback is in use does not crash (keep-alive) —
-    shared with §1.
+  - Correct offset/partition/topic/timestamp delivered; a non-ASCII topic read
+    inside the callback is correct (ties §3).
+  - An exception thrown in the callback is caught, doesn't crash or unwind into
+    native, and is re-surfaced.
+  - Aggressive GC while the callback is in use doesn't crash (keep-alive; shared
+    §1).
 
 ---
 
 ## 7. Async / Future completion — pull-based pump + `TaskCompletionSource`
 
-The C ABI is **pull-based**: the only ways to learn a send resolved are the
-blocking `kafka_producer_FutureRecordMetadata_get` / `_get_all` or the
-non-blocking poll `kafka_producer_FutureRecordMetadata_is_done`. There is **no
-push completion callback** in the ABI today. Java's `Future<RecordMetadata>`
-maps to .NET `Task<RecordMetadata>`, completed by a dedicated background
-**completion pump** — mirroring the Python binding's `poll_futures_thread`
-(see `bindings/python/.claude/rules/python-ffi.md` §5 + "Thread topology").
-
-### Thread topology
+**Decision:** Java `Future<RecordMetadata>` → .NET `Task<RecordMetadata>`,
+completed by **one** background pump that does the blocking waits. `SendAsync`
+enqueues and returns instantly with a `TaskCompletionSource`-backed `Task`; the
+pump blocks on the batched `get_all` and completes each TCS. (The ABI is
+pull-only: `get`/`get_all` block, `is_done` polls — no push callback. Mirrors the
+Python binding's `poll_futures_thread`, python-ffi.md §6.)
 
 ```
 Caller thread                         Completion pump (one bg thread)
 ─────────────                         ───────────────────────────────
 SendAsync():                          loop:
-  pin key/value (call-scoped)           drain a batch of (future, tcs)
-  Producer_send() → future handle       get_all(futures[])   ← BLOCKS here
-  new TaskCompletionSource (tcs)        for each i:
-  enqueue (future, tcs)                   tcs[i].SetResult / SetException
-  return tcs.Task  (no thread parked)   destroy_all(futures)
+  pin key/value (call-scoped, §4)       drain a batch of (future, tcs)
+  Producer_send() → future handle       get_all(futures[])   ← BLOCKS
+  new TaskCompletionSource (tcs)        tcs[i].SetResult / SetException
+  enqueue (future, tcs); return Task    destroy_all(futures)
 Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pending, exit
 ```
 
 **Rule:**
 
-  - A method that blocks in Java returns a `Task<T>` backed by a
-    `TaskCompletionSource<T>`; the caller-facing method only enqueues work and
-    returns. It NEVER calls a blocking core function (`_get` / `_get_all`)
-    directly on the caller's thread.
-  - Exactly **one** dedicated background pump thread does all blocking waits,
-    via the batched `kafka_producer_FutureRecordMetadata_get_all`. The thread
-    count is O(1) regardless of in-flight send count.
-  - `kafka_producer_Producer_send` runs inline on the caller's thread (it is a
-    fast enqueue); only the *wait* is offloaded. Unlike Python, .NET has no GIL,
-    so a separate send-batching thread is NOT required. (A send-batching thread
-    that uses `_send_batch` is an optional throughput optimization, not a
-    baseline requirement.)
-  - Construct the `TaskCompletionSource` with
-    `TaskCreationOptions.RunContinuationsAsynchronously`.
-  - Completion runs on the pump thread, not the caller's — this is the .NET
-    analog of Java's send-callback contract. Document the thread affinity.
-  - Completion is exactly-once. Guard against completing an already-completed or
-    cancelled `Task`, and free the native handles on every path.
-  - **Cancellation is best-effort:** cancelling the returned `Task` does NOT
-    abort an in-flight send (the record is already enqueued in the core); it
-    only discards the result and frees its handles.
+  - `SendAsync` never calls a blocking `_get`/`_get_all` on the caller's thread —
+    it pins (§4), calls `Producer_send` (inline; a fast enqueue), checks the sync
+    `out_error`, enqueues `(future, tcs)`, returns `tcs.Task`. Inline send is fine
+    because .NET has no GIL (a send-batching thread is an optional throughput
+    tweak, not required).
+  - **Exactly one** pump thread does all waits via batched `get_all` — O(1)
+    threads for unbounded in-flight sends. Per result: read fields + free handles
+    on the pump (§2), `SetResult`/`SetException`, `destroy_all` the futures.
+  - Build the TCS with `RunContinuationsAsynchronously` — otherwise a slow awaiter
+    continuation runs on the pump thread and stalls every other completion.
+  - Completion is exactly-once (guard cancelled/done, free handles on every path).
+    Cancellation is best-effort: it discards the result, it does **not** abort an
+    in-flight send.
+  - `Dispose`: stop sends → drain/fault pending → **join the pump** →
+    `flush`/`close` → release the producer `SafeHandle`. Optional fast path: if
+    `is_done` at send time, complete synchronously (a `ValueTask`, no queue).
 
-**Why:** The core owns its own Tokio runtime and background sender task, so the
-"drive the work" loop already lives in Rust — the binding must only bridge each
-resolved future to a `Task`. A pull ABI forces the wait onto *some* thread; a
-single pump gives bounded threads for unbounded in-flight sends. The
-alternative — `Task.Run(() => FutureRecordMetadata_get(...))` per send — parks
-one thread-pool thread per in-flight message, which starves the pool under the
-high in-flight concurrency a Kafka producer is designed for (sync-over-async
-anti-pattern). `RunContinuationsAsynchronously` is required because, by default,
-`tcs.SetResult` runs the awaiter's continuation **synchronously on the pump
-thread**; a slow user continuation would then stall completion of every other
-send. This design matches CLAUDE.md §11 ("avoid per-message spawn; use a shared
-completion task with a channel") and keeps the .NET binding consistent with the
-Python design.
+**Why:** the core's own runtime already drives the work, so the binding only
+bridges each resolved future to a `Task`; a pull ABI forces the wait onto some
+thread, and one pump gives bounded threads. The alternative — `Task.Run(get)` per
+send — parks a thread-pool thread per in-flight message and starves the pool
+(sync-over-async). Matches CLAUDE.md §11 ("shared completion task, not per-message
+spawn") and the Python design.
 
-**How to apply:**
+**Anti-patterns:**
 
-  - `SendAsync`: pin key/value bytes (call-scoped, see the pinning section),
-    call `kafka_producer_Producer_send` to get the future handle, check the
-    synchronous `out_error` (throw `KafkaException` on non-null), create the
-    `TaskCompletionSource`, enqueue `(future, tcs)`, return `tcs.Task`.
-  - Use a `System.Threading.Channels.Channel` (or `BlockingCollection`) as the
-    hand-off queue; the pump drains a batch (FIFO), calls `_get_all`, and
-    completes each `tcs`.
-  - Read result fields immediately and free the native handles on the pump
-    thread: on success, extract offset/partition/topic/timestamp then
-    `RecordMetadata_destroy` (or use `RecordMetadata_copy`, which extracts +
-    frees in one call); on error, read `KafkaError_code` / `_message` /
-    `_is_retriable` then `KafkaError_destroy`. The managed `RecordMetadata` /
-    `KafkaException` hold **copied values**, not handles — so they need no
-    `SafeHandle`.
-  - Free the future handles with `kafka_producer_FutureRecordMetadata_destroy_all`
-    after `_get_all` returns (the futures are NOT consumed by `_get_all`).
-  - `Dispose` / `close`: stop accepting sends, let the pump drain (Java
-    `close()` flush semantics) or fault the still-pending `Task`s with a
-    `KafkaException`, then **join the pump thread**, then
-    `kafka_producer_Producer_flush` → `_close` → dispose the producer
-    `SafeHandle`. Never destroy the producer handle while the pump may still be
-    calling `_get_all` on futures derived from it.
-  - Optional fast path: if `kafka_producer_FutureRecordMetadata_is_done` is true
-    at send time (auto-complete mock, or an already-acked send), complete
-    synchronously and return a completed `ValueTask` without queueing.
-
-**Anti-patterns to flag in review:**
-
-  - `Task.Run(() => ...FutureRecordMetadata_get...)` per send, or any
-    one-thread-per-in-flight-message pattern (Option A).
-  - A caller-facing `SendAsync` that blocks on `_get` / `_get_all` directly.
-  - `TaskCompletionSource` created without `RunContinuationsAsynchronously`.
-  - Running user continuations / user code on the pump thread.
-  - Completing a cancelled or already-completed `Task` without freeing the
-    metadata/error handles.
-  - Destroying the producer handle before draining + joining the pump.
-  - Assuming `Task` cancellation aborts the in-flight send.
-  - Holding a managed lock across a blocking `_get_all` FFI call.
+  - `Task.Run(get)` per send / any one-thread-per-message pattern; a `SendAsync`
+    that blocks on `_get`/`_get_all` directly.
+  - A TCS without `RunContinuationsAsynchronously`; running user code on the pump.
+  - Destroying the producer before joining the pump; assuming cancel aborts the
+    send; holding a managed lock across `get_all`.
 
 **Tests required:**
 
-  - `SendAsync` `Task` resolves with `RecordMetadata` on success and faults with
-    `KafkaException` on error.
-  - `Dispose`/`close` called with sends still in flight returns (does not hang) —
-    the pump-join regression.
-  - Cancelling a pending `Task` is safe and frees its native handles.
-  - High-concurrency produce (many more in-flight sends than thread-pool
-    threads) completes without thread-pool starvation.
+  - `Task` resolves with `RecordMetadata` / faults with `KafkaException`.
+  - `Dispose` with sends in flight returns (doesn't hang) — the pump-join
+    regression.
+  - Cancel is safe + frees handles; high-concurrency produce doesn't starve the
+    thread pool.
 
 ---
 
 ## 8. Native library loading, packaging & AOT
 
-The native library is **our own Rust cdylib `confluent_kafka`** (built by
-`cargo build --features ffi`), which we build and control — unlike
-`confluent-kafka-dotnet`, which wraps a large third-party prebuilt librdkafka
-across many RIDs, two libc flavors (glibc/musl), and a GSSAPI-optional build.
-Because we own a single self-built native, we skip almost all of their loading
-machinery.
+**Decision:** The native lib is our own Rust cdylib `confluent_kafka` (from `cargo
+build --features ffi`). For now, an MSBuild step copies it into the project's
+output dir and default `[DllImport]` probing resolves it — **no NuGet needed**.
+One `Native` class, one `DllName`, no hand-rolled loader.
 
-**Rule — packaging (for now: copy-to-output, no NuGet):**
+**Rule:**
 
-  - `cargo build --features ffi` emits `target/<cfg>/libconfluent_kafka.{so,dylib}`
-    / `confluent_kafka.dll`. An **MSBuild step copies that artifact into the .NET
-    project's output directory** (`$(OutDir)`) so the default `[DllImport]`
-    search (app base directory) resolves it. **No NuGet is required to ship or
-    test.**
-  - The bare name `"confluent_kafka"` in `[DllImport]` maps to exactly the
-    filenames Cargo emits (Cargo `[lib] name = "confluent_kafka"`) — never
-    hardcode a platform-specific filename or absolute path.
-  - A **separate redist NuGet** (native assets under `runtimes/{rid}/native/`,
-    à la `librdkafka.redist`) is deferred to later. When it lands it is a
-    **packaging-only** change: the `Native` P/Invoke layer and the `DllName` do
-    not change.
+  - **Packaging (now):** MSBuild copies `target/<cfg>/…confluent_kafka.…` to
+    `$(OutDir)` (`CopyToOutputDirectory=PreserveNewest`); default probing (app base
+    dir) finds it. The bare `[DllImport("confluent_kafka")]` maps to the filenames
+    Cargo emits — never hardcode a filename/absolute path. A separate redist NuGet
+    (`runtimes/{rid}/native/`) is deferred and **packaging-only** — it won't touch
+    the P/Invoke layer.
+  - **Loading:** rely on default `[DllImport]` resolution — do **not** port
+    confluent-kafka-dotnet's `Librdkafka.Initialize` (manual `dlopen`/`LoadLibraryEx`
+    preload, reflection binding, distro/GSSAPI variant selection); none applies to
+    one self-built cdylib. If custom probing is ever needed, use
+    `NativeLibrary.SetDllImportResolver` (modern), not a reflection loader; on
+    net462 keep the native in the app dir (a `LoadLibraryEx` preload is a last
+    resort).
+  - **Single `Native` class**, one `DllName = "confluent_kafka"` — the equivalent
+    of only their default `NativeMethods`. No `_Alpine`/`_Centos8` /
+    `/etc/os-release` detection (our own build can emit a musl artifact under the
+    right RID).
+  - **AOT:** not committed to, but kept open — direct `[DllImport]` (not a
+    reflection loader) is AOT-amenable, unlike theirs. Don't add reflection-based
+    loading.
 
-**Rule — loading (no hand-rolled loader):**
+**Why:** we build and control one native, so the drivers of their loader
+(third-party binary placement on net462, musl/glibc + GSSAPI variants) don't exist
+for us; Cargo's output names already match default P/Invoke resolution. Deferring
+the NuGet is safe because packaging never touches the P/Invoke surface.
 
-  - Rely on the runtime's **default `[DllImport]` resolution** (the copy step put
-    the native in the app base dir). Do **not** port
-    `confluent-kafka-dotnet`'s `Librdkafka.Initialize`: no manual `LoadLibraryEx`
-    / `dlopen` preload, no reflection `CreateDelegate` binding, no version
-    handshake. Those exist only to place a third-party binary and to swap
-    libc/GSSAPI variants — neither applies here.
-  - If custom probing is ever needed on modern .NET (Core 3.0+), use
-    **`NativeLibrary.SetDllImportResolver`** (reflection-free), not a hand loader.
-    On **net462** (no resolver, no RID auto-copy) the copy-to-output step keeps
-    the native in the app base dir; a one-time `LoadLibraryEx` preload is a last
-    resort only if that ever fails.
+**Anti-patterns:**
 
-**Rule — single `Native` class:**
-
-  - **One** `internal static class Native` with a single `DllName =
-    "confluent_kafka"` — the equivalent of only `confluent-kafka-dotnet`'s
-    default `NativeMethods`.
-
-**Why:** we build and control the native (one cdylib), so the drivers of
-`confluent-kafka-dotnet`'s loader — third-party binary placement on net462, and
-musl/glibc + GSSAPI variant selection — simply don't exist for us. Cargo's output
-names already match the default P/Invoke name mapping, so default resolution
-"just works" once the native is beside the app. Deferring the redist NuGet is
-safe because packaging never touches the P/Invoke surface. Avoiding the
-reflection loader also keeps NativeAOT viable later, which theirs cannot.
-
-**How to apply:**
-
-  - Add an MSBuild item/target copying
-    `..\..\target\$(Configuration)\…confluent_kafka.…` to output with
-    `CopyToOutputDirectory=PreserveNewest`; document the `cargo build --features
-    ffi` prerequisite. (CI runs the cargo build before `dotnet build/test`.)
-  - Declare the single `Native` class per §1 with
-    `[DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]`.
-  - Optionally expose an explicit load / path override (their `userSpecifiedPath`
-    escape hatch) for non-standard deployments.
-
-**Anti-patterns to flag in review:**
-
-  - Porting `Librdkafka.Initialize` / reflection `CreateDelegate` binding / the
-    3-`NativeMethods` + `/etc/os-release` detection — unnecessary for one
-    self-built cdylib, and it kills AOT.
-  - Hardcoding an absolute path or a platform-specific filename in `[DllImport]`
-    (breaks the cross-platform default name mapping).
-  - Assuming net462 auto-copies `runtimes/{rid}/native/` (it does not) — ensure
-    the native lands in the app base dir.
-  - Blocking all delivery on the redist NuGet — copy-to-output unblocks dev/test
-    now; the NuGet is a later, additive packaging step.
-  - Adding reflection-based loading (forecloses AOT for no benefit here).
+  - Porting `Librdkafka.Initialize` / reflection binding / 3× NativeMethods /
+    `/etc/os-release` — unnecessary, and it kills AOT.
+  - Hardcoding an absolute path or platform filename in `[DllImport]`.
+  - Assuming net462 auto-copies `runtimes/{rid}/native/` (it doesn't).
+  - Blocking delivery on the redist NuGet (copy-to-output unblocks dev/test now).
 
 **Tests required:**
 
-  - The binding loads and a smoke call (e.g. `MockProducer` create → send →
-    close) succeeds on each target framework (net462, net8.0, net10.0) on at
-    least Windows + Linux in CI, with the native copied to output.
-  - A missing/unresolvable native produces a clear `DllNotFoundException`, not an
-    obscure crash (sanity of the failure mode).
+  - A smoke call (`MockProducer` create → send → close) loads and works on net462,
+    net8.0, net10.0 on Windows + Linux in CI, with the native copied to output.
+  - A missing native gives a clear `DllNotFoundException`, not an obscure crash.
