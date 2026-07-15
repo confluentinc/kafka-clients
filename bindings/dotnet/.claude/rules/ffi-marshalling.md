@@ -49,12 +49,9 @@ adds only the caller threads and a single completion pump.
     Because the runtime is multi-threaded, this parks only that one .NET thread;
     the Sender keeps running on the runtime's worker threads. A blocked pump does
     NOT stall sending.
-  - Any native → managed callback runs on a **non-.NET-managed thread**:
-    `RecordMetadata_copy`'s callback fires synchronously on whoever called it
-    (the pump); a future push-completion callback (see §1 "Future direction")
-    would fire on a tokio worker thread. Treat all such callbacks as foreign-
-    thread (keep delegates alive, catch every exception, hop user continuations
-    off the callback thread).
+  - The one native → managed callback (`RecordMetadata_copy`) fires
+    **synchronously on the caller's (pump) thread** — not a foreign thread. Keep
+    its delegate alive and let no managed exception escape it into native (§7).
 
 **Why:** This is Java's single-Selector NIO model translated to tokio
 (CLAUDE.md §8) — deliberately unlike librdkafka, which runs a "main" thread plus
@@ -75,8 +72,8 @@ thread is safe and cannot deadlock the Sender.
     `poll()` in this ABI, and nothing needs pumping to make progress.
   - Do not hold a managed lock across any blocking FFI call (`_get_all`,
     `_flush`, `_close`).
-  - Treat every native → managed callback as arriving on a foreign thread (see
-    the Callback and §1 Async sections).
+  - The `RecordMetadata_copy` callback runs on the caller's (pump) thread; keep
+    its delegate rooted and exception-safe (§7).
 
 **Anti-patterns to flag in review:**
 
@@ -88,7 +85,6 @@ thread is safe and cannot deadlock the Sender.
     core already serializes via its `Mutex`).
   - Assuming FFI calls are single-threaded, or that completions arrive on the
     caller's thread.
-  - Doing user work directly on a callback thread (a tokio worker).
 
 **Tests required:**
 
@@ -774,3 +770,183 @@ the §3/§4 ownership contract applied to the error handle.
     `Dispose` → `ObjectDisposedException`; bad partition → `ArgumentException` /
     `ArgumentOutOfRangeException` — each thrown **before** any native call (fails
     even with no live producer handle).
+
+---
+
+## 7. Callback & delegate marshalling
+
+The one callback in the producer ABI is **`RecordMetadata_copy`**, a C function
+pointer (`void (*cb)(...)` + `void *user_data`) that the core invokes
+**synchronously** to hand back all of a record's metadata in a single crossing.
+Using it is optional — the binding may instead call the individual accessors
+(`RecordMetadata_offset` / `_partition` / `_topic` / `_timestamp` + `_destroy`)
+and skip callbacks entirely. This section governs the callback form.
+
+On the netstandard2.0 / net462 floor there are **no** C# function pointers
+(`delegate* unmanaged`) and **no** `[UnmanagedCallersOnly]` (§2), so the callback
+is a classic **delegate** typed `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`
+— exactly what `confluent-kafka-dotnet` (also net462) does.
+
+The callback:
+
+    void cb(int64_t offset, int32_t partition, const char* topic, int64_t timestamp, void* user_data)
+
+  - fires **synchronously**, on the **caller's** thread (the completion pump), and
+    returns *before* `RecordMetadata_copy` returns;
+  - the `topic` pointer is valid **only during the callback** — the core destroys
+    the handle (and its cached `CString`) immediately after (§4).
+
+**Rule:**
+
+  - Declare the callback as a named delegate type with
+    `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`. Its parameters must be
+    **blittable**: `int64_t → long`, `int32_t → int`, `const char* → IntPtr`,
+    `void* → IntPtr`. Do **not** type `topic` as `string` — take `IntPtr` and
+    `Utf8.PtrToString` it **inside** the callback, within its validity window (§4).
+  - **Keep the delegate instance alive** across the call. The GC tracks managed
+    references, **not** the native thunk; a collected delegate → a call into freed
+    memory → crash. Hold a real reference — a `static readonly` field for the
+    stateless callback (never a bare lambda the GC could reclaim mid-call). Because
+    the callback is synchronous, rooting it across the single `RecordMetadata_copy`
+    call suffices.
+  - **No managed exception may unwind into native.** A managed exception crossing
+    back into the Rust frame is **undefined behavior**. Wrap the callback body in
+    `try/catch`; stash any failure in the context and re-surface it on the caller's
+    thread **after** `RecordMetadata_copy` returns (or swallow + log) — never let
+    it propagate. (The field copies don't throw; `Utf8.PtrToString` is the only
+    real risk.) Python's callback does this via `PyErr_Print`.
+  - **`user_data` carries the managed context.** Pass a `GCHandle`
+    (`GCHandle.ToIntPtr`) over the target object as `user_data`; recover it in the
+    callback (`GCHandle.FromIntPtr`, cast `.Target`); **free it exactly once**,
+    after the call returns.
+  - **Cdecl** (matches cbindgen `extern "C"`). The callback runs on the caller's
+    (pump) thread — no foreign-thread concern for this synchronous callback.
+
+**Why:** netstandard2.0 / net462 lack function pointers and
+`[UnmanagedCallersOnly]`, so a classic `[UnmanagedFunctionPointer(Cdecl)]`
+delegate is the only portable mechanism — the same pattern
+`confluent-kafka-dotnet` uses (`DeliveryReportDelegate` et al., kept alive in
+fields). The GC only sees managed references, so an un-rooted delegate can be
+collected while native still holds its thunk pointer → crash; hence the
+keep-alive rule. A managed exception unwinding through a native frame is UB (the
+CLR cannot propagate through Rust), so the callback must be a no-throw boundary.
+`user_data` is C's only per-invocation context channel, so a `GCHandle` is the
+bridge to the managed target. The `topic` window follows §4: it points into the
+handle's cached `CString`, which the core frees the instant the callback returns.
+
+**How to apply:**
+
+  - `[UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void
+    RecordMetadataCopyCallback(long offset, int partition, IntPtr topic, long
+    timestamp, IntPtr userData);` held as a `static readonly` field.
+  - Allocate a `GCHandle` over the managed target, call
+    `RecordMetadata_copy(md, s_copyCb, GCHandle.ToIntPtr(gch))`; inside `s_copyCb`
+    (in a `try/catch`) recover the target, `Utf8.PtrToString(topic)`, and populate
+    it; after the call returns, `gch.Free()` and re-surface any stashed exception.
+
+**Anti-patterns to flag in review:**
+
+  - `delegate* unmanaged` / `[UnmanagedCallersOnly]` (unavailable on the floor).
+  - A delegate instance with no rooted reference (collectible while native holds
+    the thunk) → crash; passing a bare lambda inline.
+  - Letting an exception escape the callback into native (UB) — must `try/catch`.
+  - Typing `topic` as `string` instead of `IntPtr` + `Utf8.PtrToString`; storing
+    or using the `topic` pointer after the callback returns (handle already
+    destroyed — §4).
+  - Omitting `CallingConvention.Cdecl`.
+  - Leaking or double-freeing the `user_data` `GCHandle`.
+
+**Tests required:**
+
+  - `RecordMetadata_copy` delivers the correct offset / partition / topic /
+    timestamp; a **non-ASCII** topic read inside the callback is correct (ties §4).
+  - An exception thrown inside the callback body is caught, does **not** crash the
+    process or unwind into native, and is re-surfaced to the caller after the call.
+  - Aggressive GC while the callback is in use does not crash (keep-alive) —
+    shared with §2.
+
+---
+
+## 8. Native library loading, packaging & AOT
+
+The native library is **our own Rust cdylib `confluent_kafka`** (built by
+`cargo build --features ffi`), which we build and control — unlike
+`confluent-kafka-dotnet`, which wraps a large third-party prebuilt librdkafka
+across many RIDs, two libc flavors (glibc/musl), and a GSSAPI-optional build.
+Because we own a single self-built native, we skip almost all of their loading
+machinery.
+
+**Rule — packaging (for now: copy-to-output, no NuGet):**
+
+  - `cargo build --features ffi` emits `target/<cfg>/libconfluent_kafka.{so,dylib}`
+    / `confluent_kafka.dll`. An **MSBuild step copies that artifact into the .NET
+    project's output directory** (`$(OutDir)`) so the default `[DllImport]`
+    search (app base directory) resolves it. **No NuGet is required to ship or
+    test.**
+  - The bare name `"confluent_kafka"` in `[DllImport]` maps to exactly the
+    filenames Cargo emits (Cargo `[lib] name = "confluent_kafka"`) — never
+    hardcode a platform-specific filename or absolute path.
+  - A **separate redist NuGet** (native assets under `runtimes/{rid}/native/`,
+    à la `librdkafka.redist`) is deferred to later. When it lands it is a
+    **packaging-only** change: the `Native` P/Invoke layer and the `DllName` do
+    not change.
+
+**Rule — loading (no hand-rolled loader):**
+
+  - Rely on the runtime's **default `[DllImport]` resolution** (the copy step put
+    the native in the app base dir). Do **not** port
+    `confluent-kafka-dotnet`'s `Librdkafka.Initialize`: no manual `LoadLibraryEx`
+    / `dlopen` preload, no reflection `CreateDelegate` binding, no version
+    handshake. Those exist only to place a third-party binary and to swap
+    libc/GSSAPI variants — neither applies here.
+  - If custom probing is ever needed on modern .NET (Core 3.0+), use
+    **`NativeLibrary.SetDllImportResolver`** (reflection-free), not a hand loader.
+    On **net462** (no resolver, no RID auto-copy) the copy-to-output step keeps
+    the native in the app base dir; a one-time `LoadLibraryEx` preload is a last
+    resort only if that ever fails.
+
+**Rule — single `Native` class:**
+
+  - **One** `internal static class Native` with a single `DllName =
+    "confluent_kafka"` — the equivalent of only `confluent-kafka-dotnet`'s
+    default `NativeMethods`.
+
+**Why:** we build and control the native (one cdylib), so the drivers of
+`confluent-kafka-dotnet`'s loader — third-party binary placement on net462, and
+musl/glibc + GSSAPI variant selection — simply don't exist for us. Cargo's output
+names already match the default P/Invoke name mapping, so default resolution
+"just works" once the native is beside the app. Deferring the redist NuGet is
+safe because packaging never touches the P/Invoke surface. Avoiding the
+reflection loader also keeps NativeAOT viable later, which theirs cannot.
+
+**How to apply:**
+
+  - Add an MSBuild item/target copying
+    `..\..\target\$(Configuration)\…confluent_kafka.…` to output with
+    `CopyToOutputDirectory=PreserveNewest`; document the `cargo build --features
+    ffi` prerequisite. (CI runs the cargo build before `dotnet build/test`.)
+  - Declare the single `Native` class per §2 with
+    `[DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]`.
+  - Optionally expose an explicit load / path override (their `userSpecifiedPath`
+    escape hatch) for non-standard deployments.
+
+**Anti-patterns to flag in review:**
+
+  - Porting `Librdkafka.Initialize` / reflection `CreateDelegate` binding / the
+    3-`NativeMethods` + `/etc/os-release` detection — unnecessary for one
+    self-built cdylib, and it kills AOT.
+  - Hardcoding an absolute path or a platform-specific filename in `[DllImport]`
+    (breaks the cross-platform default name mapping).
+  - Assuming net462 auto-copies `runtimes/{rid}/native/` (it does not) — ensure
+    the native lands in the app base dir.
+  - Blocking all delivery on the redist NuGet — copy-to-output unblocks dev/test
+    now; the NuGet is a later, additive packaging step.
+  - Adding reflection-based loading (forecloses AOT for no benefit here).
+
+**Tests required:**
+
+  - The binding loads and a smoke call (e.g. `MockProducer` create → send →
+    close) succeeds on each target framework (net462, net8.0, net10.0) on at
+    least Windows + Linux in CI, with the native copied to output.
+  - A missing/unresolvable native produces a clear `DllNotFoundException`, not an
+    obscure crash (sanity of the failure mode).
