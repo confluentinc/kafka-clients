@@ -55,6 +55,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::common::serialization::BytesDeserializer;
 use crate::common::{KafkaError, Uuid};
@@ -66,7 +67,7 @@ use super::common::{
     self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
-use super::records::{box_string_list, kafka_consumer_StringList_t};
+use super::records::{box_records, box_string_list, kafka_consumer_ConsumerRecords_t, kafka_consumer_StringList_t};
 
 // The share consumer is monomorphized over refcounted `bytes::Bytes` keys and
 // values: each record's key/value is a zero-copy slice of the owning fetch
@@ -734,6 +735,154 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_subscription(
 }
 
 // ---------------------------------------------------------------------------
+// poll
+// ---------------------------------------------------------------------------
+
+/// Polls for records (synchronous). Drives the consumer's `poll(timeout)` under
+/// the access guard via `block_on`.
+///
+/// # Parameters
+///
+/// - `consumer`: Non-null consumer handle.
+/// - `timeout_ms`: Poll timeout in milliseconds.
+/// - `out_error`: Pointer where an error handle is written on failure, or null.
+///
+/// # Returns
+///
+/// A non-null
+/// [`kafka_consumer_ConsumerRecords_t`](super::records::kafka_consumer_ConsumerRecords_t)
+/// handle on success (free it with `kafka_consumer_ConsumerRecords_destroy`), or
+/// null on failure with `*out_error` set.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle from a share-consumer constructor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    timeout_ms: i64,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_consumer_ConsumerRecords_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(e) };
+        }
+        return std::ptr::null_mut();
+    }
+    let _g = ReleaseGuard(h);
+    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    let result = h.runtime.block_on(unsafe { consumer_mut(h).poll(timeout) });
+    match result {
+        Ok(records) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
+            }
+            box_records(records)
+        },
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            std::ptr::null_mut()
+        },
+    }
+}
+
+/// Completion callback for [`kafka_consumer_ShareConsumer_poll_async`].
+///
+/// On success `records` is non-null and `error` is null; on failure `records` is
+/// null and `error` is non-null. The callback takes ownership of whichever handle
+/// is non-null and must free it.
+pub type kafka_consumer_ShareConsumer_poll_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_ConsumerRecords_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// A poll-callback target (function pointer + opaque `user_data`), wrapped so it
+/// can cross the tokio task / dispatcher thread boundary.
+#[derive(Clone, Copy)]
+struct PollCallbackTarget {
+    callback: kafka_consumer_ShareConsumer_poll_callback_t,
+    user_data: *mut c_void,
+}
+// SAFETY: the C user owns the thread-safety of `user_data`; the function pointer
+// is trivially shareable.
+unsafe impl Send for PollCallbackTarget {}
+
+/// Owned poll completion payload, fired by the dispatcher thread. Carries the raw
+/// result handles (one of `records`/`error` is non-null) and the `&'static
+/// ShareConsumerHandle` so the access guard is released **after** the awaited op
+/// completes but **before** the callback fires.
+struct PollCompletion {
+    target: PollCallbackTarget,
+    records: *mut kafka_consumer_ConsumerRecords_t,
+    error: *mut kafka_common_KafkaError_t,
+    handle: &'static ShareConsumerHandle,
+}
+// SAFETY: the raw pointers are owned handles moved to the dispatcher thread; the
+// C user owns the thread-safety of `user_data`. The `&ShareConsumerHandle` is
+// Send via the type's `unsafe impl Send`.
+unsafe impl Send for PollCompletion {}
+impl PollCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread.
+    unsafe fn fire(self) {
+        // Release BEFORE firing the callback. By the time this completion job
+        // runs, the awaited op has fully completed (`poll().await` returned), so
+        // the consumer is no longer borrowed. Releasing before the callback
+        // avoids a release-vs-next-op race for embedders that resume work from
+        // the callback. The callback only reads the already-built result handles;
+        // it does not touch the consumer.
+        release(self.handle);
+        unsafe { (self.target.callback)(self.records, self.error, self.target.user_data) };
+    }
+}
+
+/// Polls for records asynchronously (one-operation-in-flight). The access guard
+/// is held from submission until the callback fires, so any concurrent op (sync
+/// or async) is rejected until completion.
+///
+/// If the guard cannot be acquired, the callback fires inline with the error.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle from a share-consumer constructor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    timeout_ms: i64,
+    callback: kafka_consumer_ShareConsumer_poll_callback_t,
+    user_data: *mut c_void,
+) {
+    let h = unsafe { handle_ref(consumer) };
+    let target = PollCallbackTarget { callback, user_data };
+    if let Err(e) = acquire(h) {
+        // Rejected: deliver the error through the callback inline. The guard was
+        // not taken, so nothing to release.
+        unsafe { (target.callback)(std::ptr::null_mut(), box_error(e), target.user_data) };
+        return;
+    }
+    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    let tx = h.completion_tx.clone();
+    // Capture the `&'static ShareConsumerHandle` (Send+Sync via the unsafe
+    // impls), NOT a bare `*mut` (raw pointers are !Send and would make the
+    // future !Send). The handle is leaked, so the borrow is effectively
+    // `'static`.
+    let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
+    h.runtime_handle.spawn(async move {
+        let target = target;
+        let result = unsafe { consumer_mut(hs).poll(timeout).await };
+        // No `.await` after building the raw handles below.
+        let (records, error) = match result {
+            Ok(r) => (box_records(r), std::ptr::null_mut()),
+            Err(e) => (std::ptr::null_mut(), box_error(e)),
+        };
+        let completion = PollCompletion { target, records, error, handle: hs };
+        let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
+        enqueue_or_run_inline(&tx, job);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // MockShareConsumer driver methods (broker-less test support)
 //
 // These match on `ShareConsumerKind::Mock` and return `illegal_state` for the
@@ -846,8 +995,30 @@ mod tests {
     use super::*;
     use crate::ffi::common::{kafka_common_KafkaError_destroy, kafka_common_KafkaError_message};
     use crate::ffi::records::{
-        kafka_consumer_StringList_count, kafka_consumer_StringList_destroy, kafka_consumer_StringList_get,
+        kafka_consumer_ConsumerRecord_delivery_count, kafka_consumer_ConsumerRecord_key,
+        kafka_consumer_ConsumerRecord_offset, kafka_consumer_ConsumerRecord_value,
+        kafka_consumer_ConsumerRecords_count, kafka_consumer_ConsumerRecords_destroy,
+        kafka_consumer_ConsumerRecords_get, kafka_consumer_StringList_count, kafka_consumer_StringList_destroy,
+        kafka_consumer_StringList_get,
     };
+
+    /// Subscribes a mock consumer to `topic` over the ABI.
+    fn subscribe(consumer: *const kafka_consumer_ShareConsumer_t, topic: &str) {
+        let topic_c = CString::new(topic).unwrap();
+        let topics = [topic_c.as_ptr()];
+        let err = unsafe { kafka_consumer_ShareConsumer_subscribe(consumer, topics.as_ptr(), 1) };
+        assert!(err.is_null(), "subscribe should succeed");
+    }
+
+    /// Reads a record's borrowed byte slice via a (ptr, len) accessor, or `None`
+    /// if the accessor reports absence (len < 0).
+    unsafe fn read_bytes(ptr: *const u8, len: i32) -> Option<Vec<u8>> {
+        if len < 0 || ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec())
+        }
+    }
 
     /// Reads a boxed error handle's message as an owned `String`, then frees it.
     unsafe fn take_error_message(err: *mut kafka_common_KafkaError_t) -> String {
@@ -976,5 +1147,114 @@ mod tests {
             );
             kafka_consumer_ShareConsumer_destroy(consumer);
         }
+    }
+
+    /// Adds a record to a subscribed mock, then polls it back over the ABI and
+    /// reads the offset, key, value, and delivery count. The byte slices are
+    /// borrowed from the boxed batch (zero-copy) and stay valid until it is
+    /// destroyed.
+    #[test]
+    fn test_poll_reads_added_record_fields() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        subscribe(consumer, "share-topic");
+
+        let topic = CString::new("share-topic").unwrap();
+        let key = b"k1";
+        let value = b"v1";
+        let mut add_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        unsafe {
+            kafka_consumer_MockShareConsumer_add_record(
+                consumer,
+                topic.as_ptr(),
+                0,
+                key.as_ptr(),
+                key.len() as i32,
+                value.as_ptr(),
+                value.len() as i32,
+                7,
+                &mut add_error,
+            )
+        };
+        assert!(add_error.is_null(), "add_record should succeed on a subscribed topic");
+
+        let mut poll_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let records = unsafe { kafka_consumer_ShareConsumer_poll(consumer, 0, &mut poll_error) };
+        assert!(poll_error.is_null());
+        assert!(!records.is_null());
+
+        unsafe {
+            assert_eq!(kafka_consumer_ConsumerRecords_count(records), 1);
+            let rec = kafka_consumer_ConsumerRecords_get(records, 0);
+            assert!(!rec.is_null());
+            assert_eq!(kafka_consumer_ConsumerRecord_offset(rec), 7);
+
+            let mut key_len = 0i32;
+            let key_ptr = kafka_consumer_ConsumerRecord_key(rec, &mut key_len);
+            assert_eq!(read_bytes(key_ptr, key_len), Some(b"k1".to_vec()));
+
+            let mut value_len = 0i32;
+            let value_ptr = kafka_consumer_ConsumerRecord_value(rec, &mut value_len);
+            assert_eq!(read_bytes(value_ptr, value_len), Some(b"v1".to_vec()));
+
+            // A mock-added record carries no broker-assigned delivery count.
+            let mut delivery = 0i32;
+            assert!(!kafka_consumer_ConsumerRecord_delivery_count(rec, &mut delivery));
+
+            kafka_consumer_ConsumerRecords_destroy(records);
+        }
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    unsafe extern "C" fn send_poll_count(
+        records: *mut kafka_consumer_ConsumerRecords_t,
+        error: *mut kafka_common_KafkaError_t,
+        user_data: *mut c_void,
+    ) {
+        let count = if records.is_null() {
+            unsafe { kafka_common_KafkaError_destroy(error) };
+            -1
+        } else {
+            let n = unsafe { kafka_consumer_ConsumerRecords_count(records) };
+            unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
+            n
+        };
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<i32>) };
+        tx.send(count).ok();
+    }
+
+    /// The async poll path delivers the boxed batch to its callback and releases
+    /// the guard inside the completion job.
+    #[test]
+    fn test_poll_async_delivers_batch_to_callback() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        subscribe(consumer, "share-topic");
+
+        let topic = CString::new("share-topic").unwrap();
+        let value = b"v1";
+        let mut add_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        unsafe {
+            kafka_consumer_MockShareConsumer_add_record(
+                consumer,
+                topic.as_ptr(),
+                0,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                0,
+                &mut add_error,
+            )
+        };
+        assert!(add_error.is_null());
+
+        let (tx, rx) = std::sync::mpsc::channel::<i32>();
+        unsafe {
+            kafka_consumer_ShareConsumer_poll_async(consumer, 0, send_poll_count, &tx as *const _ as *mut c_void)
+        };
+        let count = rx.recv_timeout(Duration::from_secs(5)).expect("poll callback must fire");
+        assert_eq!(count, 1, "poll_async should deliver the one added record");
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
     }
 }
