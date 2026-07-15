@@ -232,13 +232,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_destroy(records: *mut ka
     }
 }
 
-/// Casts a record handle to its inner type.
+/// Casts a record handle to its inner type. Exposed to the consumer FFI surfaces
+/// so `acknowledge`-style entry points can borrow the polled record.
 ///
 /// # Safety
 ///
 /// `record` must be a valid record pointer obtained from
-/// [`kafka_consumer_ConsumerRecords_get`].
-unsafe fn record_ref(record: *const kafka_consumer_ConsumerRecord_t) -> &'static ConsumerRecord<Bytes, Bytes> {
+/// [`kafka_consumer_ConsumerRecords_get`], and the owning batch must still be
+/// alive.
+pub(crate) unsafe fn record_ref(
+    record: *const kafka_consumer_ConsumerRecord_t,
+) -> &'static ConsumerRecord<Bytes, Bytes> {
     unsafe { &*(record as *const ConsumerRecord<Bytes, Bytes>) }
 }
 

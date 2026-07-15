@@ -53,21 +53,25 @@
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::common::serialization::BytesDeserializer;
 use crate::common::{KafkaError, Uuid};
 use crate::consumer::{
-    ConsumerRecord, MockShareConsumer, ShareConsumer, ShareConsumerConfig, WakeupHandle, new_share_consumer_with_wakeup,
+    AcknowledgeType, ConsumerRecord, MockShareConsumer, ShareConsumer, ShareConsumerConfig, WakeupHandle,
+    new_share_consumer_with_wakeup,
 };
 
 use super::common::{
     self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
-use super::records::{box_records, box_string_list, kafka_consumer_ConsumerRecords_t, kafka_consumer_StringList_t};
+use super::records::{
+    box_records, box_string_list, kafka_consumer_ConsumerRecord_t, kafka_consumer_ConsumerRecords_t,
+    kafka_consumer_StringList_t, record_ref,
+};
 
 // The share consumer is monomorphized over refcounted `bytes::Bytes` keys and
 // values: each record's key/value is a zero-copy slice of the owning fetch
@@ -118,9 +122,18 @@ fn acquire(h: &ShareConsumerHandle) -> Result<(), KafkaError> {
     }
 }
 
+/// Releases the single-owner guard on its shared owner cell.
+///
+/// The cell is held behind an [`Arc`] so an async completion job can release the
+/// guard through its own clone — even after the handle it came from has been
+/// destroyed — without touching freed memory.
+fn release_owner(owner: &AtomicU64) {
+    owner.store(NO_OWNER, Ordering::Release);
+}
+
 /// Releases the single-owner guard for `h`.
 fn release(h: &ShareConsumerHandle) {
-    h.owner.store(NO_OWNER, Ordering::Release);
+    release_owner(&h.owner);
 }
 
 /// RAII guard that releases the access guard on scope exit (return or panic).
@@ -146,7 +159,7 @@ enum ShareConsumerKind {
 }
 
 /// Per-consumer handle state. Owns the consumer directly behind an
-/// [`UnsafeCell`] and guards access with the single-owner [`AtomicU64`]; see the
+/// [`UnsafeCell`] and guards access with the single-owner owner cell; see the
 /// module documentation for the concurrency model.
 struct ShareConsumerHandle {
     /// The consumer. Exclusive access is enforced by `owner`, not the type
@@ -154,15 +167,20 @@ struct ShareConsumerHandle {
     /// `&ShareConsumerHandle`.
     consumer: UnsafeCell<ShareConsumerKind>,
     /// `NO_OWNER`, or the thread id (from [`current_thread_id`]) holding it.
-    owner: AtomicU64,
-    /// Drives app-side async methods via `block_on` (sync path).
-    runtime: tokio::runtime::Runtime,
+    /// Shared via [`Arc`] so an in-flight async op's completion job can release
+    /// the guard through its own clone after the handle is gone.
+    owner: Arc<AtomicU64>,
+    /// Drives app-side async methods via `block_on` (sync path). `Option` so
+    /// `destroy` can drop it (stopping all spawned tasks) while the handle box
+    /// is still alive for those tasks to unwind against.
+    runtime: Option<tokio::runtime::Runtime>,
     /// Handle for spawning async-variant awaiters (async path).
     runtime_handle: tokio::runtime::Handle,
     /// Sender for the completion-dispatch queue (shared machinery).
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
-    /// Dispatcher thread join handle; detached on destroy.
-    dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Dispatcher thread join handle; detached (dropped, not joined) on destroy.
+    #[allow(dead_code)]
+    dispatcher: std::thread::JoinHandle<()>,
     /// Wakeup handle captured at construction; fired by
     /// [`kafka_consumer_ShareConsumer_wakeup`] without acquiring the guard.
     wakeup_handle: WakeupHandle,
@@ -177,6 +195,14 @@ struct ShareConsumerHandle {
 // shared `&ShareConsumerHandle`.
 unsafe impl Send for ShareConsumerHandle {}
 unsafe impl Sync for ShareConsumerHandle {}
+
+impl ShareConsumerHandle {
+    /// The `block_on` runtime for the sync FFI path. Present for the whole life
+    /// of the handle; only `destroy` clears it (after which no FFI call runs).
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        self.runtime.as_ref().expect("share consumer runtime present before destroy")
+    }
+}
 
 /// Builds a [`ShareConsumerHandle`] around a [`ShareConsumerKind`], spawning the
 /// callback dispatcher thread, and returns the leaked C handle.
@@ -197,11 +223,11 @@ fn build_share_consumer_handle(
 
     let handle = Box::new(ShareConsumerHandle {
         consumer: UnsafeCell::new(kind),
-        owner: AtomicU64::new(NO_OWNER),
-        runtime,
+        owner: Arc::new(AtomicU64::new(NO_OWNER)),
+        runtime: Some(runtime),
         runtime_handle,
         completion_tx,
-        dispatcher: Mutex::new(Some(dispatcher)),
+        dispatcher,
         wakeup_handle,
         is_mock,
     });
@@ -493,20 +519,21 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_destroy(consumer: *mut kaf
     if consumer.is_null() {
         return;
     }
-    let handle = unsafe { Box::from_raw(consumer as *mut ShareConsumerHandle) };
-    let ShareConsumerHandle { consumer, runtime, completion_tx, dispatcher, .. } = *handle;
+    let mut handle = unsafe { Box::from_raw(consumer as *mut ShareConsumerHandle) };
 
-    // 1. Shut down the runtime first. This cancels any in-flight async-variant
-    //    future that borrows `*consumer.get()`, so the consumer is no longer
-    //    aliased when we drop it next.
-    runtime.shutdown_background();
-    // 2. Drop the consumer; its own `Drop` signals and joins the bg pipeline.
-    drop(consumer);
-    // 3. Close the completion channel and detach the dispatcher (do NOT join —
-    //    outstanding completion jobs may still hold a cloned `completion_tx`,
-    //    and the dispatcher exits once all clones are released).
-    drop(completion_tx);
-    drop(dispatcher.into_inner().unwrap_or(None));
+    // 1. Drop the runtime FIRST, while the handle box is still alive. This is a
+    //    blocking shutdown: it waits for the worker threads to stop, so no
+    //    spawned async op is still borrowing the consumer (via `consumer_mut`) or
+    //    about to enqueue a completion job. `Option::take` drops it in place
+    //    without freeing the box the running tasks unwind against.
+    drop(handle.runtime.take());
+
+    // 2. Drop the rest of the handle. The consumer's own `Drop` signals and
+    //    joins its bg pipeline; dropping `completion_tx` lets the detached
+    //    dispatcher drain any already-enqueued completion jobs and then exit.
+    //    Those jobs release the guard through their own `Arc<AtomicU64>` clone
+    //    and own their result handles, so none of them touches this freed box.
+    drop(handle);
 }
 
 /// Wakes up a share consumer blocked in `poll` (or another long operation).
@@ -555,7 +582,7 @@ where
     }
     let _g = ReleaseGuard(h);
     let fut = op(unsafe { consumer_mut(h) });
-    match h.runtime.block_on(fut) {
+    match h.runtime().block_on(fut) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => box_error(e),
     }
@@ -589,10 +616,15 @@ unsafe fn async_void_op<F, Fut>(
         return;
     }
     let tx = h.completion_tx.clone();
+    // The completion job releases the guard through a clone of the shared owner
+    // cell, so it stays valid even if `destroy` frees the handle before the job
+    // runs on the dispatcher.
+    let owner = Arc::clone(&h.owner);
     // Capture the `&'static ShareConsumerHandle` (Send+Sync via the unsafe
     // impls), NOT a bare `*mut` (raw pointers are !Send and would make the
     // future !Send). The handle is leaked, so the borrow is effectively
-    // `'static`.
+    // `'static`. It is used only while the op runs; `destroy` blocks on the
+    // runtime shutdown before freeing it, so `consumer_mut` never races the free.
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
@@ -609,7 +641,7 @@ unsafe fn async_void_op<F, Fut>(
             // the consumer is no longer borrowed. This avoids a
             // release-vs-next-op race when the callback resumes embedder work on
             // another thread.
-            release(hs);
+            release_owner(&owner);
             unsafe { completion.fire() };
         });
         enqueue_or_run_inline(&tx, job);
@@ -772,7 +804,7 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll(
     }
     let _g = ReleaseGuard(h);
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-    let result = h.runtime.block_on(unsafe { consumer_mut(h).poll(timeout) });
+    let result = h.runtime().block_on(unsafe { consumer_mut(h).poll(timeout) });
     match result {
         Ok(records) => {
             if !out_error.is_null() {
@@ -809,18 +841,18 @@ struct PollCallbackTarget {
 unsafe impl Send for PollCallbackTarget {}
 
 /// Owned poll completion payload, fired by the dispatcher thread. Carries the raw
-/// result handles (one of `records`/`error` is non-null) and the `&'static
-/// ShareConsumerHandle` so the access guard is released **after** the awaited op
-/// completes but **before** the callback fires.
+/// result handles (one of `records`/`error` is non-null) and a clone of the
+/// shared owner cell so the access guard is released **after** the awaited op
+/// completes but **before** the callback fires — and safely even if `destroy`
+/// already freed the handle the op ran on.
 struct PollCompletion {
     target: PollCallbackTarget,
     records: *mut kafka_consumer_ConsumerRecords_t,
     error: *mut kafka_common_KafkaError_t,
-    handle: &'static ShareConsumerHandle,
+    owner: Arc<AtomicU64>,
 }
 // SAFETY: the raw pointers are owned handles moved to the dispatcher thread; the
-// C user owns the thread-safety of `user_data`. The `&ShareConsumerHandle` is
-// Send via the type's `unsafe impl Send`.
+// C user owns the thread-safety of `user_data`. `Arc<AtomicU64>` is Send.
 unsafe impl Send for PollCompletion {}
 impl PollCompletion {
     /// # Safety
@@ -832,7 +864,7 @@ impl PollCompletion {
         // avoids a release-vs-next-op race for embedders that resume work from
         // the callback. The callback only reads the already-built result handles;
         // it does not touch the consumer.
-        release(self.handle);
+        release_owner(&self.owner);
         unsafe { (self.target.callback)(self.records, self.error, self.target.user_data) };
     }
 }
@@ -863,10 +895,14 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll_async(
     }
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     let tx = h.completion_tx.clone();
+    // Released by the completion job through this clone, so it stays valid even
+    // if `destroy` frees the handle before the job runs.
+    let owner = Arc::clone(&h.owner);
     // Capture the `&'static ShareConsumerHandle` (Send+Sync via the unsafe
     // impls), NOT a bare `*mut` (raw pointers are !Send and would make the
     // future !Send). The handle is leaked, so the borrow is effectively
-    // `'static`.
+    // `'static`. It is used only while the op runs; `destroy` blocks on the
+    // runtime shutdown before freeing it, so `consumer_mut` never races the free.
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
@@ -876,10 +912,130 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll_async(
             Ok(r) => (box_records(r), std::ptr::null_mut()),
             Err(e) => (std::ptr::null_mut(), box_error(e)),
         };
-        let completion = PollCompletion { target, records, error, handle: hs };
+        let completion = PollCompletion { target, records, error, owner };
         let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
         enqueue_or_run_inline(&tx, job);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Acknowledge (sync, guarded — records intent only, no network)
+// ---------------------------------------------------------------------------
+
+/// How a delivered record was handled, for the `acknowledge*` entry points
+/// (KIP-932).
+// The variant names are the C ABI enum values, so they stay upper-case; their
+// discriminants arrive from C callers, so Rust's dead-code analysis cannot see
+// them being constructed.
+#[allow(dead_code, clippy::upper_case_acronyms)]
+#[derive(Clone, Copy)]
+#[repr(i32)]
+pub enum kafka_consumer_AcknowledgeType_t {
+    /// The record was consumed successfully.
+    ACCEPT = 1,
+    /// Release the record for another delivery attempt.
+    RELEASE = 2,
+    /// Reject the record; do not release it for another attempt.
+    REJECT = 3,
+    /// The record is still being processed; renew its acquisition lock.
+    RENEW = 4,
+}
+
+impl kafka_consumer_AcknowledgeType_t {
+    /// Maps the C enum onto the internal [`AcknowledgeType`].
+    fn to_ack_type(self) -> AcknowledgeType {
+        match self {
+            Self::ACCEPT => AcknowledgeType::Accept,
+            Self::RELEASE => AcknowledgeType::Release,
+            Self::REJECT => AcknowledgeType::Reject,
+            Self::RENEW => AcknowledgeType::Renew,
+        }
+    }
+}
+
+/// Runs a sync, guarded, non-awaiting consumer op (the `acknowledge*` family
+/// records intent in the current fetch without any network round-trip). Returns
+/// null on success, or a non-null error handle on failure (including a
+/// concurrent-access rejection if the guard cannot be acquired).
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+unsafe fn guarded_ack_op<F>(consumer: *const kafka_consumer_ShareConsumer_t, op: F) -> *mut kafka_common_KafkaError_t
+where
+    F: FnOnce(&mut dyn ShareConsumer<Bytes, Bytes>) -> Result<(), KafkaError>,
+{
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    match op(unsafe { consumer_mut(h) }) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Acknowledges successful delivery of `record` with `ACCEPT`.
+///
+/// `record` must be a pointer obtained from this consumer's most recent poll
+/// batch, and that batch must still be alive (it owns the record). A record that
+/// is no longer in flight surfaces an `IllegalState` error, exactly as the
+/// underlying consumer reports.
+///
+/// Returns null on success, or a non-null error handle on failure.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `record` a valid record pointer from this
+/// consumer's last poll.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_acknowledge(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    record: *const kafka_consumer_ConsumerRecord_t,
+) -> *mut kafka_common_KafkaError_t {
+    let rec = unsafe { record_ref(record) };
+    unsafe { guarded_ack_op(consumer, |c| c.acknowledge(rec)) }
+}
+
+/// Acknowledges delivery of `record` with the given [`kafka_consumer_AcknowledgeType_t`].
+///
+/// See [`kafka_consumer_ShareConsumer_acknowledge`] for the record-lifetime
+/// contract.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `record` a valid record pointer from this
+/// consumer's last poll.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_acknowledge_with_type(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    record: *const kafka_consumer_ConsumerRecord_t,
+    ack_type: kafka_consumer_AcknowledgeType_t,
+) -> *mut kafka_common_KafkaError_t {
+    let rec = unsafe { record_ref(record) };
+    let ack = ack_type.to_ack_type();
+    unsafe { guarded_ack_op(consumer, |c| c.acknowledge_with_type(rec, ack)) }
+}
+
+/// Acknowledges delivery of the record identified by `(topic, partition,
+/// offset)` with the given [`kafka_consumer_AcknowledgeType_t`]. Unlike the
+/// record-pointer variants, this does not borrow a polled batch.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `topic` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_acknowledge_by_offset(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    topic: *const c_char,
+    partition: i32,
+    offset: i64,
+    ack_type: kafka_consumer_AcknowledgeType_t,
+) -> *mut kafka_common_KafkaError_t {
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    let ack = ack_type.to_ack_type();
+    unsafe { guarded_ack_op(consumer, move |c| c.acknowledge_by_offset(&topic_str, partition, offset, ack)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1255,6 +1411,91 @@ mod tests {
         let count = rx.recv_timeout(Duration::from_secs(5)).expect("poll callback must fire");
         assert_eq!(count, 1, "poll_async should deliver the one added record");
 
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// Polls a record from a mock, then acknowledges it through all three entry
+    /// points. The mock accepts every acknowledgement (it does not track
+    /// in-flight offsets), so each returns a null error; the non-in-flight
+    /// `IllegalState` path exercises the production consumer and is covered by
+    /// the broker-driven integration layer.
+    #[test]
+    fn test_acknowledge_polled_record() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        subscribe(consumer, "share-topic");
+
+        let topic = CString::new("share-topic").unwrap();
+        let value = b"v1";
+        let mut add_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        unsafe {
+            kafka_consumer_MockShareConsumer_add_record(
+                consumer,
+                topic.as_ptr(),
+                0,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                3,
+                &mut add_error,
+            )
+        };
+        assert!(add_error.is_null());
+
+        let mut poll_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let records = unsafe { kafka_consumer_ShareConsumer_poll(consumer, 0, &mut poll_error) };
+        assert!(!records.is_null());
+
+        unsafe {
+            let rec = kafka_consumer_ConsumerRecords_get(records, 0);
+
+            let err = kafka_consumer_ShareConsumer_acknowledge(consumer, rec);
+            assert!(err.is_null(), "acknowledge (accept) should succeed on the mock");
+
+            let err = kafka_consumer_ShareConsumer_acknowledge_with_type(
+                consumer,
+                rec,
+                kafka_consumer_AcknowledgeType_t::RELEASE,
+            );
+            assert!(err.is_null(), "acknowledge_with_type should succeed on the mock");
+
+            let err = kafka_consumer_ShareConsumer_acknowledge_by_offset(
+                consumer,
+                topic.as_ptr(),
+                0,
+                3,
+                kafka_consumer_AcknowledgeType_t::REJECT,
+            );
+            assert!(err.is_null(), "acknowledge_by_offset should succeed on the mock");
+
+            kafka_consumer_ConsumerRecords_destroy(records);
+        }
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// Acknowledging while the single-owner guard is held is rejected with the
+    /// multi-threaded-access error.
+    #[test]
+    fn test_acknowledge_by_offset_rejected_under_guard() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        let h = unsafe { handle_ref(consumer) };
+        acquire(h).expect("first acquire succeeds");
+
+        let topic = CString::new("share-topic").unwrap();
+        let err = unsafe {
+            kafka_consumer_ShareConsumer_acknowledge_by_offset(
+                consumer,
+                topic.as_ptr(),
+                0,
+                0,
+                kafka_consumer_AcknowledgeType_t::ACCEPT,
+            )
+        };
+        let msg = unsafe { take_error_message(err) };
+        assert!(msg.contains("not safe for multi-threaded access"), "unexpected message: {msg}");
+
+        release(h);
         unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
     }
 }
