@@ -86,9 +86,15 @@ realization lives in its own `bindings/<lang>/CLAUDE.md`.
    to the host's convention. Names stay recognizable across bindings.
 3. **Async model** — Map Java's `Future` / blocking calls to the host's nearest
    async idiom, preserving the same semantics.
-4. **Shape, not logic** — Bindings add **no Kafka behavior**; all logic stays in
+4. **Resource lifecycle & ownership** — Give every opaque handle deterministic
+   cleanup in the host idiom, and honor the ABI's ownership contract (who frees
+   what).
+5. **Zero-copy at the boundary** — Add no *extra* copies of key/value/header
+   bytes when crossing the ABI; pass by reference where the buffer's lifetime
+   allows, and copy only when lifetime forces it.
+6. **Shape, not logic** — Bindings add **no Kafka behavior**; all logic stays in
    the Rust core.
-5. **Review ground truth** — Review a binding against the **C ABI header** and
+7. **Review ground truth** — Review a binding against the **C ABI header** and
    the **Kafka Java public API** — not against Java implementation logic.
 
 ---
