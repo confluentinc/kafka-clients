@@ -553,3 +553,224 @@ the handle.
     boundary, marshal correctly.
   - Reading `RecordMetadata.Topic` after the record is materialized returns the
     correct value (implicitly exercises copy-before-free).
+
+---
+
+## 5. Zero-copy & buffer lifetime (pinning)
+
+CLAUDE.md §12 forbids copying key/value bytes on the send path; that contract
+extends into the binding. The user's `byte[]` must reach the core **without an
+intermediate managed copy** — pin it and pass its address as `IntPtr` + `int`.
+
+**The load-bearing fact (verified in the core):** the key/value bytes are
+serialized and **copied into the batch buffer synchronously during the send
+call** — `Producer_send` → `block_on(send())` → `do_send_bytes` →
+`RecordAccumulator::append` → `ProducerBatch::try_append` →
+`MemoryRecordsBuilder::append`, which writes the bytes directly into the batch's
+`Vec<u8>` (`default_record.rs` `copy_from_slice`; memory_records_builder: "Records
+already written directly into self.buffer"). `block_on` drives that to
+completion **before `Producer_send` returns.** Therefore the pin is
+**call-scoped, not Task-scoped**: the core holds no reference to the user's
+buffer after the FFI call returns.
+
+**Rule:**
+
+  - Pass key/value as `IntPtr` (address of the user's own `byte[]`) + `int len`.
+    Do **not** copy into an intermediate buffer.
+  - **Pin only for the duration of the `Producer_send` / `_send_batch` FFI call,
+    then unpin.** Do NOT keep the pin alive until the returned `Task`/future
+    completes — the core already copied the bytes; holding the pin longer just
+    pins GC memory per in-flight message and fragments the heap.
+  - Prefer a **`fixed` block** for the single-send path (stack-scoped, no
+    allocation; the synchronous call fits exactly inside the `fixed` scope). Use
+    `GCHandle.Alloc(arr, GCHandleType.Pinned)` + `AddrOfPinnedObject()` + a
+    `finally { Free(); }` where `fixed` does not fit (e.g. the N buffers of a
+    `_send_batch`).
+  - For `_send_batch`, every record's key **and** value must stay pinned for the
+    whole `send_batch` call (each is copied during that call).
+  - Encode the ABI sentinels explicitly: **absent** key/value → `IntPtr.Zero`
+    + `len = -1`; **empty** → a valid pointer + `len = 0`. Never conflate the
+    two.
+
+**Why:** verified above — the borrow of the user's buffer ends when the send
+call returns, so a call-scoped pin is exactly sufficient and Task-scoped pinning
+is both unnecessary and harmful (per-message pinned objects fragment the GC
+heap under load). This mirrors `confluent-kafka-dotnet`, which pins the array
+around `produceva` with `MSG_F_COPY` (librdkafka copies during the call) and
+`Free()`s in a `finally`. Any intermediate managed→native copy
+(`Marshal.AllocHGlobal` + `Marshal.Copy`, `Span.ToArray()`, a copying
+marshaller) would add exactly the per-message allocation §12 exists to prevent.
+
+**How to apply:**
+
+  - Single send (cheapest):
+    ```csharp
+    fixed (byte* k = key)     // null → k == null
+    fixed (byte* v = value)
+    {
+        future = Native.kafka_producer_Producer_send(
+            handle, topicPtr, partition, timestamp,
+            (IntPtr)k, key   is null ? -1 : key.Length,
+            (IntPtr)v, value is null ? -1 : value.Length,
+            out err);
+    }
+    ```
+    Translate `null` → (`IntPtr.Zero`, `-1`) explicitly; a `fixed` over `null`
+    yields a null pointer, so gate the length on `null`, not on the pointer.
+  - Batch send: `GCHandle`-pin each record's key/value, fill the
+    `ProducerRecord_t[]`, call `_send_batch`, then `Free()` every pin in a
+    `finally`.
+  - Unpin (`fixed` scope exit / `GCHandle.Free`) immediately after the call
+    returns. Never hold a pin across the returned `Task`.
+
+**Anti-patterns to flag in review:**
+
+  - Any intermediate copy of key/value: `Marshal.AllocHGlobal` + `Marshal.Copy`,
+    `arr.ToArray()`, `span.ToArray()`, or a marshaller that copies binary.
+  - Keeping the pin alive until the `Task` completes (per-message pinned objects
+    → GC heap fragmentation; unnecessary since the core copied during the call).
+  - Forgetting to unpin / `Free()` (a permanent pin — worse than a leak).
+  - Conflating empty (`len 0`) with absent (`len -1`).
+  - Pinning a buffer then mutating/resizing the array (the address may move).
+  - Routing key/value through the UTF-8 string helpers (§4) — those copy.
+
+**Tests required:**
+
+  - **Mutation-after-send** (proves the copy happened during the call): send a
+    value, then immediately mutate the caller's `byte[]`; the produced record is
+    unchanged. This is the external proof that call-scoped pinning is safe.
+  - **Allocation budget** (mirrors the core's hot-path allocation test / DoD
+    §10): sending a large value adds no value-sized managed allocation beyond the
+    user's own buffer — i.e. no intermediate copy.
+  - Absent (`len -1`) vs empty (`len 0`) key and value each produce the correct
+    record.
+  - Batch send with a mix of null / empty / large key & values is correct and
+    leaves nothing pinned afterward.
+
+---
+
+## 6. Error model (operational vs. precondition)
+
+Two distinct error categories cross this boundary, handled differently:
+
+  - **Kafka operational errors** — reported by the core through the
+    `kafka_common_KafkaError_t *` handle → a single flat `KafkaException`.
+  - **Precondition (argument/state) errors** — programmer mistakes (null topic,
+    closed producer, bad partition) caught in the binding **before** the FFI call
+    → standard .NET argument/state exceptions, **never** `KafkaException`.
+
+### 6a. Kafka operational errors: null-handle → `KafkaException`
+
+The ABI signals these with an opaque `kafka_common_KafkaError_t *`: **null =
+success, non-null = error** — via an `out_error` out-param (`KafkaProducer_new`,
+`Producer_send`, `flush`, `close`) or an `out_errors[]` array (`send_batch`,
+`get_all`). Read the accessors, then free the handle.
+
+| ABI accessor | Type | → C# |
+|---|---|---|
+| `KafkaError_code` | `int32_t` (Kafka protocol code, i16 widened) | `int Code` |
+| `KafkaError_message` | `const char *` (UTF-8, handle-owned) | `Message`, via `Utf8.PtrToString` (§4) |
+| `KafkaError_is_retriable` | `bool` | `IsRetriable` property |
+| `KafkaError_is_fatal` | `bool` | `IsFatal` property |
+| `KafkaError_destroy` | — | free after reading (§3) |
+
+**Model — one flat `KafkaException` (for now).** A single
+`KafkaException : Exception` carrying `Code` / `IsRetriable` / `IsFatal` (+
+`Message`), mirroring the Python sibling's `KafkaError`. Do **not** build a
+per-code typed hierarchy now: the ABI only exposes code + retriable + fatal, and
+the reference sibling (Python) is flat, so a flat model keeps the bindings
+consistent and avoids a large `Errors`-enum `code → Type` table. This is
+deliberately *"for now"* — specific Java-named subclasses (e.g.
+`RecordTooLargeException`) can be added later **under** the same `KafkaException`
+base, non-breakingly, if a concrete need for catch-by-type appears.
+
+**Rule (operational):**
+
+  - After every fallible call, check the error slot: `IntPtr.Zero` = success;
+    non-null = build a `KafkaException` and dispose the handle.
+  - `KafkaException.FromHandle(IntPtr err)`: read `_code`, `_message` (via
+    `Utf8.PtrToString`, **before** freeing — §4), `_is_retriable`, `_is_fatal`
+    into managed fields, then `KafkaError_destroy` in a `finally` so the handle
+    is freed **exactly once**, even if construction throws (§3). The exception
+    holds **copied values**, never the handle.
+  - **Sync failures** (`KafkaProducer_new`, immediate `Producer_send`, `flush`,
+    `close`) `throw`. **Async send failures** (the future resolves to an error)
+    are read by the pump from `out_errors[i]` and **fault the `Task`** with the
+    same exception (§1). Both paths go through the same `FromHandle`.
+  - Do **not** fabricate attributes the ABI does not expose. `txn_requires_abort`
+    exists in the core but is **not** in the producer ABI surface; adding
+    transactions later needs a new accessor first.
+  - Do **not** adopt `confluent-kafka-dotnet`'s librdkafka-shaped `Error` /
+    `ErrorCode` object — expose `Code` as a plain `int` property.
+
+### 6b. Precondition (argument/state) errors: validate in the binding
+
+**Rule (precondition):**
+
+  - Validate arguments and state in the managed binding **before** any pin /
+    marshal / P/Invoke, throwing standard .NET exceptions — **never**
+    `KafkaException`:
+    - `ArgumentNullException` — null topic / record / config (and a null
+      key/value buffer when its length says present).
+    - `ArgumentException` / `ArgumentOutOfRangeException` — invalid partition,
+      negative timeout, malformed args.
+    - `ObjectDisposedException` / `InvalidOperationException` — producer already
+      closed / disposed.
+  - This is **mandatory**, not a nicety: the C ABI **does not validate
+    preconditions** (CLAUDE.md §3 — *"Don't check for failing programming
+    preconditions like NULLs on required parameters"*), and some ABI functions
+    **`assert!`/panic on violation** (e.g. `send_batch`) — a Rust panic unwinding
+    across the FFI boundary is **undefined behavior**. The managed binding is the
+    safety net that stops bad input before it reaches native code.
+
+**Why (both):** a flat `KafkaException` matches exactly what the ABI exposes
+(code + retriable + fatal) and the Python sibling, so the bindings stay
+consistent without a per-code table — and it can grow into typed subclasses
+later. Preconditions are a *separate* category because they are programmer
+errors, not Kafka outcomes: Java raises `IllegalArgumentException` /
+`IllegalStateException` / NPE (never `KafkaException`), Python raises
+`ValueError` / `TypeError` / `RuntimeError`, and `confluent-kafka-dotnet` raises
+`ArgumentException` / `InvalidOperationException` — all in the high-level layer,
+before the native call. Ours must too, and *must* because the ABI would
+otherwise panic (UB). The read-before-free / destroy-exactly-once discipline is
+the §3/§4 ownership contract applied to the error handle.
+
+**How to apply:**
+
+  - `KafkaException : Exception { public int Code; public bool IsRetriable;
+    public bool IsFatal; }`; `static KafkaException FromHandle(IntPtr err)` reads
+    the accessors (message **before** free) and frees in a `finally`.
+  - Operational — sync: `if (err != IntPtr.Zero) throw KafkaException.FromHandle(err);`;
+    async: the pump does `tcs.SetException(KafkaException.FromHandle(errs[i]));`.
+  - Precondition — guard at the top of every public method **before** touching
+    the ABI: `ThrowIfDisposed();`, then null/range checks. (On the netstandard2.0
+    floor `ArgumentNullException.ThrowIfNull` may be unavailable — use an explicit
+    `if (x is null) throw new ArgumentNullException(nameof(x));`.)
+
+**Anti-patterns to flag in review:**
+
+  - *(operational)* Not checking the error slot; leaking the handle or destroying
+    it **before** reading `_message` (use-after-free — §4); `FromHandle` that can
+    throw before `KafkaError_destroy` (leak — wrap in `try/finally`).
+  - *(operational)* A `confluent-kafka-dotnet`-style `Error` + `ErrorCode`
+    object, or fabricating attributes (`txn_requires_abort`) the ABI doesn't
+    expose.
+  - *(operational)* Building a per-code `KafkaException` hierarchy now — we chose
+    flat "for now"; that's over-engineering vs. the Python sibling.
+  - *(precondition)* Relying on the ABI to reject null / bad args (it may
+    **panic → UB**); throwing `KafkaException` for a programmer error; validating
+    **after** the P/Invoke instead of before.
+
+**Tests required:**
+
+  - *(operational)* A sync failure (invalid config to `KafkaProducer_new`, or a
+    record-too-large `send`) throws `KafkaException` with the correct `Code`,
+    `Message`, `IsRetriable`, `IsFatal`.
+  - *(operational)* An async send failure faults the `Task` with a matching
+    `KafkaException` (drive via the mock `error_next`).
+  - *(operational)* The error handle is destroyed exactly once even on the throw
+    path (no leak); a non-ASCII message round-trips (ties to §4).
+  - *(precondition)* Null topic / record → `ArgumentNullException`; use after
+    `Dispose` → `ObjectDisposedException`; bad partition → `ArgumentException` /
+    `ArgumentOutOfRangeException` — each thrown **before** any native call (fails
+    even with no live producer handle).
