@@ -1145,10 +1145,16 @@ pub unsafe extern "C" fn kafka_consumer_MockShareConsumer_set_client_instance_id
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
     use std::ffi::{CStr, CString, c_void};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     use super::*;
+    use crate::common::TopicIdPartition;
+    use crate::consumer::ConsumerRecords;
+    use crate::consumer::acknowledgement_commit_callback::AcknowledgementCommitCallback;
     use crate::ffi::common::{kafka_common_KafkaError_destroy, kafka_common_KafkaError_message};
     use crate::ffi::records::{
         kafka_consumer_ConsumerRecord_delivery_count, kafka_consumer_ConsumerRecord_key,
@@ -1280,29 +1286,172 @@ mod tests {
         unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
     }
 
-    unsafe extern "C" fn free_error_only(error: *mut kafka_common_KafkaError_t, _user_data: *mut c_void) {
-        unsafe { kafka_common_KafkaError_destroy(error) };
+    /// Frees whichever handle a poll callback receives; used where the test does
+    /// not inspect the delivered batch.
+    unsafe extern "C" fn poll_free_all(
+        records: *mut kafka_consumer_ConsumerRecords_t,
+        error: *mut kafka_common_KafkaError_t,
+        _user_data: *mut c_void,
+    ) {
+        if !records.is_null() {
+            unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
+        }
+        if !error.is_null() {
+            unsafe { kafka_common_KafkaError_destroy(error) };
+        }
     }
 
-    /// Destroying a handle while an async op may still be in flight is safe: the
-    /// runtime is shut down, the consumer dropped, and the dispatcher detached
-    /// without a deadlock. `user_data` is null so nothing dangles if the
-    /// callback runs on the dispatcher after teardown returns.
-    #[test]
-    fn test_destroy_after_in_flight_async_is_safe() {
-        let consumer = kafka_consumer_MockShareConsumer_new();
-        let topic = CString::new("share-topic").unwrap();
-        let topics = [topic.as_ptr()];
-        unsafe {
-            kafka_consumer_ShareConsumer_subscribe_async(
-                consumer,
-                topics.as_ptr(),
-                1,
-                free_error_only,
-                std::ptr::null_mut(),
-            );
-            kafka_consumer_ShareConsumer_destroy(consumer);
+    /// A test-only [`ShareConsumer`] whose `poll` parks its worker thread on a
+    /// two-party [`Barrier`](std::sync::Barrier). It lets a test hold an async
+    /// operation genuinely in flight — the worker is busy *inside* `poll`, not
+    /// idle at an `await` the runtime could cancel — while it tears the handle
+    /// down, so the exact window the blocking runtime-drop guard protects is
+    /// exercised deterministically instead of relying on scheduling variance.
+    struct BarrierConsumer {
+        /// Fires once `poll` has entered and borrowed the consumer.
+        started_tx: std::sync::mpsc::Sender<()>,
+        /// The test releases the parked `poll` by arriving at this barrier.
+        barrier: Arc<std::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl ShareConsumer<Bytes, Bytes> for BarrierConsumer {
+        fn subscription(&self) -> Result<HashSet<String>, KafkaError> {
+            Ok(HashSet::new())
         }
+
+        async fn subscribe(&mut self, _topics: Vec<String>) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn poll(&mut self, _timeout: Duration) -> Result<ConsumerRecords<Bytes, Bytes>, KafkaError> {
+            // Snapshot the barrier before parking so the wait runs against the
+            // shared allocation (kept alive by the test), independent of `self`.
+            let barrier = Arc::clone(&self.barrier);
+            self.started_tx.send(()).ok();
+            // Block the worker synchronously — the runtime cannot cancel a worker
+            // stuck in blocking code, so dropping the runtime must join it and
+            // therefore wait here until the test releases the barrier.
+            barrier.wait();
+            Ok(ConsumerRecords::empty())
+        }
+
+        fn acknowledge(&mut self, _record: &ConsumerRecord<Bytes, Bytes>) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn acknowledge_with_type(
+            &mut self,
+            _record: &ConsumerRecord<Bytes, Bytes>,
+            _ack_type: AcknowledgeType,
+        ) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn acknowledge_by_offset(
+            &mut self,
+            _topic: &str,
+            _partition: i32,
+            _offset: i64,
+            _ack_type: AcknowledgeType,
+        ) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn commit_sync(&mut self) -> Result<HashMap<TopicIdPartition, Option<KafkaError>>, KafkaError> {
+            Ok(HashMap::new())
+        }
+
+        async fn commit_sync_timeout(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<HashMap<TopicIdPartition, Option<KafkaError>>, KafkaError> {
+            Ok(HashMap::new())
+        }
+
+        async fn commit_async(&mut self) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn set_acknowledgement_commit_callback(&mut self, _callback: Option<Arc<dyn AcknowledgementCommitCallback>>) {}
+
+        async fn client_instance_id(&mut self, _timeout: Duration) -> Result<Uuid, KafkaError> {
+            Err(KafkaError::illegal_state("clientInstanceId not set"))
+        }
+
+        fn acquisition_lock_timeout_ms(&self) -> Result<Option<i32>, KafkaError> {
+            Ok(None)
+        }
+
+        async fn close(&mut self) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn close_timeout(&mut self, _timeout: Duration) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn wakeup(&self) {}
+    }
+
+    /// Regression guard for the teardown-safe destroy path: `destroy` must not
+    /// free the handle box while an async operation is still in flight. A
+    /// [`BarrierConsumer`] holds a `poll_async` genuinely in flight (its worker is
+    /// parked mid-`poll`), then `destroy` is called from another thread. A correct
+    /// `destroy` drops the tokio runtime, which joins the parked worker and so
+    /// blocks until the operation completes; the test asserts it does NOT return
+    /// early. If the blocking runtime-drop is reverted to a non-blocking
+    /// `shutdown_background`, `destroy` returns while the worker is still parked —
+    /// this assertion fires, and (were the barrier then released) the worker would
+    /// dereference the freed handle box, which is the original SIGBUS.
+    #[test]
+    fn test_destroy_blocks_until_in_flight_async_completes() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let kind = ShareConsumerKind::Kafka(Box::new(BarrierConsumer { started_tx, barrier: Arc::clone(&barrier) }));
+        let wakeup = WakeupHandle::for_mock(Arc::new(AtomicBool::new(false)));
+        let consumer = build_share_consumer_handle(kind, wakeup, false);
+
+        // Fire an async poll; the barrier-consumer parks its worker inside poll().
+        unsafe { kafka_consumer_ShareConsumer_poll_async(consumer, 0, poll_free_all, std::ptr::null_mut()) };
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("poll_async must enter poll and park the worker");
+
+        // Tear the handle down from another thread while the op is in flight.
+        let consumer_addr = consumer as usize;
+        let (destroy_done_tx, destroy_done_rx) = mpsc::channel::<()>();
+        let destroyer = thread::spawn(move || {
+            let ptr = consumer_addr as *mut kafka_consumer_ShareConsumer_t;
+            unsafe { kafka_consumer_ShareConsumer_destroy(ptr) };
+            destroy_done_tx.send(()).ok();
+        });
+
+        // The op is still parked, so a correct destroy (blocking runtime-drop)
+        // cannot have returned yet. A non-blocking shutdown would return here.
+        let returned_early = destroy_done_rx.recv_timeout(Duration::from_millis(500)).is_ok();
+        assert!(
+            !returned_early,
+            "destroy returned while an async op was still in flight — the teardown \
+             guard's blocking runtime-drop has regressed to a non-blocking shutdown"
+        );
+
+        // Release the parked poll; destroy must now drain and return, and the
+        // completion job runs safely on the detached dispatcher after the box is
+        // freed (it holds only its own Arc + owned result handles).
+        barrier.wait();
+        destroy_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("destroy must return once the in-flight op completes");
+        destroyer.join().expect("destroy thread joins cleanly");
     }
 
     /// Adds a record to a subscribed mock, then polls it back over the ABI and
@@ -1497,5 +1646,34 @@ mod tests {
 
         release(h);
         unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// Constructing a production share consumer with a blank `group.id` fails at
+    /// the ABI boundary: a null handle is returned and `out_error` carries the
+    /// precise cause (the unwrapped `group.id` rejection, not the generic
+    /// construction-wrapper message).
+    #[test]
+    fn test_kafka_share_consumer_new_blank_group_id_sets_out_error() {
+        let props = kafka_consumer_ShareConsumerProperties_new();
+        let bootstrap_key = CString::new("bootstrap.servers").unwrap();
+        let bootstrap_val = CString::new("localhost:59999").unwrap();
+        let group_key = CString::new("group.id").unwrap();
+        let group_blank = CString::new("   ").unwrap();
+        unsafe {
+            kafka_consumer_ShareConsumerProperties_put(props, bootstrap_key.as_ptr(), bootstrap_val.as_ptr());
+            kafka_consumer_ShareConsumerProperties_put(props, group_key.as_ptr(), group_blank.as_ptr());
+        }
+
+        let mut out_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let consumer = unsafe { kafka_consumer_KafkaShareConsumer_new(props, &mut out_error) };
+        assert!(consumer.is_null(), "a blank group.id must not build a consumer");
+
+        let msg = unsafe { take_error_message(out_error) };
+        assert!(
+            msg.contains("You must provide a valid group.id"),
+            "unexpected group.id rejection message: {msg}"
+        );
+
+        unsafe { kafka_consumer_ShareConsumerProperties_destroy(props) };
     }
 }
