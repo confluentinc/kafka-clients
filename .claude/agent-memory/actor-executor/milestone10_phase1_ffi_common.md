@@ -31,10 +31,14 @@ but NO share Rust code. It is a porting *template*, not a merge source.
   `enqueue_or_run_inline`, `OperationCallbackFn`, `OperationCompletion`+`fire`,
   `OperationCallbackTarget`, `SendUserData`) is per-item `#[allow(dead_code)]`
   (pub(crate), pub(crate) fields) until phase 2 wires it.
-- **`cargo xtask lint` runs clippy WITHOUT `--features ffi`** — it will not lint
-  ffi-gated code. For any FFI work you MUST also run
-  `cargo clippy --all-targets --features ffi -- -D warnings` manually. (Same gap
-  noted for integration tests.)
+- **`cargo xtask lint`/`lint-fix` now run a second clippy pass with
+  `--features ffi`** (added in the Phase-1 Critic-fixup round, COMMENTS.1 #1) on
+  top of the default-feature pass, so ffi-gated code (`src/ffi/**`,
+  `bytes_deserializer`) IS covered by the authoritative gate. You no longer need
+  to run `cargo clippy --all-targets --features ffi -- -D warnings` by hand for
+  FFI work — `cargo xtask lint` does it. (The default pass stays because
+  without-ffi and with-ffi are distinct compilations.) NOTE: the
+  `integration-tests` feature is still NOT linted by xtask — that gap remains.
 - **Moving a cbindgen-exported type between modules REORDERS the generated header**
   (`target/include/confluent_kafka.h`): cbindgen emits in module-declaration order,
   so `common` (declared before `producer`) now emits `kafka_common_KafkaError_t` +
