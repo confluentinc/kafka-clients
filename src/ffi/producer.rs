@@ -61,16 +61,7 @@ use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
 
-/// Initialize the default stderr log backend if RUST_LOG is set.
-/// Idempotent: succeeds once, silently no-ops on subsequent calls.
-/// A custom log backend (e.g. Python logging bridge) can be set before
-/// the first producer is created to override this default.
-fn init_default_logger() {
-    #[cfg(feature = "ffi")]
-    {
-        let _ = env_logger::try_init();
-    }
-}
+use super::common::{box_error, init_default_logger, kafka_common_KafkaError_t};
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -130,15 +121,6 @@ struct RecordMetadataInner {
     topic_cstring: CString,
 }
 
-/// Internal wrapper that pairs [`KafkaError`] with a [`CString`] for the
-/// error message, so that [`kafka_common_KafkaError_message`] can return a valid
-/// `*const c_char` that lives as long as the handle.
-struct KafkaErrorInner {
-    error: KafkaError,
-    /// Cached CString for the error message, created once at construction time.
-    message_cstring: CString,
-}
-
 // ---------------------------------------------------------------------------
 // Opaque handle types
 // ---------------------------------------------------------------------------
@@ -165,17 +147,6 @@ pub struct kafka_producer_FutureRecordMetadata_t {
 /// Internally wraps a `Box<RecordMetadataInner>`.
 #[repr(C)]
 pub struct kafka_producer_RecordMetadata_t {
-    _private: [u8; 0],
-}
-
-/// Opaque error handle returned by functions that can fail.
-///
-/// Internally wraps a `Box<KafkaErrorInner>` containing the [`KafkaError`]
-/// and a cached [`CString`] for the error message.
-///
-/// A null `kafka_common_KafkaError_t` pointer means success (no error).
-#[repr(C)]
-pub struct kafka_common_KafkaError_t {
     _private: [u8; 0],
 }
 
@@ -283,23 +254,6 @@ fn producer_send(
         },
         ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, None)),
     }
-}
-
-/// Wraps a [`KafkaError`] into a heap-allocated opaque error pointer, including
-/// a cached [`CString`] for the error message.
-fn box_error(error: KafkaError) -> *mut kafka_common_KafkaError_t {
-    let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let inner = KafkaErrorInner { error, message_cstring };
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_KafkaError_t
-}
-
-/// Casts a `*const kafka_common_KafkaError_t` to a reference to `KafkaErrorInner`.
-///
-/// # Safety
-///
-/// The pointer must be non-null and must have been created by [`box_error`].
-unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'static KafkaErrorInner {
-    unsafe { &*(error as *const KafkaErrorInner) }
 }
 
 /// Casts a `*const kafka_producer_ProducerProperties_t` to a reference to
@@ -1442,122 +1396,18 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_clear(producer: *mut kafka_
 }
 
 // ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
-
-/// Returns the error code from a [`kafka_common_KafkaError_t`] handle.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// The numeric error code (i32), or `0` if the error handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common_KafkaError_t) -> i32 {
-    if error.is_null() {
-        return 0;
-    }
-    i32::from(unsafe { error_ref(error) }.error.code())
-}
-
-/// Returns the error message as a null-terminated C string.
-///
-/// The returned pointer is valid until [`kafka_common_KafkaError_destroy`] is called on
-/// the same handle.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// A `*const c_char` pointing to the error message, or null if the error
-/// handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-/// The returned pointer must not be used after the error is destroyed.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_message(error: *const kafka_common_KafkaError_t) -> *const c_char {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    unsafe { error_ref(error) }.message_cstring.as_ptr()
-}
-
-/// Returns whether the error is retriable.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error is retriable, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafka_common_KafkaError_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_retriable()
-}
-
-/// Returns whether the error is fatal (unrecoverable).
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error is fatal, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_common_KafkaError_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    unsafe { error_ref(error) }.error.is_fatal()
-}
-
-/// Destroys an error handle, freeing all associated resources.
-///
-/// Safe to call with a null pointer (no-op).
-///
-/// # Safety
-///
-/// - `error` must be null or a valid handle from a function that returned an error.
-/// - After this call, the pointer is invalid and must not be used.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_common_KafkaError_t) {
-    if !error.is_null() {
-        unsafe {
-            drop(Box::from_raw(error as *mut KafkaErrorInner));
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The error-handle accessors now live in the shared `common` module; the
+    // producer tests still exercise them through this handle.
+    use super::super::common::{
+        kafka_common_KafkaError_code, kafka_common_KafkaError_destroy, kafka_common_KafkaError_is_fatal,
+        kafka_common_KafkaError_is_retriable, kafka_common_KafkaError_message,
+    };
 
     /// Helper: asserts that a `*mut kafka_common_KafkaError_t` is null (success) and returns nothing.
     /// Panics with the error message if non-null.
