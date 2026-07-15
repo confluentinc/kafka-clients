@@ -9,7 +9,7 @@ sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
 [export]
 # Only export FFI types — no internal Kafka client constants or structs.
 include = ["kafka_producer_Producer_t", "kafka_producer_FutureRecordMetadata_t", "kafka_producer_RecordMetadata_t", "kafka_producer_ProducerRecord_t", "kafka_common_KafkaError_t"]
-item_types = ["functions", "structs"]
+item_types = ["functions", "structs", "typedefs"]
 
 [fn]
 prefix = ""
