@@ -82,3 +82,4 @@
 - [Milestone 9 Phase 6 integration](milestone9_phase6_integration.md) — ShareConsumerImpl+facade+§31+3 blockers DONE+green; only production bg-pipeline + KafkaShareConsumerTest deferred to Phase 7
 - [Milestone 9 Phase 7 production pipeline](milestone9_phase7_production_pipeline.md) — new_share_consumer wired, share bg reconcile, share-consume response routing, from_shared_metadata, Clone bound, integration gating; test-double harness pattern
 - [Milestone 10 Phase 1 FFI common.rs](milestone10_phase1_ffi_common.md) — share C FFI: ungated common mod, SendUserData from consumer.rs, header-reorder-not-bytediff, xtask lint skips ffi, bytes optional "1"
+- [Milestone 10 Phase 2 share FFI](milestone10_phase2_share_ffi.md) — handle/guard/poll/ack; teardown-safe Arc<AtomicU64> owner + Option<Runtime> blocking-drop (SIGBUS fix vs reference); shared records mod; cbindgen "enums"
