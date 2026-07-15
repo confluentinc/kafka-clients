@@ -18,10 +18,14 @@
 //! implementations for strings and byte arrays.
 
 pub mod byte_array_serializer;
+#[cfg(feature = "ffi")]
+pub mod bytes_deserializer;
 pub mod deserializer;
 pub mod string_serializer;
 
 pub use byte_array_serializer::ByteArraySerializer;
+#[cfg(feature = "ffi")]
+pub use bytes_deserializer::BytesDeserializer;
 pub use deserializer::Deserializer;
 pub use string_serializer::StringSerializer;
 
