@@ -460,3 +460,96 @@ work first.
     crash.
   - `Dispose()` with in-flight sends joins the pump before releasing the producer
     handle — no use-after-free (shared with §1).
+
+---
+
+## 4. String marshalling (UTF-8)
+
+Every string that crosses the boundary is **UTF-8**: the core reads inputs via
+`CStr::from_ptr(...).to_string_lossy()` and returns outputs as pointers into
+cached UTF-8 `CString`s. netstandard2.0 / net462 lack `UnmanagedType.LPUTF8Str`
+and `Marshal.PtrToStringUTF8` (§2), so we hand-roll two helpers and route every
+string through them.
+
+### String touchpoints
+
+| Direction | ABI site(s) | C type | Helper |
+|---|---|---|---|
+| **In** (C# → C) | topic (`Producer_send`, `ProducerRecord_t.topic`), config key/value (`ProducerProperties_put` / `_from_configs`), error message (`MockProducer_error_next`) | `const char *` | `Utf8.Pin` (encode + NUL + pin) |
+| **Out** — handle-owned, valid until `_destroy` | `KafkaError_message`, `RecordMetadata_topic` | `const char *` | `Utf8.PtrToString` |
+| **Out** — callback-scoped, valid only during the call | `topic` arg of the `RecordMetadata_copy` callback | `const char *` | `Utf8.PtrToString`, **inside** the callback |
+
+**Rule:**
+
+  - **Input:** encode with a `StringAsPinnedUTF8`-style helper —
+    `Encoding.UTF8.GetBytes(str)` → copy into `new byte[len + 1]` (the extra
+    zero byte is the NUL terminator) → pin via `GCHandle` → pass
+    `AddrOfPinnedObject()`; **unpin in a `finally`/`using`** after the call.
+    String marshalling necessarily **copies** (an encoding conversion) — that is
+    fine for small topic/config strings and is **not** the zero-copy path (§5
+    governs key/value bytes).
+  - **Output:** read a callee-owned `const char *` with a hand-rolled
+    `PtrToStringUTF8(IntPtr)` — scan to the NUL byte, then
+    `Encoding.UTF8.GetString(ptr, len)`; return `null` for a null pointer. This
+    needs `unsafe`. A `#if NET6_0_OR_GREATER` fast path
+    (`MemoryMarshal.CreateReadOnlySpanFromNullTerminated`) is optional — it is
+    internal to the helper and does **not** fork the P/Invoke declarations.
+  - **Copy before free / before the callback returns.** Output pointers are
+    *borrowed*: `KafkaError_message` / `RecordMetadata_topic` are valid only
+    until the owning handle is `_destroy`ed, and the `RecordMetadata_copy`
+    callback's `topic` is valid only for the duration of the callback. Always
+    `PtrToStringUTF8` into a managed `string` first. **Never store or return the
+    raw pointer.**
+  - **Never** `[MarshalAs(UnmanagedType.LPStr)]` (ANSI — corrupts non-ASCII,
+    §2a) or `LPWStr` (UTF-16 — wrong width); **never** `LPUTF8Str` /
+    `Marshal.PtrToStringUTF8` (absent on the floor).
+  - Topic / config keys must not contain an interior NUL — the core reads to the
+    first NUL (`CStr`) and would silently truncate. (Kafka names can't contain
+    NUL; validate only if being defensive.)
+
+**Why:** UTF-8 is the contract on both sides, and the core's
+`to_string_lossy()` means invalid bytes are silently replaced, **not** rejected
+— so an ANSI `LPStr` mistake corrupts topic/key names quietly rather than
+erroring (and hides entirely for ASCII-only tests). Hand-rolled helpers are
+mandatory because the floor TFMs predate the built-in UTF-8 marshallers — the
+same reason `confluent-kafka-dotnet` ships `Util.Marshal.StringAsPinnedUTF8` +
+`PtrToStringUTF8` (its net6 branch uses the span fast path; its netstandard2.0
+branch walks to the NUL — we mirror that). The copy-before-free rule follows
+from the core caching output strings inside the handle: the pointer dies with
+the handle.
+
+**How to apply:**
+
+  - Provide the two helpers §2/§3 already reference:
+    `Utf8.Pin(string) : IDisposable { IntPtr Ptr; }` (encode + NUL + pin; `Free`
+    on `Dispose`) and `Utf8.PtrToString(IntPtr) : string?` (NUL-scan +
+    `GetString`).
+  - Send path: `using var t = Utf8.Pin(topic);` then pass `t.Ptr`; pin config
+    strings the same way when using `_put`.
+  - Error path: `Utf8.PtrToString(Native.kafka_common_KafkaError_message(err))`
+    **before** `Native.kafka_common_KafkaError_destroy(err)`.
+  - `RecordMetadata`: prefer `RecordMetadata_copy`; `Utf8.PtrToString` the
+    `topic` argument **inside** the callback (the pointer dies when it returns).
+
+**Anti-patterns to flag in review:**
+
+  - `[MarshalAs(UnmanagedType.LPStr)]` / `LPWStr` for any string; `LPUTF8Str` /
+    `Marshal.PtrToStringUTF8` (unavailable on the floor).
+  - Marshalling a `const char *` **return** as a C# `string` (the marshaller
+    frees callee-owned memory — §2).
+  - Storing/returning an output pointer, or reading it after the owning handle is
+    destroyed; reading the callback `topic` pointer after the callback returns.
+  - Assuming ASCII (works until a non-ASCII topic corrupts silently).
+  - Routing key/value bytes through the string/byte marshaller instead of pinning
+    (that's §5, zero-copy).
+
+**Tests required:**
+
+  - A non-ASCII (multi-byte UTF-8) value round-trips unchanged through each
+    direction: topic (in → `RecordMetadata.Topic` out), a config value, and an
+    error message — guards both directions and catches an accidental `LPStr`.
+  - `PtrToStringUTF8(IntPtr.Zero)` returns `null`.
+  - Empty string, and a string whose multi-byte character sits at the buffer
+    boundary, marshal correctly.
+  - Reading `RecordMetadata.Topic` after the record is materialized returns the
+    correct value (implicitly exercises copy-before-free).
