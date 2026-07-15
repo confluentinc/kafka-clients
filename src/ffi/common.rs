@@ -20,7 +20,16 @@
 //! - The opaque [`kafka_common_KafkaError_t`] error handle and its accessor
 //!   functions. `kafka_common_*` is shared verbatim between FFI surfaces — a
 //!   second definition would make cbindgen emit a duplicate type.
+//! - The async completion-queue / dispatcher-thread abstraction
+//!   ([`CompletionJob`], [`spawn_dispatcher`], [`enqueue_or_run_inline`]).
+//! - The void-returning operation callback machinery ([`OperationCallbackFn`],
+//!   [`OperationCompletion`], [`OperationCallbackTarget`], [`SendUserData`]).
 //! - The default logger initialization helper ([`init_default_logger`]).
+//!
+//! The async / callback pieces have no caller in the producer FFI (which
+//! delivers results synchronously via a block-on `FutureRecordMetadata`); they
+//! are staged behind `#[allow(dead_code)]` for the share consumer FFI that
+//! wires them next.
 
 // FFI function names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -185,6 +194,114 @@ pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_commo
         unsafe {
             drop(Box::from_raw(error as *mut KafkaErrorInner));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async (callback-based) delivery machinery
+// ---------------------------------------------------------------------------
+//
+// The async API mirrors the librdkafka delivery-report model: each operation
+// returns immediately and its result is delivered later through a C callback.
+// All callbacks are invoked from a single per-handle **dispatcher thread**
+// that drains a completion queue, so user callbacks run on one predictable
+// thread and never on a tokio worker (a slow callback cannot stall I/O).
+//
+// Every item below is `#[allow(dead_code)]` until the share consumer FFI wires
+// it: the producer FFI has no async op, so nothing constructs these types yet.
+
+/// A unit of work executed by the dispatcher thread. Each async operation
+/// captures its own C callback, `user_data`, and owned result handles into the
+/// closure and bakes in the correct invocation, so the queue stays uniform
+/// (one element type) while every operation delivers exactly the outputs its
+/// sync counterpart produces.
+#[allow(dead_code)]
+pub(crate) type CompletionJob = Box<dyn FnOnce() + Send>;
+
+/// Spawns a dispatcher thread that drains the completion queue, running each
+/// queued [`CompletionJob`] in order. The thread exits once all senders are
+/// dropped (after draining any queued jobs).
+///
+/// Returns the sender half of the completion queue and the thread join handle.
+/// The caller stores the sender on its handle (cloned into each async op) and
+/// keeps the join handle for teardown.
+#[allow(dead_code)]
+pub(crate) fn spawn_dispatcher(name: &str) -> (std::sync::mpsc::Sender<CompletionJob>, std::thread::JoinHandle<()>) {
+    let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+    let dispatcher = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            // Run each completion closure; exits once all senders are dropped
+            // (after draining any queued jobs).
+            while let Ok(job) = completion_rx.recv() {
+                job();
+            }
+        })
+        .expect("failed to spawn FFI callback dispatcher thread");
+    (completion_tx, dispatcher)
+}
+
+/// Enqueues a [`CompletionJob`] on the dispatcher's completion queue. If the
+/// dispatcher is gone (post-teardown), runs the job inline to honor the
+/// callback obligation rather than leak the owned handles it captured.
+#[allow(dead_code)]
+pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>, job: CompletionJob) {
+    if let Err(returned) = tx.send(job) {
+        (returned.0)();
+    }
+}
+
+/// Canonical operation callback signature (not exported). A null `error` means
+/// success. The public per-method typedefs alias this shape.
+#[allow(dead_code)]
+pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+
+/// Owned operation completion payload, fired by the dispatcher thread for
+/// void-returning operations (`flush` / `close` / consumer void ops).
+#[allow(dead_code)]
+pub(crate) struct OperationCompletion {
+    pub(crate) callback: OperationCallbackFn,
+    pub(crate) user_data: *mut std::ffi::c_void,
+    pub(crate) error: *mut kafka_common_KafkaError_t,
+}
+// SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
+// the C user is responsible for the thread-safety of `user_data`.
+unsafe impl Send for OperationCompletion {}
+impl OperationCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn fire(self) {
+        unsafe { (self.callback)(self.error, self.user_data) };
+    }
+}
+
+/// A C operation-callback target (function pointer + opaque `user_data`).
+/// Wrapped so it can cross the tokio task / dispatcher thread boundary.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct OperationCallbackTarget {
+    pub(crate) callback: OperationCallbackFn,
+    pub(crate) user_data: *mut std::ffi::c_void,
+}
+// SAFETY: the C user owns the thread-safety of `user_data`; the function
+// pointer is trivially shareable.
+unsafe impl Send for OperationCallbackTarget {}
+
+/// A raw `user_data` pointer wrapped so it can cross into the spawned task and
+/// completion job. The C user owns its thread-safety (CLAUDE.md FFI §3).
+#[allow(dead_code)]
+pub(crate) struct SendUserData(pub(crate) *mut std::ffi::c_void);
+// SAFETY: the C user is responsible for the thread-safety of `user_data`.
+unsafe impl Send for SendUserData {}
+impl SendUserData {
+    /// Consume the wrapper, returning the raw pointer. Taking `self` by value
+    /// forces a completion closure that calls this to capture the whole
+    /// `SendUserData` (which is `Send`) rather than disjointly capturing the
+    /// inner `*mut c_void` field (which is not) — see Rust 2021 closure capture.
+    #[allow(dead_code)]
+    pub(crate) fn into_ptr(self) -> *mut std::ffi::c_void {
+        self.0
     }
 }
 
