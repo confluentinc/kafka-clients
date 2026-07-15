@@ -138,6 +138,15 @@ fn lint() -> anyhow::Result<()> {
     // Lint main crate
     run_command("cargo", &["clippy", "--all-targets", "--", "-D", "warnings"])?;
 
+    // Lint main crate again with the `ffi` feature on. `mod ffi` and the
+    // ffi-gated `BytesDeserializer` are stripped from the default build, so the
+    // pass above never compiles them — this is the only clippy coverage the C
+    // FFI surface gets, and it must reject warnings just like the default pass.
+    run_command(
+        "cargo",
+        &["clippy", "--all-targets", "--features", "ffi", "--", "-D", "warnings"],
+    )?;
+
     // Lint generator crate
     run_command(
         "cargo",
@@ -165,6 +174,24 @@ fn lint_fix() -> anyhow::Result<()> {
         &[
             "clippy",
             "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+
+    // Fix main crate with the `ffi` feature on so the C FFI surface is covered
+    // too — clippy skips it entirely in the default (non-ffi) build.
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "--all-targets",
+            "--features",
+            "ffi",
             "--fix",
             "--allow-dirty",
             "--allow-staged",
