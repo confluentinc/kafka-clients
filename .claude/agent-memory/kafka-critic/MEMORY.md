@@ -67,3 +67,4 @@
 - [M9 Phase 5 ShareConsumeRequestManager](review_m9_phase5_patterns.md) — reset_deadline(now=0) bug masked by near-zero MockClock; per-node ack-slot routing sound; single-node test hidden among multi-node deferrals
 - [M9 Phase 6 share-consumer core](review_m9_phase6_patterns.md) — zero-copy move-out breaks RENEW re-delivery (systemic); entries() share order reversed vs Java; §31 test-teeth proof; group-id/mock-wakeup faithfulness non-findings
 - [M9 Phase 7 production wiring](review_m9_phase7_patterns.md) — load-bearing bg-loop reconcile orchestration untested (smoke-test subscribe bypasses reconcile); response routing clones FetchRM faithfully; ack-failure drain-time divergence; poll-before-reconcile non-finding
+- [M10 Phase 1 C-FFI foundation](review_m10_phase1_ffi_foundation.md) — xtask-lint ffi blind spot (green lint proves nothing about src/ffi); ffi module gated once at lib.rs; header pure-reorder recipe (sorted-diff); allowlist gates cbindgen typedefs
