@@ -16,8 +16,9 @@
 //!
 //! Exposes the share consumer (`ShareConsumer<Bytes, Bytes>` trait,
 //! [`KafkaShareConsumer`], [`MockShareConsumer`]) via C-callable `extern "C"`
-//! functions, so non-Rust callers can drive the subscribe → poll → acknowledge
-//! flow. Commit / close / the acknowledgement-commit callback are a later phase.
+//! functions, so non-Rust callers can drive the whole
+//! subscribe → poll → acknowledge → commit → close flow, with an optional
+//! registered acknowledgement-commit callback.
 //!
 //! # Concurrency model — single-owner access guard
 //!
@@ -52,21 +53,21 @@
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::common::serialization::BytesDeserializer;
-use crate::common::{KafkaError, Uuid};
+use crate::common::{KafkaError, TopicIdPartition, Uuid};
 use crate::consumer::{
     AcknowledgeType, ConsumerRecord, MockShareConsumer, ShareConsumer, ShareConsumerConfig, WakeupHandle,
     new_share_consumer_with_wakeup,
 };
 
 use super::common::{
-    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
+    self, CompletionJob, KafkaErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion,
+    SendUserData, borrow_error_ptr, box_error, enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
 use super::records::{
     box_records, box_string_list, kafka_consumer_ConsumerRecord_t, kafka_consumer_ConsumerRecords_t,
@@ -648,6 +649,62 @@ unsafe fn async_void_op<F, Fut>(
     });
 }
 
+/// Async dispatch for a value-returning consumer op (one-operation-in-flight).
+/// Runs the awaited `op` on the runtime, then hands its `Result<T>` to `complete`
+/// on the dispatcher thread, which builds the typed result handle and fires the
+/// C callback. The access guard is held from submission until `complete` runs, so
+/// any concurrent op is rejected until completion; on an acquire failure the
+/// callback fires inline with the error (guard not taken).
+///
+/// `op` must capture only `Send` data so the spawned future stays `Send`;
+/// `complete` runs on the dispatcher, receiving the op result and the C
+/// `user_data`.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle. The closure runs on the runtime; it
+/// receives the guarded `&mut dyn ShareConsumer`.
+unsafe fn async_value_op<T, Fut, F, C>(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    user_data: *mut c_void,
+    op: F,
+    complete: C,
+) where
+    T: Send + 'static,
+    Fut: std::future::Future<Output = Result<T, KafkaError>> + Send,
+    F: FnOnce(&'static mut dyn ShareConsumer<Bytes, Bytes>) -> Fut + Send + 'static,
+    C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
+{
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        // Rejected: fire the callback inline with the error; guard not taken.
+        complete(Err(e), user_data);
+        return;
+    }
+    let tx = h.completion_tx.clone();
+    // Released by the completion job through this clone, so it stays valid even
+    // if `destroy` frees the handle before the job runs on the dispatcher.
+    let owner = Arc::clone(&h.owner);
+    // Capture the `&'static ShareConsumerHandle` (Send+Sync via the unsafe
+    // impls), NOT a bare `*mut`. The handle is leaked, so the borrow is
+    // effectively `'static`; it is used only while the op runs, and `destroy`
+    // blocks on the runtime shutdown before freeing it.
+    let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
+    let ud = SendUserData(user_data);
+    h.runtime_handle.spawn(async move {
+        let ud = ud;
+        let result = op(unsafe { consumer_mut(hs) }).await;
+        let job: CompletionJob = Box::new(move || {
+            // Release BEFORE firing the callback: the awaited op is complete, so
+            // the consumer is no longer borrowed. `complete` builds the result
+            // handle from the already-owned `T` (no consumer access), then fires.
+            release_owner(&owner);
+            complete(result, ud.into_ptr());
+        });
+        enqueue_or_run_inline(&tx, job);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Subscription
 // ---------------------------------------------------------------------------
@@ -1039,6 +1096,508 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_acknowledge_by_offset(
 }
 
 // ---------------------------------------------------------------------------
+// TopicIdPartition — a borrowed key inside the commit / ack-callback containers
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a topic-id-partition: a topic name, its 16-byte topic id,
+/// and a partition number. **Borrowed** from an owning result container (a
+/// [`kafka_consumer_ShareCommitResult_t`] or
+/// [`kafka_consumer_ShareAcknowledgeOffsets_t`]); it has no standalone
+/// destructor and is invalidated when its container is destroyed.
+#[repr(C)]
+pub struct kafka_common_TopicIdPartition_t {
+    _private: [u8; 0],
+}
+
+/// Owns the derived, C-ready fields of a [`TopicIdPartition`]: the cached
+/// NUL-terminated topic name, the 16 raw big-endian topic-id bytes, and the
+/// partition. Living inside a container, it hands out stable borrowed pointers.
+struct TopicIdPartitionInner {
+    topic_c: CString,
+    topic_id_bytes: [u8; 16],
+    partition: i32,
+}
+
+impl TopicIdPartitionInner {
+    fn new(tip: &TopicIdPartition) -> Self {
+        Self {
+            topic_c: CString::new(tip.topic().as_bytes()).unwrap_or_default(),
+            topic_id_bytes: tip.topic_id().to_bytes(),
+            partition: tip.partition(),
+        }
+    }
+}
+
+/// Returns the topic name as a NUL-terminated C string (owned by the container,
+/// valid until it is destroyed), or null if `tip` is null.
+///
+/// # Safety
+///
+/// `tip` must be a borrowed handle obtained from a result container.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
+    tip: *const kafka_common_TopicIdPartition_t,
+) -> *const c_char {
+    if tip.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { &*(tip as *const TopicIdPartitionInner) }.topic_c.as_ptr()
+}
+
+/// Returns a pointer to the 16 raw big-endian topic-id bytes (owned by the
+/// container, valid until it is destroyed), or null if `tip` is null. The length
+/// is always 16.
+///
+/// # Safety
+///
+/// `tip` must be a borrowed handle obtained from a result container.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
+    tip: *const kafka_common_TopicIdPartition_t,
+) -> *const u8 {
+    if tip.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { &*(tip as *const TopicIdPartitionInner) }.topic_id_bytes.as_ptr()
+}
+
+/// Returns the partition number, or `-1` if `tip` is null.
+///
+/// # Safety
+///
+/// `tip` must be a borrowed handle obtained from a result container.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(tip: *const kafka_common_TopicIdPartition_t) -> i32 {
+    if tip.is_null() {
+        return -1;
+    }
+    unsafe { &*(tip as *const TopicIdPartitionInner) }.partition
+}
+
+// ---------------------------------------------------------------------------
+// ShareCommitResult — the commit_sync return value
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `commit_sync` result: a per-partition outcome map
+/// (`Map<TopicIdPartition, Optional<KafkaException>>`). A null per-partition
+/// error means that partition's acknowledgements committed successfully.
+#[repr(C)]
+pub struct kafka_consumer_ShareCommitResult_t {
+    _private: [u8; 0],
+}
+
+/// One committed partition and its outcome. The error payload is owned here (not
+/// boxed separately) so [`kafka_consumer_ShareCommitResult_get_error`] can hand
+/// out a borrowed `kafka_common_KafkaError_t` that lives as long as the result.
+struct ShareCommitEntry {
+    partition: TopicIdPartitionInner,
+    error: Option<KafkaErrorInner>,
+}
+
+/// Owns the committed entries in a deterministic order for stable indexed access.
+struct ShareCommitResultInner {
+    entries: Vec<ShareCommitEntry>,
+}
+
+/// Boxes the `commit_sync` outcome map into an opaque result handle. Entries are
+/// sorted by `(topic, partition)` so indexed access is deterministic (the source
+/// `HashMap` has no stable order).
+fn box_share_commit_result(
+    map: HashMap<TopicIdPartition, Option<KafkaError>>,
+) -> *mut kafka_consumer_ShareCommitResult_t {
+    let mut entries: Vec<ShareCommitEntry> = map
+        .into_iter()
+        .map(|(tip, error)| ShareCommitEntry {
+            partition: TopicIdPartitionInner::new(&tip),
+            error: error.map(KafkaErrorInner::new),
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        a.partition
+            .topic_c
+            .as_bytes()
+            .cmp(b.partition.topic_c.as_bytes())
+            .then(a.partition.partition.cmp(&b.partition.partition))
+    });
+    Box::into_raw(Box::new(ShareCommitResultInner { entries })) as *mut kafka_consumer_ShareCommitResult_t
+}
+
+/// Returns the number of committed partitions, or 0 if `result` is null.
+///
+/// # Safety
+///
+/// `result` must be a valid share-commit-result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareCommitResult_count(
+    result: *const kafka_consumer_ShareCommitResult_t,
+) -> i32 {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { &*(result as *const ShareCommitResultInner) }.entries.len() as i32
+}
+
+/// Returns the partition at `index` (borrowed; valid until the result is
+/// destroyed), or null if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid share-commit-result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareCommitResult_get_partition(
+    result: *const kafka_consumer_ShareCommitResult_t,
+    index: i32,
+) -> *const kafka_common_TopicIdPartition_t {
+    if result.is_null() || index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { &*(result as *const ShareCommitResultInner) }
+        .entries
+        .get(index as usize)
+    {
+        Some(entry) => &entry.partition as *const TopicIdPartitionInner as *const kafka_common_TopicIdPartition_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the partition at `index` (borrowed; valid until the
+/// result is destroyed), or **null if that partition committed successfully** (or
+/// if `index` is out of range). The returned pointer is read-only — do NOT pass
+/// it to `kafka_common_KafkaError_destroy` (it is owned by the result).
+///
+/// # Safety
+///
+/// `result` must be a valid share-commit-result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareCommitResult_get_error(
+    result: *const kafka_consumer_ShareCommitResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if result.is_null() || index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { &*(result as *const ShareCommitResultInner) }
+        .entries
+        .get(index as usize)
+    {
+        Some(entry) => match &entry.error {
+            Some(inner) => borrow_error_ptr(inner),
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a share-commit-result handle, freeing the owned entries (and any
+/// borrowed partition / error pointers obtained from it). Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid share-commit-result handle. After this call
+/// the pointer (and anything borrowed from it) is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareCommitResult_destroy(result: *mut kafka_consumer_ShareCommitResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ShareCommitResultInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commit (async)
+// ---------------------------------------------------------------------------
+
+/// Completion callback for the async commit-sync ops. On success `result` is
+/// non-null (a [`kafka_consumer_ShareCommitResult_t`], free it with
+/// `kafka_consumer_ShareCommitResult_destroy`) and `error` is null; on failure
+/// `result` is null and `error` is non-null. The callback owns whichever handle
+/// is non-null and must free it.
+pub type kafka_consumer_ShareConsumer_commit_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_ShareCommitResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Commits the acknowledgements for the last poll (sync), waiting up to
+/// `default.api.timeout.ms`. On success returns a non-null
+/// [`kafka_consumer_ShareCommitResult_t`] (free it with
+/// `kafka_consumer_ShareCommitResult_destroy`) and sets `*out_error` to null; on
+/// failure returns null with `*out_error` set.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_commit_sync(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_consumer_ShareCommitResult_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(e) };
+        }
+        return std::ptr::null_mut();
+    }
+    let _g = ReleaseGuard(h);
+    match h.runtime().block_on(unsafe { consumer_mut(h).commit_sync() }) {
+        Ok(map) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
+            }
+            box_share_commit_result(map)
+        },
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            std::ptr::null_mut()
+        },
+    }
+}
+
+/// Commits the acknowledgements for the last poll asynchronously
+/// (one-operation-in-flight), waiting up to `default.api.timeout.ms`. See
+/// [`kafka_consumer_ShareConsumer_commit_sync`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_commit_sync_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    callback: kafka_consumer_ShareConsumer_commit_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.commit_sync().await },
+            move |result, ud| {
+                let (res, err) = match result {
+                    Ok(map) => (box_share_commit_result(map), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(res, err, ud);
+            },
+        )
+    };
+}
+
+/// Commits the acknowledgements for the last poll (sync), waiting up to
+/// `timeout_ms`. See [`kafka_consumer_ShareConsumer_commit_sync`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_commit_sync_timeout(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    timeout_ms: i64,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_consumer_ShareCommitResult_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(e) };
+        }
+        return std::ptr::null_mut();
+    }
+    let _g = ReleaseGuard(h);
+    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    match h.runtime().block_on(unsafe { consumer_mut(h).commit_sync_timeout(timeout) }) {
+        Ok(map) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
+            }
+            box_share_commit_result(map)
+        },
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            std::ptr::null_mut()
+        },
+    }
+}
+
+/// Commits the acknowledgements for the last poll asynchronously
+/// (one-operation-in-flight), waiting up to `timeout_ms`. See
+/// [`kafka_consumer_ShareConsumer_commit_sync`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_commit_sync_timeout_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    timeout_ms: i64,
+    callback: kafka_consumer_ShareConsumer_commit_callback_t,
+    user_data: *mut c_void,
+) {
+    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    unsafe {
+        async_value_op(
+            consumer,
+            user_data,
+            move |c| async move { c.commit_sync_timeout(timeout).await },
+            move |result, ud| {
+                let (res, err) = match result {
+                    Ok(map) => (box_share_commit_result(map), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(res, err, ud);
+            },
+        )
+    };
+}
+
+/// Commits the acknowledgements for the last poll without waiting for the
+/// network (sync). Java's `commitAsync` does not block on the broker; it drains
+/// and fires the registered ack-commit callback when the acknowledgement
+/// completes. Returns null on success, non-null error on failure.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_commit_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_async())) }
+}
+
+/// Commits the acknowledgements for the last poll without waiting for the
+/// network (async dispatch of the non-blocking op). See
+/// [`kafka_consumer_ShareConsumer_commit_async`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_commit_async_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    callback: kafka_consumer_ShareConsumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe { async_void_op(consumer, callback, user_data, |c| c.commit_async()) };
+}
+
+// ---------------------------------------------------------------------------
+// Close (async)
+// ---------------------------------------------------------------------------
+
+/// Closes the consumer (sync), waiting up to the default close timeout. Returns
+/// null on success, non-null error on failure.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_close(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe { sync_void_op(consumer, |c| Box::pin(c.close())) }
+}
+
+/// Closes the consumer (sync), waiting up to `timeout_ms`. See
+/// [`kafka_consumer_ShareConsumer_close`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_close_timeout(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    timeout_ms: i64,
+) -> *mut kafka_common_KafkaError_t {
+    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_timeout(timeout))) }
+}
+
+/// Closes the consumer asynchronously (one-operation-in-flight), waiting up to
+/// the default close timeout. See [`kafka_consumer_ShareConsumer_close`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_close_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    callback: kafka_consumer_ShareConsumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe { async_void_op(consumer, callback, user_data, |c| c.close()) };
+}
+
+/// Closes the consumer asynchronously (one-operation-in-flight), waiting up to
+/// `timeout_ms`. See [`kafka_consumer_ShareConsumer_close`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_close_timeout_async(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    timeout_ms: i64,
+    callback: kafka_consumer_ShareConsumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.close_timeout(timeout)) };
+}
+
+// ---------------------------------------------------------------------------
+// acquisition_lock_timeout_ms (sync state read)
+// ---------------------------------------------------------------------------
+
+/// Returns whether an acquisition-lock timeout is known for the last fetched
+/// records, writing it to `*out_ms` when present.
+///
+/// Returns `true` and sets `*out_ms` if the timeout is present; returns `false`
+/// (leaving `*out_ms` untouched) if it is absent or on error. On error `*out_error`
+/// is set to a non-null handle; on success or plain absence it is set to null.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `out_ms` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_acquisition_lock_timeout_ms(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    out_ms: *mut i32,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> bool {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(e) };
+        }
+        return false;
+    }
+    let _g = ReleaseGuard(h);
+    match unsafe { consumer_mut(h) }.acquisition_lock_timeout_ms() {
+        Ok(Some(ms)) => {
+            if !out_ms.is_null() {
+                unsafe { *out_ms = ms };
+            }
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
+            }
+            true
+        },
+        Ok(None) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
+            }
+            false
+        },
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            false
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MockShareConsumer driver methods (broker-less test support)
 //
 // These match on `ShareConsumerKind::Mock` and return `illegal_state` for the
@@ -1152,7 +1711,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::common::TopicIdPartition;
+    use crate::common::protocol::Errors;
+    use crate::common::{TopicIdPartition, Uuid};
     use crate::consumer::ConsumerRecords;
     use crate::consumer::acknowledgement_commit_callback::AcknowledgementCommitCallback;
     use crate::ffi::common::{kafka_common_KafkaError_destroy, kafka_common_KafkaError_message};
@@ -1675,5 +2235,165 @@ mod tests {
         );
 
         unsafe { kafka_consumer_ShareConsumerProperties_destroy(props) };
+    }
+
+    /// The mock's `commit_sync` returns an empty per-partition outcome map; over
+    /// the ABI that surfaces as a non-null result handle with count 0 and no
+    /// error.
+    #[test]
+    fn test_commit_sync_returns_empty_result_on_mock() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        subscribe(consumer, "share-topic");
+
+        let mut out_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let result = unsafe { kafka_consumer_ShareConsumer_commit_sync(consumer, &mut out_error) };
+        assert!(out_error.is_null(), "commit_sync should not error on the mock");
+        assert!(!result.is_null(), "commit_sync returns a (possibly empty) result handle");
+        unsafe {
+            assert_eq!(kafka_consumer_ShareCommitResult_count(result), 0);
+            kafka_consumer_ShareCommitResult_destroy(result);
+        }
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// Directly exercises the `ShareCommitResult` container with a synthetic
+    /// outcome map: one partition that committed OK (null error) and one that
+    /// failed. The mock always commits an empty map, so this is the only test
+    /// that verifies the partition + per-partition error marshaling — the topic
+    /// id, name, partition, and error message survive the boundary, and a null
+    /// error means "committed OK".
+    #[test]
+    fn test_share_commit_result_container_marshals_partitions_and_errors() {
+        let topic_id = Uuid::new(0x0102_0304_0506_0708, 0x090a_0b0c_0d0e_0f10);
+        let ok_tip = TopicIdPartition::from_parts(topic_id, 0, "topic-ok");
+        let err_tip = TopicIdPartition::from_parts(topic_id, 1, "topic-err");
+
+        let mut map: HashMap<TopicIdPartition, Option<KafkaError>> = HashMap::new();
+        map.insert(ok_tip, None);
+        map.insert(
+            err_tip,
+            Some(KafkaError::with_message(
+                Errors::InvalidRecordState,
+                "record no longer acquirable",
+            )),
+        );
+
+        let result = box_share_commit_result(map);
+        assert!(!result.is_null());
+        unsafe {
+            assert_eq!(kafka_consumer_ShareCommitResult_count(result), 2);
+
+            // Entries are sorted by (topic, partition): "topic-err" before "topic-ok".
+            let p0 = kafka_consumer_ShareCommitResult_get_partition(result, 0);
+            assert!(!p0.is_null());
+            let topic0 = CStr::from_ptr(kafka_common_TopicIdPartition_topic(p0)).to_string_lossy();
+            assert_eq!(topic0, "topic-err");
+            assert_eq!(kafka_common_TopicIdPartition_partition(p0), 1);
+            let id_bytes = std::slice::from_raw_parts(kafka_common_TopicIdPartition_topic_id(p0), 16);
+            assert_eq!(id_bytes, topic_id.to_bytes());
+
+            // "topic-err" carries the failure, message content preserved.
+            let e0 = kafka_consumer_ShareCommitResult_get_error(result, 0);
+            assert!(!e0.is_null(), "the failed partition must expose its error");
+            let msg = CStr::from_ptr(kafka_common_KafkaError_message(e0)).to_string_lossy();
+            assert_eq!(msg, "record no longer acquirable");
+
+            // "topic-ok" committed successfully → null error.
+            let p1 = kafka_consumer_ShareCommitResult_get_partition(result, 1);
+            let topic1 = CStr::from_ptr(kafka_common_TopicIdPartition_topic(p1)).to_string_lossy();
+            assert_eq!(topic1, "topic-ok");
+            assert_eq!(kafka_common_TopicIdPartition_partition(p1), 0);
+            assert!(
+                kafka_consumer_ShareCommitResult_get_error(result, 1).is_null(),
+                "a committed-OK partition must report a null error"
+            );
+
+            // Out-of-range indices are null-safe on both accessors.
+            assert!(kafka_consumer_ShareCommitResult_get_partition(result, 2).is_null());
+            assert!(kafka_consumer_ShareCommitResult_get_error(result, 2).is_null());
+
+            kafka_consumer_ShareCommitResult_destroy(result);
+        }
+    }
+
+    /// `commit_async` on the mock completes without error.
+    #[test]
+    fn test_commit_async_succeeds_on_mock() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        subscribe(consumer, "share-topic");
+        let err = unsafe { kafka_consumer_ShareConsumer_commit_async(consumer) };
+        assert!(err.is_null(), "commit_async should succeed on the mock");
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// `close` and `close_timeout` on the mock complete without error.
+    #[test]
+    fn test_close_succeeds_on_mock() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        let err = unsafe { kafka_consumer_ShareConsumer_close(consumer) };
+        assert!(err.is_null(), "close should succeed on the mock");
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        let err = unsafe { kafka_consumer_ShareConsumer_close_timeout(consumer, 5000) };
+        assert!(err.is_null(), "close_timeout should succeed on the mock");
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// The mock reports no acquisition-lock timeout: presence is false, no error
+    /// is set, and the out-parameter is left untouched.
+    #[test]
+    fn test_acquisition_lock_timeout_ms_absent_on_mock() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        let mut out_ms = 12345i32; // sentinel; must survive an "absent" result
+        let mut out_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let present =
+            unsafe { kafka_consumer_ShareConsumer_acquisition_lock_timeout_ms(consumer, &mut out_ms, &mut out_error) };
+        assert!(!present, "the mock reports no acquisition-lock timeout");
+        assert!(out_error.is_null(), "absence is not an error");
+        assert_eq!(out_ms, 12345, "out_ms must be left untouched when the timeout is absent");
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    unsafe extern "C" fn send_commit_count(
+        result: *mut kafka_consumer_ShareCommitResult_t,
+        error: *mut kafka_common_KafkaError_t,
+        user_data: *mut c_void,
+    ) {
+        let count = if result.is_null() {
+            unsafe { kafka_common_KafkaError_destroy(error) };
+            -1
+        } else {
+            let n = unsafe { kafka_consumer_ShareCommitResult_count(result) };
+            unsafe { kafka_consumer_ShareCommitResult_destroy(result) };
+            n
+        };
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<i32>) };
+        tx.send(count).ok();
+    }
+
+    /// The async commit-sync path delivers a non-null (empty) result to its
+    /// callback and releases the guard inside the completion job, so a follow-up
+    /// sync commit then succeeds.
+    #[test]
+    fn test_commit_sync_async_delivers_result_and_releases_guard() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+        subscribe(consumer, "share-topic");
+
+        let (tx, rx) = std::sync::mpsc::channel::<i32>();
+        unsafe {
+            kafka_consumer_ShareConsumer_commit_sync_async(consumer, send_commit_count, &tx as *const _ as *mut c_void)
+        };
+        let count = rx.recv_timeout(Duration::from_secs(5)).expect("commit callback must fire");
+        assert_eq!(count, 0, "the mock commits an empty outcome map");
+
+        // Guard released in the completion job → this sync commit now succeeds.
+        let mut out_error: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let result = unsafe { kafka_consumer_ShareConsumer_commit_sync(consumer, &mut out_error) };
+        assert!(out_error.is_null());
+        assert!(!result.is_null());
+        unsafe { kafka_consumer_ShareCommitResult_destroy(result) };
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
     }
 }

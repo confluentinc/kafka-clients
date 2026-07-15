@@ -28,9 +28,9 @@
 //!
 //! The async / callback pieces have no caller in the producer FFI (which
 //! delivers results synchronously via a block-on `FutureRecordMetadata`); the
-//! share consumer FFI consumes them for its `_async` entry points.
-//! [`SendUserData`] stays staged behind `#[allow(dead_code)]` until the
-//! value-returning async ops (commit / close) that need it land.
+//! share consumer FFI consumes them for its `_async` entry points, including the
+//! value-returning commit ops and the registered ack-commit callback that carry
+//! a [`SendUserData`] across the dispatcher boundary.
 
 // FFI function names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -64,6 +64,16 @@ pub(crate) struct KafkaErrorInner {
     pub(crate) message_cstring: CString,
 }
 
+impl KafkaErrorInner {
+    /// Builds the inner error payload (the error plus a cached message
+    /// `CString`). Shared by [`box_error`] and by result containers that own a
+    /// per-entry error and hand out a borrowed pointer to it.
+    pub(crate) fn new(error: KafkaError) -> Self {
+        let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
+        KafkaErrorInner { error, message_cstring }
+    }
+}
+
 /// Opaque error handle returned by functions that can fail.
 ///
 /// Internally wraps a `Box<KafkaErrorInner>` containing the [`KafkaError`]
@@ -78,9 +88,16 @@ pub struct kafka_common_KafkaError_t {
 /// Wraps a [`KafkaError`] into a heap-allocated opaque error pointer, including
 /// a cached [`CString`] for the error message.
 pub(crate) fn box_error(error: KafkaError) -> *mut kafka_common_KafkaError_t {
-    let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let inner = KafkaErrorInner { error, message_cstring };
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_KafkaError_t
+    Box::into_raw(Box::new(KafkaErrorInner::new(error))) as *mut kafka_common_KafkaError_t
+}
+
+/// Returns a borrowed error pointer into an owned [`KafkaErrorInner`] living
+/// inside a result container. The pointer works with the read-only
+/// `kafka_common_KafkaError_*` accessors, but the caller must NOT pass it to
+/// [`kafka_common_KafkaError_destroy`] — it is freed when the owning container
+/// is destroyed, not on its own.
+pub(crate) fn borrow_error_ptr(inner: &KafkaErrorInner) -> *const kafka_common_KafkaError_t {
+    inner as *const KafkaErrorInner as *const kafka_common_KafkaError_t
 }
 
 /// Casts a `*const kafka_common_KafkaError_t` to a reference to `KafkaErrorInner`.
@@ -209,9 +226,8 @@ pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_commo
 // user callback can stall the dispatcher but never the I/O runtime.
 //
 // The producer FFI has no async op, so these have no producer caller; the share
-// consumer FFI drives them for its `_async` entry points. Items still without a
-// caller (`SendUserData`, used only by the not-yet-landed value-returning ops)
-// keep `#[allow(dead_code)]`.
+// consumer FFI drives them for its `_async` entry points — the void ops plus the
+// value-returning commit ops (which carry `SendUserData` across the dispatcher).
 
 /// A unit of work executed by the dispatcher thread. Each async operation
 /// captures its own C callback, `user_data`, and owned result handles into the
@@ -286,16 +302,19 @@ unsafe impl Send for OperationCallbackTarget {}
 
 /// A raw `user_data` pointer wrapped so it can cross into the spawned task and
 /// completion job. The C user owns its thread-safety (CLAUDE.md FFI §3).
-#[allow(dead_code)]
 pub(crate) struct SendUserData(pub(crate) *mut std::ffi::c_void);
-// SAFETY: the C user is responsible for the thread-safety of `user_data`.
+// SAFETY: the C user is responsible for the thread-safety of `user_data`. `Sync`
+// is sound for the same reason as `Send`: the only access through a shared
+// reference is reading the pointer value to hand back to the C callback (e.g.
+// from a registered `Arc<dyn AcknowledgementCommitCallback>`, whose bound
+// requires `Sync`), never a dereference on the Rust side.
 unsafe impl Send for SendUserData {}
+unsafe impl Sync for SendUserData {}
 impl SendUserData {
     /// Consume the wrapper, returning the raw pointer. Taking `self` by value
     /// forces a completion closure that calls this to capture the whole
     /// `SendUserData` (which is `Send`) rather than disjointly capturing the
     /// inner `*mut c_void` field (which is not) — see Rust 2021 closure capture.
-    #[allow(dead_code)]
     pub(crate) fn into_ptr(self) -> *mut std::ffi::c_void {
         self.0
     }
