@@ -201,11 +201,11 @@ pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_commo
 // Async (callback-based) delivery machinery
 // ---------------------------------------------------------------------------
 //
-// The async API mirrors the librdkafka delivery-report model: each operation
-// returns immediately and its result is delivered later through a C callback.
-// All callbacks are invoked from a single per-handle **dispatcher thread**
-// that drains a completion queue, so user callbacks run on one predictable
-// thread and never on a tokio worker (a slow callback cannot stall I/O).
+// Each async operation returns immediately and delivers its result later
+// through a C callback. Every callback fires from a single per-handle
+// **dispatcher thread** that drains a completion queue, so callbacks arrive
+// one at a time on one predictable thread, never on a tokio worker: a slow
+// user callback can stall the dispatcher but never the I/O runtime.
 //
 // Every item below is `#[allow(dead_code)]` until the share consumer FFI wires
 // it: the producer FFI has no async op, so nothing constructs these types yet.
