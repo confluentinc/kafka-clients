@@ -66,3 +66,4 @@
 - [M9 Phase 4 share membership/heartbeat/metadata](review_m9_phase4_patterns.md) — "shared pipeline" deferral false b/c reconcile is DUPLICATED per-subclass (grep abstract); no-auto-commit confirmed; UNSUPPORTED_VERSION reachable; epoch is i32 not i64
 - [M9 Phase 5 ShareConsumeRequestManager](review_m9_phase5_patterns.md) — reset_deadline(now=0) bug masked by near-zero MockClock; per-node ack-slot routing sound; single-node test hidden among multi-node deferrals
 - [M9 Phase 6 share-consumer core](review_m9_phase6_patterns.md) — zero-copy move-out breaks RENEW re-delivery (systemic); entries() share order reversed vs Java; §31 test-teeth proof; group-id/mock-wakeup faithfulness non-findings
+- [M9 Phase 7 production wiring](review_m9_phase7_patterns.md) — load-bearing bg-loop reconcile orchestration untested (smoke-test subscribe bypasses reconcile); response routing clones FetchRM faithfully; ack-failure drain-time divergence; poll-before-reconcile non-finding
