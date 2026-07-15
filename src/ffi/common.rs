@@ -27,9 +27,10 @@
 //! - The default logger initialization helper ([`init_default_logger`]).
 //!
 //! The async / callback pieces have no caller in the producer FFI (which
-//! delivers results synchronously via a block-on `FutureRecordMetadata`); they
-//! are staged behind `#[allow(dead_code)]` for the share consumer FFI that
-//! wires them next.
+//! delivers results synchronously via a block-on `FutureRecordMetadata`); the
+//! share consumer FFI consumes them for its `_async` entry points.
+//! [`SendUserData`] stays staged behind `#[allow(dead_code)]` until the
+//! value-returning async ops (commit / close) that need it land.
 
 // FFI function names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -207,15 +208,16 @@ pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_commo
 // one at a time on one predictable thread, never on a tokio worker: a slow
 // user callback can stall the dispatcher but never the I/O runtime.
 //
-// Every item below is `#[allow(dead_code)]` until the share consumer FFI wires
-// it: the producer FFI has no async op, so nothing constructs these types yet.
+// The producer FFI has no async op, so these have no producer caller; the share
+// consumer FFI drives them for its `_async` entry points. Items still without a
+// caller (`SendUserData`, used only by the not-yet-landed value-returning ops)
+// keep `#[allow(dead_code)]`.
 
 /// A unit of work executed by the dispatcher thread. Each async operation
 /// captures its own C callback, `user_data`, and owned result handles into the
 /// closure and bakes in the correct invocation, so the queue stays uniform
 /// (one element type) while every operation delivers exactly the outputs its
 /// sync counterpart produces.
-#[allow(dead_code)]
 pub(crate) type CompletionJob = Box<dyn FnOnce() + Send>;
 
 /// Spawns a dispatcher thread that drains the completion queue, running each
@@ -225,7 +227,6 @@ pub(crate) type CompletionJob = Box<dyn FnOnce() + Send>;
 /// Returns the sender half of the completion queue and the thread join handle.
 /// The caller stores the sender on its handle (cloned into each async op) and
 /// keeps the join handle for teardown.
-#[allow(dead_code)]
 pub(crate) fn spawn_dispatcher(name: &str) -> (std::sync::mpsc::Sender<CompletionJob>, std::thread::JoinHandle<()>) {
     let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
     let dispatcher = std::thread::Builder::new()
@@ -244,7 +245,6 @@ pub(crate) fn spawn_dispatcher(name: &str) -> (std::sync::mpsc::Sender<Completio
 /// Enqueues a [`CompletionJob`] on the dispatcher's completion queue. If the
 /// dispatcher is gone (post-teardown), runs the job inline to honor the
 /// callback obligation rather than leak the owned handles it captured.
-#[allow(dead_code)]
 pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>, job: CompletionJob) {
     if let Err(returned) = tx.send(job) {
         (returned.0)();
@@ -253,12 +253,10 @@ pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>,
 
 /// Canonical operation callback signature (not exported). A null `error` means
 /// success. The public per-method typedefs alias this shape.
-#[allow(dead_code)]
 pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 
 /// Owned operation completion payload, fired by the dispatcher thread for
 /// void-returning operations (`flush` / `close` / consumer void ops).
-#[allow(dead_code)]
 pub(crate) struct OperationCompletion {
     pub(crate) callback: OperationCallbackFn,
     pub(crate) user_data: *mut std::ffi::c_void,
@@ -270,7 +268,6 @@ unsafe impl Send for OperationCompletion {}
 impl OperationCompletion {
     /// # Safety
     /// Must be called exactly once, on the dispatcher thread.
-    #[allow(dead_code)]
     pub(crate) unsafe fn fire(self) {
         unsafe { (self.callback)(self.error, self.user_data) };
     }
@@ -279,7 +276,6 @@ impl OperationCompletion {
 /// A C operation-callback target (function pointer + opaque `user_data`).
 /// Wrapped so it can cross the tokio task / dispatcher thread boundary.
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct OperationCallbackTarget {
     pub(crate) callback: OperationCallbackFn,
     pub(crate) user_data: *mut std::ffi::c_void,

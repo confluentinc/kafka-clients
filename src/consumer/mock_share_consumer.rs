@@ -29,6 +29,8 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 
 use crate::common::{KafkaError, TopicPartition, Uuid};
+#[cfg(feature = "ffi")]
+use crate::consumer::WakeupHandle;
 use crate::consumer::acknowledge_type::AcknowledgeType;
 use crate::consumer::acknowledgement_commit_callback::AcknowledgementCommitCallback;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
@@ -87,6 +89,14 @@ impl<K, V> MockShareConsumer<K, V> {
     /// Translates Java's `setClientInstanceId(Uuid)`.
     pub fn set_client_instance_id(&mut self, client_instance_id: Uuid) {
         self.client_instance_id = Some(client_instance_id);
+    }
+
+    /// Returns a [`WakeupHandle`] that fires this mock's `wakeup()` from any
+    /// task without holding a reference to the consumer. The C FFI captures it
+    /// at construction so `wakeup` can bypass the single-owner access guard.
+    #[cfg(feature = "ffi")]
+    pub(crate) fn wakeup_handle(&self) -> WakeupHandle {
+        WakeupHandle::for_mock(Arc::clone(&self.wakeup))
     }
 
     /// Java's `ensureNotClosed()`.

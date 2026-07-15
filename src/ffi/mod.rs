@@ -32,3 +32,5 @@
 
 pub(crate) mod common;
 pub(crate) mod producer;
+pub(crate) mod records;
+pub(crate) mod share_consumer;

@@ -496,6 +496,11 @@ where
     }
 }
 
+/// A constructed share [`ShareConsumer`] paired with a [`WakeupHandle`] that can
+/// fire its `wakeup()` without a reference to the (type-erased, `&mut`-only)
+/// consumer.
+type ShareConsumerWithWakeup<K, V> = (Box<dyn ShareConsumer<K, V>>, WakeupHandle);
+
 /// Constructs a new share [`ShareConsumer`] (KIP-932) from a
 /// [`ShareConsumerConfig`] and explicit key/value
 /// [`Deserializer`](crate::common::serialization::Deserializer)s.
@@ -543,25 +548,53 @@ where
     K: Send + Sync + Clone + 'static,
     V: Send + Sync + Clone + 'static,
 {
-    build_share_consumer(config, key_deserializer, value_deserializer).map_err(|cause| {
-        // Java: `throw new KafkaException("Failed to construct Kafka share
-        // consumer", t)`. Rust's KafkaError has no cause chain, so log the cause
-        // and return the exact top-level message the tests assert.
-        log::error!("Failed to construct Kafka share consumer: {cause}");
-        KafkaError::with_message(
-            crate::common::protocol::Errors::UnknownServerError,
-            "Failed to construct Kafka share consumer",
-        )
-    })
+    build_share_consumer(config, key_deserializer, value_deserializer)
+        .map(|(consumer, _wakeup_handle)| consumer)
+        .map_err(|cause| {
+            // Java: `throw new KafkaException("Failed to construct Kafka share
+            // consumer", t)`. Rust's KafkaError has no cause chain, so log the
+            // cause and return the exact top-level message the tests assert.
+            log::error!("Failed to construct Kafka share consumer: {cause}");
+            KafkaError::with_message(
+                crate::common::protocol::Errors::UnknownServerError,
+                "Failed to construct Kafka share consumer",
+            )
+        })
+}
+
+/// Constructs a share [`ShareConsumer`] like [`new_share_consumer`] but also
+/// hands back a [`WakeupHandle`] that can fire the consumer's `wakeup()`
+/// without holding a reference to the (type-erased, `&mut`-only) consumer.
+///
+/// The C FFI layer needs the handle up front: its single-owner access guard may
+/// hold the consumer for the duration of an in-flight `poll` on one thread while
+/// another thread requests a `wakeup`, so the wakeup path must not itself borrow
+/// the consumer. Unlike [`new_share_consumer`], the underlying construction
+/// error is returned unwrapped, so the caller can surface the precise cause
+/// (for instance a blank `group.id`) rather than the generic wrapper message.
+#[cfg(feature = "ffi")]
+pub(crate) fn new_share_consumer_with_wakeup<K, V>(
+    config: ShareConsumerConfig,
+    key_deserializer: Box<dyn Deserializer<K>>,
+    value_deserializer: Box<dyn Deserializer<V>>,
+) -> Result<ShareConsumerWithWakeup<K, V>, KafkaError>
+where
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
+{
+    build_share_consumer(config, key_deserializer, value_deserializer)
 }
 
 /// Inner assembly for [`new_share_consumer`]; every error is wrapped by the
-/// caller as `"Failed to construct Kafka share consumer"`.
+/// caller as `"Failed to construct Kafka share consumer"`. Also returns a
+/// [`WakeupHandle`] captured over the same `wakeup_trigger` / `event_notify` the
+/// background pipeline uses, for callers (the C FFI) that need to wake the
+/// consumer without a reference to it.
 fn build_share_consumer<K, V>(
     config: ShareConsumerConfig,
     key_deserializer: Box<dyn Deserializer<K>>,
     value_deserializer: Box<dyn Deserializer<V>>,
-) -> Result<Box<dyn ShareConsumer<K, V>>, KafkaError>
+) -> Result<ShareConsumerWithWakeup<K, V>, KafkaError>
 where
     K: Send + Sync + Clone + 'static,
     V: Send + Sync + Clone + 'static,
@@ -804,6 +837,19 @@ where
         wakeup_for_fn.wakeup();
     });
 
+    // Wakeup handle for callers that must fire `wakeup()` without a reference to
+    // the type-erased consumer (the C FFI access guard). It fires the same
+    // rotating wakeup trigger the bg loop observes and pokes the shared
+    // selector-wakeup notify, so an in-progress network poll returns promptly —
+    // exactly what `wakeup()` does from inside the consumer.
+    let wakeup_handle = WakeupHandle::for_async(
+        wakeup_trigger.clone(),
+        Arc::new({
+            let n = Arc::clone(&event_notify);
+            move || n.notify_one()
+        }),
+    );
+
     // Dedicated IO thread hosting a current_thread runtime (Phase 21 pattern).
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     let thread_handle = std::thread::Builder::new()
@@ -867,7 +913,7 @@ where
     };
 
     log::debug!("Kafka share consumer initialized");
-    Ok(Box::new(ShareConsumerImpl::from_components(components)))
+    Ok((Box::new(ShareConsumerImpl::from_components(components)), wakeup_handle))
 }
 
 #[cfg(test)]
