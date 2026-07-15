@@ -29,3 +29,7 @@ Performance optimizations on the hot path
 ## Milestone 9
 
 The client-side KIP-932 share consumer flow. `KafkaShareConsumer` is built on `ShareConsumerImpl` and reuses the existing KIP-848 consumer engine (network thread, request-manager registry, event plumbing), adding the share-specific fetch, acknowledge, heartbeat, and membership managers along with the acknowledgement types and the public `ShareConsumer<K, V>` API. Records are fetched from share-group partitions, acknowledged (accept/release/reject/renew) individually or in batches, and committed synchronously or asynchronously through the share coordinator. Metrics are deferred to KIP-714; broker, persister, admin, and tools code stay out of scope.
+
+## Milestone 10
+
+C and Python client bindings for the KIP-932 share consumer. A C FFI layer (`src/ffi/share_consumer.rs`) exposes `KafkaShareConsumer` / `MockShareConsumer` across a C ABI — subscribe, poll, per-record acknowledge (accept/release/reject/renew), synchronous/asynchronous commit, a registered acknowledgement-commit callback, and close — reusing the reference consumer-FFI machinery (embedded Tokio runtime, single-owner access guard, callback dispatcher thread, zero-copy `bytes::Bytes` record marshaling). A cbindgen-generated `confluent_kafka.h` then feeds a CPython C-extension binding and a high-level `share_consumer.py`, mirroring the Milestone-4 producer-binding stack. Key/value cross the boundary as `bytes::Bytes`; `client_instance_id` is omitted pending KIP-714 telemetry.
