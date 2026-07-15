@@ -38,6 +38,9 @@ use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData
 use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
+use crate::share_acknowledge_request_data::ShareAcknowledgeRequestData;
+use crate::share_fetch_request_data::ShareFetchRequestData;
+use crate::share_group_heartbeat_request_data::ShareGroupHeartbeatRequestData;
 
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
@@ -55,6 +58,9 @@ use super::RequestHeader;
 use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
+use super::ShareAcknowledgeRequest;
+use super::ShareFetchRequest;
+use super::ShareGroupHeartbeatRequest;
 
 /// Trait for building requests at a specific version.
 ///
@@ -120,6 +126,12 @@ pub enum ConcreteRequest {
     OffsetCommit(OffsetCommitRequest),
     /// An OffsetFetch request.
     OffsetFetch(OffsetFetchRequest),
+    /// A ShareFetch request (KIP-932).
+    ShareFetch(ShareFetchRequest),
+    /// A ShareAcknowledge request (KIP-932).
+    ShareAcknowledge(ShareAcknowledgeRequest),
+    /// A ShareGroupHeartbeat request (KIP-932).
+    ShareGroupHeartbeat(ShareGroupHeartbeatRequest),
 }
 
 impl ConcreteRequest {
@@ -138,6 +150,9 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
+            Self::ShareFetch(r) => r.version(),
+            Self::ShareAcknowledge(r) => r.version(),
+            Self::ShareGroupHeartbeat(r) => r.version(),
         }
     }
 
@@ -156,6 +171,9 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::ShareFetch(r) => r.api_key(),
+            Self::ShareAcknowledge(r) => r.api_key(),
+            Self::ShareGroupHeartbeat(r) => r.api_key(),
         }
     }
 
@@ -180,6 +198,9 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareAcknowledge(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -250,6 +271,15 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::ShareFetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareAcknowledge(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareGroupHeartbeat(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -275,6 +305,9 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareAcknowledge(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -311,6 +344,9 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ShareFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ShareAcknowledge(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ShareGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -385,6 +421,18 @@ impl ConcreteRequest {
                 let data = OffsetFetchRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
             },
+            ApiKeys::SHARE_FETCH => {
+                let data = ShareFetchRequestData::read(readable, api_version)?;
+                Ok(Self::ShareFetch(ShareFetchRequest::new(data, api_version)))
+            },
+            ApiKeys::SHARE_ACKNOWLEDGE => {
+                let data = ShareAcknowledgeRequestData::read(readable, api_version)?;
+                Ok(Self::ShareAcknowledge(ShareAcknowledgeRequest::new(data, api_version)))
+            },
+            ApiKeys::SHARE_GROUP_HEARTBEAT => {
+                let data = ShareGroupHeartbeatRequestData::read(readable, api_version)?;
+                Ok(Self::ShareGroupHeartbeat(ShareGroupHeartbeatRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -408,6 +456,9 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::ShareFetch(r) => write!(f, "{r}"),
+            Self::ShareAcknowledge(r) => write!(f, "{r}"),
+            Self::ShareGroupHeartbeat(r) => write!(f, "{r}"),
         }
     }
 }

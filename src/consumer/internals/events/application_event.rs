@@ -239,6 +239,35 @@ pub(crate) enum ApplicationEvent {
         /// Java's `Optional<Integer> offsetEpoch`.
         offset_epoch: Option<i32>,
     },
+
+    // ─── Share-consumer events (KIP-932) ───
+    //
+    // Wrap the standalone `*Event` structs built in Phase 5 (see
+    // `events/share_*.rs`). Non-completable share events (`SharePoll`,
+    // `ShareFetch`, `ShareAcknowledgeAsync`,
+    // `ShareAcknowledgementCommitCallbackRegistration`) carry no handle; the
+    // completable ones (`ShareSubscriptionChange`, `ShareUnsubscribe`,
+    // `ShareAcknowledgeSync`, `ShareAcknowledgeOnClose`) carry their handle
+    // inside the wrapped struct and expose it via `.handle()`.
+    /// `SharePollEvent` — pumps the share membership / heartbeat state machine.
+    SharePoll(super::share_poll_event::SharePollEvent),
+    /// `ShareFetchEvent` — triggers a `ShareFetch` round with pending acks.
+    ShareFetch(super::share_fetch_event::ShareFetchEvent),
+    /// `ShareSubscriptionChangeEvent` — join / update the share group.
+    ShareSubscriptionChange(super::share_subscription_change_event::ShareSubscriptionChangeEvent),
+    /// `ShareUnsubscribeEvent` — leave the share group.
+    ShareUnsubscribe(super::share_unsubscribe_event::ShareUnsubscribeEvent),
+    /// `ShareAcknowledgeAsyncEvent` — fire-and-forget acknowledgement commit.
+    ShareAcknowledgeAsync(super::share_acknowledge_async_event::ShareAcknowledgeAsyncEvent),
+    /// `ShareAcknowledgeSyncEvent` — synchronous acknowledgement commit.
+    ShareAcknowledgeSync(super::share_acknowledge_sync_event::ShareAcknowledgeSyncEvent),
+    /// `ShareAcknowledgeOnCloseEvent` — commit pending acks + close the session.
+    ShareAcknowledgeOnClose(super::share_acknowledge_on_close_event::ShareAcknowledgeOnCloseEvent),
+    /// `ShareAcknowledgementCommitCallbackRegistrationEvent` — toggle whether
+    /// the user registered an acknowledgement commit callback.
+    ShareAcknowledgementCommitCallbackRegistration(
+        super::share_acknowledgement_commit_callback_registration_event::ShareAcknowledgementCommitCallbackRegistrationEvent,
+    ),
 }
 
 impl ApplicationEvent {
@@ -271,6 +300,14 @@ impl ApplicationEvent {
             Self::ResumePartitions { .. } => "ResumePartitions",
             Self::CurrentLag { .. } => "CurrentLag",
             Self::SeekUnvalidated { .. } => "SeekUnvalidated",
+            Self::SharePoll(_) => "SharePoll",
+            Self::ShareFetch(_) => "ShareFetch",
+            Self::ShareSubscriptionChange(_) => "ShareSubscriptionChange",
+            Self::ShareUnsubscribe(_) => "ShareUnsubscribe",
+            Self::ShareAcknowledgeAsync(_) => "ShareAcknowledgeAsync",
+            Self::ShareAcknowledgeSync(_) => "ShareAcknowledgeSync",
+            Self::ShareAcknowledgeOnClose(_) => "ShareAcknowledgeOnClose",
+            Self::ShareAcknowledgementCommitCallbackRegistration(_) => "ShareAcknowledgementCommitCallbackRegistration",
         }
     }
 
@@ -371,12 +408,23 @@ impl ApplicationEvent {
             Self::ResumePartitions { handle, .. } => Some(handle.erased()),
             Self::CurrentLag { handle, .. } => Some(handle.erased()),
             Self::SeekUnvalidated { handle, .. } => Some(handle.erased()),
+            // Share completable variants — carry the handle inside the wrapped
+            // struct (Java: `extends CompletableApplicationEvent<T>`).
+            Self::ShareSubscriptionChange(e) => Some(e.handle().erased()),
+            Self::ShareUnsubscribe(e) => Some(e.handle().erased()),
+            Self::ShareAcknowledgeSync(e) => Some(e.handle().erased()),
+            Self::ShareAcknowledgeOnClose(e) => Some(e.handle().erased()),
             // Non-completable variants — Java: not `instanceof CompletableEvent`.
             Self::CommitOnClose
             | Self::StopFindCoordinatorOnClose
             | Self::NewTopicsMetadataUpdate
             | Self::ConsumerRebalanceListenerCallbackCompleted { .. }
-            | Self::AsyncPoll { .. } => None,
+            | Self::AsyncPoll { .. }
+            // Share non-completable variants (bare `ApplicationEvent`).
+            | Self::SharePoll(_)
+            | Self::ShareFetch(_)
+            | Self::ShareAcknowledgeAsync(_)
+            | Self::ShareAcknowledgementCommitCallbackRegistration(_) => None,
         }
     }
 
@@ -858,6 +906,48 @@ mod tests {
         } else {
             panic!("unexpected variant");
         }
+    }
+
+    #[test]
+    fn share_variants_type_names_and_handles() {
+        use super::super::share_acknowledge_on_close_event::ShareAcknowledgeOnCloseEvent;
+        use super::super::share_acknowledgement_commit_callback_registration_event::ShareAcknowledgementCommitCallbackRegistrationEvent;
+        use super::super::share_fetch_event::ShareFetchEvent;
+        use super::super::share_poll_event::SharePollEvent;
+        use super::super::share_subscription_change_event::ShareSubscriptionChangeEvent;
+        use super::super::share_unsubscribe_event::ShareUnsubscribeEvent;
+
+        // Non-completable share variants — no reaper handle.
+        let ev = ApplicationEvent::SharePoll(SharePollEvent::new(10));
+        assert_eq!(ev.type_name(), "SharePoll");
+        assert!(ev.erased_handle().is_none());
+        assert!(!ev.is_metadata_error_notifiable());
+
+        let ev = ApplicationEvent::ShareFetch(ShareFetchEvent::new(indexmap::IndexMap::new()));
+        assert_eq!(ev.type_name(), "ShareFetch");
+        assert!(ev.erased_handle().is_none());
+
+        let ev = ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration(
+            ShareAcknowledgementCommitCallbackRegistrationEvent::new(true),
+        );
+        assert_eq!(ev.type_name(), "ShareAcknowledgementCommitCallbackRegistration");
+        assert!(ev.erased_handle().is_none());
+
+        // Completable share variants — expose their handle to the reaper.
+        let (event, _rx) = ShareSubscriptionChangeEvent::new(HashSet::from(["t".to_string()]));
+        let ev = ApplicationEvent::ShareSubscriptionChange(event);
+        assert_eq!(ev.type_name(), "ShareSubscriptionChange");
+        assert!(ev.erased_handle().is_some());
+
+        let (event, _rx) = ShareUnsubscribeEvent::new(i64::MAX);
+        let ev = ApplicationEvent::ShareUnsubscribe(event);
+        assert_eq!(ev.type_name(), "ShareUnsubscribe");
+        assert!(ev.erased_handle().is_some());
+
+        let (event, _rx) = ShareAcknowledgeOnCloseEvent::new(indexmap::IndexMap::new(), i64::MAX);
+        let ev = ApplicationEvent::ShareAcknowledgeOnClose(event);
+        assert_eq!(ev.type_name(), "ShareAcknowledgeOnClose");
+        assert!(ev.erased_handle().is_some());
     }
 
     #[test]

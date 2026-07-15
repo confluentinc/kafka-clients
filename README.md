@@ -24,6 +24,23 @@ Or if already cloned:
 git submodule update --init
 ```
 
+### Install a current Rust toolchain
+
+This project requires `edition = "2024"` (Rust ≥1.85), and `cargo-llvm-cov`
+requires Rust ≥1.87. Your distro's packaged Rust (e.g. Ubuntu's
+`apt install cargo`/`rustc`, which ships 1.75) is too old — install Rust via
+[rustup](https://rustup.rs) instead:
+
+```bash
+sudo apt install -y rustup   # or: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup default stable
+```
+
+Make sure `~/.cargo/bin` comes before any distro Rust on your `PATH`, then
+verify with `cargo --version` (should be ≥1.87). If you already have
+`cargo`/`rustc` installed via `apt`, remove them (`sudo apt remove cargo
+rustc`) to avoid `PATH` ambiguity.
+
 ### Install development tools
 
 ```bash
@@ -33,6 +50,28 @@ cargo install cargo-llvm-cov grcov && rustup component add llvm-tools
 - **cargo-llvm-cov**: LLVM source-based code coverage instrumentation
 - **grcov**: HTML coverage report generator
 - **llvm-tools**: LLVM binaries required by cargo-llvm-cov
+
+### Additional tools for C/Python bindings and full verification
+
+The Rust-only workflow above (`cargo build`, `cargo test`, `cargo xtask ...`)
+is enough to work on the core library. The repo also ships C bindings
+(`bindings/c/`) and Python bindings (`bindings/python/`), built and tested
+through the top-level `Makefile`:
+
+```bash
+sudo apt install -y cmake python3-venv
+make init      # one-shot: submodules + Python venv + bindings/python[dev]
+make build     # builds Rust (release, with `ffi` feature), C, and Python bindings
+make verify    # format-check + lint + Rust/C/Python tests (what CI/pre-commit run)
+```
+
+`make init-hooks` (run as part of `make build`) installs a pre-commit hook
+(`.githooks/pre-commit`) that runs `make verify-sandbox` before every commit;
+bypass with `git commit --no-verify` if needed.
+
+Docker is required for `cargo xtask coverage-all` and for the opt-in
+multilanguage integration tests (`make test-multilanguage`), which spin up
+per-language gRPC server containers via testcontainers.
 
 ## Directory Structure
 
