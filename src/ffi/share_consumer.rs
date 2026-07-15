@@ -52,7 +52,7 @@
 #![allow(non_snake_case, non_camel_case_types)]
 
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +60,7 @@ use std::time::Duration;
 
 use crate::common::serialization::BytesDeserializer;
 use crate::common::{KafkaError, TopicIdPartition, Uuid};
+use crate::consumer::acknowledgement_commit_callback::AcknowledgementCommitCallback;
 use crate::consumer::{
     AcknowledgeType, ConsumerRecord, MockShareConsumer, ShareConsumer, ShareConsumerConfig, WakeupHandle,
     new_share_consumer_with_wakeup,
@@ -1598,6 +1599,290 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_acquisition_lock_timeout_m
 }
 
 // ---------------------------------------------------------------------------
+// ShareAcknowledgeOffsets — the registered ack-commit callback payload
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to the completed offsets delivered to a registered
+/// acknowledgement-commit callback (`Map<TopicIdPartition, Set<Long>>`).
+///
+/// **Owned by the C callback**: the callback receives it, reads it, and frees it
+/// with [`kafka_consumer_ShareAcknowledgeOffsets_destroy`] (unlike the borrowed
+/// result-container sub-handles).
+#[repr(C)]
+pub struct kafka_consumer_ShareAcknowledgeOffsets_t {
+    _private: [u8; 0],
+}
+
+/// Owns the completed partitions in a deterministic order, each paired with its
+/// sorted list of completed offsets, for stable indexed access.
+struct ShareAcknowledgeOffsetsInner {
+    partitions: Vec<TopicIdPartitionInner>,
+    /// `offsets[i]` are the completed offsets for `partitions[i]`, sorted ascending.
+    offsets: Vec<Vec<i64>>,
+}
+
+/// Marshals the **borrowed** completed-offsets map into an owned handle. Called
+/// from the ack-commit callback before its borrow ends; partitions are sorted by
+/// `(topic, partition)` and each partition's offsets ascending, so the C side
+/// sees a deterministic layout.
+fn box_share_acknowledge_offsets(
+    map: &HashMap<TopicIdPartition, HashSet<i64>>,
+) -> *mut kafka_consumer_ShareAcknowledgeOffsets_t {
+    let mut entries: Vec<(TopicIdPartitionInner, Vec<i64>)> = map
+        .iter()
+        .map(|(tip, offs)| {
+            let mut sorted: Vec<i64> = offs.iter().copied().collect();
+            sorted.sort_unstable();
+            (TopicIdPartitionInner::new(tip), sorted)
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        a.0.topic_c
+            .as_bytes()
+            .cmp(b.0.topic_c.as_bytes())
+            .then(a.0.partition.cmp(&b.0.partition))
+    });
+    let (partitions, offsets): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+    Box::into_raw(Box::new(ShareAcknowledgeOffsetsInner { partitions, offsets }))
+        as *mut kafka_consumer_ShareAcknowledgeOffsets_t
+}
+
+/// Returns the number of completed partitions, or 0 if `offsets` is null.
+///
+/// # Safety
+///
+/// `offsets` must be a valid share-acknowledge-offsets handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareAcknowledgeOffsets_partition_count(
+    offsets: *const kafka_consumer_ShareAcknowledgeOffsets_t,
+) -> i32 {
+    if offsets.is_null() {
+        return 0;
+    }
+    unsafe { &*(offsets as *const ShareAcknowledgeOffsetsInner) }.partitions.len() as i32
+}
+
+/// Returns the partition at `index` (borrowed; valid until the handle is
+/// destroyed), or null if out of range.
+///
+/// # Safety
+///
+/// `offsets` must be a valid share-acknowledge-offsets handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareAcknowledgeOffsets_get_partition(
+    offsets: *const kafka_consumer_ShareAcknowledgeOffsets_t,
+    index: i32,
+) -> *const kafka_common_TopicIdPartition_t {
+    if offsets.is_null() || index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { &*(offsets as *const ShareAcknowledgeOffsetsInner) }
+        .partitions
+        .get(index as usize)
+    {
+        Some(tip) => tip as *const TopicIdPartitionInner as *const kafka_common_TopicIdPartition_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of completed offsets for the partition at `index`, or 0 if
+/// out of range.
+///
+/// # Safety
+///
+/// `offsets` must be a valid share-acknowledge-offsets handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareAcknowledgeOffsets_offset_count(
+    offsets: *const kafka_consumer_ShareAcknowledgeOffsets_t,
+    index: i32,
+) -> i32 {
+    if offsets.is_null() || index < 0 {
+        return 0;
+    }
+    match unsafe { &*(offsets as *const ShareAcknowledgeOffsetsInner) }
+        .offsets
+        .get(index as usize)
+    {
+        Some(offs) => offs.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns the `offset_index`-th completed offset for the partition at
+/// `partition_index` (offsets are sorted ascending), or `-1` if either index is
+/// out of range.
+///
+/// # Safety
+///
+/// `offsets` must be a valid share-acknowledge-offsets handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareAcknowledgeOffsets_get_offset(
+    offsets: *const kafka_consumer_ShareAcknowledgeOffsets_t,
+    partition_index: i32,
+    offset_index: i32,
+) -> i64 {
+    if offsets.is_null() || partition_index < 0 || offset_index < 0 {
+        return -1;
+    }
+    let inner = unsafe { &*(offsets as *const ShareAcknowledgeOffsetsInner) };
+    match inner
+        .offsets
+        .get(partition_index as usize)
+        .and_then(|offs| offs.get(offset_index as usize))
+    {
+        Some(&offset) => offset,
+        None => -1,
+    }
+}
+
+/// Destroys a share-acknowledge-offsets handle. The registered callback owns the
+/// handle it receives and must call this exactly once. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `offsets` must be null or a valid share-acknowledge-offsets handle. After this
+/// call the pointer (and anything borrowed from it) is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareAcknowledgeOffsets_destroy(
+    offsets: *mut kafka_consumer_ShareAcknowledgeOffsets_t,
+) {
+    if !offsets.is_null() {
+        unsafe { drop(Box::from_raw(offsets as *mut ShareAcknowledgeOffsetsInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registered acknowledgement-commit callback
+// ---------------------------------------------------------------------------
+
+/// The non-null C ack-commit callback signature, used for internal storage once
+/// a callback has been registered. The exported ABI typedef
+/// [`kafka_consumer_ShareConsumer_AcknowledgementCommitCallback_t`] is the
+/// nullable (`Option`) form.
+type AckCommitCallbackFn = unsafe extern "C" fn(
+    *const kafka_consumer_ShareAcknowledgeOffsets_t,
+    *const kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Callback invoked when a share-group acknowledgement commit completes.
+///
+/// `offsets` is always non-null (the completed offsets); `error` is null on
+/// success or non-null on failure. The callback **takes ownership** of both
+/// non-null handles and must free them
+/// ([`kafka_consumer_ShareAcknowledgeOffsets_destroy`] and, if non-null,
+/// `kafka_common_KafkaError_destroy`).
+///
+/// Nullable at the ABI boundary: passing a null pointer to
+/// [`kafka_consumer_ShareConsumer_set_acknowledgement_commit_callback`] clears
+/// the registered callback.
+pub type kafka_consumer_ShareConsumer_AcknowledgementCommitCallback_t = Option<
+    unsafe extern "C" fn(
+        *const kafka_consumer_ShareAcknowledgeOffsets_t,
+        *const kafka_common_KafkaError_t,
+        *mut c_void,
+    ),
+>;
+
+/// The Rust `AcknowledgementCommitCallback` that bridges to a registered C
+/// callback. Stored as `Arc<dyn AcknowledgementCommitCallback>` on the consumer,
+/// so it must be `Send + Sync`: the C fn pointer and the completion sender are
+/// both `Send + Sync`, and [`SendUserData`] is too (only its pointer value is
+/// read through the shared reference).
+struct FfiAckCommitCallback {
+    callback: AckCommitCallbackFn,
+    user_data: SendUserData,
+    /// A clone of the handle's dispatcher queue, so the C callback fires on the
+    /// single dispatcher thread like every other FFI callback.
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+}
+
+/// Owned ack-commit completion payload fired on the dispatcher thread. Transfers
+/// ownership of the marshaled offsets handle and the optional boxed error to the
+/// C callback.
+struct AckCommitCompletion {
+    callback: AckCommitCallbackFn,
+    user_data: *mut c_void,
+    offsets: *mut kafka_consumer_ShareAcknowledgeOffsets_t,
+    error: *mut kafka_common_KafkaError_t,
+}
+// SAFETY: the raw pointers are owned handles moved to the dispatcher thread; the
+// C user owns the thread-safety of `user_data`.
+unsafe impl Send for AckCommitCompletion {}
+impl AckCommitCompletion {
+    /// # Safety
+    /// Must be called exactly once, on the dispatcher thread. Ownership of
+    /// `offsets` and `error` passes to the C callback.
+    unsafe fn fire(self) {
+        unsafe { (self.callback)(self.offsets, self.error as *const _, self.user_data) };
+    }
+}
+
+#[async_trait::async_trait]
+impl AcknowledgementCommitCallback for FfiAckCommitCallback {
+    async fn on_complete(&self, offsets: &HashMap<TopicIdPartition, HashSet<i64>>, error: Option<&KafkaError>) {
+        // `offsets` / `error` are BORROWED and the borrow ends when this returns.
+        // Marshal them into owned C handles now (one allocation per commit, off
+        // the per-record hot path), then hand them to a completion job. There is
+        // no `.await` between the borrow and the marshal, so the borrowed data is
+        // fully captured before it can go away.
+        let offsets_handle = box_share_acknowledge_offsets(offsets);
+        let error_handle = match error {
+            Some(e) => box_error(e.clone()),
+            None => std::ptr::null_mut(),
+        };
+        // Copy the pointer value into a fresh completion payload so the closure
+        // stays `Send` (a bare `*mut c_void` capture would not be).
+        let completion = AckCommitCompletion {
+            callback: self.callback,
+            user_data: self.user_data.0,
+            offsets: offsets_handle,
+            error: error_handle,
+        };
+        let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
+        // Route onto the shared dispatcher thread — never a tokio worker, never a
+        // per-call spawn. If the dispatcher is gone, run inline to honor the
+        // callback and free the owned handles.
+        enqueue_or_run_inline(&self.completion_tx, job);
+    }
+}
+
+/// Registers a C acknowledgement-commit callback, or clears it when `callback` is
+/// null. When registered, the callback fires on the shared dispatcher thread as
+/// each acknowledgement commit completes, receiving an owned
+/// [`kafka_consumer_ShareAcknowledgeOffsets_t`] and (on failure) an owned
+/// `kafka_common_KafkaError_t` that it must free.
+///
+/// Returns null on success, or a non-null error on a concurrent-access rejection.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle. `callback`, when non-null, must remain a
+/// valid function pointer, and `user_data`'s thread-safety is the C caller's
+/// responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ShareConsumer_set_acknowledgement_commit_callback(
+    consumer: *const kafka_consumer_ShareConsumer_t,
+    callback: kafka_consumer_ShareConsumer_AcknowledgementCommitCallback_t,
+    user_data: *mut c_void,
+) -> *mut kafka_common_KafkaError_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let registered: Option<Arc<dyn AcknowledgementCommitCallback>> = callback.map(|cb| {
+        Arc::new(FfiAckCommitCallback {
+            callback: cb,
+            user_data: SendUserData(user_data),
+            completion_tx: h.completion_tx.clone(),
+        }) as Arc<dyn AcknowledgementCommitCallback>
+    });
+    unsafe { consumer_mut(h) }.set_acknowledgement_commit_callback(registered);
+    std::ptr::null_mut()
+}
+
+// ---------------------------------------------------------------------------
 // MockShareConsumer driver methods (broker-less test support)
 //
 // These match on `ShareConsumerKind::Mock` and return `illegal_state` for the
@@ -2393,6 +2678,173 @@ mod tests {
         assert!(out_error.is_null());
         assert!(!result.is_null());
         unsafe { kafka_consumer_ShareCommitResult_destroy(result) };
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// What a stub C ack callback observed, marshaled back to owned Rust values.
+    #[derive(Debug)]
+    struct DeliveredAck {
+        /// `(topic, 16-byte topic id, partition, sorted offsets)` per partition.
+        partitions: Vec<(String, [u8; 16], i32, Vec<i64>)>,
+        error_msg: Option<String>,
+    }
+
+    /// A Rust-defined stub for the C ack-commit callback: reads every field back
+    /// out of the delivered `ShareAcknowledgeOffsets_t` (and the optional error),
+    /// frees the owned handles exactly once, then sends the observed data to the
+    /// test over a channel in `user_data`.
+    unsafe extern "C" fn send_ack_delivery(
+        offsets: *const kafka_consumer_ShareAcknowledgeOffsets_t,
+        error: *const kafka_common_KafkaError_t,
+        user_data: *mut c_void,
+    ) {
+        let mut partitions = Vec::new();
+        let pc = unsafe { kafka_consumer_ShareAcknowledgeOffsets_partition_count(offsets) };
+        for i in 0..pc {
+            let tip = unsafe { kafka_consumer_ShareAcknowledgeOffsets_get_partition(offsets, i) };
+            let topic = unsafe { CStr::from_ptr(kafka_common_TopicIdPartition_topic(tip)) }
+                .to_string_lossy()
+                .into_owned();
+            let mut id = [0u8; 16];
+            id.copy_from_slice(unsafe { std::slice::from_raw_parts(kafka_common_TopicIdPartition_topic_id(tip), 16) });
+            let part = unsafe { kafka_common_TopicIdPartition_partition(tip) };
+            let oc = unsafe { kafka_consumer_ShareAcknowledgeOffsets_offset_count(offsets, i) };
+            let offs: Vec<i64> = (0..oc)
+                .map(|j| unsafe { kafka_consumer_ShareAcknowledgeOffsets_get_offset(offsets, i, j) })
+                .collect();
+            partitions.push((topic, id, part, offs));
+        }
+        let error_msg = if error.is_null() {
+            None
+        } else {
+            Some(
+                unsafe { CStr::from_ptr(kafka_common_KafkaError_message(error)) }
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        // The callback owns the delivered handles; free them exactly once.
+        unsafe { kafka_consumer_ShareAcknowledgeOffsets_destroy(offsets as *mut _) };
+        if !error.is_null() {
+            unsafe { kafka_common_KafkaError_destroy(error as *mut _) };
+        }
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<DeliveredAck>) };
+        tx.send(DeliveredAck { partitions, error_msg }).ok();
+    }
+
+    /// Drives [`FfiAckCommitCallback::on_complete`] directly with a synthetic
+    /// completed-offsets map and a failure error, then asserts the delivered
+    /// `ShareAcknowledgeOffsets_t` has the right partitions (sorted), the offsets
+    /// sorted ascending, the topic id bytes intact, and the error message mapped.
+    /// This is the teeth for the marshaling: `MockShareConsumer`'s setter is a
+    /// no-op and never fires the callback, so end-to-end firing through the ABI
+    /// is covered by the share-consumer §31 drain tests, not here.
+    #[test]
+    fn test_ffi_ack_commit_callback_marshals_offsets_and_error() {
+        let (tx, dispatcher) = common::spawn_dispatcher("test-ack-dispatcher");
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<DeliveredAck>();
+
+        let topic_id = Uuid::new(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+        let mut map: HashMap<TopicIdPartition, HashSet<i64>> = HashMap::new();
+        map.insert(TopicIdPartition::from_parts(topic_id, 0, "t-a"), HashSet::from([10, 5, 7]));
+        map.insert(TopicIdPartition::from_parts(topic_id, 3, "t-b"), HashSet::from([1]));
+
+        let cb = FfiAckCommitCallback {
+            callback: send_ack_delivery,
+            user_data: SendUserData(&result_tx as *const _ as *mut c_void),
+            completion_tx: tx,
+        };
+
+        let err = KafkaError::with_message(Errors::InvalidRecordState, "ack failed");
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(cb.on_complete(&map, Some(&err)));
+
+        let delivered = result_rx.recv_timeout(Duration::from_secs(5)).expect("ack callback must fire");
+        assert_eq!(delivered.partitions.len(), 2);
+
+        // Sorted by (topic, partition): t-a(0) before t-b(3).
+        let (topic0, id0, part0, offs0) = &delivered.partitions[0];
+        assert_eq!(topic0, "t-a");
+        assert_eq!(*id0, topic_id.to_bytes());
+        assert_eq!(*part0, 0);
+        assert_eq!(offs0, &vec![5, 7, 10], "offsets are marshaled sorted ascending");
+
+        let (topic1, _id1, part1, offs1) = &delivered.partitions[1];
+        assert_eq!(topic1, "t-b");
+        assert_eq!(*part1, 3);
+        assert_eq!(offs1, &vec![1]);
+
+        assert_eq!(delivered.error_msg.as_deref(), Some("ack failed"));
+
+        // Drop the last sender so the dispatcher drains and exits; join to prove
+        // the completion job ran and freed its handles without leak/double-free.
+        drop(cb);
+        dispatcher.join().expect("dispatcher joins cleanly");
+    }
+
+    /// A successful acknowledgement commit delivers a non-null offsets handle and
+    /// a **null** error to the callback.
+    #[test]
+    fn test_ffi_ack_commit_callback_null_error_on_success() {
+        let (tx, dispatcher) = common::spawn_dispatcher("test-ack-dispatcher-ok");
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<DeliveredAck>();
+
+        let topic_id = Uuid::new(1, 2);
+        let mut map: HashMap<TopicIdPartition, HashSet<i64>> = HashMap::new();
+        map.insert(TopicIdPartition::from_parts(topic_id, 2, "t-ok"), HashSet::from([42]));
+
+        let cb = FfiAckCommitCallback {
+            callback: send_ack_delivery,
+            user_data: SendUserData(&result_tx as *const _ as *mut c_void),
+            completion_tx: tx,
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(cb.on_complete(&map, None));
+
+        let delivered = result_rx.recv_timeout(Duration::from_secs(5)).expect("ack callback must fire");
+        assert_eq!(delivered.partitions.len(), 1);
+        assert_eq!(delivered.partitions[0].0, "t-ok");
+        assert_eq!(delivered.partitions[0].3, vec![42]);
+        assert!(delivered.error_msg.is_none(), "a successful commit delivers a null error");
+
+        drop(cb);
+        dispatcher.join().expect("dispatcher joins cleanly");
+    }
+
+    /// A stub C ack callback that just frees the delivered handles.
+    unsafe extern "C" fn drop_ack(
+        offsets: *const kafka_consumer_ShareAcknowledgeOffsets_t,
+        error: *const kafka_common_KafkaError_t,
+        _user_data: *mut c_void,
+    ) {
+        unsafe { kafka_consumer_ShareAcknowledgeOffsets_destroy(offsets as *mut _) };
+        if !error.is_null() {
+            unsafe { kafka_common_KafkaError_destroy(error as *mut _) };
+        }
+    }
+
+    /// Registering then clearing the acknowledgement-commit callback over the ABI
+    /// succeeds and does not crash (the mock's setter is a no-op; clearing passes
+    /// `None`, which drops the stored C pointers on a production consumer).
+    #[test]
+    fn test_set_acknowledgement_commit_callback_register_then_clear() {
+        let consumer = kafka_consumer_MockShareConsumer_new();
+
+        let err = unsafe {
+            kafka_consumer_ShareConsumer_set_acknowledgement_commit_callback(
+                consumer,
+                Some(drop_ack),
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(err.is_null(), "registering a callback should succeed on the mock");
+
+        let err = unsafe {
+            kafka_consumer_ShareConsumer_set_acknowledgement_commit_callback(consumer, None, std::ptr::null_mut())
+        };
+        assert!(err.is_null(), "clearing the callback should succeed on the mock");
 
         unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
     }

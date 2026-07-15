@@ -8,7 +8,7 @@ sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
 
 [export]
 # Only export FFI types — no internal Kafka client constants or structs.
-include = ["kafka_producer_Producer_t", "kafka_producer_FutureRecordMetadata_t", "kafka_producer_RecordMetadata_t", "kafka_producer_ProducerRecord_t", "kafka_common_KafkaError_t", "kafka_consumer_ShareConsumer_t", "kafka_consumer_ShareConsumerProperties_t", "kafka_consumer_StringList_t", "kafka_consumer_ShareConsumer_op_callback_t", "kafka_consumer_ConsumerRecords_t", "kafka_consumer_ConsumerRecord_t", "kafka_consumer_ShareConsumer_poll_callback_t", "kafka_consumer_AcknowledgeType_t", "kafka_common_TopicIdPartition_t", "kafka_consumer_ShareCommitResult_t", "kafka_consumer_ShareConsumer_commit_callback_t"]
+include = ["kafka_producer_Producer_t", "kafka_producer_FutureRecordMetadata_t", "kafka_producer_RecordMetadata_t", "kafka_producer_ProducerRecord_t", "kafka_common_KafkaError_t", "kafka_consumer_ShareConsumer_t", "kafka_consumer_ShareConsumerProperties_t", "kafka_consumer_StringList_t", "kafka_consumer_ShareConsumer_op_callback_t", "kafka_consumer_ConsumerRecords_t", "kafka_consumer_ConsumerRecord_t", "kafka_consumer_ShareConsumer_poll_callback_t", "kafka_consumer_AcknowledgeType_t", "kafka_common_TopicIdPartition_t", "kafka_consumer_ShareCommitResult_t", "kafka_consumer_ShareConsumer_commit_callback_t", "kafka_consumer_ShareAcknowledgeOffsets_t", "kafka_consumer_ShareConsumer_AcknowledgementCommitCallback_t"]
 item_types = ["functions", "structs", "typedefs", "enums"]
 
 [fn]
