@@ -31,8 +31,6 @@ pub struct ListTopicsResult {
 
 impl ListTopicsResult {
     /// Creates a result wrapping the topic-listing future.
-    // Wired by KafkaAdminClient::list_topics (next commit).
-    #[allow(dead_code)]
     pub(crate) fn new(future: KafkaFuture<HashMap<String, TopicListing>>) -> Self {
         Self { future }
     }
