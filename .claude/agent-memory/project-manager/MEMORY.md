@@ -1,1 +1,3 @@
 - [Phase 8a.3 dropped](phase_8a3_dropped.md) — post-8a.2 perf collapse is broker-end, not a sub-phase; no NOTES.md addendum
+- [Milestone 11 scope: Rust-only](milestone11_scope_rust_only.md) — AdminClient task is Rust core + tests only; C FFI/Python bindings deferred to a future task (reuse PR #116)
+- [Milestone 11 agent numbering](milestone11_agent_numbering.md) — N=1 = Milestone 11 AdminClient (Actor/Critic); N=0 was message-layer work

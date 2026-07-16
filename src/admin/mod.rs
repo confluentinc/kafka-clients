@@ -25,6 +25,7 @@ pub mod config_entry;
 pub mod create_topics_result;
 pub mod delete_topics_result;
 pub mod describe_topics_result;
+pub mod kafka_admin_client;
 pub mod list_topics_result;
 pub mod mock_admin_client;
 pub mod new_topic;
@@ -32,12 +33,15 @@ pub mod options;
 pub mod topic_description;
 pub mod topic_listing;
 
+pub(crate) mod internals;
+
 pub use admin_client_config::AdminClientConfig;
 pub use config::Config;
 pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
 pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
 pub use delete_topics_result::DeleteTopicsResult;
 pub use describe_topics_result::DescribeTopicsResult;
+pub use kafka_admin_client::KafkaAdminClient;
 pub use list_topics_result::ListTopicsResult;
 pub use mock_admin_client::MockAdminClient;
 pub use new_topic::NewTopic;
@@ -49,7 +53,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::common::TopicCollection;
+use crate::common::{KafkaError, TopicCollection};
 
 /// The administrative client for Kafka, which supports managing and inspecting
 /// topics, brokers, configurations and records.
@@ -91,4 +95,18 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.close(Duration)`; blocking in Java, so `async` in
     /// Rust (CLAUDE.md §9.4).
     async fn close(&self, timeout: Duration);
+}
+
+/// Creates a network-backed [`Admin`] client from the given configuration.
+///
+/// Corresponds to `Admin.create(Properties)` / `AdminClient.create`. Spawns the
+/// single background I/O task. Phase 1 supports the PLAINTEXT security protocol
+/// only.
+///
+/// # Errors
+///
+/// Returns an error if the bootstrap addresses cannot be resolved or the
+/// network client cannot be constructed.
+pub fn new_admin_client(config: AdminClientConfig) -> Result<Box<dyn Admin>, KafkaError> {
+    Ok(Box::new(KafkaAdminClient::from_config(config)?))
 }
