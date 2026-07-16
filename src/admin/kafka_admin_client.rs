@@ -1703,10 +1703,14 @@ impl Admin for KafkaAdminClient {
                 };
                 let error = Errors::for_code(describe_response.data().error_code);
                 if error != Errors::None {
-                    return HandleResult::Retry(api_error(
-                        describe_response.data().error_code,
-                        &describe_response.data().error_message,
-                    ));
+                    // Mirrors Java's `handleFailure(error.exception(errorMessage))`:
+                    // fail all four futures directly rather than retrying.
+                    let err = api_error(describe_response.data().error_code, &describe_response.data().error_message);
+                    resp_nodes.complete_exceptionally(err.clone());
+                    resp_controller.complete_exceptionally(err.clone());
+                    resp_cluster_id.complete_exceptionally(err.clone());
+                    resp_authorized.complete_exceptionally(err);
+                    return HandleResult::Done;
                 }
                 let nodes = describe_response.nodes();
                 let controller_id = describe_response.data().controller_id;
@@ -3319,6 +3323,454 @@ mod tests {
         let mock = MockAdminClient::create(1);
         let result = mock.delete_records(&HashMap::new(), DeleteRecordsOptions::new());
         assert!(result.low_watermarks().is_empty());
+    }
+
+    // --- describeCluster -----------------------------------------------------
+
+    use crate::admin::{
+        AlterConfigOp, AlterConfigsOptions, DescribeClusterOptions, DescribeConfigsOptions, ListConfigResourcesOptions,
+        OpType,
+    };
+    use crate::common::acl::AclOperation;
+    use crate::common::config::{ConfigResource, ConfigResourceType};
+    use crate::common::requests::{
+        DescribeClusterResponse, DescribeConfigsResponse, IncrementalAlterConfigsResponse, ListConfigResourcesResponse,
+    };
+    use crate::describe_cluster_response_data::{DescribeClusterBroker, DescribeClusterResponseData};
+    use crate::describe_configs_response_data::{
+        DescribeConfigsResponseData, DescribeConfigsResult as WireDescribeConfigsResult,
+    };
+    use crate::incremental_alter_configs_response_data::{
+        AlterConfigsResourceResponse, IncrementalAlterConfigsResponseData,
+    };
+    use crate::list_config_resources_response_data::{
+        ConfigResource as WireConfigResource, ListConfigResourcesResponseData,
+    };
+
+    fn describe_cluster_response(
+        controller_id: i32,
+        brokers: &[Node],
+        cluster_id: &str,
+        authorized_ops: i32,
+    ) -> ConcreteResponse {
+        let mut data = DescribeClusterResponseData::new();
+        data.set_error_code(Errors::None.code());
+        data.set_controller_id(controller_id);
+        data.set_cluster_id(cluster_id.to_string());
+        data.set_cluster_authorized_operations(authorized_ops);
+        let wire_brokers = brokers
+            .iter()
+            .map(|n| {
+                let mut b = DescribeClusterBroker::new();
+                b.set_broker_id(n.id());
+                b.set_host(n.host().to_string());
+                b.set_port(n.port());
+                b.set_rack(n.rack().map(str::to_string));
+                b
+            })
+            .collect();
+        data.set_brokers(wire_brokers);
+        ConcreteResponse::DescribeCluster(DescribeClusterResponse::new(data))
+    }
+
+    #[tokio::test]
+    async fn test_describe_cluster() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let cluster_id = "mock-cluster";
+
+        // First call: authorized operations omitted, controller id 2.
+        runnable.client_mut().prepare_response(describe_cluster_response(
+            2,
+            &nodes,
+            cluster_id,
+            AUTHORIZED_OPERATIONS_OMITTED,
+        ));
+        let result = admin.describe_cluster(DescribeClusterOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
+        let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
+        assert_eq!(got, nodes.iter().cloned().collect());
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
+        assert_eq!(result.authorized_operations().get().await.unwrap(), None);
+
+        // Second call: authorized operations DESCRIBE|ALTER, controller id 1.
+        let ops = (1 << AclOperation::Describe.code()) | (1 << AclOperation::Alter.code());
+        runnable
+            .client_mut()
+            .prepare_response(describe_cluster_response(1, &nodes, cluster_id, ops));
+        let result2 = admin.describe_cluster(DescribeClusterOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(result2.controller().get().await.unwrap().unwrap().id(), 1);
+        let expected: BTreeSet<AclOperation> = [AclOperation::Describe, AclOperation::Alter].into_iter().collect();
+        assert_eq!(result2.authorized_operations().get().await.unwrap(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn test_describe_cluster_handle_error() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let error_message = "my error";
+        let mut data = DescribeClusterResponseData::new();
+        data.set_error_code(Errors::InvalidRequest.code());
+        data.set_error_message(Some(error_message.to_string()));
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::DescribeCluster(DescribeClusterResponse::new(data)));
+
+        let result = admin.describe_cluster(DescribeClusterOptions::new());
+        pump(&mut runnable, 5).await;
+        for err in [
+            result.cluster_id().get().await.unwrap_err(),
+            result.controller().get().await.unwrap_err(),
+            result.nodes().get().await.unwrap_err(),
+            result.authorized_operations().get().await.unwrap_err(),
+        ] {
+            assert_eq!(err.error(), Errors::InvalidRequest);
+            assert!(err.message().contains(error_message), "message was: {}", err.message());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_describe_cluster_fail_back() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let cluster_id = "mock-cluster";
+        // Reject the DescribeCluster request with an unsupported version, then
+        // answer the Metadata fallback.
+        runnable.client_mut().prepare_unsupported_version_response();
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some(cluster_id),
+                2,
+                Vec::new(),
+            )));
+
+        let result = admin.describe_cluster(DescribeClusterOptions::new());
+        pump(&mut runnable, 8).await;
+        assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
+        let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
+        assert_eq!(got, nodes.iter().cloned().collect());
+        assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
+        assert_eq!(result.authorized_operations().get().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_describe_cluster_unsupported_version_for_fenced_brokers() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        // includeFencedBrokers=true: an UnsupportedVersion must NOT fall back to
+        // the Metadata request; it propagates as UnsupportedVersion.
+        runnable.client_mut().prepare_unsupported_version_response();
+        let result = admin.describe_cluster(DescribeClusterOptions::new().include_fenced_brokers(true));
+        pump(&mut runnable, 8).await;
+        let err = result.nodes().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    // --- describeConfigs -----------------------------------------------------
+
+    fn describe_configs_result(name: &str, type_id: i8, error: Errors) -> WireDescribeConfigsResult {
+        let mut r = WireDescribeConfigsResult::new();
+        r.set_resource_name(name.to_string());
+        r.set_resource_type(type_id);
+        r.set_error_code(error.code());
+        r.set_configs(Vec::new());
+        r
+    }
+
+    fn describe_configs_response(results: Vec<WireDescribeConfigsResult>) -> ConcreteResponse {
+        let mut data = DescribeConfigsResponseData::new();
+        data.set_results(results);
+        ConcreteResponse::DescribeConfigs(DescribeConfigsResponse::new(data))
+    }
+
+    #[tokio::test]
+    async fn test_describe_broker_configs() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let broker0 = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let broker1 = ConfigResource::new(ConfigResourceType::Broker, "1".to_string());
+        runnable.client_mut().prepare_response_for_node(
+            describe_configs_response(vec![describe_configs_result(
+                "0",
+                ConfigResourceType::Broker.id(),
+                Errors::None,
+            )]),
+            &nodes[0],
+        );
+        runnable.client_mut().prepare_response_for_node(
+            describe_configs_response(vec![describe_configs_result(
+                "1",
+                ConfigResourceType::Broker.id(),
+                Errors::None,
+            )]),
+            &nodes[1],
+        );
+        let result = admin.describe_configs(&[broker0.clone(), broker1.clone()], DescribeConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
+        assert_eq!(keys, [broker0.clone(), broker1.clone()].into_iter().collect());
+        result.values().get(&broker0).unwrap().get().await.unwrap();
+        result.values().get(&broker1).unwrap().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_describe_broker_and_log_configs() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let broker = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let broker_logger = ConfigResource::new(ConfigResourceType::BrokerLogger, "0".to_string());
+        // Both broker and broker-logger resources for node 0 go to node 0 in one
+        // request.
+        runnable.client_mut().prepare_response_for_node(
+            describe_configs_response(vec![
+                describe_configs_result("0", ConfigResourceType::Broker.id(), Errors::None),
+                describe_configs_result("0", ConfigResourceType::BrokerLogger.id(), Errors::None),
+            ]),
+            &nodes[0],
+        );
+        let result = admin.describe_configs(&[broker.clone(), broker_logger.clone()], DescribeConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
+        assert_eq!(keys, [broker.clone(), broker_logger.clone()].into_iter().collect());
+        result.values().get(&broker).unwrap().get().await.unwrap();
+        result.values().get(&broker_logger).unwrap().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_describe_configs_partial_response() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let topic = ConfigResource::new(ConfigResourceType::Topic, "topic".to_string());
+        let topic2 = ConfigResource::new(ConfigResourceType::Topic, "topic2".to_string());
+        // The (single, least-loaded) response only contains `topic`.
+        runnable
+            .client_mut()
+            .prepare_response(describe_configs_response(vec![describe_configs_result(
+                "topic",
+                ConfigResourceType::Topic.id(),
+                Errors::None,
+            )]));
+        let result = admin.describe_configs(&[topic.clone(), topic2.clone()], DescribeConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
+        assert_eq!(keys, [topic.clone(), topic2.clone()].into_iter().collect());
+        result.values().get(&topic).unwrap().get().await.unwrap();
+        assert!(result.values().get(&topic2).unwrap().get().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_describe_configs_unrequested() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let topic = ConfigResource::new(ConfigResourceType::Topic, "topic".to_string());
+        // Response contains an extra, unrequested resource; it is ignored.
+        runnable.client_mut().prepare_response(describe_configs_response(vec![
+            describe_configs_result("topic", ConfigResourceType::Topic.id(), Errors::None),
+            describe_configs_result("unrequested", ConfigResourceType::Topic.id(), Errors::None),
+        ]));
+        let result = admin.describe_configs(std::slice::from_ref(&topic), DescribeConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
+        assert_eq!(keys, [topic.clone()].into_iter().collect());
+        result.values().get(&topic).unwrap().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_describe_client_metrics_configs() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let sub1 = ConfigResource::new(ConfigResourceType::ClientMetrics, "sub1".to_string());
+        let sub2 = ConfigResource::new(ConfigResourceType::ClientMetrics, "sub2".to_string());
+        runnable.client_mut().prepare_response(describe_configs_response(vec![
+            describe_configs_result("sub1", ConfigResourceType::ClientMetrics.id(), Errors::None),
+            describe_configs_result("sub2", ConfigResourceType::ClientMetrics.id(), Errors::None),
+        ]));
+        let result = admin.describe_configs(&[sub1.clone(), sub2.clone()], DescribeConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
+        assert_eq!(keys, [sub1.clone(), sub2.clone()].into_iter().collect());
+        result.values().get(&sub1).unwrap().get().await.unwrap();
+        result.values().get(&sub2).unwrap().get().await.unwrap();
+    }
+
+    // --- incrementalAlterConfigs ---------------------------------------------
+
+    fn alter_configs_resource_response(
+        name: &str,
+        type_id: i8,
+        error: Errors,
+        message: &str,
+    ) -> AlterConfigsResourceResponse {
+        let mut r = AlterConfigsResourceResponse::new();
+        r.set_resource_name(name.to_string());
+        r.set_resource_type(type_id);
+        r.set_error_code(error.code());
+        r.set_error_message(Some(message.to_string()));
+        r
+    }
+
+    fn incremental_alter_configs_response(responses: Vec<AlterConfigsResourceResponse>) -> ConcreteResponse {
+        let mut data = IncrementalAlterConfigsResponseData::new();
+        data.set_responses(responses);
+        ConcreteResponse::IncrementalAlterConfigs(IncrementalAlterConfigsResponse::new(data))
+    }
+
+    #[tokio::test]
+    async fn test_incremental_alter_configs() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let broker_resource = ConfigResource::new(ConfigResourceType::Broker, String::new());
+        let topic_resource = ConfigResource::new(ConfigResourceType::Topic, "topic1".to_string());
+        let metric_resource = ConfigResource::new(ConfigResourceType::ClientMetrics, "metric1".to_string());
+        let group_resource = ConfigResource::new(ConfigResourceType::Group, "group1".to_string());
+
+        // Error scenario: all four resources are least-loaded-routed (default
+        // broker, topic, client-metrics, group all have node_for == None), so a
+        // single request fails per-resource.
+        runnable.client_mut().prepare_response(incremental_alter_configs_response(vec![
+            alter_configs_resource_response(
+                "",
+                ConfigResourceType::Broker.id(),
+                Errors::ClusterAuthorizationFailed,
+                "authorization error",
+            ),
+            alter_configs_resource_response(
+                "metric1",
+                ConfigResourceType::ClientMetrics.id(),
+                Errors::InvalidRequest,
+                "Subscription is not allowed",
+            ),
+            alter_configs_resource_response(
+                "topic1",
+                ConfigResourceType::Topic.id(),
+                Errors::InvalidRequest,
+                "Config value append is not allowed for config",
+            ),
+            alter_configs_resource_response(
+                "group1",
+                ConfigResourceType::Group.id(),
+                Errors::InvalidConfig,
+                "Unknown group config name: group.initial.rebalance.delay.ms",
+            ),
+        ]));
+
+        let op1 = AlterConfigOp::new(
+            ConfigEntry::new("log.segment.bytes".to_string(), Some("1073741".to_string())),
+            OpType::Set,
+        );
+        let op2 = AlterConfigOp::new(
+            ConfigEntry::new("compression.type".to_string(), Some("gzip".to_string())),
+            OpType::Append,
+        );
+        let op3 = AlterConfigOp::new(
+            ConfigEntry::new("interval.ms".to_string(), Some("1000".to_string())),
+            OpType::Append,
+        );
+        let op4 = AlterConfigOp::new(
+            ConfigEntry::new("group.initial.rebalance.delay.ms".to_string(), Some("1000".to_string())),
+            OpType::Set,
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(broker_resource.clone(), vec![op1.clone()]);
+        configs.insert(topic_resource.clone(), vec![op2]);
+        configs.insert(metric_resource.clone(), vec![op3.clone()]);
+        configs.insert(group_resource.clone(), vec![op4.clone()]);
+
+        let result = admin.incremental_alter_configs(&configs, AlterConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        assert_eq!(
+            result.values().get(&broker_resource).unwrap().get().await.unwrap_err().error(),
+            Errors::ClusterAuthorizationFailed
+        );
+        assert_eq!(
+            result.values().get(&topic_resource).unwrap().get().await.unwrap_err().error(),
+            Errors::InvalidRequest
+        );
+        assert_eq!(
+            result.values().get(&metric_resource).unwrap().get().await.unwrap_err().error(),
+            Errors::InvalidRequest
+        );
+        assert_eq!(
+            result.values().get(&group_resource).unwrap().get().await.unwrap_err().error(),
+            Errors::InvalidConfig
+        );
+
+        // Success scenario.
+        runnable.client_mut().prepare_response(incremental_alter_configs_response(vec![
+            alter_configs_resource_response("", ConfigResourceType::Broker.id(), Errors::None, ""),
+            alter_configs_resource_response("metric1", ConfigResourceType::ClientMetrics.id(), Errors::None, ""),
+            alter_configs_resource_response("group1", ConfigResourceType::Group.id(), Errors::None, ""),
+        ]));
+        let mut success = HashMap::new();
+        success.insert(broker_resource, vec![op1]);
+        success.insert(metric_resource, vec![op3]);
+        success.insert(group_resource, vec![op4]);
+        let result = admin.incremental_alter_configs(&success, AlterConfigsOptions::new());
+        pump(&mut runnable, 8).await;
+        result.all().get().await.unwrap();
+    }
+
+    // --- listConfigResources -------------------------------------------------
+
+    fn list_config_resources_response(error: Errors, resources: &[(&str, i8)]) -> ConcreteResponse {
+        let mut data = ListConfigResourcesResponseData::new();
+        data.set_error_code(error.code());
+        let wire = resources
+            .iter()
+            .map(|(name, type_id)| {
+                let mut r = WireConfigResource::new();
+                r.set_resource_name((*name).to_string());
+                r.set_resource_type(*type_id);
+                r
+            })
+            .collect();
+        data.set_config_resources(wire);
+        ConcreteResponse::ListConfigResources(ListConfigResourcesResponse::new(data))
+    }
+
+    #[tokio::test]
+    async fn test_list_config_resources() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let expected = [
+            ("client-metrics", ConfigResourceType::ClientMetrics.id()),
+            ("1", ConfigResourceType::Broker.id()),
+            ("1", ConfigResourceType::BrokerLogger.id()),
+            ("topic", ConfigResourceType::Topic.id()),
+            ("group", ConfigResourceType::Group.id()),
+        ];
+        runnable
+            .client_mut()
+            .prepare_response(list_config_resources_response(Errors::None, &expected));
+        let result = admin.list_config_resources(&HashSet::new(), ListConfigResourcesOptions::new());
+        pump(&mut runnable, 5).await;
+        let listed = result.all().get().await.unwrap();
+        assert_eq!(listed.len(), expected.len());
+        let expected_set: HashSet<ConfigResource> = expected
+            .iter()
+            .map(|(name, type_id)| ConfigResource::new(ConfigResourceType::for_id(*type_id), (*name).to_string()))
+            .collect();
+        assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected_set);
+    }
+
+    #[tokio::test]
+    async fn test_list_config_resources_empty() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(list_config_resources_response(Errors::None, &[]));
+        let result = admin.list_config_resources(&HashSet::new(), ListConfigResourcesOptions::new());
+        pump(&mut runnable, 5).await;
+        assert!(result.all().get().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_config_resources_not_supported() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
+        let mut types = HashSet::new();
+        types.insert(ConfigResourceType::Unknown);
+        let result = admin.list_config_resources(&types, ListConfigResourcesOptions::new());
+        pump(&mut runnable, 5).await;
+        let err = result.all().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
 
     // Branch (2) coverage at the `Call` bridge: the `maybe_retry` hook installed
