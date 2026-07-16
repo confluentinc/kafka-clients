@@ -15,6 +15,8 @@
 """Test suite for the Python KIP-932 share consumer (MockShareConsumer-driven)."""
 
 import gc
+import sys
+import weakref
 
 import pytest
 from producer import KafkaError
@@ -259,6 +261,13 @@ def test_wakeup_after_close_is_noop():
 # clear lifecycle is tested over the boundary, and the marshaling the callback
 # performs is tested by driving the wrapper's bridge closure directly with the
 # raw structures the C trampoline would hand it.
+#
+# The extension's INCREF-on-set / DECREF-on-clear balance is the novel refcount
+# path, so it gets real teeth below via sys.getrefcount / weakref probes on the
+# registered bridge. The C trampoline itself — its owned-handle destroys and its
+# deliberate lack of a per-call DECREF — can only run against a live broker and
+# is covered at the FFI / share-consumer layers, since the mock's no-op setter
+# can never fire it.
 
 def test_set_and_clear_ack_commit_callback():
     with MockShareConsumer() as c:
@@ -322,6 +331,68 @@ def test_ack_commit_bridge_marshals_to_value_types():
     assert "boom" in str(err1)
     assert err1.is_retriable is True
     assert err1.is_fatal is False
+
+
+# -- registered ack-commit callback: C refcount balance ----------------------
+#
+# Wrapper-attribute tracking (tested above) is independent of the extension's
+# INCREF/DECREF, so these probe the actual refcount. A missing or double INCREF
+# changes what getrefcount reads; a leaked INCREF keeps the weakref target alive
+# past the point the bridge should have been freed.
+
+def test_ack_commit_callback_incref_is_exactly_one():
+    with MockShareConsumer() as c:
+        c.set_acknowledgement_commit_callback(lambda offs, err: None)
+        # Three live references to the bridge: the wrapper attribute, the single
+        # extension INCREF, and the temporary argument to getrefcount. A missing
+        # INCREF would read 2; a double INCREF would read 4.
+        assert sys.getrefcount(c._ack_commit_bridge) == 3
+
+
+def test_ack_commit_callback_released_on_clear():
+    with MockShareConsumer() as c:
+        c.set_acknowledgement_commit_callback(lambda offs, err: None)
+        ref = weakref.ref(c._ack_commit_bridge)
+        assert ref() is not None
+        c.set_acknowledgement_commit_callback(None)
+        gc.collect()
+        # Attribute dropped and extension INCREF released, so nothing keeps the
+        # bridge alive; a leaked INCREF would.
+        assert ref() is None
+
+
+def test_ack_commit_callback_released_on_replace():
+    with MockShareConsumer() as c:
+        c.set_acknowledgement_commit_callback(lambda offs, err: None)
+        old_ref = weakref.ref(c._ack_commit_bridge)
+        c.set_acknowledgement_commit_callback(lambda offs, err: None)
+        gc.collect()
+        assert old_ref() is None                           # previous bridge freed
+        assert sys.getrefcount(c._ack_commit_bridge) == 3  # new one is balanced
+
+
+def test_ack_commit_callback_no_leak_over_many_cycles():
+    refs = []
+    with MockShareConsumer() as c:
+        for _ in range(200):
+            c.set_acknowledgement_commit_callback(lambda offs, err: None)
+            refs.append(weakref.ref(c._ack_commit_bridge))
+            c.set_acknowledgement_commit_callback(None)
+        gc.collect()
+        # If any cycle leaked its INCREF, that cycle's bridge would still be live.
+        assert sum(1 for r in refs if r() is not None) == 0
+
+
+def test_ack_commit_callback_released_on_close():
+    c = MockShareConsumer()
+    c.set_acknowledgement_commit_callback(lambda offs, err: None)
+    ref = weakref.ref(c._ack_commit_bridge)
+    assert ref() is not None
+    c.close()
+    gc.collect()
+    # close() clears the still-registered callback, releasing the extension
+    # INCREF instead of leaking it.
+    assert ref() is None
 
 
 # -- value-type conversions --------------------------------------------------

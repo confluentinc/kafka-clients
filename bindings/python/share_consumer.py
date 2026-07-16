@@ -230,7 +230,13 @@ class _ShareConsumerBase:
         acknowledgement commit completes. The callback receives
         ``(offsets, error)`` where ``offsets`` is a
         ``dict[TopicIdPartition, set[int]]`` and ``error`` is a
-        :class:`KafkaError` or ``None``."""
+        :class:`KafkaError` or ``None``.
+
+        The registered callback is retained until it is cleared or the consumer
+        is closed. A consumer that still has a callback registered must be
+        closed (or used as a context manager) to release it — dropping it
+        without closing leaks the callback closure, the same must-close contract
+        that already applies to the consumer handle itself."""
         if callback is not None and not callable(callback):
             raise TypeError("callback must be callable or None")
         old = self._ack_commit_bridge
@@ -331,7 +337,11 @@ class _ShareConsumerBase:
 class ShareConsumer(_ShareConsumerBase):
     """A synchronous share consumer. Blocking methods submit an async FFI op and
     wait on an interruptible event, so ``KeyboardInterrupt`` is honored promptly
-    (translated into a Rust-side ``wakeup``)."""
+    (translated into a Rust-side ``wakeup``).
+
+    A consumer owns native resources (and, if one is registered, an
+    acknowledgement-commit callback) that are only released by :meth:`close`;
+    always close it explicitly or use it as a context manager."""
 
     def __enter__(self):
         return self
@@ -408,6 +418,13 @@ class ShareConsumer(_ShareConsumerBase):
             self._run_sync(*self._close_spec())
         finally:
             self._destroy()
+            # A rejected pre-close clear (only reachable on a real consumer under
+            # concurrent misuse) leaves the extension's INCREF held — Rust keeps
+            # the callable as opaque user_data and can't DECREF it on destroy, so
+            # that one closure leaks. Drop the wrapper's own reference regardless
+            # so a closed consumer never dangles a bridge; there's no UAF because
+            # the dispatcher is gone and the stale callback can't fire.
+            self._ack_commit_bridge = None
 
 
 # --------------------------------------------------------------------------
