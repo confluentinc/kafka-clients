@@ -1,11 +1,15 @@
 version: v1.0
 name: Build Python wheels
 
-# Builds the Python binding wheels for each target architecture with
-# cibuildwheel: for every target Python version it compiles the C extension
-# (_confluentkafka.c) inside manylinux_2_28 against the Rust library pulled
-# from the artifact store, then repairs the wheel with auditwheel so the .so
-# is vendored in and the wheel gets the manylinux_2_28 tag.
+# Builds the Python binding wheels with cibuildwheel and verifies them.
+#   Build blocks:  compile the C extension (_confluentkafka.c) inside
+#     manylinux_2_28 against the Rust library pulled from the artifact store,
+#     repair with auditwheel (vendors the .so + stamps the manylinux tag), and
+#     push the wheels to the artifact store.
+#   Verify blocks: pull the wheels and install + import them (1) on the runner
+#     across every Python version, and (2) on bare Linux distro containers via
+#     .semaphore/test-wheels.sh -- proving the wheels are self-contained and
+#     portable across distros / glibc versions.
 
 agent:
   machine:
@@ -26,10 +30,9 @@ global_job_config:
       - checkout
       - sem-version python 3.11
       - python -m pip install --upgrade pip
-      - python -m pip install cibuildwheel==3.2.1
 
 blocks:
-  - name: "Python wheel: Linux x64"
+  - name: "Build wheels: Linux x64"
     dependencies: []
     task:
       agent:
@@ -39,20 +42,23 @@ blocks:
         - name: ARCH
           value: x64
       jobs:
-        - name: build-and-verify
+        - name: build
           commands:
+            - python -m pip install cibuildwheel==3.2.1
             # Stage the Rust library + header inside the package dir so the
             # cibuildwheel container can see them.
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
             - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            # cibuildwheel copies the whole repo to /project and builds the
+            # subdir, so $PWD is the repo root -- point at bindings/python/native.
+            # Keep $PWD literal; cibuildwheel expands it inside the container.
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/bindings/python/native/lib'
-            - export CIBW_TEST_COMMAND='python -c "import _confluentkafka; print('"'"'import OK'"'"')"'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
 
-  - name: "Python wheel: Linux arm64"
+  - name: "Build wheels: Linux arm64"
     dependencies: []
     task:
       agent:
@@ -62,13 +68,87 @@ blocks:
         - name: ARCH
           value: arm64
       jobs:
-        - name: build-and-verify
+        - name: build
           commands:
+            - python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
             - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/bindings/python/native/lib'
-            - export CIBW_TEST_COMMAND='python -c "import _confluentkafka; print('"'"'import OK'"'"')"'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
+
+  - name: "Verify wheels: Linux x64"
+    dependencies:
+      - "Build wheels: Linux x64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - |
+              set -e
+              for py in 3.10 3.11 3.12 3.13 3.14; do
+                echo "== verifying on Python $py =="
+                sem-version python "$py" || { echo "Python $py not available -- skipping"; continue; }
+                rm -rf "/tmp/v$py"
+                python -m venv "/tmp/v$py"
+                . "/tmp/v$py/bin/activate"
+                python -m pip install --upgrade pip >/dev/null
+                python -m pip install --no-index --find-links wheelhouse confluent-kafka-rust-python
+                python -c "import _confluentkafka; print('import OK on Python $py')"
+                # Run the binding unit tests against the installed wheel from a
+                # neutral dir so 'import producer' resolves to the wheel, not src.
+                python -m pip install pytest >/dev/null
+                testtmp=$(mktemp -d); cp -r bindings/python/test "$testtmp/"
+                ( cd "$testtmp" && python -m pytest test/unit -q )
+                rm -rf "$testtmp"
+                deactivate
+              done
+            # Portability check: install + import on bare Linux distros.
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Verify wheels: Linux arm64"
+    dependencies:
+      - "Build wheels: Linux arm64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - |
+              set -e
+              for py in 3.10 3.11 3.12 3.13 3.14; do
+                echo "== verifying on Python $py =="
+                sem-version python "$py" || { echo "Python $py not available -- skipping"; continue; }
+                rm -rf "/tmp/v$py"
+                python -m venv "/tmp/v$py"
+                . "/tmp/v$py/bin/activate"
+                python -m pip install --upgrade pip >/dev/null
+                python -m pip install --no-index --find-links wheelhouse confluent-kafka-rust-python
+                python -c "import _confluentkafka; print('import OK on Python $py')"
+                # Run the binding unit tests against the installed wheel from a
+                # neutral dir so 'import producer' resolves to the wheel, not src.
+                python -m pip install pytest >/dev/null
+                testtmp=$(mktemp -d); cp -r bindings/python/test "$testtmp/"
+                ( cd "$testtmp" && python -m pytest test/unit -q )
+                rm -rf "$testtmp"
+                deactivate
+              done
+            # Portability check: install + import on bare Linux distros.
+            - sh .semaphore/test-wheels.sh wheelhouse
