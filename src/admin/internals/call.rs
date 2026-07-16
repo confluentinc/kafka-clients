@@ -69,8 +69,6 @@ pub(crate) enum HandleResult {
 /// Strategy for selecting the target node of a [`Call`].
 ///
 /// Corresponds to the `NodeProvider` implementations in `KafkaAdminClient`.
-/// `LeastLoadedBrokerOrActiveKController` is still deferred (it is only needed
-/// for `bootstrap.controllers`, unsupported here — `.claude/rules/admin-client.md` §2).
 pub(crate) enum NodeProvider {
     /// Targets the cluster controller (createTopics / deleteTopics /
     /// createPartitions).
@@ -78,6 +76,14 @@ pub(crate) enum NodeProvider {
     /// Targets the least-loaded broker (listTopics / describeTopics, driver
     /// lookup requests).
     LeastLoaded,
+    /// Targets the least-loaded broker, or the active controller when the
+    /// client uses `bootstrap.controllers` (KIP-919). Mirrors
+    /// `LeastLoadedBrokerOrActiveKController`. Because `bootstrap.controllers`
+    /// is unsupported here (`using_bootstrap_controllers()` is always false),
+    /// its `provide` behaves like [`NodeProvider::LeastLoaded`]; it differs only
+    /// in `supports_use_controllers`, used by `describeCluster` /
+    /// `describeConfigs` / `incrementalAlterConfigs`.
+    LeastLoadedBrokerOrActiveKController,
     /// Targets the least-loaded node for the internal metadata refresh call.
     MetadataUpdate,
     /// Targets a specific broker id (driver fulfillment requests).
@@ -93,6 +99,7 @@ impl NodeProvider {
         match self {
             NodeProvider::Controller => false,
             NodeProvider::LeastLoaded => false,
+            NodeProvider::LeastLoadedBrokerOrActiveKController => true,
             NodeProvider::MetadataUpdate => true,
             NodeProvider::ConstantNodeId(_) => false,
         }
@@ -133,6 +140,24 @@ impl NodeProvider {
             NodeProvider::LeastLoaded => {
                 if metadata_manager.is_ready()? {
                     Ok(client.least_loaded_node(now).node().cloned())
+                } else {
+                    metadata_manager.request_update();
+                    Ok(None)
+                }
+            },
+            NodeProvider::LeastLoadedBrokerOrActiveKController => {
+                if metadata_manager.is_ready()? {
+                    if metadata_manager.using_bootstrap_controllers() {
+                        match metadata_manager.controller() {
+                            Some(node) => Ok(Some(node)),
+                            None => {
+                                metadata_manager.request_update();
+                                Ok(None)
+                            },
+                        }
+                    } else {
+                        Ok(client.least_loaded_node(now).node().cloned())
+                    }
                 } else {
                     metadata_manager.request_update();
                     Ok(None)

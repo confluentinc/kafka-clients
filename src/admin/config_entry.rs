@@ -44,6 +44,31 @@ pub enum ConfigType {
     Password,
 }
 
+impl ConfigType {
+    /// Maps a `DescribeConfigsResponse.ConfigType` wire id to the public
+    /// [`ConfigType`].
+    ///
+    /// Mirrors the composition of `DescribeConfigsResponse.ConfigType.forId`
+    /// and `.type()`. Unlike Java's `forId`, which throws
+    /// `IllegalArgumentException` for a negative id, this returns
+    /// [`ConfigType::Unknown`] for any unrecognized id so response parsing never
+    /// panics on a recoverable path (CLAUDE.md §10).
+    pub(crate) fn for_id(id: i8) -> ConfigType {
+        match id {
+            1 => ConfigType::Boolean,
+            2 => ConfigType::String,
+            3 => ConfigType::Int,
+            4 => ConfigType::Short,
+            5 => ConfigType::Long,
+            6 => ConfigType::Double,
+            7 => ConfigType::List,
+            8 => ConfigType::Class,
+            9 => ConfigType::Password,
+            _ => ConfigType::Unknown,
+        }
+    }
+}
+
 /// Source of configuration entries.
 ///
 /// Corresponds to `ConfigEntry.ConfigSource`.

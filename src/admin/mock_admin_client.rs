@@ -24,14 +24,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::admin::{
-    Admin, Config, ConfigEntry, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions,
-    CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
-    DeletedRecords, DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions, ListTopicsResult, NewPartitions,
+    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, Config, ConfigEntry, CreatePartitionsOptions,
+    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
+    DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClusterOptions, DescribeClusterResult,
+    DescribeConfigsOptions, DescribeConfigsResult, DescribeTopicsOptions, DescribeTopicsResult,
+    ListConfigResourcesOptions, ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, NewPartitions,
     NewTopic, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
+use crate::common::acl::AclOperation;
+use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
 use crate::common::{KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
+
+use std::collections::{BTreeSet, HashSet};
 
 /// Default cluster id used by the mock (matches Java's `DEFAULT_CLUSTER_ID`).
 const DEFAULT_CLUSTER_ID: &str = "4A5xz_QZTB2CtL4wc0X0Jw";
@@ -461,6 +467,84 @@ impl Admin for MockAdminClient {
             result.insert(topic_partition.clone(), handle.future());
         }
         DeleteRecordsResult::new(result)
+    }
+
+    fn describe_cluster(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {
+        let state = self.state.lock().unwrap();
+        let nodes: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
+        let controller: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
+        let cluster_id: KafkaFutureImpl<String> = KafkaFutureImpl::new();
+        let authorized_operations: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
+
+        if state.timeout_next_requests > 0 {
+            let err = KafkaError::timeout("Mock timeout");
+            nodes.complete_exceptionally(err.clone());
+            controller.complete_exceptionally(err.clone());
+            cluster_id.complete_exceptionally(err.clone());
+            authorized_operations.complete_exceptionally(err);
+        } else {
+            nodes.complete(state.brokers.clone());
+            controller.complete(Some(state.controller.clone()));
+            cluster_id.complete(state.cluster_id.clone());
+            // Java completes with an empty set (not null).
+            authorized_operations.complete(Some(BTreeSet::new()));
+        }
+        DescribeClusterResult::new(
+            nodes.future(),
+            controller.future(),
+            cluster_id.future(),
+            authorized_operations.future(),
+        )
+    }
+
+    fn describe_configs(
+        &self,
+        config_resources: &[ConfigResource],
+        _options: DescribeConfigsOptions,
+    ) -> DescribeConfigsResult {
+        // Java's `MockAdminClient.describeConfigs` reads from in-memory broker /
+        // topic config maps that this mock does not model (no in-scope test
+        // exercises them). Per `.claude/rules/admin-client.md` §9 the Rust mock
+        // returns an "unsupported" `KafkaError` per resource instead of
+        // panicking (documented deviation).
+        let mut result = HashMap::new();
+        for resource in config_resources {
+            let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(resource.clone(), handle.future());
+        }
+        DescribeConfigsResult::new(result)
+    }
+
+    fn incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        _options: AlterConfigsOptions,
+    ) -> AlterConfigsResult {
+        // See `describe_configs`: the mock does not model config storage, so it
+        // returns an "unsupported" `KafkaError` per resource (documented
+        // deviation, `.claude/rules/admin-client.md` §9).
+        let mut result = HashMap::new();
+        for resource in configs.keys() {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(resource.clone(), handle.future());
+        }
+        AlterConfigsResult::new(result)
+    }
+
+    fn list_config_resources(
+        &self,
+        _config_resource_types: &HashSet<ConfigResourceType>,
+        _options: ListConfigResourcesOptions,
+    ) -> ListConfigResourcesResult {
+        // Java's `MockAdminClient.listConfigResources` throws
+        // `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
+        // "unsupported" `KafkaError` instead of panicking (documented deviation).
+        let handle: KafkaFutureImpl<Vec<ConfigResource>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        ListConfigResourcesResult::new(handle.future())
     }
 
     async fn close(&self, _timeout: Duration) {
