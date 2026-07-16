@@ -79,3 +79,4 @@
 - [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — receive-path zero-copy via bytes::Bytes: read_bytes_owned/BytesReader, FieldType::Records→Bytes only, BytesDeserializer slice_ref, MemoryRecords buffer→Bytes, producer-builder BytesMut deviation (no pub Vec→BytesMut in bytes 1.x), 0.11 allocs/record
 - [M11 Phase 1 Admin notes](m11_phase1_admin_notes.md) — Admin foundation done (rules + completable KafkaFuture + common leaf types); scope conflicts vs PLAN needing decisions; remaining-work order
 - [M11 Phase 2 Admin driver notes](m11_phase2_admin_driver_notes.md) — createPartitions plain Call + deleteRecords via AdminApiDriver/PartitionLeaderStrategy (pulled fwd); Call maybe_retry+ConstantNodeId; MockClient auth-error gap
+- [M11 Phase 2 driver test notes](m11_phase2_driver_test_notes.md) — AdminApiDriverTest translation; shared #[cfg(test)] pub(crate) fakes; key_to_broker_id; coalesce deviation; maybe_retry hook test
