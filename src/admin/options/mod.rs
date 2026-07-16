@@ -19,12 +19,16 @@
 //! each options struct simply carries its own optional timeout plus operation
 //! specific fields.
 
+pub mod create_partitions_options;
 pub mod create_topics_options;
+pub mod delete_records_options;
 pub mod delete_topics_options;
 pub mod describe_topics_options;
 pub mod list_topics_options;
 
+pub use create_partitions_options::CreatePartitionsOptions;
 pub use create_topics_options::CreateTopicsOptions;
+pub use delete_records_options::DeleteRecordsOptions;
 pub use delete_topics_options::DeleteTopicsOptions;
 pub use describe_topics_options::DescribeTopicsOptions;
 pub use list_topics_options::ListTopicsOptions;

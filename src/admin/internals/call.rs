@@ -38,6 +38,19 @@ pub(crate) type HandleFailureFn = Box<dyn FnMut(&KafkaError) + Send>;
 /// Unsupported-version hook; returns `true` iff the call should be retried after
 /// a protocol downgrade (without spending a retry).
 pub(crate) type HandleUnsupportedVersionFn = Box<dyn FnMut() -> bool + Send>;
+/// Retry hook invoked from `Call.fail`'s retriable branch (mirrors Java's
+/// `Call.maybeRetry`). Returns whether the runnable should re-queue this call or
+/// the hook has taken over (e.g. the [`AdminApiDriver`] re-issued requests).
+pub(crate) type MaybeRetryFn = Box<dyn FnMut(&KafkaError, i64) -> MaybeRetryOutcome + Send>;
+
+/// The outcome of [`Call::maybe_retry`].
+pub(crate) enum MaybeRetryOutcome {
+    /// The runnable should re-queue this call into `pending_calls` (Java's
+    /// default `maybeRetry`).
+    Requeue,
+    /// The hook handled the failure itself (the current call is finished).
+    Handled,
+}
 
 /// The outcome of [`Call::handle_response`].
 pub(crate) enum HandleResult {
@@ -56,16 +69,21 @@ pub(crate) enum HandleResult {
 /// Strategy for selecting the target node of a [`Call`].
 ///
 /// Corresponds to the `NodeProvider` implementations in `KafkaAdminClient`.
-/// Only the variants exercised by the Tier-1 Phase-1 topic RPCs are modelled;
-/// `ConstantNodeIdProvider` and `LeastLoadedBrokerOrActiveKController` arrive
-/// with later tiers (`.claude/rules/admin-client.md` §2).
+/// `LeastLoadedBrokerOrActiveKController` is still deferred (it is only needed
+/// for `bootstrap.controllers`, unsupported here — `.claude/rules/admin-client.md` §2).
 pub(crate) enum NodeProvider {
-    /// Targets the cluster controller (createTopics / deleteTopics).
+    /// Targets the cluster controller (createTopics / deleteTopics /
+    /// createPartitions).
     Controller,
-    /// Targets the least-loaded broker (listTopics / describeTopics).
+    /// Targets the least-loaded broker (listTopics / describeTopics, driver
+    /// lookup requests).
     LeastLoaded,
     /// Targets the least-loaded node for the internal metadata refresh call.
     MetadataUpdate,
+    /// Targets a specific broker id (driver fulfillment requests).
+    ///
+    /// Mirrors `ConstantNodeIdProvider`.
+    ConstantNodeId(i32),
 }
 
 impl NodeProvider {
@@ -76,6 +94,7 @@ impl NodeProvider {
             NodeProvider::Controller => false,
             NodeProvider::LeastLoaded => false,
             NodeProvider::MetadataUpdate => true,
+            NodeProvider::ConstantNodeId(_) => false,
         }
     }
 
@@ -119,6 +138,17 @@ impl NodeProvider {
                     Ok(None)
                 }
             },
+            NodeProvider::ConstantNodeId(node_id) => {
+                // Mirrors ConstantNodeIdProvider: if we can't find the node with
+                // the given id, schedule a metadata update and hope it appears.
+                if metadata_manager.is_ready()?
+                    && let Some(node) = metadata_manager.node_by_id(*node_id)
+                {
+                    return Ok(Some(node));
+                }
+                metadata_manager.request_update();
+                Ok(None)
+            },
         }
     }
 }
@@ -145,6 +175,10 @@ pub(crate) struct Call {
     handle_response_fn: HandleResponseFn,
     handle_failure_fn: HandleFailureFn,
     handle_unsupported_version_fn: HandleUnsupportedVersionFn,
+    /// Optional override of `Call.maybeRetry` (used by the driver so a disconnect
+    /// retries lookup rather than re-sending to a dead node). `None` mirrors
+    /// Java's default `maybeRetry` (re-queue into pending calls).
+    maybe_retry_fn: Option<MaybeRetryFn>,
 }
 
 impl Call {
@@ -170,6 +204,22 @@ impl Call {
             handle_response_fn,
             handle_failure_fn,
             handle_unsupported_version_fn,
+            maybe_retry_fn: None,
+        }
+    }
+
+    /// Sets the `maybe_retry` override (mirrors overriding `Call.maybeRetry`).
+    pub(crate) fn set_maybe_retry_fn(&mut self, f: MaybeRetryFn) {
+        self.maybe_retry_fn = Some(f);
+    }
+
+    /// Runs the retry hook from `fail`'s retriable branch, returning whether the
+    /// runnable should re-queue this call. Mirrors `Call.maybeRetry`; the
+    /// default (no hook) requeues.
+    pub(crate) fn maybe_retry(&mut self, error: &KafkaError, now: i64) -> MaybeRetryOutcome {
+        match self.maybe_retry_fn.as_mut() {
+            Some(f) => f(error, now),
+            None => MaybeRetryOutcome::Requeue,
         }
     }
 

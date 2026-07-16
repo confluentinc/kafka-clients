@@ -22,14 +22,19 @@
 pub mod admin_client_config;
 pub mod config;
 pub mod config_entry;
+pub mod create_partitions_result;
 pub mod create_topics_result;
+pub mod delete_records_result;
 pub mod delete_topics_result;
+pub mod deleted_records;
 pub mod describe_topics_result;
 pub mod kafka_admin_client;
 pub mod list_topics_result;
 pub mod mock_admin_client;
+pub mod new_partitions;
 pub mod new_topic;
 pub mod options;
+pub mod records_to_delete;
 pub mod topic_description;
 pub mod topic_listing;
 
@@ -38,14 +43,24 @@ pub(crate) mod internals;
 pub use admin_client_config::AdminClientConfig;
 pub use config::Config;
 pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
+use std::collections::HashMap;
+
+pub use create_partitions_result::CreatePartitionsResult;
 pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
+pub use delete_records_result::DeleteRecordsResult;
 pub use delete_topics_result::DeleteTopicsResult;
+pub use deleted_records::DeletedRecords;
 pub use describe_topics_result::DescribeTopicsResult;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_topics_result::ListTopicsResult;
 pub use mock_admin_client::MockAdminClient;
+pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
-pub use options::{CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListTopicsOptions};
+pub use options::{
+    CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeTopicsOptions,
+    ListTopicsOptions,
+};
+pub use records_to_delete::RecordsToDelete;
 pub use topic_description::TopicDescription;
 pub use topic_listing::TopicListing;
 
@@ -53,7 +68,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::common::{KafkaError, TopicCollection};
+use crate::common::{KafkaError, TopicCollection, TopicPartition};
 
 /// The administrative client for Kafka, which supports managing and inspecting
 /// topics, brokers, configurations and records.
@@ -88,6 +103,25 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.describeTopics(TopicCollection, DescribeTopicsOptions)`.
     fn describe_topics(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
+
+    /// Increase the number of partitions of the given topics.
+    ///
+    /// Corresponds to `Admin.createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)`.
+    fn create_partitions(
+        &self,
+        new_partitions: &HashMap<String, NewPartitions>,
+        options: CreatePartitionsOptions,
+    ) -> CreatePartitionsResult;
+
+    /// Delete records whose offset is smaller than the given offset of the
+    /// corresponding partition.
+    ///
+    /// Corresponds to `Admin.deleteRecords(Map<TopicPartition, RecordsToDelete>, DeleteRecordsOptions)`.
+    fn delete_records(
+        &self,
+        records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
+        options: DeleteRecordsOptions,
+    ) -> DeleteRecordsResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

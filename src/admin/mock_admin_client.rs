@@ -24,13 +24,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::admin::{
-    Admin, Config, ConfigEntry, CreateTopicsOptions, CreateTopicsResult, DeleteTopicsOptions, DeleteTopicsResult,
-    DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions, ListTopicsResult, NewTopic, TopicDescription,
-    TopicListing, TopicMetadataAndConfig,
+    Admin, Config, ConfigEntry, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions,
+    CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    DeletedRecords, DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions, ListTopicsResult, NewPartitions,
+    NewTopic, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, Node, TopicCollection, TopicPartitionInfo, Uuid};
+use crate::common::{KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
 
 /// Default cluster id used by the mock (matches Java's `DEFAULT_CLUSTER_ID`).
 const DEFAULT_CLUSTER_ID: &str = "4A5xz_QZTB2CtL4wc0X0Jw";
@@ -421,6 +422,45 @@ impl Admin for MockAdminClient {
                 DescribeTopicsResult::of_topic_ids(result)
             },
         }
+    }
+
+    fn create_partitions(
+        &self,
+        new_partitions: &HashMap<String, NewPartitions>,
+        _options: CreatePartitionsOptions,
+    ) -> CreatePartitionsResult {
+        // Java's `MockAdminClient.createPartitions` throws
+        // `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
+        // "unsupported" `KafkaError` per key instead of panicking (documented
+        // deviation).
+        let mut result = HashMap::new();
+        for topic in new_partitions.keys() {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(topic.clone(), handle.future());
+        }
+        CreatePartitionsResult::new(result)
+    }
+
+    fn delete_records(
+        &self,
+        records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
+        _options: DeleteRecordsOptions,
+    ) -> DeleteRecordsResult {
+        // Java's `MockAdminClient.deleteRecords` returns an empty result for an
+        // empty request and otherwise throws
+        // `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the non-empty case returns an
+        // "unsupported" `KafkaError` per key instead of panicking (documented
+        // deviation).
+        let mut result = HashMap::new();
+        for topic_partition in records_to_delete.keys() {
+            let handle: KafkaFutureImpl<DeletedRecords> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(topic_partition.clone(), handle.future());
+        }
+        DeleteRecordsResult::new(result)
     }
 
     async fn close(&self, _timeout: Duration) {
