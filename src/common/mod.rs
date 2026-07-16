@@ -14,6 +14,7 @@
 
 //! Common types and utilities for Kafka (org.apache.kafka.common)
 
+pub mod acl;
 pub mod cluster;
 pub mod cluster_resource;
 pub mod cluster_resource_listener;
@@ -34,8 +35,10 @@ pub mod record;
 pub mod requests;
 pub mod security;
 pub mod serialization;
+pub mod topic_collection;
 pub mod topic_id_partition;
 pub mod topic_partition;
+pub mod topic_partition_info;
 pub mod utils;
 pub mod uuid;
 
@@ -48,6 +51,8 @@ pub use kafka_future::KafkaFuture;
 pub use node::Node;
 pub use partition_info::PartitionInfo;
 pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
+pub use topic_collection::TopicCollection;
 pub use topic_id_partition::TopicIdPartition;
 pub use topic_partition::TopicPartition;
+pub use topic_partition_info::TopicPartitionInfo;
 pub use uuid::Uuid;
