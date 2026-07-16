@@ -34,11 +34,12 @@ registered ack-commit callback).
   job (owned before release); the job must NOT capture the `&'static handle` (only
   the spawned future does, during the await). Freed-box safety relies on blocking
   `Runtime` drop in `_destroy` step 1.
-- **Systemic pre-existing risk (out of scope per-delta, note only):** if the
+- **Systemic panic risk — FIXED in `be6ac2e` (Phase-3 hardening).** Was: if the
   awaited `op` PANICS (vs returns Err) in those three helpers, the completion job
   is never enqueued → callback never fires AND guard never released → consumer
-  permanently locked. Rust API returns Result normally, so acceptable; a drop-guard
-  on the future would harden it.
+  permanently locked. Now hardened with a one-shot RAII drop-guard armed before
+  the await. Verified sound — and note it fires on tokio runtime-drop CANCELLATION
+  during destroy too, not just panic. See [[review-ffi-async-dropguard-teardown]].
 - **Result-container borrowed-error pattern:** `ShareCommitResult_get_error`
   returns `borrow_error_ptr(inner)` (`common.rs`), null = committed-OK; borrowed
   `TopicIdPartition_t` has NO standalone `_destroy`. Confirm nothing frees the
