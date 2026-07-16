@@ -86,3 +86,5 @@
 - [Milestone 10 Phase 3 share FFI write path](milestone10_phase3_share_ffi_writepath.md) — commit/close/async_value_op, registered ack callback, cbindgen Option<fn>-must-be-inline gotcha, Sender is Sync, borrow_error_ptr, C smoke test (unity submodule + brew cmake)
 - [Milestone 10 Phase 3 panic-safety](milestone10_phase3_panic_safety.md) — IncompleteOpGuard (was PanicCompletionGuard) disarm-returns-payload, fires on panic OR teardown-cancel, disjoint-capture Send pitfall, teeth-proof by neutering Drop
 - [COMMENTS gitignore + staging hygiene](workflow_comments_gitignore_and_staging.md) — COMMENTS.<N>.md gitignored (only DONE tracked); shared workdir → stage explicitly, never git add -A
+- [Python bindings macOS build](python_bindings_macos_build.md) — producer half needs C11 threads.h (absent on macOS SDK); venv + pthreads shim via CFLAGS recipe
+- [Phase 4 share consumer Python](phase4_share_consumer_python_notes.md) — ack-cb INCREF/old_cb DECREF, borrowed-vs-owned KafkaError, add_record key/value-before-offset, mock behaviors
