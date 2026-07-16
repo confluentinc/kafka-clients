@@ -614,17 +614,34 @@ class AsyncConsumer(_ConsumerBase):
             return
         fut.set_result(payload)
 
+    @staticmethod
+    def _fail(fut, err):
+        # Event-loop thread. Fail the awaiter unless it's already resolved.
+        if fut.cancelled() or fut.done():
+            return
+        fut.set_exception(err)
+
     async def _run_async(self, submit, resolve, free):
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
 
         def cb(*payload):
-            # Runs on the Rust dispatcher thread with the GIL held. asyncio
-            # futures must be touched only on the loop thread.
-            if loop.is_closed():
+            # Dispatcher thread, GIL held. INVARIANT (rules 1.2/1.3): never leave
+            # `fut` unresolved and never drop the C handles — on every path.
+            try:
+                if loop.is_closed():
+                    free(payload)
+                    return
+                loop.call_soon_threadsafe(self._deliver, fut, payload, free)
+            except BaseException as err:
+                # call_soon_threadsafe can raise if the loop closed after the
+                # is_closed() check. Release the handles, then wake the awaiter
+                # with the error so `await fut` doesn't hang forever.
                 free(payload)
-                return
-            loop.call_soon_threadsafe(self._deliver, fut, payload, free)
+                try:
+                    loop.call_soon_threadsafe(self._fail, fut, err)
+                except BaseException:
+                    pass  # loop truly gone -> the awaiter is gone too
 
         submit(cb)
         try:
