@@ -49,12 +49,15 @@ producer.SendAsync(record)  ──►  Task<RecordMetadata>
    Rust   Producer::send(ProducerRecord) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
-**What's real.** The C ABI exposes the **producer only** (~30 fns across Producer
-/ Properties / Future / RecordMetadata / KafkaError / MockProducer families;
-`src/ffi/producer.rs` is authoritative). The KIP-848 **consumer is fully built in
-Rust but not exposed at the ABI**, so it's unreachable from .NET until the ABI
-layer is written. Source of truth for the surface = `src/ffi/*.rs` +
-`cbindgen.toml` (the header is generated, not checked in).
+**What's real.** The C ABI exposes the **producer** (~30 fns across Producer /
+Properties / Future / RecordMetadata / KafkaError / MockProducer families;
+`src/ffi/producer.rs`) **and the KIP-848 consumer** (~130 fns across Consumer /
+ConsumerProperties / ConsumerRecord(s) / TopicPartition(List) / OffsetAndMetadata
+/ OffsetAndTimestamp / ConsumerGroupMetadata / PartitionInfo / MockConsumer + map
+helpers; `src/ffi/consumer.rs`) — both with sync **and** `_async`/callback
+variants. Admin / transactions are **not** exposed yet. Source of truth for the
+surface = `src/ffi/*.rs` + `cbindgen.toml` (the header is generated, not checked
+in).
 
 **To full producer parity** — Java producer features not yet in the sketch (each
 tracked where its decision lives; the *Unblocked by* tag routes the work):
@@ -67,8 +70,9 @@ tracked where its decision lives; the *Unblocked by* tag routes the work):
 | `MockProducer.History()` (full record list) | **ABI** (only a count today) | §2 clipped note |
 | interceptors | **.NET-side**, deferred | §3 Interceptors |
 
-Consumer / admin / transactions are separate *families* — all need the C ABI
-first (Mode B, §5).
+The **consumer** ABI has now landed (Mode A — build the .NET surface directly,
+§5.2; its receive-path ownership decision is §5.4). Admin / transactions are
+still separate *families* that need the C ABI first (Mode B, §5.3).
 
 **Intended file map** — split by visibility, so the public *shape* is auditable
 at a glance and the unsafe boundary is quarantined. (Folders are organizational;
@@ -150,10 +154,11 @@ can back — it omits Java members the ABI doesn't expose yet:
 and `MockProducer.history()` (Java returns the full record list; the ABI gives
 only a count, hence `HistoryCount`). Add each when the ABI grows to cover it.
 
-**Consumer & admin client** follow the identical pattern — the Java surface in C#
-idiom (`IConsumer` / `KafkaConsumer` → `PollAsync` / `SubscribeAsync` /
-`CommitAsync`; `IAdminClient`) — sketched here once their C ABI lands (§5, the
-Mode-B path).
+**Consumer** follows the identical pattern — the Java surface in C# idiom
+(`IConsumer` / `KafkaConsumer` → `PollAsync` / `SubscribeAsync` / `CommitAsync`).
+Its C ABI has **landed**, so it's a **Mode A** build (§5.2); the receive-path
+key/value ownership decision is §5.4. The **admin client** (`IAdminClient`) is
+still **Mode B** — sketched once its C ABI lands (§5.3).
 
 **The Java → C# idiom map** — the binding's spine. Each row: the Java construct,
 its C# realization, and where the enforcing rule lives.
@@ -273,15 +278,25 @@ personas; §7.1/§7.2). The `dotnet-actor` **depends on** them and owns **steps
 **Naming across layers:** `kafka_<pkg-minus-clients>_<Type>_<method>` at the ABI;
 C# casing above it (PascalCase, properties for getters, `Async` suffix).
 
-### 5.4 ⚠ Before you start Mode B for the consumer
+### 5.4 ⚠ The consumer receive-path ownership decision (Mode A)
 
-The producer send path hands bytes *in* and gets a small metadata handle back —
-no borrowed-bytes-out problem. The **consumer is the opposite**: the receive-path
-zero-copy contract (`consumer-threading.md §27`) says fetched bytes are owned by
-one buffer and every record borrows a slice. Crossing those **borrowed slices**
-through a C ABI into .NET — which wants owned `byte[]` / `ReadOnlyMemory<byte>` —
-is the crux design problem, and it does not exist on the send path. Resolve the
-lifetime/ownership model *before* designing the consumer ABI.
+The consumer C ABI has landed, and it **confirms** the receive-path zero-copy
+contract (`consumer-threading.md §27`): `ConsumerRecord_key` / `_value` / `_topic`
+return a `(const uint8_t* / const char*, int32_t len)` pair that **borrows into
+the batch and is valid only until `ConsumerRecords_destroy`**. The producer send
+path had no such problem (bytes go *in*, a small handle comes back). Here the crux
+decision is how .NET surfaces those **borrowed slices**, which want to become
+owned `byte[]` / `ReadOnlyMemory<byte>`:
+
+- **Copy-out (default)** — copy each key/value into a managed array before
+  `ConsumerRecords_destroy`. Simple, safe, one copy per record (matches Java's own
+  allocation behavior).
+- **Keep-alive spans** — hold the `ConsumerRecords_t` handle alive and hand out
+  `ReadOnlySpan`/`ReadOnlyMemory` over the borrowed bytes; zero-copy, but ties
+  record lifetime to the handle and must forbid use-after-`Dispose`.
+
+Resolve this *before* building the managed `ConsumerRecord` surface — it's the one
+genuinely new marshalling decision the consumer adds over the producer.
 
 ---
 
