@@ -28,6 +28,8 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+use crate::create_topics_request_data::CreateTopicsRequestData;
+use crate::delete_topics_request_data::DeleteTopicsRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
@@ -42,6 +44,8 @@ use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatRequest;
+use super::CreateTopicsRequest;
+use super::DeleteTopicsRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::ListOffsetsRequest;
@@ -120,6 +124,10 @@ pub enum ConcreteRequest {
     OffsetCommit(OffsetCommitRequest),
     /// An OffsetFetch request.
     OffsetFetch(OffsetFetchRequest),
+    /// A CreateTopics request.
+    CreateTopics(CreateTopicsRequest),
+    /// A DeleteTopics request.
+    DeleteTopics(DeleteTopicsRequest),
 }
 
 impl ConcreteRequest {
@@ -138,6 +146,8 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
+            Self::CreateTopics(r) => r.version(),
+            Self::DeleteTopics(r) => r.version(),
         }
     }
 
@@ -156,6 +166,8 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::CreateTopics(r) => r.api_key(),
+            Self::DeleteTopics(r) => r.api_key(),
         }
     }
 
@@ -180,6 +192,8 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -250,6 +264,12 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::CreateTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -275,6 +295,8 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -311,6 +333,8 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -385,6 +409,14 @@ impl ConcreteRequest {
                 let data = OffsetFetchRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
             },
+            ApiKeys::CREATE_TOPICS => {
+                let data = CreateTopicsRequestData::read(readable, api_version)?;
+                Ok(Self::CreateTopics(CreateTopicsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_TOPICS => {
+                let data = DeleteTopicsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteTopics(DeleteTopicsRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -408,6 +440,8 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::CreateTopics(r) => write!(f, "{r}"),
+            Self::DeleteTopics(r) => write!(f, "{r}"),
         }
     }
 }
