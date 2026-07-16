@@ -52,20 +52,19 @@ the share binding stack here, using the sibling branch's consumer FFI as a
 | # | Phase | Rust/output | Depends on |
 |---|---|---|---|
 | 1 | **C-FFI foundation** ✅ DONE — port `common.rs`; add `BytesDeserializer`; `cbindgen.toml` (`item_types += typedefs`, seed `[export]`); wire `src/ffi/mod.rs`; `xtask lint` covers `ffi`. | `src/ffi/common.rs`, `src/common/serialization/bytes_deserializer.rs`, `cbindgen.toml`, `src/ffi/mod.rs`, `xtask/src/main.rs` | M9 |
-| 2 | **Handle + read + acknowledge** *(merged; was 2+3+4)* — `ShareConsumerHandle`/`ShareConsumerKind` + single-owner guard + wakeup seam; `ShareConsumerProperties_*`; `KafkaShareConsumer_new`/`MockShareConsumer_new`/`_destroy`/`_wakeup`; subscribe/unsubscribe/subscription; `_poll`/`_poll_async` + shared `box_records` + `ConsumerRecord(s)_*` (incl. `_delivery_count`); `AcknowledgeType_t` + `_acknowledge`/`_acknowledge_with_type`/`_acknowledge_by_offset`. | `src/ffi/share_consumer.rs`, shared record marshaling in `common.rs`, `new_share_consumer_with_wakeup` in `src/consumer/mod.rs`, `MockShareConsumer::wakeup_handle` | 1 |
-| 3 | **Commit + close + ack callback + tests** *(merged; was 5+6)* — `TopicIdPartition_t`, `ShareCommitResult_t`, `ShareAcknowledgeOffsets_t`; commit/close (sync+async); `set_acknowledgement_commit_callback`; `acquisition_lock_timeout_ms`; Rust FFI tests + C smoke test. | `src/ffi/share_consumer.rs` (+ tests), `bindings/c/tests/test_mock_share_consumer.c`, `bindings/c` build wiring | 2 |
-| 4 | **CPython extension glue** — share methods in the C-extension. | `bindings/python/_confluentkafka.c` | 3 |
-| 5 | **`share_consumer.py`** — high-level Pythonic wrapper. | `bindings/python/share_consumer.py` | 4 |
-| 6 | **Python tests + harness** — unit tests + gRPC harness wiring. | `bindings/python/test/...`, `grpc_server*.py` | 5 |
+| 2 | **Handle + read + acknowledge** ✅ DONE *(merged; was 2+3+4)* — `ShareConsumerHandle`/`ShareConsumerKind` + single-owner guard + wakeup seam; `ShareConsumerProperties_*`; `KafkaShareConsumer_new`/`MockShareConsumer_new`/`_destroy`/`_wakeup`; subscribe/unsubscribe/subscription; `_poll`/`_poll_async` + shared `box_records` + `ConsumerRecord(s)_*` (incl. `_delivery_count`); `AcknowledgeType_t` + `_acknowledge`/`_acknowledge_with_type`/`_acknowledge_by_offset`. | `src/ffi/share_consumer.rs`, shared record marshaling in `common.rs`, `new_share_consumer_with_wakeup` in `src/consumer/mod.rs`, `MockShareConsumer::wakeup_handle` | 1 |
+| 3 | **Commit + close + ack callback + tests** ✅ DONE *(merged; was 5+6; + async panic-safety hardening)* — `TopicIdPartition_t`, `ShareCommitResult_t`, `ShareAcknowledgeOffsets_t`; commit/close (sync+async); `set_acknowledgement_commit_callback`; `acquisition_lock_timeout_ms`; Rust FFI tests + C smoke test. | `src/ffi/share_consumer.rs` (+ tests), `bindings/c/tests/test_mock_share_consumer.c`, `bindings/c` build wiring | 2 |
+| 4 | **Python binding** *(merged; was 4+5+unit tests)* — CPython `_confluentkafka.c` share glue (port the consumer extension machinery + the ack surface: `AcknowledgeType`, `ShareCommitResult`/`ShareAcknowledgeOffsets`/`TopicIdPartition` drains, commit trampoline, persistent `set_acknowledgement_commit_callback`); sync `KafkaShareConsumer` + `MockShareConsumer` wrapper; pytest unit tests. | `bindings/python/_confluentkafka.c`, `bindings/python/share_consumer.py`, `bindings/python/test/unit/test_share_consumer.py`, `pyproject.toml` | 3 |
+| 5 | **Multilanguage harness** ⏸ DEFERRED — Docker/gRPC harness wiring + any live-broker integration. Out of scope: integration infra needing Docker + a share-group broker (à la M9's `#[ignore]`-gated integration tests); not required for the binding deliverable. | `bindings/python/grpc_server*.py`, `grpc_translate.py`, `Dockerfile.grpc*` | 4 |
 
-Phases 4–6 (Python) are outlined here; each gets a detailed `Phase-N/PLAN.md`
-when it starts. The C-FFI phases 1–3 are specified in the linked design doc,
-which was originally written as six phases and **regrouped** at review: foundation
-= phase 1; handle + read + acknowledge = phase 2; commit + callback + tests =
-phase 3. The split is at the read/write seam — phase 2 is everything up to and
-including sync acknowledge-intent; phase 3 is the async commit/close write path
-plus the one novel unsafe pattern (the registered ack-commit callback + result
-containers), deliberately isolated for focused review.
+The milestone was originally nine phases and **regrouped** twice at review, to
+five. **C FFI (1–3, done):** foundation = 1; handle + read + acknowledge = 2;
+commit + close + ack-callback + tests (+ the async panic-safety hardening) = 3 —
+split at the read/write seam, with the novel unsafe marshaling isolated in 3.
+**Python (4–5):** the CPython extension + the Pythonic wrapper + unit tests are
+co-developed and merge into one **Python binding** phase (4, specified in
+`Phase-4/PLAN.md`); the Docker/gRPC multilanguage harness is the final phase (5),
+detailed when it starts.
 
 ## Key constraints (carried into every phase)
 
@@ -106,18 +105,40 @@ move to `COMMENTS.DONE.<critic-id>.md`. All work lands on
 
 ## Outcome
 
-Phases 1–3 (the **C FFI layer**) complete on `milestone9-share-consumer-python`:
-the full share-consumer C ABI (construct / subscribe / poll / acknowledge / commit
-/ close + the registered ack-commit callback), a cmake-buildable generated header,
-and a passing C smoke test. Phases 4–6 (Python) pending.
+**Milestone wrapped at Phase 4 (user decision, 2026-07-16)** — its stated
+deliverable (C + Python client bindings for the KIP-932 share consumer) is achieved
+and unit-tested end to end across Rust → C → Python:
 
-### Known gaps (tracked)
+- **C FFI (Phases 1–3)** on `milestone9-share-consumer-python`: the full
+  share-consumer C ABI (construct / subscribe / poll / acknowledge / commit / close
+  + the registered ack-commit callback), a cmake-buildable generated header, a
+  passing C smoke test, and an async panic-safety hardening pass.
+- **Python binding (Phase 4):** CPython `_confluentkafka.c` share glue + a sync
+  `KafkaShareConsumer` / `MockShareConsumer` `share_consumer.py` wrapper + 67 pytest
+  tests (incl. proven-teeth ack-callback refcount guards).
 
-- **Async op panic-safety** (Phase 3 Critic finding #2 — non-blocking,
-  pre-existing): a panic (not `Err`) in an awaited op inside `async_value_op` /
-  `async_void_op` / `poll_async` skips the completion job, so the single-owner
-  guard is never released (consumer permanently locked) and the callback never
-  fires. Only triggers on abnormal panics (bug/OOM); normal error paths are fine.
-  Candidate fix: an RAII release-on-unwind + error-completion in the three shared
-  helpers. Deferred; a dedicated hardening pass before the Python layer is an open
-  decision.
+Every phase ran a Manager-coordinated Actor → Critic → fix loop (N=1); the Critic
+caught three real defects that were fixed (reference `destroy` UAF, async
+panic-lock, and a refcount test-teeth gap). Nothing pushed; no PR.
+
+### Deferred / not done
+
+- **Phase 5** — the Docker/gRPC multilanguage harness + any live-broker integration
+  (integration infra; the same class M9 `#[ignore]`-gated).
+- An **`async`** Python `KafkaShareConsumer` (sync-first shipped; the reusable
+  `_run_async` makes it an easy additive follow-on).
+- `client_instance_id` across the FFI/Python (KIP-714 telemetry).
+- macOS-native `make build`/`make test` needs a `<threads.h>` shim (pre-existing
+  producer-half dependency; Linux CI unaffected).
+
+### Hardening (resolved)
+
+- **Async op panic-safety** (was Phase 3 Critic finding #2): a panic — or a task
+  cancellation when `ShareConsumer_destroy` drops the runtime — in an awaited op
+  inside `async_value_op` / `async_void_op` / `poll_async` previously skipped the
+  completion job, leaving the single-owner guard held (consumer locked) and the
+  callback unfired. **Resolved** by a one-shot RAII drop-guard (`IncompleteOpGuard`)
+  that, on an armed drop, releases the guard via the owner `Arc<AtomicU64>` clone
+  and fires an error completion (commits `be6ac2e`, `0477c4c`; Critic-verified safe
+  under teardown cancellation, header byte-identical). No known gaps remain in the
+  C FFI layer.
