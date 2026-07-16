@@ -85,3 +85,44 @@ layer over the core-owned catalog; a parity check (xtask + a DoD item) keeps the
 Python projection in sync with the catalog, and the catalog in sync with Java's
 consumer-surface exceptions — the same "promote-to-rule + detect-drift" loop the
 rest of the infra uses.
+
+## Packaging & layout
+
+**Decision (Option B): ship as an installable package `confluent_kafka4`.** Today
+the binding is flat scripts — `producer.py` / `consumer.py` imported by bare name,
+C extension `_confluentkafka`, `py-modules` in `pyproject.toml`. That works for the
+test harness but is **not** installable as a real package. The target is a proper
+src-layout package:
+
+    bindings/python/
+    ├── pyproject.toml            # distribution: confluent-kafka4
+    ├── setup.py                  # ext: confluent_kafka4._confluentkafka
+    ├── src/confluent_kafka4/     # import confluent_kafka4
+    │   ├── __init__.py           # public API re-exports
+    │   ├── consumer.py  producer.py  _confluentkafka.c  py.typed
+    ├── test/                     # imports the installed package
+    └── (grpc_*, Dockerfiles)     # harness — NOT shipped
+
+**Why `confluent_kafka4` (the `4` in the name).** From the org packaging plan
+(Confluence "Rust based clients repository and packages"): the new major fully
+converges on the Java API, which is breaking vs the librdkafka-era client. Many
+Python users pin loosely (`>=` or unpinned), so reusing `confluent-kafka` would
+break them silently on upgrade. A distinct name (dist `confluent-kafka4`, import
+`confluent_kafka4`) makes the upgrade opt-in and lets both live side by side — the
+established Python pattern (`urllib2`, `psycopg2`, `bs4`, `jinja2`).
+
+**Why src-layout.** Matches the reference `confluent-kafka-python` and forces tests
+to run against the *installed* package, not the source tree — important for a
+C-extension package where "works in the repo" ≠ "works installed".
+
+**Rejected — namespace package `confluent.kafka`.** Cleaner folder (no `4`), keeps
+the `4` only in the distribution name. Rejected: diverges from the packaging doc's
+fixed import name and the reference precedent; the trailing-major convention is
+idiomatic. Revisit only via the Confluence doc, not a local rename.
+
+**Monorepo note.** At the repo split (`kafka-clients/` with per-language top-level
+folders) `bindings/python/` becomes `python/` unchanged; its `.claude/rules/…` and
+`design/…` colocate then.
+
+Execution is tracked in `milestones/package-layout.md` — a pure restructure, no
+behavior change.
