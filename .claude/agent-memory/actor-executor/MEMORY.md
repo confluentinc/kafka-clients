@@ -84,3 +84,4 @@
 - [Milestone 10 Phase 1 FFI common.rs](milestone10_phase1_ffi_common.md) — share C FFI: ungated common mod, SendUserData from consumer.rs, header-reorder-not-bytediff, xtask lint skips ffi, bytes optional "1"
 - [Milestone 10 Phase 2 share FFI](milestone10_phase2_share_ffi.md) — handle/guard/poll/ack; teardown-safe Arc<AtomicU64> owner + Option<Runtime> blocking-drop (SIGBUS fix vs reference); shared records mod; cbindgen "enums"
 - [Milestone 10 Phase 3 share FFI write path](milestone10_phase3_share_ffi_writepath.md) — commit/close/async_value_op, registered ack callback, cbindgen Option<fn>-must-be-inline gotcha, Sender is Sync, borrow_error_ptr, C smoke test (unity submodule + brew cmake)
+- [Milestone 10 Phase 3 panic-safety](milestone10_phase3_panic_safety.md) — PanicCompletionGuard disarm-returns-payload, disjoint-capture Send pitfall, teeth-proof by neutering Drop, panic=unwind + tokio catches task panic
