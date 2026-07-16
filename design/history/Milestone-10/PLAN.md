@@ -106,4 +106,18 @@ move to `COMMENTS.DONE.<critic-id>.md`. All work lands on
 
 ## Outcome
 
-TBD.
+Phases 1–3 (the **C FFI layer**) complete on `milestone9-share-consumer-python`:
+the full share-consumer C ABI (construct / subscribe / poll / acknowledge / commit
+/ close + the registered ack-commit callback), a cmake-buildable generated header,
+and a passing C smoke test. Phases 4–6 (Python) pending.
+
+### Known gaps (tracked)
+
+- **Async op panic-safety** (Phase 3 Critic finding #2 — non-blocking,
+  pre-existing): a panic (not `Err`) in an awaited op inside `async_value_op` /
+  `async_void_op` / `poll_async` skips the completion job, so the single-owner
+  guard is never released (consumer permanently locked) and the callback never
+  fires. Only triggers on abnormal panics (bug/OOM); normal error paths are fine.
+  Candidate fix: an RAII release-on-unwind + error-completion in the three shared
+  helpers. Deferred; a dedicated hardening pass before the Python layer is an open
+  decision.
