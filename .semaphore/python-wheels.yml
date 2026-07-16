@@ -30,6 +30,7 @@ global_job_config:
 
 blocks:
   - name: "Python wheel: Linux x64"
+    dependencies: []
     task:
       agent:
         machine:
@@ -54,6 +55,7 @@ blocks:
             - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
 
   - name: "Python wheel: Linux arm64"
+    dependencies: []
     task:
       agent:
         machine:
