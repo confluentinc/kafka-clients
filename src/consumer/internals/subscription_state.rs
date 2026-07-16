@@ -1117,10 +1117,7 @@ impl SubscriptionState {
             return None;
         }
 
-        let current_position = match &state.position {
-            Some(p) => p.clone(),
-            None => return None,
-        };
+        let current_position = state.position.as_ref()?.clone();
         if &current_position != request_position {
             debug!(
                 "Skipping completed validation for partition {tp} since the current position {current_position} \
