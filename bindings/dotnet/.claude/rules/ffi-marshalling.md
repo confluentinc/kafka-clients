@@ -477,45 +477,54 @@ design.
 ## 8. Native library loading, packaging & AOT
 
 **Decision:** The native lib is our own Rust cdylib `confluent_kafka` (from `cargo
-build --features ffi`). For now, an MSBuild step copies it into the project's
-output dir and default `[DllImport]` probing resolves it — **no NuGet needed**.
-One `Native` class, one `DllName`, no hand-rolled loader.
+build --features ffi`). **No NuGet, ever** — the binding is consumed as a
+**project / source reference**, and an MSBuild step copies the native into the
+consuming app's output dir where default `[DllImport]` probing finds it. One
+`Native` class, one `DllName`, no hand-rolled loader.
 
 **Rule:**
 
-  - **Packaging (now):** MSBuild copies `target/<cfg>/…confluent_kafka.…` to
+  - **Packaging:** an MSBuild target copies `target/<cfg>/…confluent_kafka.…` to
     `$(OutDir)` (`CopyToOutputDirectory=PreserveNewest`); default probing (app base
-    dir) finds it. The bare `[DllImport("confluent_kafka")]` maps to the filenames
-    Cargo emits — never hardcode a filename/absolute path. A separate redist NuGet
-    (`runtimes/{rid}/native/`) is deferred and **packaging-only** — it won't touch
-    the P/Invoke layer.
+    dir) resolves it. **No NuGet / no `runtimes/{rid}/native/` package** — the build
+    copies the native explicitly. The bare `[DllImport("confluent_kafka")]` maps to
+    the per-OS filename Cargo emits — never hardcode a filename/absolute path.
+  - **Cross-platform:** one `DllName` covers every OS — the runtime maps it to
+    `confluent_kafka.dll` / `libconfluent_kafka.so` / `libconfluent_kafka.dylib`.
+    OS/arch/libc is selected by *which native is copied*, keyed by RID (`win-x64`,
+    `linux-x64`, `linux-musl-x64`, `osx-arm64`, …). With **no NuGet**, that
+    selection happens at **build/publish** time (`dotnet publish -r <rid>` copies
+    the matching native) or via `NativeLibrary.SetDllImportResolver` — never NuGet
+    RID assets. musl/Alpine = the `linux-musl-x64` RID (build the musl-target
+    cdylib), **not** a second `Native` class or `/etc/os-release` detection.
   - **Loading:** rely on default `[DllImport]` resolution — do **not** port
     confluent-kafka-dotnet's `Librdkafka.Initialize` (manual `dlopen`/`LoadLibraryEx`
     preload, reflection binding, distro/GSSAPI variant selection); none applies to
-    one self-built cdylib. If custom probing is ever needed, use
-    `NativeLibrary.SetDllImportResolver` (modern), not a reflection loader; on
-    net462 keep the native in the app dir (a `LoadLibraryEx` preload is a last
-    resort).
+    one self-built cdylib. Custom probing → `NativeLibrary.SetDllImportResolver`
+    (modern), never a reflection loader; on net462 keep the native in the app dir
+    (a `LoadLibraryEx` preload is a last resort).
   - **Single `Native` class**, one `DllName = "confluent_kafka"` — the equivalent
-    of only their default `NativeMethods`. No `_Alpine`/`_Centos8` /
-    `/etc/os-release` detection (our own build can emit a musl artifact under the
-    right RID).
+    of only their default `NativeMethods`; no `_Alpine`/`_Centos8` variants (our
+    pure-Rust TLS/SASL has no GSSAPI system dep, and musl is a RID, not a filename).
   - **AOT:** not committed to, but kept open — direct `[DllImport]` (not a
     reflection loader) is AOT-amenable, unlike theirs. Don't add reflection-based
     loading.
 
-**Why:** we build and control one native, so the drivers of their loader
-(third-party binary placement on net462, musl/glibc + GSSAPI variants) don't exist
-for us; Cargo's output names already match default P/Invoke resolution. Deferring
-the NuGet is safe because packaging never touches the P/Invoke surface.
+**Why:** we build and control one native and consume it by project reference, so
+the drivers of their loader (third-party binary placement, musl/glibc + GSSAPI
+variant selection by filename) don't exist for us; the RID *classifies* which
+binary is needed, but the **build/publish (or a resolver) delivers it** — no NuGet
+required. Cargo's output names already match default P/Invoke resolution.
 
 **Anti-patterns:**
 
   - Porting `Librdkafka.Initialize` / reflection binding / 3× NativeMethods /
     `/etc/os-release` — unnecessary, and it kills AOT.
   - Hardcoding an absolute path or platform filename in `[DllImport]`.
-  - Assuming net462 auto-copies `runtimes/{rid}/native/` (it doesn't).
-  - Blocking delivery on the redist NuGet (copy-to-output unblocks dev/test now).
+  - Adding a NuGet packaging path, or assuming any `runtimes/{rid}/native/`
+    auto-copy — the decision is **no NuGet**; the build copies the native.
+  - A second `Native` class / `DllName` for musl — musl is the `linux-musl-x64`
+    RID, same `DllName`.
 
 **Tests required:**
 
