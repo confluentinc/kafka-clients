@@ -148,6 +148,62 @@ impl Drop for ReleaseGuard<'_> {
     }
 }
 
+/// The error handed to an async op's C callback when the awaited operation
+/// **panicked** instead of returning a value or `Err`. There is no Kafka error
+/// code for "the client panicked mid-operation"; surfacing it as an
+/// illegal-state failure — the closest runtime-exception analog, as with the
+/// access-guard rejection — lets the caller observe and free an ordinary error
+/// handle rather than wait forever for a callback that would otherwise never come.
+fn op_panicked_error() -> KafkaError {
+    KafkaError::illegal_state("KafkaShareConsumer operation failed unexpectedly.")
+}
+
+/// The action a [`PanicCompletionGuard`] runs on a panic unwind: it consumes the
+/// payload to enqueue an error completion that releases the guard and fires the
+/// callback.
+type PanicAction<P> = Box<dyn FnOnce(P) + Send>;
+
+/// A one-shot RAII "bomb" that makes the async dispatch helpers panic-safe.
+///
+/// An op awaited on a worker task can *panic*, not just return `Err`. Without
+/// this guard the unwind skips everything after the `.await`, so the single-owner
+/// guard is never released (the consumer stays locked forever) and no completion
+/// is ever enqueued (the C callback never fires and the caller hangs). While
+/// armed, dropping this guard — which only happens on a panic unwind, since the
+/// normal path [`disarm`](Self::disarm)s it first — runs `on_panic(payload)`,
+/// which enqueues an error completion that releases the guard (through the shared
+/// owner cell, exactly as an ordinary completion does) and fires the callback.
+///
+/// `payload` holds the move-only pieces a completion needs (the result builder
+/// and `user_data` for a value op). Exactly one path consumes them: the bomb owns
+/// them while armed, and `disarm` hands them back to the ordinary completion job
+/// on the normal path — so the guard is released once and the callback fires
+/// once, never twice and never both success and error.
+struct PanicCompletionGuard<P> {
+    armed: Option<(P, PanicAction<P>)>,
+}
+
+impl<P> PanicCompletionGuard<P> {
+    fn new(payload: P, on_panic: impl FnOnce(P) + Send + 'static) -> Self {
+        Self { armed: Some((payload, Box::new(on_panic))) }
+    }
+
+    /// Defuses the bomb: the op returned normally, so ownership of `payload`
+    /// passes back to the caller for the ordinary completion job.
+    fn disarm(mut self) -> P {
+        let (payload, _on_panic) = self.armed.take().expect("panic guard is armed until disarmed");
+        payload
+    }
+}
+
+impl<P> Drop for PanicCompletionGuard<P> {
+    fn drop(&mut self) {
+        if let Some((payload, on_panic)) = self.armed.take() {
+            on_panic(payload);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handle
 // ---------------------------------------------------------------------------
@@ -630,9 +686,34 @@ unsafe fn async_void_op<F, Fut>(
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
+        // Arm the panic-safety bomb before awaiting: if `op` panics and unwinds,
+        // the guard's drop enqueues an error completion so the consumer is
+        // released and the callback still fires. Disarmed on the normal path just
+        // below. `target` is `Copy`, so both the bomb and the normal completion
+        // hold their own copy.
+        let panic_guard = PanicCompletionGuard::new((), {
+            let owner = Arc::clone(&owner);
+            let tx = tx.clone();
+            move |()| {
+                // Capture the whole `target` (Send), not its `*mut c_void` field
+                // disjointly (which would make the closure !Send).
+                let target = target;
+                let completion = OperationCompletion {
+                    callback: target.callback,
+                    user_data: target.user_data,
+                    error: box_error(op_panicked_error()),
+                };
+                let job: CompletionJob = Box::new(move || {
+                    release_owner(&owner);
+                    unsafe { completion.fire() };
+                });
+                enqueue_or_run_inline(&tx, job);
+            }
+        });
         // SAFETY: the guard is held for the whole submit->callback window.
         let consumer = unsafe { consumer_mut(hs) };
         let result = op(consumer).await;
+        panic_guard.disarm();
         let error = match result {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => box_error(e),
@@ -693,8 +774,24 @@ unsafe fn async_value_op<T, Fut, F, C>(
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     let ud = SendUserData(user_data);
     h.runtime_handle.spawn(async move {
-        let ud = ud;
+        // Arm the panic-safety bomb before awaiting. `complete` and `ud` are
+        // move-only and consumed by exactly one path: the bomb owns them while
+        // armed and, on a panic unwind, fires the callback with an internal error;
+        // on the normal path `disarm` hands them back to the ordinary completion
+        // job. Either way the guard is released and the callback fires once.
+        let panic_guard = PanicCompletionGuard::new((complete, ud), {
+            let owner = Arc::clone(&owner);
+            let tx = tx.clone();
+            move |(complete, ud): (C, SendUserData)| {
+                let job: CompletionJob = Box::new(move || {
+                    release_owner(&owner);
+                    complete(Err(op_panicked_error()), ud.into_ptr());
+                });
+                enqueue_or_run_inline(&tx, job);
+            }
+        });
         let result = op(unsafe { consumer_mut(hs) }).await;
+        let (complete, ud) = panic_guard.disarm();
         let job: CompletionJob = Box::new(move || {
             // Release BEFORE firing the callback: the awaited op is complete, so
             // the consumer is no longer borrowed. `complete` builds the result
@@ -964,7 +1061,27 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll_async(
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
+        // Arm the panic-safety bomb before awaiting: a panicking `poll` unwind
+        // enqueues an error completion (null records) so the guard is released and
+        // the callback still fires, instead of locking the consumer and hanging
+        // the caller. Disarmed on the normal path just below. `target` is `Copy`,
+        // so both the bomb and the normal completion hold their own copy.
+        let panic_guard = PanicCompletionGuard::new((), {
+            let owner = Arc::clone(&owner);
+            let tx = tx.clone();
+            move |()| {
+                let completion = PollCompletion {
+                    target,
+                    records: std::ptr::null_mut(),
+                    error: box_error(op_panicked_error()),
+                    owner,
+                };
+                let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
+                enqueue_or_run_inline(&tx, job);
+            }
+        });
         let result = unsafe { consumer_mut(hs).poll(timeout).await };
+        panic_guard.disarm();
         // No `.await` after building the raw handles below.
         let (records, error) = match result {
             Ok(r) => (box_records(r), std::ptr::null_mut()),
@@ -2297,6 +2414,234 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("destroy must return once the in-flight op completes");
         destroyer.join().expect("destroy thread joins cleanly");
+    }
+
+    /// A test-only [`ShareConsumer`] whose awaited ops **panic** rather than
+    /// return. It stands in for an abnormal internal failure (a bug / `unwrap`
+    /// inside an awaited op) and proves the async dispatch helpers stay
+    /// panic-safe: on a panic unwind the spawned task's drop guard must still
+    /// release the single-owner guard AND fire the C callback with an error,
+    /// instead of leaving the consumer permanently locked and the caller hanging
+    /// with no callback. Non-awaited methods stay benign so the guard-freedom
+    /// probe and `destroy` run cleanly after the panic.
+    struct PanicConsumer;
+
+    #[async_trait::async_trait]
+    impl ShareConsumer<Bytes, Bytes> for PanicConsumer {
+        fn subscription(&self) -> Result<HashSet<String>, KafkaError> {
+            Ok(HashSet::new())
+        }
+
+        async fn subscribe(&mut self, _topics: Vec<String>) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn poll(&mut self, _timeout: Duration) -> Result<ConsumerRecords<Bytes, Bytes>, KafkaError> {
+            panic!("poll panicked (test)");
+        }
+
+        fn acknowledge(&mut self, _record: &ConsumerRecord<Bytes, Bytes>) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn acknowledge_with_type(
+            &mut self,
+            _record: &ConsumerRecord<Bytes, Bytes>,
+            _ack_type: AcknowledgeType,
+        ) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn acknowledge_by_offset(
+            &mut self,
+            _topic: &str,
+            _partition: i32,
+            _offset: i64,
+            _ack_type: AcknowledgeType,
+        ) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn commit_sync(&mut self) -> Result<HashMap<TopicIdPartition, Option<KafkaError>>, KafkaError> {
+            panic!("commit_sync panicked (test)");
+        }
+
+        async fn commit_sync_timeout(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<HashMap<TopicIdPartition, Option<KafkaError>>, KafkaError> {
+            panic!("commit_sync_timeout panicked (test)");
+        }
+
+        async fn commit_async(&mut self) -> Result<(), KafkaError> {
+            panic!("commit_async panicked (test)");
+        }
+
+        fn set_acknowledgement_commit_callback(&mut self, _callback: Option<Arc<dyn AcknowledgementCommitCallback>>) {}
+
+        async fn client_instance_id(&mut self, _timeout: Duration) -> Result<Uuid, KafkaError> {
+            Err(KafkaError::illegal_state("clientInstanceId not set"))
+        }
+
+        fn acquisition_lock_timeout_ms(&self) -> Result<Option<i32>, KafkaError> {
+            Ok(None)
+        }
+
+        async fn close(&mut self) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        async fn close_timeout(&mut self, _timeout: Duration) -> Result<(), KafkaError> {
+            Ok(())
+        }
+
+        fn wakeup(&self) {}
+    }
+
+    /// Reports a poll callback's outcome as `Some(error_message)` when it received
+    /// a non-null error, or `None` when it received records. Frees whichever handle
+    /// is non-null, then sends the outcome over the channel in `user_data`.
+    unsafe extern "C" fn capture_poll_outcome(
+        records: *mut kafka_consumer_ConsumerRecords_t,
+        error: *mut kafka_common_KafkaError_t,
+        user_data: *mut c_void,
+    ) {
+        let outcome = if error.is_null() {
+            if !records.is_null() {
+                unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
+            }
+            None
+        } else {
+            let msg = unsafe { CStr::from_ptr(kafka_common_KafkaError_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_common_KafkaError_destroy(error) };
+            Some(msg)
+        };
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<Option<String>>) };
+        tx.send(outcome).ok();
+    }
+
+    /// [`capture_poll_outcome`] for the commit-sync callback shape.
+    unsafe extern "C" fn capture_commit_outcome(
+        result: *mut kafka_consumer_ShareCommitResult_t,
+        error: *mut kafka_common_KafkaError_t,
+        user_data: *mut c_void,
+    ) {
+        let outcome = if error.is_null() {
+            if !result.is_null() {
+                unsafe { kafka_consumer_ShareCommitResult_destroy(result) };
+            }
+            None
+        } else {
+            let msg = unsafe { CStr::from_ptr(kafka_common_KafkaError_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_common_KafkaError_destroy(error) };
+            Some(msg)
+        };
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<Option<String>>) };
+        tx.send(outcome).ok();
+    }
+
+    /// Panic-safety teeth for [`kafka_consumer_ShareConsumer_poll_async`]: when the
+    /// awaited `poll` panics and unwinds, the spawned task's drop guard must still
+    /// release the single-owner guard AND fire the callback with a non-null error.
+    /// Pre-fix (no drop guard) the completion is never enqueued, so the callback
+    /// never fires — the `recv_timeout` below trips and the test fails — and the
+    /// guard is never released, so the `acquire` below would also fail.
+    #[test]
+    fn test_poll_async_panic_releases_guard_and_fires_error() {
+        let kind = ShareConsumerKind::Kafka(Box::new(PanicConsumer));
+        let wakeup = WakeupHandle::for_mock(Arc::new(AtomicBool::new(false)));
+        let consumer = build_share_consumer_handle(kind, wakeup, false);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        unsafe {
+            kafka_consumer_ShareConsumer_poll_async(consumer, 0, capture_poll_outcome, &tx as *const _ as *mut c_void)
+        };
+
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("poll callback must fire even though poll panicked");
+        let msg = outcome.expect("a panicking poll must deliver a non-null error to the callback");
+        assert!(
+            msg.contains("failed unexpectedly"),
+            "unexpected panic-completion error message: {msg}"
+        );
+
+        // The drop guard released the single-owner guard, so a fresh acquire
+        // succeeds — the consumer is not locked out.
+        let h = unsafe { handle_ref(consumer) };
+        acquire(h).expect("the single-owner guard must be free after the panicking op");
+        release(h);
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// Panic-safety teeth for the value-returning async path
+    /// ([`kafka_consumer_ShareConsumer_commit_sync_async`] over [`async_value_op`]):
+    /// a panicking `commit_sync` still releases the guard and fires the callback
+    /// with a non-null error.
+    #[test]
+    fn test_commit_sync_async_panic_releases_guard_and_fires_error() {
+        let kind = ShareConsumerKind::Kafka(Box::new(PanicConsumer));
+        let wakeup = WakeupHandle::for_mock(Arc::new(AtomicBool::new(false)));
+        let consumer = build_share_consumer_handle(kind, wakeup, false);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        unsafe {
+            kafka_consumer_ShareConsumer_commit_sync_async(
+                consumer,
+                capture_commit_outcome,
+                &tx as *const _ as *mut c_void,
+            )
+        };
+
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("commit callback must fire even though commit_sync panicked");
+        let msg = outcome.expect("a panicking commit_sync must deliver a non-null error to the callback");
+        assert!(
+            msg.contains("failed unexpectedly"),
+            "unexpected panic-completion error message: {msg}"
+        );
+
+        let h = unsafe { handle_ref(consumer) };
+        acquire(h).expect("the single-owner guard must be free after the panicking op");
+        release(h);
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
+    }
+
+    /// Panic-safety teeth for the void async path ([`async_void_op`], here via
+    /// [`kafka_consumer_ShareConsumer_commit_async_async`]): a panicking void op
+    /// still releases the guard and fires the callback with a non-null error
+    /// (`send_op_result` reports `false` when the delivered error is non-null).
+    #[test]
+    fn test_void_async_op_panic_releases_guard_and_fires_error() {
+        let kind = ShareConsumerKind::Kafka(Box::new(PanicConsumer));
+        let wakeup = WakeupHandle::for_mock(Arc::new(AtomicBool::new(false)));
+        let consumer = build_share_consumer_handle(kind, wakeup, false);
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        unsafe {
+            kafka_consumer_ShareConsumer_commit_async_async(consumer, send_op_result, &tx as *const _ as *mut c_void)
+        };
+        let ok = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("void-op callback must fire even though the op panicked");
+        assert!(!ok, "a panicking void op must deliver a non-null error to the callback");
+
+        let h = unsafe { handle_ref(consumer) };
+        acquire(h).expect("the single-owner guard must be free after the panicking op");
+        release(h);
+
+        unsafe { kafka_consumer_ShareConsumer_destroy(consumer) };
     }
 
     /// Adds a record to a subscribed mock, then polls it back over the ABI and
