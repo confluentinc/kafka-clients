@@ -15,9 +15,9 @@ them explicitly (never rely on nested auto-loading).
 and directs it; the C# signatures below are the *target*, not current code. The
 **rules & decisions** here are durable, but the **status markers are
 point-in-time and must be refreshed as the binding lands** — namely: this line,
-§1 *What's real* + the producer-parity table, the file map's *(intended)* tags,
-and §7's *(to be created)* personas. Update those as code/ABI arrives; leave the
-shape, decisions, and boundary rules unless a decision actually changes.
+§1 *What's real* + the producer-parity table, and the file map's *(intended)*
+tags. Update those as code/ABI arrives; leave the shape, decisions, and boundary
+rules unless a decision actually changes.
 
 **The one law:** the binding restores the Java **shape** and holds **no Kafka
 logic** — batching, partitioning, retries, offsets all live once, in the Rust
@@ -250,7 +250,13 @@ The `kafka_*` function already exists in the header:
 
 ### 5.3 Mode B — full-stack port (the C-ABI-first loop)
 
-The feature lives only in the Rust core. Walk all four layers, ABI first:
+The feature lives only in the Rust core. Walk all four layers, ABI first.
+
+**Ownership split:** steps 1–4 (design + write the Rust ABI, regenerate) are a
+**Rust-core task** — the shared C ABI is authored by the root `actor-executor`
+and reviewed by `kafka-critic` against root `CLAUDE.md` (not the `dotnet-*`
+personas; §7.1/§7.2). The `dotnet-actor` **depends on** them and owns **steps
+5–7** (from the header down). The Manager sequences the handoff.
 
 1. **Design the ABI surface** — opaque handles, transparent structs, functions
    (naming per "Naming across layers" below). *This is the real work.*
@@ -347,13 +353,19 @@ Who builds and reviews this binding. The *process* is inherited from root
 live in `ffi-marshalling.md` (anti-patterns) and §6 (verify) — this section
 points at them.
 
-### 7.1 Personas (to be created)
+### 7.1 Personas
 
-- **`dotnet-actor`** and **`dotnet-critic`** (`.claude/agents/*.md`) will inherit
-  the Actor / Critic roles and the `COMMENTS.<N>.md` loop from `agent-roles.md`.
-  The Manager is the root `project-manager` (coordination is client-agnostic).
+- **`dotnet-actor`** and **`dotnet-critic`** (`.claude/agents/dotnet-*.md`)
+  inherit the Actor / Critic roles and the `COMMENTS.<N>.md` loop from
+  `agent-roles.md`. The Manager is the root `project-manager` (coordination is
+  client-agnostic).
 - They are needed because the root `actor-executor` / `kafka-critic` are
   Rust-translation-shaped and don't know P/Invoke / .NET interop.
+- **Scope — the C# side, header-down.** The `dotnet-actor` builds only C# (from
+  the generated header down) and **does not author Rust**; the `dotnet-critic`
+  reviews only C#. When a feature needs a new ABI function (Mode B, §5.3
+  steps 1–4), that's a Rust-core dependency on the root `actor-executor` /
+  `kafka-critic`, not the `dotnet-*` personas.
 
 ### 7.2 Review ground truth (firm)
 
