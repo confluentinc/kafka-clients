@@ -198,6 +198,12 @@ comment).
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
 | **Nullable reference types** | `#nullable enable` project-wide; annotate the P/Invoke surface precisely. | project setup |
 
+**Consumer-era note** — a Java sync/async *pair* (e.g. `commitSync`/`commitAsync`)
+maps to `CommitSync()` (genuinely synchronous — blocks the caller; fine since
+commit is low-frequency, not hot-path) **+** `CommitAsync()` (`Task`). The `Async`
+suffix marks the `Task`-returner; the sync twin stays sync — no suffix, calls the
+blocking-native ABI directly (not sync-over-async).
+
 ---
 
 ## 4 · Boundary rules → `ffi-marshalling.md`
