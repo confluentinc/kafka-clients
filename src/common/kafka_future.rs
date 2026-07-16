@@ -286,6 +286,11 @@ impl<T: Clone + Send + Sync + 'static> Completable<T> {
 
     /// Register a callback to run when this future completes. If the future is
     /// already complete, the callback runs immediately on the calling task.
+    ///
+    /// Only reached via [`KafkaFutureImpl::when_complete`], whose sole consumer
+    /// (the `AdminApiDriver` `describeCluster().nodes()` chaining) arrives with
+    /// a later admin tier.
+    #[allow(dead_code)]
     fn on_complete(&self, callback: CompletionCallback<T>) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(result) = guard.result.clone() {
@@ -345,15 +350,11 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
 // `KafkaFutureImpl` is a foundational prerequisite for the admin client
 // (Milestone 11): admin RPCs create these handles, return the public
 // `KafkaFuture` view synchronously, and complete them later from the
-// background task. It is landed ahead of its first caller in `src/admin`, so
-// the handle methods are not yet referenced by non-test crate code — allow
-// dead_code until the admin module lands its consumers.
-#[allow(dead_code)]
+// background task (see `src/admin`).
 pub(crate) struct KafkaFutureImpl<T: Clone + Send + Sync + 'static> {
     state: Arc<Completable<T>>,
 }
 
-#[allow(dead_code)]
 impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     /// Create a new, uncompleted future handle.
     pub(crate) fn new() -> Self {
@@ -386,7 +387,9 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     ///
     /// Translated from the eager side of `KafkaFuture.whenComplete` — used by
     /// the admin client to chain a follow-up `Call` when a prerequisite future
-    /// (e.g. `describeCluster().nodes()`) resolves.
+    /// (e.g. `describeCluster().nodes()`) resolves. That chaining arrives with a
+    /// later admin tier (Phase-1 topic RPCs do not chain calls).
+    #[allow(dead_code)]
     pub(crate) fn when_complete<F>(&self, action: F)
     where
         F: FnOnce(&Result<T, KafkaError>) + Send + 'static,
