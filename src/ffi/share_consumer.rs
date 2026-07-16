@@ -148,58 +148,72 @@ impl Drop for ReleaseGuard<'_> {
     }
 }
 
-/// The error handed to an async op's C callback when the awaited operation
-/// **panicked** instead of returning a value or `Err`. There is no Kafka error
-/// code for "the client panicked mid-operation"; surfacing it as an
-/// illegal-state failure — the closest runtime-exception analog, as with the
-/// access-guard rejection — lets the caller observe and free an ordinary error
-/// handle rather than wait forever for a callback that would otherwise never come.
-fn op_panicked_error() -> KafkaError {
+/// The error handed to an async op's C callback when the awaited operation did
+/// not finish normally — either it panicked mid-operation, or its task was
+/// cancelled by the runtime shutting down during `destroy`. There is no Kafka
+/// error code for either case; surfacing it as an illegal-state failure — the
+/// closest runtime-exception analog, as with the access-guard rejection — lets
+/// the caller observe and free an ordinary error handle rather than wait forever
+/// for a callback that would otherwise never come.
+fn op_incomplete_error() -> KafkaError {
     KafkaError::illegal_state("KafkaShareConsumer operation failed unexpectedly.")
 }
 
-/// The action a [`PanicCompletionGuard`] runs on a panic unwind: it consumes the
-/// payload to enqueue an error completion that releases the guard and fires the
+/// The action an [`IncompleteOpGuard`] runs when it is dropped while still armed
+/// (the op panicked, or its task was cancelled): it consumes the payload to
+/// enqueue an error completion that releases the access guard and fires the
 /// callback.
-type PanicAction<P> = Box<dyn FnOnce(P) + Send>;
+type IncompleteOpAction<P> = Box<dyn FnOnce(P) + Send>;
 
-/// A one-shot RAII "bomb" that makes the async dispatch helpers panic-safe.
+/// A one-shot RAII "bomb" that guarantees an async op always completes: if the
+/// awaited op does not finish normally, it fires a fallback error completion.
 ///
-/// An op awaited on a worker task can *panic*, not just return `Err`. Without
-/// this guard the unwind skips everything after the `.await`, so the single-owner
-/// guard is never released (the consumer stays locked forever) and no completion
-/// is ever enqueued (the C callback never fires and the caller hangs). While
-/// armed, dropping this guard — which only happens on a panic unwind, since the
-/// normal path [`disarm`](Self::disarm)s it first — runs `on_panic(payload)`,
-/// which enqueues an error completion that releases the guard (through the shared
-/// owner cell, exactly as an ordinary completion does) and fires the callback.
+/// An op awaited on a worker task can fail to run past its `.await` in two ways,
+/// and both skip everything after that point: it can *panic* (e.g. a bug or an
+/// `unwrap`), unwinding the task; or its task can be *cancelled* — when `destroy`
+/// drops the tokio runtime, the future of any task suspended at an `.await` is
+/// dropped in place. Without this guard, in either case the single-owner access
+/// guard would never be released (the consumer stays locked forever) and no
+/// completion would ever be enqueued (the C callback never fires and the caller
+/// hangs).
+///
+/// The invariant it enforces is: *if the op did not complete normally, release the
+/// access guard and fire an error completion anyway.* The normal path calls
+/// [`disarm`](Self::disarm) once the `.await` returns, which defuses the bomb — so
+/// an *armed* drop means the op did NOT complete normally (it panicked or was
+/// cancelled), and it runs `on_incomplete(payload)` to enqueue an error completion
+/// that releases the access guard (through the shared owner cell, exactly as an
+/// ordinary completion does) and fires the callback. That enqueued job captures
+/// only owned data, so it stays safe even under teardown cancellation: `destroy`
+/// finishes the blocking runtime shutdown (running this drop) before it frees the
+/// handle box.
 ///
 /// `payload` holds the move-only pieces a completion needs (the result builder
 /// and `user_data` for a value op). Exactly one path consumes them: the bomb owns
 /// them while armed, and `disarm` hands them back to the ordinary completion job
-/// on the normal path — so the guard is released once and the callback fires
-/// once, never twice and never both success and error.
-struct PanicCompletionGuard<P> {
-    armed: Option<(P, PanicAction<P>)>,
+/// on the normal path — so the access guard is released once and the callback
+/// fires once, never twice and never both success and error.
+struct IncompleteOpGuard<P> {
+    armed: Option<(P, IncompleteOpAction<P>)>,
 }
 
-impl<P> PanicCompletionGuard<P> {
-    fn new(payload: P, on_panic: impl FnOnce(P) + Send + 'static) -> Self {
-        Self { armed: Some((payload, Box::new(on_panic))) }
+impl<P> IncompleteOpGuard<P> {
+    fn new(payload: P, on_incomplete: impl FnOnce(P) + Send + 'static) -> Self {
+        Self { armed: Some((payload, Box::new(on_incomplete))) }
     }
 
     /// Defuses the bomb: the op returned normally, so ownership of `payload`
     /// passes back to the caller for the ordinary completion job.
     fn disarm(mut self) -> P {
-        let (payload, _on_panic) = self.armed.take().expect("panic guard is armed until disarmed");
+        let (payload, _on_incomplete) = self.armed.take().expect("incomplete-op guard is armed until disarmed");
         payload
     }
 }
 
-impl<P> Drop for PanicCompletionGuard<P> {
+impl<P> Drop for IncompleteOpGuard<P> {
     fn drop(&mut self) {
-        if let Some((payload, on_panic)) = self.armed.take() {
-            on_panic(payload);
+        if let Some((payload, on_incomplete)) = self.armed.take() {
+            on_incomplete(payload);
         }
     }
 }
@@ -686,12 +700,13 @@ unsafe fn async_void_op<F, Fut>(
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
-        // Arm the panic-safety bomb before awaiting: if `op` panics and unwinds,
-        // the guard's drop enqueues an error completion so the consumer is
-        // released and the callback still fires. Disarmed on the normal path just
-        // below. `target` is `Copy`, so both the bomb and the normal completion
-        // hold their own copy.
-        let panic_guard = PanicCompletionGuard::new((), {
+        // Arm the completion-safety bomb before awaiting: if `op` does not finish
+        // normally — a panic unwind, or task cancellation when `destroy` drops the
+        // runtime mid-await — the guard's drop enqueues an error completion so the
+        // consumer is released and the callback still fires. Disarmed on the normal
+        // path just below. `target` is `Copy`, so both the bomb and the normal
+        // completion hold their own copy.
+        let incomplete_guard = IncompleteOpGuard::new((), {
             let owner = Arc::clone(&owner);
             let tx = tx.clone();
             move |()| {
@@ -701,7 +716,7 @@ unsafe fn async_void_op<F, Fut>(
                 let completion = OperationCompletion {
                     callback: target.callback,
                     user_data: target.user_data,
-                    error: box_error(op_panicked_error()),
+                    error: box_error(op_incomplete_error()),
                 };
                 let job: CompletionJob = Box::new(move || {
                     release_owner(&owner);
@@ -713,7 +728,7 @@ unsafe fn async_void_op<F, Fut>(
         // SAFETY: the guard is held for the whole submit->callback window.
         let consumer = unsafe { consumer_mut(hs) };
         let result = op(consumer).await;
-        panic_guard.disarm();
+        incomplete_guard.disarm();
         let error = match result {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => box_error(e),
@@ -774,24 +789,26 @@ unsafe fn async_value_op<T, Fut, F, C>(
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     let ud = SendUserData(user_data);
     h.runtime_handle.spawn(async move {
-        // Arm the panic-safety bomb before awaiting. `complete` and `ud` are
+        // Arm the completion-safety bomb before awaiting. `complete` and `ud` are
         // move-only and consumed by exactly one path: the bomb owns them while
-        // armed and, on a panic unwind, fires the callback with an internal error;
-        // on the normal path `disarm` hands them back to the ordinary completion
-        // job. Either way the guard is released and the callback fires once.
-        let panic_guard = PanicCompletionGuard::new((complete, ud), {
+        // armed and, if the op does not finish normally (a panic unwind, or task
+        // cancellation when `destroy` drops the runtime mid-await), fires the
+        // callback with an internal error; on the normal path `disarm` hands them
+        // back to the ordinary completion job. Either way the guard is released and
+        // the callback fires once.
+        let incomplete_guard = IncompleteOpGuard::new((complete, ud), {
             let owner = Arc::clone(&owner);
             let tx = tx.clone();
             move |(complete, ud): (C, SendUserData)| {
                 let job: CompletionJob = Box::new(move || {
                     release_owner(&owner);
-                    complete(Err(op_panicked_error()), ud.into_ptr());
+                    complete(Err(op_incomplete_error()), ud.into_ptr());
                 });
                 enqueue_or_run_inline(&tx, job);
             }
         });
         let result = op(unsafe { consumer_mut(hs) }).await;
-        let (complete, ud) = panic_guard.disarm();
+        let (complete, ud) = incomplete_guard.disarm();
         let job: CompletionJob = Box::new(move || {
             // Release BEFORE firing the callback: the awaited op is complete, so
             // the consumer is no longer borrowed. `complete` builds the result
@@ -1061,19 +1078,21 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll_async(
     let hs: &'static ShareConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
-        // Arm the panic-safety bomb before awaiting: a panicking `poll` unwind
-        // enqueues an error completion (null records) so the guard is released and
-        // the callback still fires, instead of locking the consumer and hanging
-        // the caller. Disarmed on the normal path just below. `target` is `Copy`,
-        // so both the bomb and the normal completion hold their own copy.
-        let panic_guard = PanicCompletionGuard::new((), {
+        // Arm the completion-safety bomb before awaiting: if `poll` does not finish
+        // normally — a panic unwind, or task cancellation when `destroy` drops the
+        // runtime mid-await — the guard's drop enqueues an error completion (null
+        // records) so the guard is released and the callback still fires, instead
+        // of locking the consumer and hanging the caller. Disarmed on the normal
+        // path just below. `target` is `Copy`, so both the bomb and the normal
+        // completion hold their own copy.
+        let incomplete_guard = IncompleteOpGuard::new((), {
             let owner = Arc::clone(&owner);
             let tx = tx.clone();
             move |()| {
                 let completion = PollCompletion {
                     target,
                     records: std::ptr::null_mut(),
-                    error: box_error(op_panicked_error()),
+                    error: box_error(op_incomplete_error()),
                     owner,
                 };
                 let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
@@ -1081,7 +1100,7 @@ pub unsafe extern "C" fn kafka_consumer_ShareConsumer_poll_async(
             }
         });
         let result = unsafe { consumer_mut(hs).poll(timeout).await };
-        panic_guard.disarm();
+        incomplete_guard.disarm();
         // No `.await` after building the raw handles below.
         let (records, error) = match result {
             Ok(r) => (box_records(r), std::ptr::null_mut()),
