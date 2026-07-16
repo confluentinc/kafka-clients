@@ -15,7 +15,35 @@ Python. It is NOT completable in one session. Do it in green, committed incremen
 dependency order; the plan itself says "Rust core + tests FIRST, get green, then C FFI,
 then Python" and "one phase at a time with a check-in".
 
-**How to apply — foundation DONE (3 green commits on top of 28e9e89):**
+**Manager decisions (verified, acting on them):** proceed with wire-type enum
+variant wiring (not a blocker); authorized to fix the 2 pre-existing clippy
+lints in a separate commit (DONE — lint gate now green); C-FFI/Python bindings
+DEFERRED this round (sync-vs-async escalated to user).
+
+**How to apply — DONE (green commits on top of 28e9e89):**
+Round 2 added: clippy-gate fix; Config/ConfigEntry; CreateTopics/DeleteTopics
+wire wrappers (enum variants wired across every match arm; Metadata reused for
+list/describe); all topic POJOs (NewTopic, TopicListing, TopicDescription w/
+manual PartialEq excluding topic_id), 4 Options, 4 Result types (+ KafkaFuture
+join_map combinator); Admin trait (async_trait for close() only); full faithful
+MockAdminClient (topic RPCs, 42 admin unit tests); AdminClientConfig. Full lib
+suite 2090 green, lint/format clean.
+
+**REMAINING (largest chunk, next session):** real KafkaAdminClient network
+engine + new_admin_client() factory + KafkaAdminClientTest unit-test slices +
+tests/integration/admin_topics_test.rs (testcontainers). Feasibility CONFIRMED:
+the existing `KafkaClient` trait (src/kafka_client.rs) exposes poll/ready/send/
+least_loaded_node/disconnect/connection_failed/wakeup/new_client_request — maps
+~1:1 to Java's AdminClientRunnable needs. Build a generic
+`AdminClientRunnable<C: KafkaClient>` mirroring producer `Sender<C>`
+(src/producer/internals/sender.rs), construct NetworkClient like
+KafkaProducer::new (~156-392). describeTopics: use the Metadata-API path
+(Java's generateDescribeTopicsCallWithMetadataApi fallback) — documented
+deviation, avoids DescribeTopicPartitions cursor-pagination + describeCluster
+prereq. NewTopic::convert_to_creatable_topic still allow(dead_code) until the
+real create_topics Call uses it.
+
+**Original foundation (first 3 commits):**
 - `.claude/rules/admin-client.md` + completable `KafkaFuture` (the hard hidden
   prerequisite): `KafkaFutureImpl<T>` (pub(crate): complete/complete_exceptionally/
   when_complete/future) + `all_of`/`then_apply`/`then_apply_try`. `KafkaFutureImpl`
