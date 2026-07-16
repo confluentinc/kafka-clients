@@ -352,3 +352,14 @@ underpinning the per-key result model.
 `describe_topics` (by-name and by-id via the Metadata API). Quota-exceeded
 retries carry `ThrottlingQuotaExceededException`/`throttleTimeMs` forward and
 re-complete on final timeout, matching Java's `maybeCompleteQuotaExceededException`.
+
+**Phase 2 (2026-07-17) — `create_partitions`, `delete_records`, and the
+`AdminApiDriver` engine.** `create_partitions` is a plain controller `Call`.
+`delete_records` required the second dispatch pattern, so the `AdminApiDriver` /
+`AdminApiHandler` / `AdminApiLookupStrategy` engine (with `PartitionLeaderStrategy`
++ `PartitionLeaderCache`) was pulled forward from the originally-planned Phase 5:
+a two-stage lookup→fulfillment driver that resolves per-partition leaders, batches
+fulfillment requests by node, and unmaps + re-looks-up keys on stale-leader /
+disconnect errors (via the new `Call::set_maybe_retry_fn` / `MaybeRetryOutcome`
+hook). It runs on the same single bg task (no per-key/request `tokio::spawn`) and
+now underpins Tier 1 Phase 5, all of Tier 2's `CoordinatorStrategy`, and Tier 3.
