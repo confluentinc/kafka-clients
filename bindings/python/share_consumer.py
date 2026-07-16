@@ -231,6 +231,8 @@ class _ShareConsumerBase:
         ``(offsets, error)`` where ``offsets`` is a
         ``dict[TopicIdPartition, set[int]]`` and ``error`` is a
         :class:`KafkaError` or ``None``."""
+        if callback is not None and not callable(callback):
+            raise TypeError("callback must be callable or None")
         old = self._ack_commit_bridge
         new = None
         if callback is not None:
