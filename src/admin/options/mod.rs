@@ -1,0 +1,30 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Options classes for admin operations.
+//!
+//! Corresponds to the `*Options` classes in `org.apache.kafka.clients.admin`.
+//! Each extends the Java `AbstractOptions` base (a `timeout_ms` field); in Rust
+//! each options struct simply carries its own optional timeout plus operation
+//! specific fields.
+
+pub mod create_topics_options;
+pub mod delete_topics_options;
+pub mod describe_topics_options;
+pub mod list_topics_options;
+
+pub use create_topics_options::CreateTopicsOptions;
+pub use delete_topics_options::DeleteTopicsOptions;
+pub use describe_topics_options::DescribeTopicsOptions;
+pub use list_topics_options::ListTopicsOptions;

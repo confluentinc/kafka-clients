@@ -159,6 +159,23 @@ impl<T: Send + 'static> KafkaFuture<T> {
         }))
     }
 
+    /// Returns a future that completes when all the given keyed futures
+    /// complete, yielding a map from each key to its resolved value. If any
+    /// future completes exceptionally, the returned future yields that error.
+    ///
+    /// This is the combinator behind the admin `*Result` aggregators
+    /// (`DescribeTopicsResult::all_topic_names`, etc.). Java expresses the same
+    /// thing inline as `KafkaFuture.allOf(...).thenApply(v -> collect each
+    /// future.get())`; the Rust port names it because the get-driven model
+    /// cannot call `.get()` synchronously inside a `then_apply` closure.
+    pub fn join_map<K>(entries: Vec<(K, KafkaFuture<T>)>) -> KafkaFuture<std::collections::HashMap<K, T>>
+    where
+        T: Clone + Sync,
+        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    {
+        KafkaFuture::new(Arc::new(JoinMapFuture { entries }))
+    }
+
     /// Like [`then_apply`](Self::then_apply) but the transform may fail. If
     /// `function` returns `Err`, the returned future completes with that error.
     ///
@@ -476,6 +493,54 @@ where
 
     fn is_done(&self) -> bool {
         self.source.is_done()
+    }
+}
+
+/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::join_map`].
+struct JoinMapFuture<K, T>
+where
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    entries: Vec<(K, KafkaFuture<T>)>,
+}
+
+impl<K, T> KafkaFutureOps<std::collections::HashMap<K, T>> for JoinMapFuture<K, T>
+where
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    fn get(
+        &self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, KafkaError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let mut map = std::collections::HashMap::with_capacity(self.entries.len());
+            for (key, future) in &self.entries {
+                map.insert(key.clone(), future.get().await?);
+            }
+            Ok(map)
+        })
+    }
+
+    fn get_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, KafkaError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, self.get()).await {
+                Ok(result) => result,
+                Err(_) => Err(KafkaError::Timeout(format!(
+                    "Timed out waiting for KafkaFuture.join_map after {} ms",
+                    timeout.as_millis()
+                ))),
+            }
+        })
+    }
+
+    fn is_done(&self) -> bool {
+        self.entries.iter().all(|(_, f)| f.is_done())
     }
 }
 

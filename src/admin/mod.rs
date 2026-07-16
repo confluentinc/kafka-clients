@@ -21,6 +21,22 @@
 
 pub mod config;
 pub mod config_entry;
+pub mod create_topics_result;
+pub mod delete_topics_result;
+pub mod describe_topics_result;
+pub mod list_topics_result;
+pub mod new_topic;
+pub mod options;
+pub mod topic_description;
+pub mod topic_listing;
 
 pub use config::Config;
 pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
+pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
+pub use delete_topics_result::DeleteTopicsResult;
+pub use describe_topics_result::DescribeTopicsResult;
+pub use list_topics_result::ListTopicsResult;
+pub use new_topic::NewTopic;
+pub use options::{CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListTopicsOptions};
+pub use topic_description::TopicDescription;
+pub use topic_listing::TopicListing;
