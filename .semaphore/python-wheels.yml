@@ -6,10 +6,10 @@ name: Build Python wheels
 #     manylinux_2_28 against the Rust library pulled from the artifact store,
 #     repair with auditwheel (vendors the .so + stamps the manylinux tag), and
 #     push the wheels to the artifact store.
-#   Verify blocks: pull the wheels and install + import them (1) on the runner
-#     across every Python version, and (2) on bare Linux distro containers via
-#     .semaphore/test-wheels.sh -- proving the wheels are self-contained and
-#     portable across distros / glibc versions.
+#   Verify blocks: pull the wheels and, via .semaphore/test-wheels.sh, test
+#     every wheel on every distro x Python version -- install, import, run the
+#     unit tests, and a compression/TLS smoke -- proving they are self-contained
+#     and portable across distros / glibc versions.
 
 agent:
   machine:
@@ -94,26 +94,6 @@ blocks:
           commands:
             - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
-            - |
-              set -e
-              for py in 3.10 3.11 3.12 3.13 3.14; do
-                echo "== verifying on Python $py =="
-                sem-version python "$py" || { echo "Python $py not available -- skipping"; continue; }
-                rm -rf "/tmp/v$py"
-                python -m venv "/tmp/v$py"
-                . "/tmp/v$py/bin/activate"
-                python -m pip install --upgrade pip >/dev/null
-                python -m pip install --no-index --find-links wheelhouse confluent-kafka-rust-python
-                python -c "import _confluentkafka; print('import OK on Python $py')"
-                # Run the binding unit tests against the installed wheel from a
-                # neutral dir so 'import producer' resolves to the wheel, not src.
-                python -m pip install pytest >/dev/null
-                testtmp=$(mktemp -d); cp -r bindings/python/test "$testtmp/"
-                ( cd "$testtmp" && python -m pytest test/unit -q )
-                rm -rf "$testtmp"
-                deactivate
-              done
-            # Portability check: install + import on bare Linux distros.
             - sh .semaphore/test-wheels.sh wheelhouse
 
   - name: "Verify wheels: Linux arm64"
@@ -131,24 +111,4 @@ blocks:
           commands:
             - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
-            - |
-              set -e
-              for py in 3.10 3.11 3.12 3.13 3.14; do
-                echo "== verifying on Python $py =="
-                sem-version python "$py" || { echo "Python $py not available -- skipping"; continue; }
-                rm -rf "/tmp/v$py"
-                python -m venv "/tmp/v$py"
-                . "/tmp/v$py/bin/activate"
-                python -m pip install --upgrade pip >/dev/null
-                python -m pip install --no-index --find-links wheelhouse confluent-kafka-rust-python
-                python -c "import _confluentkafka; print('import OK on Python $py')"
-                # Run the binding unit tests against the installed wheel from a
-                # neutral dir so 'import producer' resolves to the wheel, not src.
-                python -m pip install pytest >/dev/null
-                testtmp=$(mktemp -d); cp -r bindings/python/test "$testtmp/"
-                ( cd "$testtmp" && python -m pytest test/unit -q )
-                rm -rf "$testtmp"
-                deactivate
-              done
-            # Portability check: install + import on bare Linux distros.
             - sh .semaphore/test-wheels.sh wheelhouse

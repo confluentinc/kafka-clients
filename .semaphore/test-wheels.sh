@@ -15,11 +15,11 @@
 # limitations under the License.
 #
 #
-# Install the built wheels on bare Linux distro containers and import the
-# extension, verifying the manylinux wheels are portable across distros and
-# glibc versions (almalinux:8 is at the glibc 2.28 floor). The script loops
-# over the distro images on the host and re-execs itself inside each via
-# IN_DOCKER. Must be POSIX sh.
+# Verify the built wheels on bare Linux distro containers, across every
+# supported Python version. For each distro x Python it installs the wheel and
+# runs: import, the binding unit tests, and a compression/TLS feature smoke.
+# uv provides each Python as a portable standalone build, so a distro's own
+# Python version does not limit coverage. Must be POSIX sh.
 #
 # Usage: .semaphore/test-wheels.sh <wheelhouse-dir>
 # Override the distro list with DISTRO_IMAGES="img1 img2 ...".
@@ -27,31 +27,56 @@
 set -eu
 
 wheelhouse="${1:?Usage: $0 <wheelhouse-dir>}"
+PY_VERSIONS="3.10 3.11 3.12 3.13 3.14"
 
 if [ "${IN_DOCKER:-0}" = "1" ]; then
     set -x
-    # Install a Python >= 3.10 + pip for this distro's package manager.
-    if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq python3 python3-venv python3-pip
-        py=python3
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q python3.11 python3.11-pip
-        py=python3.11
-    else
-        echo "$0: no supported package manager in image"; exit 1
+
+    # curl is needed to fetch uv (AlmaLinux ships curl-minimal already).
+    if ! command -v curl >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y -q curl
+        fi
     fi
-    "$py" -m venv /tmp/venv
-    . /tmp/venv/bin/activate
-    python -m pip install --no-index --find-links "/io/$wheelhouse" confluent-kafka-rust-python
-    python -c "import _confluentkafka; print('import OK')"
+
+    export HOME=/root
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="/root/.local/bin:$PATH"
+    uv python install $PY_VERSIONS
+
+    # Neutral test dir so 'import producer' resolves to the installed wheel.
+    testtmp=$(mktemp -d)
+    cp -r /io/bindings/python/test "$testtmp/"
+
+    for py in $PY_VERSIONS; do
+        echo "== Python $py =="
+        uv venv --python "$py" "/tmp/v$py"
+        vpy="/tmp/v$py/bin/python"
+        uv pip install --python "$vpy" --no-index --find-links "/io/$wheelhouse" confluent-kafka-rust-python
+        uv pip install --python "$vpy" pytest
+        "$vpy" -c "import _confluentkafka; print('import OK: Python $py')"
+        ( cd "$testtmp" && "$vpy" -m pytest test/unit -q )
+        "$vpy" -c "from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() or print('OK: compression '+c) for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('OK: security.protocol=SSL')"
+    done
     exit 0
 fi
 
-: "${DISTRO_IMAGES:=ubuntu:22.04 almalinux:8}"
+: "${DISTRO_IMAGES:=almalinux:8 almalinux:9 ubuntu:22.04 debian:12 ubuntu:24.04}"
+
+# Shared uv cache on the host so Python builds download once, not per distro.
+uvcache=/tmp/uvcache
+mkdir -p "$uvcache"
+
 for img in $DISTRO_IMAGES; do
-    echo "== testing wheel on $img =="
-    docker run --rm -e IN_DOCKER=1 -v "$PWD":/io -w /io "$img" \
+    echo "== testing wheels on $img =="
+    docker run --rm \
+        -e IN_DOCKER=1 \
+        -e UV_CACHE_DIR=/uvcache/cache \
+        -e UV_PYTHON_INSTALL_DIR=/uvcache/pythons \
+        -v "$uvcache":/uvcache \
+        -v "$PWD":/io -w /io "$img" \
         sh /io/.semaphore/test-wheels.sh "$wheelhouse"
 done
