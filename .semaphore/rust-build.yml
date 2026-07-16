@@ -21,6 +21,7 @@ global_job_config:
 
 blocks:
   - name: "Rust build: Linux x64"
+    dependencies: []
     task:
       agent:
         machine:
@@ -39,6 +40,7 @@ blocks:
             - artifact push workflow dist/confluent_kafka.h --destination rust-linux-${ARCH}/confluent_kafka.h --force
 
   - name: "Rust build: Linux arm64"
+    dependencies: []
     task:
       agent:
         machine:
