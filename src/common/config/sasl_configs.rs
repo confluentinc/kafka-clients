@@ -144,10 +144,7 @@ fn parse_jaas_option<'a>(jaas: &'a str, key: &str) -> Option<&'a str> {
     // Search for the key= pattern in the string
     let mut search_from = 0;
     while search_from < jaas.len() {
-        let pos = match jaas[search_from..].find(&key_eq) {
-            Some(p) => search_from + p,
-            None => return None,
-        };
+        let pos = search_from + jaas[search_from..].find(&key_eq)?;
 
         // Check that key= appears at a word boundary (preceded by whitespace or start of string)
         let at_boundary = pos == 0 || jaas.as_bytes()[pos - 1].is_ascii_whitespace();
