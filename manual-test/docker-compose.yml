@@ -1,0 +1,37 @@
+# Single-node KRaft Kafka 4.2 with KIP-932 share groups enabled, for manually
+# testing the share-consumer bindings against a real broker.
+#
+#   cd manual-test && docker compose up -d
+#   docker compose logs -f kafka        # wait for "Kafka Server started"
+#   ...run the scripts...
+#   docker compose down -v              # tear down
+#
+# Share-group config mirrors tests/integration/share_consumer_test.rs's
+# share_cluster_config(). PLAINTEXT on localhost:9092.
+services:
+  kafka:
+    image: apache/kafka:4.2.0
+    container_name: kafka-share-test
+    ports:
+      - "9092:9092"
+    environment:
+      CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      # ── KIP-932 share groups ──
+      KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS: "classic,consumer,share"
+      KAFKA_GROUP_SHARE_ENABLE: "true"
+      KAFKA_GROUP_SHARE_PARTITION_MAX_RECORD_LOCKS: "10000"
+      KAFKA_GROUP_SHARE_RECORD_LOCK_DURATION_MS: "15000"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: "1"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_NUM_PARTITIONS: "3"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: "1"
