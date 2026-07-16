@@ -20,6 +20,8 @@
 //! module.
 
 pub mod admin_client_config;
+pub mod alter_config_op;
+pub mod alter_configs_result;
 pub mod config;
 pub mod config_entry;
 pub mod create_partitions_result;
@@ -27,8 +29,11 @@ pub mod create_topics_result;
 pub mod delete_records_result;
 pub mod delete_topics_result;
 pub mod deleted_records;
+pub mod describe_cluster_result;
+pub mod describe_configs_result;
 pub mod describe_topics_result;
 pub mod kafka_admin_client;
+pub mod list_config_resources_result;
 pub mod list_topics_result;
 pub mod mock_admin_client;
 pub mod new_partitions;
@@ -41,6 +46,8 @@ pub mod topic_listing;
 pub(crate) mod internals;
 
 pub use admin_client_config::AdminClientConfig;
+pub use alter_config_op::{AlterConfigOp, OpType};
+pub use alter_configs_result::AlterConfigsResult;
 pub use config::Config;
 pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
 use std::collections::HashMap;
@@ -50,14 +57,18 @@ pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
 pub use delete_records_result::DeleteRecordsResult;
 pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
+pub use describe_cluster_result::DescribeClusterResult;
+pub use describe_configs_result::DescribeConfigsResult;
 pub use describe_topics_result::DescribeTopicsResult;
 pub use kafka_admin_client::KafkaAdminClient;
+pub use list_config_resources_result::ListConfigResourcesResult;
 pub use list_topics_result::ListTopicsResult;
 pub use mock_admin_client::MockAdminClient;
 pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
 pub use options::{
-    CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeTopicsOptions,
+    AlterConfigsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeTopicsOptions, ListConfigResourcesOptions,
     ListTopicsOptions,
 };
 pub use records_to_delete::RecordsToDelete;
@@ -68,7 +79,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::{KafkaError, TopicCollection, TopicPartition};
+
+use std::collections::HashSet;
 
 /// The administrative client for Kafka, which supports managing and inspecting
 /// topics, brokers, configurations and records.
@@ -122,6 +136,39 @@ pub trait Admin: Send + Sync {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
     ) -> DeleteRecordsResult;
+
+    /// Get information about the nodes in the cluster.
+    ///
+    /// Corresponds to `Admin.describeCluster(DescribeClusterOptions)`.
+    fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult;
+
+    /// Get the configuration for the specified resources.
+    ///
+    /// Corresponds to `Admin.describeConfigs(Collection<ConfigResource>, DescribeConfigsOptions)`.
+    fn describe_configs(
+        &self,
+        config_resources: &[ConfigResource],
+        options: DescribeConfigsOptions,
+    ) -> DescribeConfigsResult;
+
+    /// Incrementally update the configuration for the specified resources.
+    ///
+    /// Corresponds to `Admin.incrementalAlterConfigs(Map<ConfigResource, Collection<AlterConfigOp>>, AlterConfigsOptions)`.
+    fn incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        options: AlterConfigsOptions,
+    ) -> AlterConfigsResult;
+
+    /// List the config resources available in the cluster whose type is in the
+    /// given set (an empty set means all supported types).
+    ///
+    /// Corresponds to `Admin.listConfigResources(Set<ConfigResource.Type>, ListConfigResourcesOptions)`.
+    fn list_config_resources(
+        &self,
+        config_resource_types: &HashSet<ConfigResourceType>,
+        options: ListConfigResourcesOptions,
+    ) -> ListConfigResourcesResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

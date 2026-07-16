@@ -55,13 +55,17 @@ use tokio::task::JoinHandle;
 use crate::ApiVersions;
 use crate::DefaultHostResolver;
 use crate::client_utils;
+use crate::common::acl::AclOperation;
+use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
+use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
 use crate::common::requests::{
     ConcreteResponse, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteTopicsRequestBuilder,
-    MetadataRequestBuilder, RequestBuilder,
+    DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
+    IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, MetadataRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
 use crate::common::utils::{ExponentialBackoff, LogContext};
@@ -71,7 +75,13 @@ use crate::create_partitions_request_data::{
 };
 use crate::create_topics_request_data::{CreatableTopic, CreateTopicsRequestData};
 use crate::delete_topics_request_data::{DeleteTopicState, DeleteTopicsRequestData};
+use crate::describe_cluster_request_data::DescribeClusterRequestData;
+use crate::describe_configs_request_data::{DescribeConfigsRequestData, DescribeConfigsResource};
+use crate::incremental_alter_configs_request_data::{
+    AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequestData,
+};
 use crate::kafka_client::KafkaClient;
+use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 
@@ -84,12 +94,16 @@ use super::internals::delete_records_handler::DeleteRecordsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::records_to_delete::RecordsToDelete;
 use super::{
-    Admin, AdminClientConfig, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
-    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
-    DeleteTopicsOptions, DeleteTopicsResult, DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions,
-    ListTopicsResult, NewPartitions, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, Config, ConfigEntry,
+    ConfigSource, ConfigSynonym, ConfigType, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions,
+    CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
+    DescribeTopicsOptions, DescribeTopicsResult, ListConfigResourcesOptions, ListConfigResourcesResult,
+    ListTopicsOptions, ListTopicsResult, NewPartitions, NewTopic, TopicDescription, TopicListing,
+    TopicMetadataAndConfig,
 };
 use crate::common::Node;
+use std::collections::{BTreeSet, HashSet};
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
 const RETRY_BACKOFF_EXP_BASE: i32 = 2;
@@ -293,6 +307,102 @@ impl KafkaAdminClient {
             wakeup: Arc::clone(&self.shared.wakeup),
             time_provider: Arc::clone(&self.shared.time_provider),
         }
+    }
+
+    /// Submits one `incrementalAlterConfigs` [`Call`] for the given `resources`
+    /// (all routed to `node_provider`) and returns the per-resource futures.
+    ///
+    /// Translated from the private
+    /// `KafkaAdminClient.incrementalAlterConfigs(configs, options, resources, nodeProvider)`.
+    fn submit_incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        options: &AlterConfigsOptions,
+        resources: &[ConfigResource],
+        node_provider: NodeProvider,
+    ) -> HashMap<ConfigResource, KafkaFuture<()>> {
+        let mut handles: HashMap<ConfigResource, KafkaFutureImpl<()>> = HashMap::new();
+        for resource in resources {
+            handles.insert(resource.clone(), KafkaFutureImpl::new());
+        }
+        let public: HashMap<ConfigResource, KafkaFuture<()>> =
+            handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let validate_only = options.should_validate_only();
+
+        // Build the request data from the admin `ConfigResource`/`AlterConfigOp`
+        // types (Java's `IncrementalAlterConfigsRequest.Builder` does this).
+        let mut request_data = IncrementalAlterConfigsRequestData::new();
+        request_data.set_validate_only(validate_only);
+        let mut wire_resources = Vec::with_capacity(resources.len());
+        for resource in resources {
+            let mut alterable_configs = Vec::new();
+            if let Some(ops) = configs.get(resource) {
+                for op in ops {
+                    let mut c = AlterableConfig::new();
+                    c.set_name(op.config_entry().name().to_string());
+                    c.set_value(op.config_entry().value().map(str::to_string));
+                    c.set_config_operation(op.op_type().id());
+                    alterable_configs.push(c);
+                }
+            }
+            let mut wire_resource = AlterConfigsResource::new();
+            wire_resource.set_resource_type(resource.resource_type().id());
+            wire_resource.set_resource_name(resource.name().to_string());
+            wire_resource.set_configs(alterable_configs);
+            wire_resources.push(wire_resource);
+        }
+        request_data.set_resources(wire_resources);
+
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::from_data(request_data.clone()))
+                as Box<dyn RequestBuilder>)
+        });
+
+        let handles = Arc::new(handles);
+        let resp_mm = self.shared.metadata_manager.clone();
+        let resp_handles = Arc::clone(&handles);
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::IncrementalAlterConfigs(alter_response) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected an IncrementalAlterConfigs response"));
+            };
+            if let Some(err) = handle_not_controller_error(&resp_mm, &alter_response.error_counts()) {
+                return HandleResult::Retry(err);
+            }
+            let errors = alter_response.errors_by_resource();
+            for (resource, future) in resp_handles.iter() {
+                match errors.get(resource) {
+                    Some((code, message)) if *code != Errors::None.code() => {
+                        future.complete_exceptionally(api_error(*code, message));
+                    },
+                    _ => {
+                        future.complete(());
+                    },
+                }
+            }
+            HandleResult::Done
+        });
+
+        let fail_handles = Arc::clone(&handles);
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            for future in fail_handles.values() {
+                future.complete_exceptionally(error.clone());
+            }
+        });
+
+        let call = Call::new(
+            "incrementalAlterConfigs",
+            deadline,
+            node_provider,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        public
     }
 }
 
@@ -501,6 +611,146 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
     } else {
         None
     }
+}
+
+/// Returns the broker id pertaining to the given resource, or `None` if the
+/// resource is not associated with a particular broker.
+///
+/// Mirrors `KafkaAdminClient.nodeFor`.
+fn node_for(resource: &ConfigResource) -> Option<i32> {
+    if (resource.resource_type() == ConfigResourceType::Broker && !resource.is_default())
+        || resource.resource_type() == ConfigResourceType::BrokerLogger
+    {
+        // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
+        // would throw. Here a parse failure degrades to "any broker" rather
+        // than panicking on a recoverable path (CLAUDE.md §10).
+        resource.name().parse::<i32>().ok()
+    } else {
+        None
+    }
+}
+
+/// Decodes a 32-bit authorized-operations field into an optional set of valid
+/// [`AclOperation`]s, returning `None` when the field is omitted.
+///
+/// Mirrors `AdminUtils.validAclOperations`, which returns `null` when the
+/// operations are omitted (Java's `describeCluster` completes the future with
+/// that `null`).
+fn valid_acl_operations_or_null(authorized_operations: i32) -> Option<BTreeSet<AclOperation>> {
+    if authorized_operations == AUTHORIZED_OPERATIONS_OMITTED {
+        None
+    } else {
+        Some(valid_acl_operations(authorized_operations))
+    }
+}
+
+/// Converts a `DescribeConfigsResult` wire result into a [`Config`], mirroring
+/// `KafkaAdminClient.describeConfigResult`.
+fn describe_config_result(result: &crate::describe_configs_response_data::DescribeConfigsResult) -> Config {
+    Config::new(result.configs.iter().map(|config| {
+        let synonyms = config
+            .synonyms
+            .iter()
+            .map(|synonym| {
+                ConfigSynonym::new(
+                    synonym.name.clone(),
+                    synonym.value.clone(),
+                    ConfigSource::for_id(synonym.source),
+                )
+            })
+            .collect();
+        ConfigEntry::with_metadata(
+            config.name.clone(),
+            config.value.clone(),
+            ConfigSource::for_id(config.config_source),
+            config.is_sensitive,
+            config.read_only,
+            synonyms,
+            ConfigType::for_id(config.config_type),
+            config.documentation.clone(),
+        )
+    }))
+}
+
+/// Builds a `describeConfigs` [`Call`] for a set of resources routed to a single
+/// node (`Some(broker)`) or the least-loaded broker (`None`). Translated from
+/// the `Call` created inside `KafkaAdminClient.describeConfigs`.
+fn get_describe_configs_call(
+    node: Option<i32>,
+    unified: Arc<HashMap<ConfigResource, KafkaFutureImpl<Config>>>,
+    include_synonyms: bool,
+    include_documentation: bool,
+    deadline: i64,
+) -> Call {
+    let req_unified = Arc::clone(&unified);
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let resources = req_unified
+            .keys()
+            .map(|resource| {
+                let mut r = DescribeConfigsResource::new();
+                r.set_resource_name(resource.name().to_string());
+                r.set_resource_type(resource.resource_type().id());
+                r.set_configuration_keys(None);
+                r
+            })
+            .collect();
+        let mut data = DescribeConfigsRequestData::new();
+        data.set_resources(resources);
+        data.set_include_synonyms(include_synonyms);
+        data.set_include_documentation(include_documentation);
+        Ok(Box::new(DescribeConfigsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_unified = Arc::clone(&unified);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeConfigs(describe_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeConfigs response"));
+        };
+        for (config_resource, result) in describe_response.result_map() {
+            let Some(future) = resp_unified.get(&config_resource) else {
+                // A config in the response that was not in the request; Java
+                // logs a warning and ignores it.
+                continue;
+            };
+            if result.error_code != Errors::None.code() {
+                future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+            } else {
+                future.complete(describe_config_result(result));
+            }
+        }
+        // Complete any future for which the node did not return a result.
+        for (resource, future) in resp_unified.iter() {
+            if !future.is_done() {
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!("The node response did not contain a result for config resource {resource}"),
+                ));
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_unified = Arc::clone(&unified);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_unified.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    let node_provider = match node {
+        Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+        None => NodeProvider::LeastLoadedBrokerOrActiveKController,
+    };
+
+    Call::new(
+        "describeConfigs",
+        deadline,
+        node_provider,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
 }
 
 /// Completes any future not yet realized, mirroring
@@ -1376,6 +1626,273 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         DeleteRecordsResult::new(result_map)
+    }
+
+    fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        let nodes_handle: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
+        let controller_handle: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
+        let cluster_id_handle: KafkaFutureImpl<String> = KafkaFutureImpl::new();
+        let authorized_ops_handle: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
+
+        let public = DescribeClusterResult::new(
+            nodes_handle.future(),
+            controller_handle.future(),
+            cluster_id_handle.future(),
+            authorized_ops_handle.future(),
+        );
+
+        // `useMetadataRequest` is toggled to true by the UnsupportedVersion
+        // handler so the retry falls back to a Metadata request (mirrors Java).
+        let use_metadata_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mm = self.shared.metadata_manager.clone();
+        let include_authorized_operations = options.should_include_authorized_operations();
+        let include_fenced_brokers = options.should_include_fenced_brokers();
+
+        let req_use_metadata = Arc::clone(&use_metadata_request);
+        let req_mm = mm.clone();
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            if req_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
+                // Only requests node information; allow_auto_topic_creation=true
+                // simplifies communication with older brokers.
+                let mut data = crate::metadata_request_data::MetadataRequestData::new();
+                data.set_topics(Some(Vec::new()));
+                data.set_allow_auto_topic_creation(true);
+                data.set_include_cluster_authorized_operations(include_authorized_operations);
+                Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+            } else {
+                if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
+                    return Err(KafkaError::illegal_argument(
+                        "Cannot request fenced brokers from controller endpoint",
+                    ));
+                }
+                let endpoint_type = if req_mm.using_bootstrap_controllers() {
+                    ENDPOINT_TYPE_CONTROLLER
+                } else {
+                    ENDPOINT_TYPE_BROKER
+                };
+                let mut data = DescribeClusterRequestData::new();
+                data.set_include_cluster_authorized_operations(include_authorized_operations);
+                data.set_endpoint_type(endpoint_type);
+                data.set_include_fenced_brokers(include_fenced_brokers);
+                Ok(Box::new(DescribeClusterRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+            }
+        });
+
+        let resp_use_metadata = Arc::clone(&use_metadata_request);
+        let resp_nodes = nodes_handle.clone();
+        let resp_controller = controller_handle.clone();
+        let resp_cluster_id = cluster_id_handle.clone();
+        let resp_authorized = authorized_ops_handle.clone();
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            if resp_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
+                let ConcreteResponse::Metadata(metadata_response) = response else {
+                    return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+                };
+                resp_nodes.complete(metadata_response.brokers().to_vec());
+                let controller = metadata_response.controller().filter(|c| c.id() != NO_CONTROLLER_ID).cloned();
+                resp_controller.complete(controller);
+                resp_cluster_id.complete(metadata_response.cluster_id().unwrap_or_default().to_string());
+                resp_authorized
+                    .complete(valid_acl_operations_or_null(metadata_response.cluster_authorized_operations()));
+            } else {
+                let ConcreteResponse::DescribeCluster(describe_response) = response else {
+                    return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeCluster response"));
+                };
+                let error = Errors::for_code(describe_response.data().error_code);
+                if error != Errors::None {
+                    return HandleResult::Retry(api_error(
+                        describe_response.data().error_code,
+                        &describe_response.data().error_message,
+                    ));
+                }
+                let nodes = describe_response.nodes();
+                let controller_id = describe_response.data().controller_id;
+                resp_nodes.complete(nodes.values().cloned().collect());
+                // Controller is None if the controller id is NO_CONTROLLER_ID.
+                resp_controller.complete(nodes.get(&controller_id).cloned());
+                resp_cluster_id.complete(describe_response.data().cluster_id.clone());
+                resp_authorized.complete(valid_acl_operations_or_null(
+                    describe_response.data().cluster_authorized_operations,
+                ));
+            }
+            HandleResult::Done
+        });
+
+        let fail_nodes = nodes_handle.clone();
+        let fail_controller = controller_handle.clone();
+        let fail_cluster_id = cluster_id_handle.clone();
+        let fail_authorized = authorized_ops_handle.clone();
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            fail_nodes.complete_exceptionally(error.clone());
+            fail_controller.complete_exceptionally(error.clone());
+            fail_cluster_id.complete_exceptionally(error.clone());
+            fail_authorized.complete_exceptionally(error.clone());
+        });
+
+        let uv_mm = mm.clone();
+        let uv_use_metadata = Arc::clone(&use_metadata_request);
+        let handle_uv = Box::new(move || {
+            if uv_mm.using_bootstrap_controllers() {
+                return false;
+            }
+            if uv_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
+                return false;
+            }
+            // If the UnsupportedVersion was caused by requesting fenced brokers
+            // (only supported at v2+), do not fall back to the metadata request.
+            if include_fenced_brokers {
+                return false;
+            }
+            uv_use_metadata.store(true, std::sync::atomic::Ordering::Release);
+            true
+        });
+
+        let call = Call::new(
+            "listNodes",
+            deadline,
+            NodeProvider::LeastLoadedBrokerOrActiveKController,
+            create_request,
+            handle_response,
+            handle_failure,
+            handle_uv,
+        );
+        self.submit(call);
+        public
+    }
+
+    fn describe_configs(
+        &self,
+        config_resources: &[ConfigResource],
+        options: DescribeConfigsOptions,
+    ) -> DescribeConfigsResult {
+        // Partition the requested config resources based on which broker they
+        // must be sent to (null broker == obtainable from any broker).
+        let mut node_futures: HashMap<Option<i32>, HashMap<ConfigResource, KafkaFutureImpl<Config>>> = HashMap::new();
+        for resource in config_resources {
+            let broker = node_for(resource);
+            node_futures
+                .entry(broker)
+                .or_default()
+                .insert(resource.clone(), KafkaFutureImpl::new());
+        }
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let include_synonyms = options.should_include_synonyms();
+        let include_documentation = options.should_include_documentation();
+
+        let mut public: HashMap<ConfigResource, KafkaFuture<Config>> = HashMap::new();
+        for (node, unified) in &node_futures {
+            for (resource, handle) in unified {
+                public.insert(resource.clone(), handle.future());
+            }
+            let call = get_describe_configs_call(
+                *node,
+                Arc::new(unified.clone()),
+                include_synonyms,
+                include_documentation,
+                deadline,
+            );
+            self.submit(call);
+        }
+
+        DescribeConfigsResult::new(public)
+    }
+
+    fn incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        options: AlterConfigsOptions,
+    ) -> AlterConfigsResult {
+        let mut all_futures: HashMap<ConfigResource, KafkaFuture<()>> = HashMap::new();
+        // BROKER_LOGGER requests always go to a specific broker; a non-default
+        // BROKER resource goes to that specific node; everything else goes to
+        // the least loaded broker (bootstrap.controllers is unsupported here,
+        // so the controller special-casing never triggers).
+        let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
+
+        for resource in configs.keys() {
+            let mut node = node_for(resource);
+            if self.shared.metadata_manager.using_bootstrap_controllers()
+                && resource.resource_type() != ConfigResourceType::BrokerLogger
+            {
+                node = None;
+            }
+            if let Some(node_id) = node {
+                let futures = self.submit_incremental_alter_configs(
+                    configs,
+                    &options,
+                    std::slice::from_ref(resource),
+                    NodeProvider::ConstantNodeId(node_id),
+                );
+                all_futures.extend(futures);
+            } else {
+                unified_request_resources.push(resource.clone());
+            }
+        }
+        if !unified_request_resources.is_empty() {
+            let futures = self.submit_incremental_alter_configs(
+                configs,
+                &options,
+                &unified_request_resources,
+                NodeProvider::LeastLoadedBrokerOrActiveKController,
+            );
+            all_futures.extend(futures);
+        }
+
+        AlterConfigsResult::new(all_futures)
+    }
+
+    fn list_config_resources(
+        &self,
+        config_resource_types: &HashSet<ConfigResourceType>,
+        options: ListConfigResourcesOptions,
+    ) -> ListConfigResourcesResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<Vec<ConfigResource>> = KafkaFutureImpl::new();
+        let public = handle.future();
+
+        let resource_type_ids: Vec<i8> = config_resource_types.iter().map(ConfigResourceType::id).collect();
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            let mut data = ListConfigResourcesRequestData::new();
+            data.set_resource_types(resource_type_ids.clone());
+            Ok(Box::new(ListConfigResourcesRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        });
+
+        let resp_handle = handle.clone();
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::ListConfigResources(list_response) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
+            };
+            let error = list_response.error();
+            if error != Errors::None {
+                resp_handle.complete_exceptionally(KafkaError::new(error));
+            } else {
+                resp_handle.complete(list_response.config_resources());
+            }
+            HandleResult::Done
+        });
+
+        let fail_handle = handle.clone();
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            fail_handle.complete_exceptionally(error.clone());
+        });
+
+        let call = Call::new(
+            "listConfigResources",
+            deadline,
+            NodeProvider::LeastLoaded,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        ListConfigResourcesResult::new(public)
     }
 
     async fn close(&self, timeout: Duration) {

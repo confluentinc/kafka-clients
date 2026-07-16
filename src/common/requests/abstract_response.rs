@@ -34,8 +34,12 @@ use super::CreatePartitionsResponse;
 use super::CreateTopicsResponse;
 use super::DeleteRecordsResponse;
 use super::DeleteTopicsResponse;
+use super::DescribeClusterResponse;
+use super::DescribeConfigsResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
+use super::IncrementalAlterConfigsResponse;
+use super::ListConfigResourcesResponse;
 use super::ListOffsetsResponse;
 use super::MetadataResponse;
 use super::OffsetCommitResponse;
@@ -91,6 +95,14 @@ pub enum ConcreteResponse {
     CreatePartitions(CreatePartitionsResponse),
     /// A DeleteRecords response.
     DeleteRecords(DeleteRecordsResponse),
+    /// A DescribeConfigs response.
+    DescribeConfigs(DescribeConfigsResponse),
+    /// An IncrementalAlterConfigs response.
+    IncrementalAlterConfigs(IncrementalAlterConfigsResponse),
+    /// A ListConfigResources response.
+    ListConfigResources(ListConfigResourcesResponse),
+    /// A DescribeCluster response.
+    DescribeCluster(DescribeClusterResponse),
 }
 
 impl ConcreteResponse {
@@ -113,6 +125,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => r.api_key(),
             Self::CreatePartitions(r) => r.api_key(),
             Self::DeleteRecords(r) => r.api_key(),
+            Self::DescribeConfigs(r) => r.api_key(),
+            Self::IncrementalAlterConfigs(r) => r.api_key(),
+            Self::ListConfigResources(r) => r.api_key(),
+            Self::DescribeCluster(r) => r.api_key(),
         }
     }
 
@@ -141,6 +157,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::CreatePartitions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DeleteRecords(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeConfigs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ListConfigResources(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeCluster(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -201,6 +221,18 @@ impl ConcreteResponse {
             Self::DeleteRecords(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::IncrementalAlterConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListConfigResources(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeCluster(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -229,6 +261,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreatePartitions(r) => Self::serialize_body(r.data_mut(), version),
             Self::DeleteRecords(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -261,6 +297,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => r.error_counts(),
             Self::CreatePartitions(r) => r.error_counts(),
             Self::DeleteRecords(r) => r.error_counts(),
+            Self::DescribeConfigs(r) => r.error_counts(),
+            Self::IncrementalAlterConfigs(r) => r.error_counts(),
+            Self::ListConfigResources(r) => r.error_counts(),
+            Self::DescribeCluster(r) => r.error_counts(),
         }
     }
 
@@ -285,6 +325,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => r.throttle_time_ms(),
             Self::CreatePartitions(r) => r.throttle_time_ms(),
             Self::DeleteRecords(r) => r.throttle_time_ms(),
+            Self::DescribeConfigs(r) => r.throttle_time_ms(),
+            Self::IncrementalAlterConfigs(r) => r.throttle_time_ms(),
+            Self::ListConfigResources(r) => r.throttle_time_ms(),
+            Self::DescribeCluster(r) => r.throttle_time_ms(),
         }
     }
 
@@ -308,6 +352,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::CreatePartitions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DeleteRecords(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeConfigs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::IncrementalAlterConfigs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ListConfigResources(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeCluster(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -330,6 +378,10 @@ impl ConcreteResponse {
             Self::DeleteTopics(r) => r.should_client_throttle(version),
             Self::CreatePartitions(r) => r.should_client_throttle(version),
             Self::DeleteRecords(r) => r.should_client_throttle(version),
+            Self::DescribeConfigs(r) => r.should_client_throttle(version),
+            Self::IncrementalAlterConfigs(r) => r.should_client_throttle(version),
+            Self::ListConfigResources(r) => r.should_client_throttle(version),
+            Self::DescribeCluster(r) => r.should_client_throttle(version),
         }
     }
 
@@ -442,6 +494,22 @@ impl ConcreteResponse {
                 let response = DeleteRecordsResponse::parse(readable, version)?;
                 Ok(Self::DeleteRecords(response))
             },
+            ApiKeys::DESCRIBE_CONFIGS => {
+                let response = DescribeConfigsResponse::parse(readable, version)?;
+                Ok(Self::DescribeConfigs(response))
+            },
+            ApiKeys::INCREMENTAL_ALTER_CONFIGS => {
+                let response = IncrementalAlterConfigsResponse::parse(readable, version)?;
+                Ok(Self::IncrementalAlterConfigs(response))
+            },
+            ApiKeys::LIST_CONFIG_RESOURCES => {
+                let response = ListConfigResourcesResponse::parse(readable, version)?;
+                Ok(Self::ListConfigResources(response))
+            },
+            ApiKeys::DESCRIBE_CLUSTER => {
+                let response = DescribeClusterResponse::parse(readable, version)?;
+                Ok(Self::DescribeCluster(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -469,6 +537,10 @@ impl std::fmt::Display for ConcreteResponse {
             Self::DeleteTopics(r) => write!(f, "{r}"),
             Self::CreatePartitions(r) => write!(f, "{r}"),
             Self::DeleteRecords(r) => write!(f, "{r}"),
+            Self::DescribeConfigs(r) => write!(f, "{r}"),
+            Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
+            Self::ListConfigResources(r) => write!(f, "{r}"),
+            Self::DescribeCluster(r) => write!(f, "{r}"),
         }
     }
 }

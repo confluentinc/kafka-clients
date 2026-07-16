@@ -32,8 +32,12 @@ use crate::create_partitions_request_data::CreatePartitionsRequestData;
 use crate::create_topics_request_data::CreateTopicsRequestData;
 use crate::delete_records_request_data::DeleteRecordsRequestData;
 use crate::delete_topics_request_data::DeleteTopicsRequestData;
+use crate::describe_cluster_request_data::DescribeClusterRequestData;
+use crate::describe_configs_request_data::DescribeConfigsRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
+use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
@@ -50,8 +54,12 @@ use super::CreatePartitionsRequest;
 use super::CreateTopicsRequest;
 use super::DeleteRecordsRequest;
 use super::DeleteTopicsRequest;
+use super::DescribeClusterRequest;
+use super::DescribeConfigsRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
+use super::IncrementalAlterConfigsRequest;
+use super::ListConfigResourcesRequest;
 use super::ListOffsetsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
@@ -136,6 +144,14 @@ pub enum ConcreteRequest {
     CreatePartitions(CreatePartitionsRequest),
     /// A DeleteRecords request.
     DeleteRecords(DeleteRecordsRequest),
+    /// A DescribeConfigs request.
+    DescribeConfigs(DescribeConfigsRequest),
+    /// An IncrementalAlterConfigs request.
+    IncrementalAlterConfigs(IncrementalAlterConfigsRequest),
+    /// A ListConfigResources request.
+    ListConfigResources(ListConfigResourcesRequest),
+    /// A DescribeCluster request.
+    DescribeCluster(DescribeClusterRequest),
 }
 
 impl ConcreteRequest {
@@ -158,6 +174,10 @@ impl ConcreteRequest {
             Self::DeleteTopics(r) => r.version(),
             Self::CreatePartitions(r) => r.version(),
             Self::DeleteRecords(r) => r.version(),
+            Self::DescribeConfigs(r) => r.version(),
+            Self::IncrementalAlterConfigs(r) => r.version(),
+            Self::ListConfigResources(r) => r.version(),
+            Self::DescribeCluster(r) => r.version(),
         }
     }
 
@@ -180,6 +200,10 @@ impl ConcreteRequest {
             Self::DeleteTopics(r) => r.api_key(),
             Self::CreatePartitions(r) => r.api_key(),
             Self::DeleteRecords(r) => r.api_key(),
+            Self::DescribeConfigs(r) => r.api_key(),
+            Self::IncrementalAlterConfigs(r) => r.api_key(),
+            Self::ListConfigResources(r) => r.api_key(),
+            Self::DescribeCluster(r) => r.api_key(),
         }
     }
 
@@ -208,6 +232,10 @@ impl ConcreteRequest {
             Self::DeleteTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::CreatePartitions(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DeleteRecords(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::IncrementalAlterConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListConfigResources(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -290,6 +318,18 @@ impl ConcreteRequest {
             Self::DeleteRecords(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::IncrementalAlterConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListConfigResources(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeCluster(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -319,6 +359,10 @@ impl ConcreteRequest {
             Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreatePartitions(r) => Self::serialize_body(r.data_mut(), version),
             Self::DeleteRecords(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -359,6 +403,10 @@ impl ConcreteRequest {
             Self::DeleteTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::CreatePartitions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DeleteRecords(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::IncrementalAlterConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListConfigResources(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -449,6 +497,25 @@ impl ConcreteRequest {
                 let data = DeleteRecordsRequestData::read(readable, api_version)?;
                 Ok(Self::DeleteRecords(DeleteRecordsRequest::new(data, api_version)))
             },
+            ApiKeys::DESCRIBE_CONFIGS => {
+                let data = DescribeConfigsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeConfigs(DescribeConfigsRequest::new(data, api_version)))
+            },
+            ApiKeys::INCREMENTAL_ALTER_CONFIGS => {
+                let data = IncrementalAlterConfigsRequestData::read(readable, api_version)?;
+                Ok(Self::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::LIST_CONFIG_RESOURCES => {
+                let data = ListConfigResourcesRequestData::read(readable, api_version)?;
+                Ok(Self::ListConfigResources(ListConfigResourcesRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_CLUSTER => {
+                let data = DescribeClusterRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeCluster(DescribeClusterRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -476,6 +543,10 @@ impl std::fmt::Display for ConcreteRequest {
             Self::DeleteTopics(r) => write!(f, "{r}"),
             Self::CreatePartitions(r) => write!(f, "{r}"),
             Self::DeleteRecords(r) => write!(f, "{r}"),
+            Self::DescribeConfigs(r) => write!(f, "{r}"),
+            Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
+            Self::ListConfigResources(r) => write!(f, "{r}"),
+            Self::DescribeCluster(r) => write!(f, "{r}"),
         }
     }
 }
