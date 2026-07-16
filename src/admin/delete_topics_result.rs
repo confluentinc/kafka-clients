@@ -36,14 +36,11 @@ pub enum DeleteTopicsResult {
 
 impl DeleteTopicsResult {
     /// Creates a result keyed by topic id.
-    // Wired by KafkaAdminClient::delete_topics (next commit).
-    #[allow(dead_code)]
     pub(crate) fn of_topic_ids(topic_id_futures: HashMap<Uuid, KafkaFuture<()>>) -> Self {
         DeleteTopicsResult::ByTopicId(topic_id_futures)
     }
 
     /// Creates a result keyed by topic name.
-    #[allow(dead_code)]
     pub(crate) fn of_topic_names(name_futures: HashMap<String, KafkaFuture<()>>) -> Self {
         DeleteTopicsResult::ByTopicName(name_futures)
     }

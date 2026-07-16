@@ -36,14 +36,11 @@ pub enum DescribeTopicsResult {
 
 impl DescribeTopicsResult {
     /// Creates a result keyed by topic id.
-    // Wired by KafkaAdminClient::describe_topics (next commit).
-    #[allow(dead_code)]
     pub(crate) fn of_topic_ids(topic_id_futures: HashMap<Uuid, KafkaFuture<TopicDescription>>) -> Self {
         DescribeTopicsResult::ByTopicId(topic_id_futures)
     }
 
     /// Creates a result keyed by topic name.
-    #[allow(dead_code)]
     pub(crate) fn of_topic_names(name_futures: HashMap<String, KafkaFuture<TopicDescription>>) -> Self {
         DescribeTopicsResult::ByTopicName(name_futures)
     }

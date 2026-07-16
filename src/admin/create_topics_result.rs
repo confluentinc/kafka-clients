@@ -105,8 +105,6 @@ pub struct CreateTopicsResult {
 
 impl CreateTopicsResult {
     /// Creates a result from a map of topic name to per-topic future.
-    // Wired by KafkaAdminClient::create_topics (next commit).
-    #[allow(dead_code)]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
         Self { futures }
     }
