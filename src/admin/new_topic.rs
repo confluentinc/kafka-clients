@@ -122,9 +122,8 @@ impl NewTopic {
 
     /// Converts this new topic to a wire `CreatableTopic`.
     ///
-    /// Mirrors `NewTopic.convertToCreatableTopic`.
-    // Wired by KafkaAdminClient::create_topics (next commit).
-    #[allow(dead_code)]
+    /// Mirrors `NewTopic.convertToCreatableTopic`. Used by
+    /// `KafkaAdminClient::create_topics`.
     pub(crate) fn convert_to_creatable_topic(&self) -> CreatableTopic {
         let mut creatable = CreatableTopic::new();
         creatable.set_name(self.name.clone());
