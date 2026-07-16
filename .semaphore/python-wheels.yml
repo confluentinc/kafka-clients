@@ -1,0 +1,74 @@
+version: v1.0
+name: Build Python wheels
+
+# Builds the Python binding wheels for each target architecture with
+# cibuildwheel: for every target Python version it compiles the C extension
+# (_confluentkafka.c) inside manylinux_2_28 against the Rust library pulled
+# from the artifact store, then repairs the wheel with auditwheel so the .so
+# is vendored in and the wheel gets the manylinux_2_28 tag.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-3
+
+global_job_config:
+  env_vars:
+    - name: CIBW_BUILD
+      value: cp310-* cp311-* cp312-* cp313-* cp314-*
+    - name: CIBW_SKIP
+      value: "*musllinux* *i686 *t-*"
+    - name: CIBW_MANYLINUX_X86_64_IMAGE
+      value: manylinux_2_28
+    - name: CIBW_MANYLINUX_AARCH64_IMAGE
+      value: manylinux_2_28
+  prologue:
+    commands:
+      - checkout
+      - sem-version python 3.11
+      - python -m pip install --upgrade pip
+      - python -m pip install cibuildwheel==3.2.1
+
+blocks:
+  - name: "Python wheel: Linux x64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: build-and-verify
+          commands:
+            # Stage the Rust library + header inside the package dir so the
+            # cibuildwheel container can see them.
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
+            - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            # $PWD is resolved by cibuildwheel inside the container (= the
+            # package dir), so keep it literal here.
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/native/lib LDFLAGS=-L$PWD/native/lib LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/native/lib'
+            - export CIBW_TEST_COMMAND='python -c "import _confluentkafka; print('"'"'import OK'"'"')"'
+            - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
+
+  - name: "Python wheel: Linux arm64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: build-and-verify
+          commands:
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
+            - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/native/lib LDFLAGS=-L$PWD/native/lib LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/native/lib'
+            - export CIBW_TEST_COMMAND='python -c "import _confluentkafka; print('"'"'import OK'"'"')"'
+            - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
