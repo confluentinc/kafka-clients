@@ -194,3 +194,47 @@ RPCs, Rust core + unit tests + real-broker integration tests, all green.
 - DoD #10 (hot-path allocation audit) N/A for Admin (batch/administrative, not
   per-record). One Critic review round: 7 findings (0 blocker, 4 should-fix, 3
   minor), all resolved; see `design/history/Milestone-11/Phase-1/COMMENTS.DONE.1.md`.
+
+## Phase 2 — Partitions & records ✓ (2026-07-17)
+
+Translated `create_partitions` and `delete_records`, Rust core + unit tests +
+real-broker integration tests, all green.
+
+- **`create_partitions`** (`CreatePartitionsRequest`, plain `Call` on the
+  controller) and **`delete_records`**.
+- **`AdminApiDriver` engine pulled forward from Phase 5**: Java's
+  `delete_records` genuinely dispatches via `AdminApiDriver` +
+  `PartitionLeaderStrategy` (not a plain `Call`), so the multi-step
+  lookup→fulfillment dispatch engine was built now: `internals/{admin_api_driver,
+  admin_api_handler, admin_api_lookup_strategy, admin_api_future,
+  api_request_scope, partition_leader_strategy, partition_leader_cache,
+  delete_records_handler}.rs`, plus `Call::set_maybe_retry_fn`/`MaybeRetryOutcome`
+  and `NodeProvider::ConstantNodeId(i32)`. Runs on the existing single bg task.
+  **This engine now also backs Tier 1 Phase 5 and all of Tier 2's
+  CoordinatorStrategy / Tier 3.**
+- **POJOs / Options / Results**: `NewPartitions`, `RecordsToDelete`,
+  `DeletedRecords`, `{CreatePartitions,DeleteRecords}{Options,Result}`.
+- **Wire wrappers**: `CreatePartitions`/`DeleteRecords` request+response.
+
+### Accepted deviations (documented, Critic-approved)
+- `ApiRequestScope` modeled as a closed enum (`SingleLookup | Fulfillment`) vs
+  Java's open interface — sufficient for current RPCs; revisit at Tier 2's
+  `CoordinatorStrategy` if a per-group scope key is needed.
+- `Batched`/`Unbatched` handler split folded into one shape (batching preserved
+  for `delete_records`).
+- `testDeleteRecordsMultipleSends`: substituted a per-broker fatal partition
+  error for Java's SASL-auth connection error (Rust `MockClient::authentication_error`
+  always returns `None`); same multi-send code path exercised.
+- Java's 917-line `AdminApiDriverTest` not translated wholesale; the driver's
+  two defining branches (fulfillment→unmap→re-lookup, disconnect→retry-lookup)
+  are covered by dedicated driver-level unit tests added in the fix cycle.
+
+### Tests
+- **Rust lib suite: 2179 passing.**
+- **Integration**: `tests/integration/admin_partitions_records_test.rs` — 5/5
+  green against a real broker (create-partitions increases count; decreasing
+  fails; delete-records advances low-water-mark; offset-out-of-range fails;
+  nonexistent-partition fails).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 1 should-fix (untested driver branches), resolved in fix cycle then
+  re-verified clean; see `design/history/Milestone-11/Phase-2/COMMENTS.DONE.1.md`.

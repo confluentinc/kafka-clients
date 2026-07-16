@@ -85,3 +85,25 @@ src/common/requests/{create_topics_request,create_topics_response,
                      delete_topics_request,delete_topics_response}.rs
 tests/integration/admin_topics_test.rs                      # real-broker topic-CRUD tests
 ```
+
+### Phase 2 additions — Partitions & records + AdminApiDriver engine
+
+```
+src/admin/
+├── new_partitions.rs, records_to_delete.rs, deleted_records.rs
+├── create_partitions_result.rs, delete_records_result.rs
+├── options/{create_partitions_options.rs, delete_records_options.rs}
+└── internals/          # multi-step lookup→fulfillment dispatch engine (pulled fwd from Phase 5)
+    ├── admin_api_driver.rs          # AdminApiDriver
+    ├── admin_api_handler.rs         # AdminApiHandler
+    ├── admin_api_lookup_strategy.rs # AdminApiLookupStrategy
+    ├── admin_api_future.rs          # AdminApiFuture
+    ├── api_request_scope.rs         # ApiRequestScope (SingleLookup | Fulfillment)
+    ├── partition_leader_strategy.rs # PartitionLeaderStrategy
+    ├── partition_leader_cache.rs    # PartitionLeaderCache
+    └── delete_records_handler.rs    # DeleteRecordsHandler
+
+src/common/requests/{create_partitions_request,create_partitions_response,
+                     delete_records_request,delete_records_response}.rs
+tests/integration/admin_partitions_records_test.rs
+```
