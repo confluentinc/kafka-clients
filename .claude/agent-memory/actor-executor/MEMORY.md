@@ -83,3 +83,4 @@
 - [Milestone 9 Phase 7 production pipeline](milestone9_phase7_production_pipeline.md) — new_share_consumer wired, share bg reconcile, share-consume response routing, from_shared_metadata, Clone bound, integration gating; test-double harness pattern
 - [Milestone 10 Phase 1 FFI common.rs](milestone10_phase1_ffi_common.md) — share C FFI: ungated common mod, SendUserData from consumer.rs, header-reorder-not-bytediff, xtask lint skips ffi, bytes optional "1"
 - [Milestone 10 Phase 2 share FFI](milestone10_phase2_share_ffi.md) — handle/guard/poll/ack; teardown-safe Arc<AtomicU64> owner + Option<Runtime> blocking-drop (SIGBUS fix vs reference); shared records mod; cbindgen "enums"
+- [Milestone 10 Phase 3 share FFI write path](milestone10_phase3_share_ffi_writepath.md) — commit/close/async_value_op, registered ack callback, cbindgen Option<fn>-must-be-inline gotcha, Sender is Sync, borrow_error_ptr, C smoke test (unity submodule + brew cmake)
