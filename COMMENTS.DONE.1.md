@@ -6,6 +6,57 @@ Actor (N=1) in the fix cycle and verified against the Java source
 
 ---
 
+# Tier 1 Phase 2 (Partitions & records)
+
+## Should-fix
+
+## RESOLVED — AdminApiDriver's two signature branches (fulfillment-unmap + disconnect-retry) were untested
+- **File**: `src/admin/internals/admin_api_driver.rs`,
+  `src/admin/kafka_admin_client.rs`
+- **Java Reference**: `AdminApiDriverTest.java` — `testFulfillmentUnmapping`,
+  `testRetryLookupAfterDisconnect`, `testStaticMapping`, `testCoalescedLookup`,
+  `testCoalescedFulfillment`, `testRecoalescedLookup`,
+  `testLookupRetryBookkeeping`, `testFulfillmentRetryBookkeeping`
+- **Fix**: Added a `#[cfg(test)] pub(crate) mod test_support` to
+  `admin_api_driver.rs` translating the Java `MockAdminApiHandler` /
+  `MockLookupStrategy` / `TestContext` fakes (fake `AdminApiHandler` /
+  `AdminApiFuture` / `AdminApiLookupStrategy` keyed off the request's key set,
+  driving the pure synchronous driver logic). Added a `#[cfg(test)]`
+  `AdminApiDriver::key_to_broker_id` accessor mirroring Java's `keyToBrokerId`.
+  Translated 8 driver-level tests:
+  - `fulfillment_unmapping` — **branch (1)**: fulfillment returns a stale-leader
+    (`NOT_LEADER_OR_FOLLOWER`) key as `unmapped`; the driver unmaps it, re-issues
+    a metadata lookup, re-maps it to a leader, re-sends fulfillment, and
+    completes the key.
+  - `retry_lookup_after_disconnect` — **branch (2)** at the driver level: a
+    `NetworkException` on a fulfillment request unmaps the key back to lookup;
+    asserts the retry lookup spec has `tries == 1` and `next_allowed_try_ms ==
+    now` (no backoff for lookup), then completes against the new leader.
+  - `static_mapping` (static-cache fast-path gap), `coalesced_lookup`,
+    `coalesced_fulfillment`, `recoalesced_lookup`, `lookup_retry_bookkeeping`,
+    `fulfillment_retry_bookkeeping` (backoff-math gap: fulfillment retry applies
+    one jittered `backoff(0)` step; lookup retry applies none).
+  Added 2 tests to `kafka_admin_client.rs` covering the new Phase-2
+  `Call::set_maybe_retry_fn` / `MaybeRetryOutcome` hook end-to-end via the real
+  `new_driver_call`:
+  - `driver_call_maybe_retry_disconnect_redrives_lookup` — a `NetworkException`
+    through the real Call hook returns `MaybeRetryOutcome::Handled`, unmaps the
+    key, and enqueues a fresh least-loaded lookup call (not a re-send to the dead
+    node).
+  - `driver_call_maybe_retry_non_network_requeues` — a non-network error returns
+    `MaybeRetryOutcome::Requeue`, leaving driver state untouched and enqueuing
+    nothing.
+  Deviation (documented in the module + per test): the closed `ApiRequestScope`
+  enum coalesces all dynamic keys into one `SingleLookup` request (Java's
+  `MockRequestScope` carries a lookup-context id that can split them). The
+  stage-transition logic under test is identical; only the initial lookup
+  fan-out coalesces. The `NOT_LEADER_OR_FOLLOWER` → `unmapped_keys`
+  *classification* remains covered by the `delete_records_handler` unit test;
+  these tests cover the driver's *reaction* to `unmapped_keys`, mirroring how
+  Java splits `AdminApiDriverTest` from `DeleteRecordsHandlerTest`.
+
+---
+
 ## Should-fix
 
 ## RESOLVED — describe_topics-by-id disabled with a factually wrong rationale

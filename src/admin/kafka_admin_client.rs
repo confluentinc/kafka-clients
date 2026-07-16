@@ -2803,4 +2803,81 @@ mod tests {
         let result = mock.delete_records(&HashMap::new(), DeleteRecordsOptions::new());
         assert!(result.low_watermarks().is_empty());
     }
+
+    // Branch (2) coverage at the `Call` bridge: the `maybe_retry` hook installed
+    // by `new_driver_call` turns a disconnect into a lookup retry driven through
+    // the `AdminApiDriver` and reports `MaybeRetryOutcome::Handled`, instead of
+    // re-queueing the call against the (dead) fulfillment node. Mirrors the hook
+    // side of `AdminApiDriverTest.testRetryLookupAfterDisconnect`.
+    #[test]
+    fn driver_call_maybe_retry_disconnect_redrives_lookup() {
+        use crate::admin::internals::admin_api_driver::test_support::{
+            TestContext, completed, mapped, placeholder_response,
+        };
+
+        let mut ctx = TestContext::dynamic_mapped(&["foo"]);
+        let now = ctx.now;
+
+        // Drive the initial lookup so `foo` maps to broker 1.
+        ctx.expect_lookup(&["foo"], mapped(&[("foo", 1)]));
+        let lookup_specs = ctx.driver.poll();
+        assert_eq!(lookup_specs.len(), 1);
+        ctx.driver.on_response(
+            now,
+            &lookup_specs[0].scope,
+            &lookup_specs[0].keys,
+            &placeholder_response(),
+            Node::no_node(),
+        );
+        assert_eq!(ctx.driver.key_to_broker_id(&"foo".to_string()), Some(1));
+
+        // Obtain the fulfillment spec targeting broker 1.
+        ctx.expect_request(&["foo"], completed(&[("foo", 15)]));
+        let mut fulfill_specs = ctx.driver.poll();
+        assert_eq!(fulfill_specs.len(), 1);
+        let spec = fulfill_specs.remove(0);
+        assert_eq!(spec.scope.destination_broker_id(), Some(1));
+
+        // Wrap the spec in a real driver `Call` and fire a disconnect through it.
+        let driver = Arc::new(Mutex::new(ctx.driver));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let drv_ctx = DriverContext { tx, wakeup: Arc::new(Notify::new()), time_provider: Arc::new(move || now) };
+        let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
+
+        let outcome = call.maybe_retry(&KafkaError::new(Errors::NetworkException), now);
+        assert!(matches!(outcome, MaybeRetryOutcome::Handled));
+
+        // `foo` was unmapped and a fresh lookup call was enqueued (targeting a
+        // least-loaded broker, not the disconnected fulfillment node).
+        assert_eq!(driver.lock().unwrap().key_to_broker_id(&"foo".to_string()), None);
+        let follow_up = rx.try_recv().expect("a lookup call should have been enqueued");
+        assert!(matches!(follow_up.node_provider, NodeProvider::LeastLoaded));
+    }
+
+    // A non-disconnect error falls through to the default `Requeue` outcome, so
+    // the runnable re-queues the call honoring backoff/retries; the driver state
+    // is untouched and nothing new is enqueued.
+    #[test]
+    fn driver_call_maybe_retry_non_network_requeues() {
+        use crate::admin::internals::admin_api_driver::test_support::{TestContext, completed};
+
+        let ctx = TestContext::static_mapped(&[("foo", 0)]);
+        let now = ctx.now;
+        ctx.expect_request(&["foo"], completed(&[("foo", 15)]));
+
+        let mut driver = ctx.driver;
+        let mut specs = driver.poll();
+        assert_eq!(specs.len(), 1);
+        let spec = specs.remove(0);
+
+        let driver = Arc::new(Mutex::new(driver));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let drv_ctx = DriverContext { tx, wakeup: Arc::new(Notify::new()), time_provider: Arc::new(move || now) };
+        let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
+
+        let outcome = call.maybe_retry(&KafkaError::new(Errors::UnknownServerError), now);
+        assert!(matches!(outcome, MaybeRetryOutcome::Requeue));
+        assert_eq!(driver.lock().unwrap().key_to_broker_id(&"foo".to_string()), Some(0));
+        assert!(rx.try_recv().is_err());
+    }
 }
