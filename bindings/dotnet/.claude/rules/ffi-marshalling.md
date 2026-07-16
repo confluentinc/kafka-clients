@@ -92,6 +92,10 @@ pointed at our fixed-width, handle-error ABI.
     (Cdecl matches cbindgen `extern "C"`; the bare name maps to
     `confluent_kafka.dll` / `lib….so` / `lib….dylib`). One declaration set for all
     TFMs — no per-TFM `#if`.
+  - Set **`EntryPoint`** to the full ABI symbol (`kafka_<pkg>_<Type>_<method>`)
+    whenever the C# method uses the short name (dropping the `kafka_<pkg>_` prefix
+    per CLAUDE.md §5.3) — otherwise the marshaller probes the C# name and throws
+    `EntryPointNotFoundException` at **runtime**, not compile time.
   - Follow the type map verbatim: sizes are `int`/`long`, `bool` is `I1`, opaque
     handles stay `IntPtr` here (wrapped in a `SafeHandle` one layer up, §2), UTF-8
     strings and key/value bytes are marshalled by hand (§3, §4).
@@ -113,6 +117,7 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
   - `[MarshalAs(LPStr)]` for UTF-8 (ANSI corruption); `UIntPtr`/`nint` for a
     length; a callee-owned `const char*` return marshalled as `string`.
   - Omitting `Cdecl` (works on x64 by luck, breaks on x86).
+  - A short C# method name without `EntryPoint` (runtime `EntryPointNotFoundException`).
   - Porting confluent-kafka-dotnet's reflection loader / 3× NativeMethods (§8).
 
 **Tests required:**
