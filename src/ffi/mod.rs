@@ -26,4 +26,6 @@
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
 
+pub(crate) mod common;
+pub(crate) mod consumer;
 pub(crate) mod producer;

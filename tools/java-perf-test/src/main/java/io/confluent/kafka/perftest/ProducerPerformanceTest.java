@@ -23,6 +23,14 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.errors.TopicExistsException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -60,6 +68,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   LINGER_MS               linger.ms
  *   COMPRESSION_TYPE        none / gzip / snappy / lz4 / zstd (default none)
  *   ENABLE_IDEMPOTENCE      true / false (default false)
+ *   USE_DEFAULTS            True / False (default False); omit all tuning knobs, use client defaults
  *   MAX_IN_FLIGHT           max.in.flight.requests.per.connection
  *   WARMUP_SECONDS          warmup duration (default 0)
  *   TEST_DURATION_SECONDS   measured interval (default 600)
@@ -97,6 +106,11 @@ public class ProducerPerformanceTest {
     private static final long NUM_MESSAGES = envLong("NUM_MESSAGES", 0);
     private static final boolean DO_VERIFY = envBool("DO_VERIFY", true);
     private static final boolean VERIFY_CONSUMED = envBool("VERIFY_CONSUMED", false);
+    // When true (default), delete + re-create the topic before the run. -1
+    // partitions => broker default (RF is always broker default, so this works
+    // on Confluent Cloud where RF=1 is rejected).
+    private static final boolean CREATE_TOPIC = envBool("CREATE_TOPIC", true);
+    private static final int PARTITIONS = envInt("PARTITIONS", -1);
     // Per-message p99 latency budget in ms (0 = off). Matches C/Rust.
     private static final long P99_LIMIT_MS = envLong("P99_LIMIT_MS", 0);
     private static final int MAX_LATENCY_MS = 10_000;
@@ -128,6 +142,10 @@ public class ProducerPerformanceTest {
 
         Properties producerConf = configurationFromEnv();
         printConfiguration(producerConf);
+
+        if (CREATE_TOPIC) {
+            recreateTopic(producerConf, TOPIC_NAME, PARTITIONS);
+        }
 
         // Pre-generate messages, just like the Python test.
         List<KeyValue> generated = generateMessages(10_000, KEY_SIZE, VALUE_SIZE);
@@ -324,43 +342,53 @@ public class ProducerPerformanceTest {
         conf.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, envOr("BOOTSTRAP_SERVERS", "localhost:9092"));
         conf.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         conf.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
-        conf.put(ProducerConfig.ACKS_CONFIG, "all");
-        conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
 
-        // batch.size: default 1 MiB (1024 KiB); env value is in KiB. Matches
-        // the C and Rust perf tests.
-        long batchSizeBytes;
-        if (System.getenv("BATCH_SIZE") != null) {
-            batchSizeBytes = envLong("BATCH_SIZE", 1024) * 1024L;
+        // With USE_DEFAULTS the client runs at its own defaults: only the
+        // bootstrap servers, the (mandatory) serializers and SASL credentials
+        // are set, and every performance-tuning knob is omitted. Mirrors the
+        // Python, C and Rust producer performance tests' USE_DEFAULTS behavior.
+        boolean useDefaults = "True".equals(System.getenv("USE_DEFAULTS"));
+        if (!useDefaults) {
+            conf.put(ProducerConfig.ACKS_CONFIG, "all");
+            conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
+
+            // batch.size: default 1 MiB (1024 KiB); env value is in KiB. Matches
+            // the C and Rust perf tests.
+            long batchSizeBytes;
+            if (System.getenv("BATCH_SIZE") != null) {
+                batchSizeBytes = envLong("BATCH_SIZE", 1024) * 1024L;
+            } else {
+                batchSizeBytes = 1024L * 1024L;
+            }
+            conf.put(ProducerConfig.BATCH_SIZE_CONFIG, Long.toString(batchSizeBytes));
+
+            // max.request.size: default batch*64, capped at 8 MiB; env is in KiB.
+            // Matches the C and Rust perf tests.
+            long maxRequestSizeBytes;
+            if (System.getenv("MAX_REQUEST_SIZE") != null) {
+                maxRequestSizeBytes = envLong("MAX_REQUEST_SIZE", 0) * 1024L;
+            } else {
+                maxRequestSizeBytes = batchSizeBytes * 64L;
+            }
+            maxRequestSizeBytes = Math.min(maxRequestSizeBytes, 8L * 1024 * 1024);
+            conf.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, Long.toString(maxRequestSizeBytes));
+
+            conf.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, envOr("COMPRESSION_TYPE", "none"));
+            conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, envOr("ENABLE_IDEMPOTENCE", "false"));
+
+            if (System.getenv("MAX_IN_FLIGHT") != null) {
+                conf.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+                    System.getenv("MAX_IN_FLIGHT"));
+            }
+            if (System.getenv("BUFFER_MEMORY") != null) {
+                conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
+                    Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
+            }
+            // linger.ms: default 5 (matches the C and Rust perf tests).
+            conf.put(ProducerConfig.LINGER_MS_CONFIG, envOr("LINGER_MS", "5"));
         } else {
-            batchSizeBytes = 1024L * 1024L;
+            System.out.println("USE_DEFAULTS: true (client defaults; tuning knobs omitted)");
         }
-        conf.put(ProducerConfig.BATCH_SIZE_CONFIG, Long.toString(batchSizeBytes));
-
-        // max.request.size: default batch*64, capped at 8 MiB; env is in KiB.
-        // Matches the C and Rust perf tests.
-        long maxRequestSizeBytes;
-        if (System.getenv("MAX_REQUEST_SIZE") != null) {
-            maxRequestSizeBytes = envLong("MAX_REQUEST_SIZE", 0) * 1024L;
-        } else {
-            maxRequestSizeBytes = batchSizeBytes * 64L;
-        }
-        maxRequestSizeBytes = Math.min(maxRequestSizeBytes, 8L * 1024 * 1024);
-        conf.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, Long.toString(maxRequestSizeBytes));
-
-        conf.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, envOr("COMPRESSION_TYPE", "none"));
-        conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, envOr("ENABLE_IDEMPOTENCE", "false"));
-
-        if (System.getenv("MAX_IN_FLIGHT") != null) {
-            conf.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
-                System.getenv("MAX_IN_FLIGHT"));
-        }
-        if (System.getenv("BUFFER_MEMORY") != null) {
-            conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
-                Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
-        }
-        // linger.ms: default 5 (matches the C and Rust perf tests).
-        conf.put(ProducerConfig.LINGER_MS_CONFIG, envOr("LINGER_MS", "5"));
 
         // SASL
         String securityProtocol = System.getenv("SECURITY_PROTOCOL");
@@ -619,6 +647,58 @@ public class ProducerPerformanceTest {
             if (producerConf.containsKey(k)) conf.put(k, producerConf.get(k));
         }
         return conf;
+    }
+
+    /**
+     * Delete the topic (ignoring "does not exist"), wait 10s, re-create it, wait
+     * 10s — using the Java AdminClient. Partition count and replication factor
+     * use the broker default (Optional.empty) unless {@code partitions} &gt; 0,
+     * so this works on Confluent Cloud where RF=1 is rejected. The sleeps let the
+     * delete/create metadata propagate across the cluster.
+     */
+    private static void recreateTopic(Properties producerConf, String topic, int partitions)
+            throws InterruptedException {
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+            producerConf.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG));
+        // Reuse the producer's security/SASL config for the admin client.
+        for (String k : new String[]{"security.protocol", "sasl.mechanism", "sasl.jaas.config"}) {
+            if (producerConf.containsKey(k)) adminProps.put(k, producerConf.get(k));
+        }
+        try (Admin admin = Admin.create(adminProps)) {
+            System.out.println(">>> CREATE_TOPIC: deleting topic '" + topic + "' (ignored if absent) ...");
+            try {
+                admin.deleteTopics(Collections.singletonList(topic)).all().get();
+                System.out.println(">>> deleted '" + topic + "'");
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof UnknownTopicOrPartitionException) {
+                    System.out.println(">>> '" + topic + "' did not exist (ok)");
+                } else {
+                    throw new RuntimeException(e);
+                }
+            }
+            System.out.println(">>> waiting 10s after delete ...");
+            Thread.sleep(10_000);
+
+            String pdesc = partitions > 0 ? String.valueOf(partitions) : "broker-default";
+            System.out.println(">>> CREATE_TOPIC: creating topic '" + topic
+                + "' (partitions=" + pdesc + ", rf=broker-default) ...");
+            NewTopic newTopic = new NewTopic(topic,
+                partitions > 0 ? Optional.of(partitions) : Optional.<Integer>empty(),
+                Optional.<Short>empty());
+            try {
+                admin.createTopics(Collections.singletonList(newTopic)).all().get();
+                System.out.println(">>> created '" + topic + "'");
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof TopicExistsException) {
+                    System.out.println(">>> '" + topic + "' already exists (ok)");
+                } else {
+                    throw new RuntimeException(e);
+                }
+            }
+            System.out.println(">>> waiting 10s after create ...");
+            Thread.sleep(10_000);
+        }
     }
 
     // === Utility helpers =====================================================

@@ -44,6 +44,9 @@ use tonic::transport::{Channel, Endpoint};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     Python,
+    /// The asyncio-native Python backend (AsyncKafkaProducer / AsyncKafkaConsumer).
+    /// Distinct image from [`BackendKind::Python`]; see `Dockerfile.grpc.async`.
+    PythonAsync,
     C,
 }
 
@@ -51,15 +54,19 @@ impl BackendKind {
     fn image_repository(self) -> &'static str {
         match self {
             BackendKind::Python => "confluent-kafka-rust/python-grpc-server",
+            BackendKind::PythonAsync => "confluent-kafka-rust/python-async-grpc-server",
             BackendKind::C => "confluent-kafka-rust/c-grpc-server",
         }
     }
 
     /// The fixed internal port the gRPC server binds inside the container.
-    /// Testcontainers maps this to a random host port at start time.
+    /// Testcontainers maps this to a random host port at start time. The async
+    /// python server binds the same 50051 as the sync one — they run in separate
+    /// containers, so the internal ports don't collide.
     fn internal_port(self) -> u16 {
         match self {
             BackendKind::Python => 50051,
+            BackendKind::PythonAsync => 50051,
             BackendKind::C => 50052,
         }
     }
@@ -67,6 +74,7 @@ impl BackendKind {
     fn label(self) -> &'static str {
         match self {
             BackendKind::Python => "python",
+            BackendKind::PythonAsync => "python_async",
             BackendKind::C => "c",
         }
     }

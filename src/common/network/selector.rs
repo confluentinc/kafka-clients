@@ -1911,7 +1911,10 @@ mod tests {
     }
 
     fn create_send(node: &str, payload: &str) -> NetworkSend {
-        NetworkSend::new(node, Box::new(ByteBufferSend::size_prefixed(payload.as_bytes().to_vec())))
+        NetworkSend::new(
+            node,
+            Box::new(ByteBufferSend::size_prefixed(bytes::Bytes::copy_from_slice(payload.as_bytes()))),
+        )
     }
 
     fn as_string(receive: &NetworkReceive) -> String {

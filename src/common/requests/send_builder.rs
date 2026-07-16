@@ -108,7 +108,7 @@ impl SendBuilder {
 /// a separate buffer, matching Java's `SendBuilder` behavior.
 struct SendBuilderWritable {
     current_buffer: Vec<u8>,
-    completed_buffers: Vec<Vec<u8>>,
+    completed_buffers: Vec<bytes::Bytes>,
 }
 
 impl SendBuilderWritable {
@@ -116,9 +116,10 @@ impl SendBuilderWritable {
         Self { current_buffer: Vec::with_capacity(capacity), completed_buffers: Vec::new() }
     }
 
-    fn into_buffers(mut self) -> Vec<Vec<u8>> {
+    fn into_buffers(mut self) -> Vec<bytes::Bytes> {
         if !self.current_buffer.is_empty() {
-            self.completed_buffers.push(self.current_buffer);
+            // `Bytes::from(Vec<u8>)` adopts the allocation — no copy.
+            self.completed_buffers.push(bytes::Bytes::from(self.current_buffer));
         }
         self.completed_buffers
     }
@@ -173,9 +174,10 @@ impl Writable for SendBuilderWritable {
         Ok(())
     }
 
-    fn write_records(&mut self, data: Vec<u8>) -> io::Result<()> {
+    fn write_records(&mut self, data: bytes::Bytes) -> io::Result<()> {
         if !self.current_buffer.is_empty() {
-            let flushed = std::mem::take(&mut self.current_buffer);
+            // `Bytes::from(Vec<u8>)` adopts the allocation — no copy.
+            let flushed = bytes::Bytes::from(std::mem::take(&mut self.current_buffer));
             self.completed_buffers.push(flushed);
         }
         self.completed_buffers.push(data);

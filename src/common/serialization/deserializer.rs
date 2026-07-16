@@ -91,6 +91,44 @@ pub trait Deserializer<T>: Send + Sync + 'static {
         self.deserialize(topic, data)
     }
 
+    /// Deserialize from a byte slice that is a subslice of a refcounted source
+    /// buffer, enabling zero-copy `T` for byte-typed deserializers.
+    ///
+    /// `source` is the [`bytes::Bytes`] that owns the whole records buffer for
+    /// the current batch (on the receive path); `data` is the key/value
+    /// subslice of `source` for this record. The default implementation ignores
+    /// `source` and delegates to [`deserialize`](Deserializer::deserialize) — so
+    /// existing deserializers are unaffected. [`BytesDeserializer`] overrides it
+    /// to return `source.slice_ref(data)`, a zero-copy refcounted slice instead
+    /// of an owned copy (consumer-threading.md §27).
+    ///
+    /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
+    fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, KafkaError> {
+        self.deserialize(topic, data)
+    }
+
+    /// Header-aware variant of
+    /// [`deserialize_from_shared`](Deserializer::deserialize_from_shared).
+    ///
+    /// The default implementation delegates to
+    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers),
+    /// ignoring `source`. This preserves the header-inspection behavior of any
+    /// deserializer that overrides `deserialize_with_headers` (e.g. schema
+    /// registry) even when called on the shared-buffer receive path — at the
+    /// cost of the copy fallback. Byte-typed deserializers that want zero-copy
+    /// override this method directly (see [`BytesDeserializer`]).
+    ///
+    /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
+    fn deserialize_from_shared_with_headers(
+        &self,
+        topic: &str,
+        headers: &dyn Headers,
+        _source: &bytes::Bytes,
+        data: &[u8],
+    ) -> Result<T, KafkaError> {
+        self.deserialize_with_headers(topic, headers, data)
+    }
+
     /// Configure this deserializer. The default implementation is a no-op.
     ///
     /// Corresponds to Java's

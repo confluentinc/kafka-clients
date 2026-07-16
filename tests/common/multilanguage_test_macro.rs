@@ -14,13 +14,13 @@
 
 //! The `multilanguage_test!` declarative macro.
 //!
-//! Each invocation expands to three `#[tokio::test(flavor = "multi_thread")]`
+//! Each invocation expands to four `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers — one per backend — that call the same generic test body. The
 //! body must be `async fn body<F: ProducerBackendFactory>(factory: &F)`.
 //!
-//! Naming convention: `name__rust`, `name__python`, `name__c`. The double
-//! underscore is intentional so the backend label is easy to grep for in
-//! `cargo test` output.
+//! Naming convention: `name__rust`, `name__python`, `name__python_async`,
+//! `name__c`. The double underscore is intentional so the backend label is easy
+//! to grep for in `cargo test` output.
 //!
 //! Example:
 //!
@@ -31,9 +31,9 @@
 //! multilanguage_test!(test_produce_single_record, produce_single_record_inner);
 //! ```
 
-/// Expand a generic test body into three `#[tokio::test]` wrappers — one
-/// per backend (rust / python / c). See module docs for the expected
-/// signature of `$body`.
+/// Expand a generic test body into four `#[tokio::test]` wrappers — one
+/// per backend (rust / python / python_async / c). See module docs for the
+/// expected signature of `$body`.
 ///
 /// Two forms are supported:
 ///   - `multilanguage_test!(name, body)` — uses `ClusterConfig::default()`
@@ -74,6 +74,20 @@ macro_rules! multilanguage_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await);
+                $body(&mut ctx, &factory).await;
+            }
+
+            #[allow(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __ python_async>]() {
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
+                let handle = $crate::common::backend_pool::get_or_start(
+                    $crate::common::backend_pool::BackendKind::PythonAsync,
+                    ctx.broker_network_name(),
+                )
+                .await;
+                let factory =
+                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await);
                 $body(&mut ctx, &factory).await;
             }
 

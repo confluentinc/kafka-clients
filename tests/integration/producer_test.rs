@@ -602,6 +602,32 @@ crate::multilanguage_test!(test_produce_to_invalid_topic, produce_to_invalid_top
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_record_too_large, produce_record_too_large_inner);
 #[cfg(feature = "multilanguage-tests")]
+/// Test: partitionsFor returns metadata for an existing topic. Exercises the
+/// producer PartitionsFor RPC across all backends (the C/Python servers now
+/// expose partitions_for).
+async fn produce_partitions_for_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("partitions_for");
+    let producer = factory.create(make_config(&bootstrap_for(factory, ctx))).await.expect("create");
+    // Produce one record so the topic exists.
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("k")), Some(b("v")));
+    producer
+        .send(record)
+        .await
+        .expect("send")
+        .get_timeout(Duration::from_secs(30))
+        .await
+        .expect("produce");
+
+    let infos = producer.partitions_for(&topic).await.expect("partitions_for should succeed");
+    assert!(!infos.is_empty(), "{} backend: expected >=1 partition", factory.name());
+    assert!(
+        infos.iter().any(|p| p.topic() == topic && p.partition() == 0),
+        "{} backend: expected partition 0 of {topic}",
+        factory.name()
+    );
+    producer.close().await.expect("close");
+}
+
 crate::multilanguage_test!(test_flush_sends_pending_records, flush_sends_pending_records_inner);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);
@@ -640,6 +666,8 @@ crate::multilanguage_test!(
     test_produce_non_blocking_max_block_zero,
     produce_non_blocking_max_block_zero_inner
 );
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_produce_partitions_for, produce_partitions_for_inner);
 
 // ---------------------------------------------------------------------------
 // Rust-native-only tests — the Producer trait surface they exercise

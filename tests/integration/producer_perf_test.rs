@@ -48,6 +48,7 @@
 //! | `MAX_IN_FLIGHT`        | (client default)   | `max.in.flight.requests.per.connection`    |
 //! | `COMPRESSION_TYPE`     | `none`             | Compression: none/gzip/snappy/lz4/zstd     |
 //! | `ENABLE_IDEMPOTENCE`   | `false`            | `enable.idempotence`                       |
+//! | `USE_DEFAULTS`         | `False`            | Omit all tuning knobs; use client defaults |
 //! | `WARMUP_SECONDS`       | `120` *            | Warmup duration                            |
 //! | `TEST_DURATION_SECONDS`| `600` *            | Measured interval duration                 |
 //! | `DO_VERIFY`            | `True`             | Verify `RecordMetadata` per message        |
@@ -121,6 +122,7 @@ struct PerfTestConfig {
     max_in_flight: Option<String>,
     compression_type: String,
     enable_idempotence: String,
+    use_defaults: bool,
     warmup_seconds: u64,
     test_duration_seconds: u64,
     do_verify: bool,
@@ -179,6 +181,7 @@ impl PerfTestConfig {
             max_in_flight: env_opt("MAX_IN_FLIGHT"),
             compression_type: env_or("COMPRESSION_TYPE", "none"),
             enable_idempotence: env_or("ENABLE_IDEMPOTENCE", "false"),
+            use_defaults: env_or("USE_DEFAULTS", "False") == "True",
             warmup_seconds: env_parse("WARMUP_SECONDS", 120),
             test_duration_seconds,
             do_verify: env_or("DO_VERIFY", "True") == "True",
@@ -202,21 +205,27 @@ impl PerfTestConfig {
         let mut props = HashMap::from([
             ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
             ("client.id".to_string(), "perf-test-rust".to_string()),
-            ("batch.size".to_string(), self.batch_size.to_string()),
-            ("max.request.size".to_string(), self.max_request_size.to_string()),
-            ("compression.type".to_string(), self.compression_type.clone()),
-            ("enable.idempotence".to_string(), self.enable_idempotence.clone()),
         ]);
-        // `acks` is intentionally not set, so it relies on the client default
-        // (acks = all / -1), consistent with the other performance tests.
-        if let Some(v) = &self.buffer_memory {
-            props.insert("buffer.memory".to_string(), v.to_string());
-        }
-        if let Some(v) = &self.linger_ms {
-            props.insert("linger.ms".to_string(), v.clone());
-        }
-        if let Some(v) = &self.max_in_flight {
-            props.insert("max.in.flight.requests.per.connection".to_string(), v.clone());
+        // With USE_DEFAULTS the client runs at its own defaults: only the
+        // bootstrap servers, client id and SASL credentials are set, and every
+        // performance-tuning knob is omitted. Mirrors the Python producer
+        // performance test's USE_DEFAULTS behavior.
+        if !self.use_defaults {
+            props.insert("batch.size".to_string(), self.batch_size.to_string());
+            props.insert("max.request.size".to_string(), self.max_request_size.to_string());
+            props.insert("compression.type".to_string(), self.compression_type.clone());
+            props.insert("enable.idempotence".to_string(), self.enable_idempotence.clone());
+            // `acks` is intentionally not set, so it relies on the client default
+            // (acks = all / -1), consistent with the other performance tests.
+            if let Some(v) = &self.buffer_memory {
+                props.insert("buffer.memory".to_string(), v.to_string());
+            }
+            if let Some(v) = &self.linger_ms {
+                props.insert("linger.ms".to_string(), v.clone());
+            }
+            if let Some(v) = &self.max_in_flight {
+                props.insert("max.in.flight.requests.per.connection".to_string(), v.clone());
+            }
         }
         // SASL: only when the security protocol is a SASL one and all
         // credentials are present.
@@ -618,16 +627,20 @@ async fn producer_perf_test() {
         "Key size: {} B, Value size: {} B, Message size: {} B",
         config.key_size, config.value_size, message_size
     );
-    println!("batch.size: {} B", config.batch_size);
-    println!("max.request.size: {} B", config.max_request_size);
-    if let Some(v) = config.buffer_memory {
-        println!("buffer.memory: {v} B");
+    if config.use_defaults {
+        println!("USE_DEFAULTS: true (client defaults; tuning knobs omitted)");
+    } else {
+        println!("batch.size: {} B", config.batch_size);
+        println!("max.request.size: {} B", config.max_request_size);
+        if let Some(v) = config.buffer_memory {
+            println!("buffer.memory: {v} B");
+        }
+        if let Some(v) = &config.linger_ms {
+            println!("linger.ms: {v}");
+        }
+        println!("compression.type: {}", config.compression_type);
+        println!("enable.idempotence: {}", config.enable_idempotence);
     }
-    if let Some(v) = &config.linger_ms {
-        println!("linger.ms: {v}");
-    }
-    println!("compression.type: {}", config.compression_type);
-    println!("enable.idempotence: {}", config.enable_idempotence);
     println!("Verify: {}", config.do_verify);
     println!(
         "Warmup: {} s, Test duration: {} s",
