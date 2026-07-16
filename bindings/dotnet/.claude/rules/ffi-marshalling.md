@@ -192,12 +192,16 @@ read-and-freed instead (their lifetime is one pump cycle). The blocking
 
 **Decision:** Every boundary string is UTF-8, marshalled by hand (the floor lacks
 `LPUTF8Str` / `Marshal.PtrToStringUTF8`, §1): input via `Utf8.Pin` (encode + NUL +
-pin), callee-owned output via `Utf8.PtrToString` (NUL-scan + `GetString`).
+pin); output via `Utf8.PtrToString` in **two forms** — a NUL-terminated
+callee-owned `const char*` (NUL-scan + `GetString`), or a **length-delimited**
+`const char* + int32_t out_len` that **borrows into the fetch batch** (use the
+length, **never** NUL-scan).
 
 | Direction | Sites | Helper |
 |---|---|---|
 | In | topic, config key/value, `error_next` message | `Utf8.Pin` |
-| Out — valid until `_destroy` | `KafkaError_message`, `RecordMetadata_topic` | `Utf8.PtrToString` |
+| Out — NUL-terminated (owned, valid until `_destroy`) | `KafkaError_message`, `RecordMetadata_topic`, `ConsumerGroupMetadata_*`, other owned getters | `Utf8.PtrToString(ptr)` — NUL-scan |
+| Out — length-delimited, **borrowed into the batch** | `ConsumerRecord_topic` / `_header_key`, `Node_host` / `_rack` | `Utf8.PtrToString(ptr, len)` — use `out_len`, **no scan**; copy before `ConsumerRecords_destroy` |
 | Out — valid only during the callback | `RecordMetadata_copy` `topic` | `Utf8.PtrToString`, inside the callback |
 
 **Rule:**
@@ -206,10 +210,16 @@ pin), callee-owned output via `Utf8.PtrToString` (NUL-scan + `GetString`).
     pin → pass `AddrOfPinnedObject`; unpin in `finally`. Marshalling copies (an
     encoding conversion) — fine for small topic/config, and **not** the zero-copy
     path (§4).
-  - Output: read a callee-owned `const char*` with `Utf8.PtrToString` (needs
-    `unsafe`; a `#if NET6_0_OR_GREATER` span fast path is an internal
-    optimization). **Copy before free / before the callback returns** — the
-    pointer dies with the handle; never store the raw pointer.
+  - Output — **two forms**, both copy into a managed `string` (needs `unsafe`; a
+    `#if NET6_0_OR_GREATER` span fast path is an internal optimization):
+    - **NUL-terminated** callee-owned `const char*` (no `out_len`) →
+      `Utf8.PtrToString(ptr)`, scan to NUL. Valid until `_destroy`.
+    - **Length-delimited** `const char* + int32_t out_len` (consumer receive
+      path) → `Utf8.PtrToString(ptr, out_len)` using the length — **never
+      NUL-scan**: the slice borrows into the batch with no terminator, so a scan
+      over-reads into the next field. Valid until `ConsumerRecords_destroy` (§5.4).
+    In both cases **copy before free / before the callback returns** — the pointer
+    dies with the handle; never store the raw pointer.
   - Never `[MarshalAs(LPStr)]` (ANSI) or `LPWStr` (UTF-16); never `LPUTF8Str` /
     `Marshal.PtrToStringUTF8` (absent on the floor).
 
@@ -218,19 +228,27 @@ pin), callee-owned output via `Utf8.PtrToString` (NUL-scan + `GetString`).
 `LPStr` mistake corrupts non-ASCII topics quietly (and hides in ASCII-only
 tests). Hand-rolled helpers are the same reason confluent-kafka-dotnet ships
 `StringAsPinnedUTF8` + `PtrToStringUTF8`. Copy-before-free follows from output
-strings living in the handle's cached `CString`.
+strings living in the handle's cached `CString` — except the consumer
+receive-path strings (`ConsumerRecord_topic`, header keys, `Node` host/rack),
+which return a `&str` **slice into the fetch batch** (`str::as_ptr` + `out_len`,
+no terminator) and so take the length form and must be copied out before
+`ConsumerRecords_destroy` (§5.4 / §27).
 
 **Anti-patterns:**
 
   - `LPStr` / `LPWStr` for any string; a `const char*` return marshalled as
     `string`.
   - Reading an output pointer after its handle (or the callback) is gone.
+  - **NUL-scanning a length-delimited slice** (`ConsumerRecord_topic` etc.) —
+    over-reads past the batch slice (garbage / AV); use `out_len`.
   - Assuming ASCII (works until a non-ASCII topic corrupts silently).
 
 **Tests required:**
 
   - A non-ASCII value round-trips through topic (in → out), a config value, and an
     error message.
+  - A consumer `ConsumerRecord.topic` / header key with a non-ASCII, non-NUL-
+    terminated value round-trips via `out_len` (not a scan).
   - `PtrToStringUTF8(IntPtr.Zero)` → `null`; a multi-byte char at the buffer
     boundary marshals correctly.
 
