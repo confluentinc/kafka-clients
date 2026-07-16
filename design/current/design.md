@@ -315,3 +315,40 @@ Producer that accumulates messages into batches for Produce RPC.
 - Phase 4: SASL client authenticator state machine
 - Phase 5: ChannelBuilders factory for security protocol dispatch
 - Phase 6: SSL and SASL PLAIN integration tests with custom Docker image
+
+---
+
+## Milestone 11 — AdminClient (Tier 1 Phase 1, 2026-07-16)
+
+> The design notes above are stale (they predate Producer/Consumer/Admin).
+> This section captures the AdminClient design decisions. Full rules live in
+> `.claude/rules/admin-client.md`; the multi-tier plan in
+> `design/history/Milestone-11/PLAN.md`. **Scope for this task: Rust core +
+> tests only — C FFI / Python bindings are deferred to a separate future
+> task** (that future task should reuse PR #116's `src/ffi/common.rs` async
+> dispatcher).
+
+**Key architecture decision — sync-returning-futures, not async.** Unlike the
+Consumer (whose `poll()` itself blocks and is therefore `async`), every Java
+`Admin` RPC returns immediately with a `*Result` wrapping one `KafkaFuture<T>`
+per key; the network I/O happens on a background task and the caller opts into
+blocking at `KafkaFuture.get()`. So Admin's per-RPC methods are plain sync
+`fn` in Rust; only `close()` (which joins the background task in Java) is
+`async fn`. No `#[async_trait]` on per-RPC methods or internal types.
+
+**Dispatch + background task.** One `tokio::spawn` per client instance runs a
+generic `AdminClientRunnable<C: KafkaClient>` (mirrors the producer `Sender<C>`),
+driving a `Call`/`NodeProvider` retry engine over the shared `NetworkClient`.
+`AdminMetadataManager` handles bootstrap + controller/broker refresh. (The
+`AdminApiDriver`/lookup-strategy engine for coordinator/partition-leader RPCs
+arrives in later tiers; Phase 1's topic RPCs use the plain `Call` path.)
+
+**Completable `KafkaFuture`.** `KafkaFuture` was extended from pre-resolved-only
+to fully completable (`KafkaFutureImpl<T>`: complete / complete_exceptionally /
+when_complete + `all_of` / `then_apply` / `then_apply_try` / `join_map`),
+underpinning the per-key result model.
+
+**Phase 1 RPCs**: `create_topics`, `delete_topics`, `list_topics`,
+`describe_topics` (by-name and by-id via the Metadata API). Quota-exceeded
+retries carry `ThrottlingQuotaExceededException`/`throttleTimeMs` forward and
+re-complete on final timeout, matching Java's `maybeCompleteQuotaExceededException`.

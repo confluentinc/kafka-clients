@@ -127,3 +127,70 @@ Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and
 - Layer 3: `kafka/clients/src/main/java/org/apache/kafka/common/requests/`
 - Layer 4-5: `kafka/clients/src/main/java/org/apache/kafka/common/network/`
 - Layer 6: `kafka/clients/src/main/java/org/apache/kafka/clients/`
+
+---
+
+# Milestone 11 — AdminClient (Tier 1 Phase 1) ✓ (2026-07-16)
+
+> Note: the sections above this line are stale (they predate the Producer and
+> Consumer milestones). This section documents only the Milestone 11 Tier 1
+> Phase 1 delta. Scope for this task is **Rust core + tests only — no C FFI /
+> Python bindings** (deferred to a separate future task; see
+> `design/history/Milestone-11/PLAN.md` scope banner). Plan and phase
+> breakdown for all of Tiers 1–3 live there.
+
+## Phase 1 — Foundation + Topics CRUD ✓
+
+Translated `org.apache.kafka.clients.admin` foundation and the four topic-CRUD
+RPCs, Rust core + unit tests + real-broker integration tests, all green.
+
+- **`Admin` trait + `new_admin_client()` factory** (`src/admin/mod.rs`): per-RPC
+  methods are plain sync `fn` returning a `*Result` holding one `KafkaFuture<T>`
+  per key; only `close()` is `async fn` (the sole blocking-in-Java method). No
+  `#[async_trait]` bleed into per-RPC methods or internal types. Design rules
+  captured in `.claude/rules/admin-client.md`.
+- **Dispatch engine** (`src/admin/internals/`): `Call` + `NodeProvider` retry
+  engine (`call.rs`), `AdminMetadataManager` (`admin_metadata_manager.rs`),
+  `AdminUtils` (`admin_utils.rs`), and a single-`tokio::spawn` generic
+  `AdminClientRunnable<C: KafkaClient>` background task (`admin_client_runnable.rs`),
+  mirroring the producer's `Sender<C>`. Reuses `NetworkClient`/`KafkaClient`.
+- **`KafkaAdminClient`** (`kafka_admin_client.rs`), **`MockAdminClient`**
+  (`mock_admin_client.rs`, faithful in-memory), **`AdminClientConfig`**.
+- **RPCs**: `create_topics`, `delete_topics`, `list_topics`, `describe_topics`
+  (both by-name and by-id, via the Metadata-API path — see accepted deviations).
+- **POJOs / Options / Results**: `NewTopic`, `TopicListing`, `TopicDescription`,
+  `Config`, `ConfigEntry` (+ `ConfigSource`/`ConfigSynonym`/`ConfigType`), and
+  `{Create,Delete,List,Describe}Topics{Options,Result}`.
+- **New common types**: `common::acl::{AclOperation, AclPermissionType}`,
+  `common::TopicCollection`, `common::TopicPartitionInfo`,
+  `common::utils::{from_32_bit_field, to_32_bit_field}`; `KafkaFuture` extended
+  to be completable (`KafkaFutureImpl<T>` + `all_of`/`then_apply`/`then_apply_try`/
+  `join_map`); `KafkaError::ThrottlingQuotaExceeded` added (quota carry-forward).
+- **Wire wrappers**: `CreateTopics`/`DeleteTopics` request+response (new
+  `ConcreteRequest`/`ConcreteResponse` enum variants; `Metadata` reused for
+  list/describe).
+
+### Accepted deviations (documented, Critic-approved)
+- `describe_topics` uses the **Metadata-API fallback** (Java's
+  `generateDescribeTopicsCallWithMetadataApi` / `handleDescribeTopicsByIds`),
+  not `DescribeTopicPartitions` cursor pagination — behavior-faithful for both
+  by-name and by-id.
+- `TopicDescription`'s `PartialEq` excludes `topic_id` — matches Java's `equals`.
+- id-XOR-name modeled as a closed enum (`TopicCollection`) — Java's input is
+  already a sealed id-XOR-name type; no lost behavior.
+- `KafkaFuture::join_map` is a new combinator (no Java equivalent) required by
+  the get-driven future model; error propagation matches `all_of`.
+
+### Tests
+- **Rust lib suite: 2117 passing** (24 in `admin::kafka_admin_client`).
+- **Integration**: `tests/integration/admin_topics_test.rs` — 4/4 green against
+  a real Kafka 4.2.0 broker via testcontainers (create→list/describe; describe
+  nonexistent → `UNKNOWN_TOPIC_OR_PARTITION`; delete→gone; partition/RF
+  round-trip).
+- Translated `KafkaAdminClientTest` slices incl. describe-by-ids, quota-retry
+  (WhenEnabled / DontRetryWhenDisabled, create+delete), NOT_CONTROLLER retry,
+  partial-response, retry-backoff — with exact error-message assertions.
+- `cargo build` / `cargo xtask format-check` / `cargo xtask lint`: clean.
+- DoD #10 (hot-path allocation audit) N/A for Admin (batch/administrative, not
+  per-record). One Critic review round: 7 findings (0 blocker, 4 should-fix, 3
+  minor), all resolved; see `design/history/Milestone-11/Phase-1/COMMENTS.DONE.1.md`.

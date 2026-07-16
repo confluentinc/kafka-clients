@@ -55,3 +55,33 @@ tests/
     ├── metadata_test.rs
     └── ssl_sasl_test.rs    # SSL and SASL PLAIN integration tests
 ```
+
+## Admin module (Milestone 11 Tier 1 Phase 1 — org.apache.kafka.clients.admin)
+
+> The tree above is stale (it predates the Producer, Consumer and Admin work).
+> The Admin module added in Milestone 11 Phase 1:
+
+```
+src/admin/
+├── mod.rs                    # Admin trait + new_admin_client() factory
+├── admin_client_config.rs    # AdminClientConfig
+├── kafka_admin_client.rs     # KafkaAdminClient (owns NetworkClient + bg task)
+├── mock_admin_client.rs      # MockAdminClient (in-memory fake)
+├── config.rs, config_entry.rs
+├── new_topic.rs, topic_listing.rs, topic_description.rs
+├── create_topics_result.rs, delete_topics_result.rs,
+│   list_topics_result.rs, describe_topics_result.rs
+├── options/                  # {create,delete,list,describe}_topics_options.rs
+└── internals/
+    ├── call.rs               # Call + NodeProvider retry engine
+    ├── admin_metadata_manager.rs
+    ├── admin_utils.rs
+    └── admin_client_runnable.rs   # single tokio::spawn background task (AdminClientRunnable<C>)
+
+# New common/wire types added this phase:
+src/common/acl/{acl_operation.rs, acl_permission_type.rs}   # AclOperation, AclPermissionType (enums)
+src/common/{topic_collection.rs, topic_partition_info.rs}
+src/common/requests/{create_topics_request,create_topics_response,
+                     delete_topics_request,delete_topics_response}.rs
+tests/integration/admin_topics_test.rs                      # real-broker topic-CRUD tests
+```
