@@ -1,0 +1,63 @@
+version: v1.0
+name: Build Rust FFI library
+
+# Builds the FFI library (libconfluent_kafka.so) and cbindgen header
+# (confluent_kafka.h) for each target architecture via
+# .semaphore/build-ffi-artifact.sh, and pushes them to the workflow artifact
+# store.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-3
+
+# Release build with fat LTO is slow; allow more than the default 1h.
+execution_time_limit:
+  hours: 2
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+
+blocks:
+  - name: "Rust build: Linux x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: ARCH
+          value: x64
+        - name: MANYLINUX_IMAGE
+          value: quay.io/pypa/manylinux_2_28_x86_64:2026.05.07-2
+      jobs:
+        - name: build
+          commands:
+            - sh .semaphore/build-ffi-artifact.sh "$MANYLINUX_IMAGE"
+            - ls -l dist/libconfluent_kafka.so dist/confluent_kafka.h
+            - artifact push workflow dist/libconfluent_kafka.so --destination rust-linux-${ARCH}/libconfluent_kafka.so --force
+            - artifact push workflow dist/confluent_kafka.h --destination rust-linux-${ARCH}/confluent_kafka.h --force
+
+  - name: "Rust build: Linux arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: ARCH
+          value: arm64
+        - name: MANYLINUX_IMAGE
+          value: quay.io/pypa/manylinux_2_28_aarch64:2026.05.07-2
+      jobs:
+        - name: build
+          commands:
+            - sh .semaphore/build-ffi-artifact.sh "$MANYLINUX_IMAGE"
+            - ls -l dist/libconfluent_kafka.so dist/confluent_kafka.h
+            - artifact push workflow dist/libconfluent_kafka.so --destination rust-linux-${ARCH}/libconfluent_kafka.so --force
+            - artifact push workflow dist/confluent_kafka.h --destination rust-linux-${ARCH}/confluent_kafka.h --force
+
+promotions:
+  - name: Build Python wheels 
+    pipeline_file: python-wheels.yml
