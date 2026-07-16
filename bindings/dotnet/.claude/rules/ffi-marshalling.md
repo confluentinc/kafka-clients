@@ -200,9 +200,14 @@ length, **never** NUL-scan).
 | Direction | Sites | Helper |
 |---|---|---|
 | In | topic, config key/value, `error_next` message | `Utf8.Pin` |
-| Out — NUL-terminated (owned, valid until `_destroy`) | `KafkaError_message`, `RecordMetadata_topic`, `ConsumerGroupMetadata_*`, other owned getters | `Utf8.PtrToString(ptr)` — NUL-scan |
-| Out — length-delimited, **borrowed into the batch** | `ConsumerRecord_topic` / `_header_key`, `Node_host` / `_rack` | `Utf8.PtrToString(ptr, len)` — use `out_len`, **no scan**; copy before `ConsumerRecords_destroy` |
+| Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `RecordMetadata_topic`, `ConsumerGroupMetadata_*`, other getters | `Utf8.PtrToString(ptr)` — NUL-scan |
+| Out — length-delimited, borrowed from the batch, valid until `ConsumerRecords_destroy` | `ConsumerRecord_topic` / `_header_key`, `Node_host` / `_rack` | `Utf8.PtrToString(ptr, len)` — use `out_len`, **no scan** |
 | Out — valid only during the callback | `RecordMetadata_copy` `topic` | `Utf8.PtrToString`, inside the callback |
+
+**All output pointers are borrowed** — .NET copies (`GetString`) before the owning
+handle is freed (or, for the callback, before it returns); it never owns the raw
+pointer. The rows differ only in (1) termination (NUL-scan vs `out_len`) and
+(2) which handle bounds the lifetime.
 
 **Rule:**
 
