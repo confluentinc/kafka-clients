@@ -293,7 +293,7 @@ standard .NET exceptions — never `KafkaException`.
 
 | `KafkaError_*` accessor | → C# |
 |---|---|
-| `_code` (i16 widened) | `int Code` |
+| `_code` (i32) | `int Code` |
 | `_message` (UTF-8, handle-owned) | `Message` via `Utf8.PtrToString` (§3) |
 | `_is_retriable` / `_is_fatal` | `IsRetriable` / `IsFatal` |
 | `_destroy` | free after reading |
