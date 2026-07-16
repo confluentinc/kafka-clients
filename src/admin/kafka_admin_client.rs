@@ -22,7 +22,7 @@
 //!
 //! # `describeTopics` deviation
 //!
-//! Java 4.2 describes topics by name via the KIP-966
+//! Java 4.2 describes topics **by name** via the KIP-966
 //! `DescribeTopicPartitions` API (with cursor pagination), falling back to the
 //! Metadata API (`generateDescribeTopicsCallWithMetadataApi`) on
 //! `UnsupportedVersionException`. This port uses the **Metadata-API path
@@ -32,6 +32,11 @@
 //! deviation: the observable per-topic result (description or
 //! `UnknownTopicOrPartitionError`) is identical for the common case, and the
 //! `DescribeTopicPartitions` wire type is deferred to a later tier.
+//!
+//! Describing topics **by id** (`handleDescribeTopicsByIds`) already uses the
+//! Metadata API in Java (`convertTopicIdsToMetadataRequestTopic`), not
+//! `DescribeTopicPartitions`, so it is translated faithfully here with no
+//! deferral.
 //!
 //! `bootstrap.controllers` (KIP-919) is unsupported in Phase 1, so the metadata
 //! refresh always uses the broker `Metadata` API (never `DescribeCluster`), and
@@ -71,9 +76,9 @@ use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
 use super::internals::call::{Call, HandleResult, NodeProvider};
 use super::{
-    Admin, AdminClientConfig, Config, ConfigEntry, CreateTopicsOptions, CreateTopicsResult, DeleteTopicsOptions,
-    DeleteTopicsResult, DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions, ListTopicsResult, NewTopic,
-    TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AdminClientConfig, Config, ConfigEntry, ConfigSource, ConfigType, CreateTopicsOptions, CreateTopicsResult,
+    DeleteTopicsOptions, DeleteTopicsResult, DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions,
+    ListTopicsResult, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
@@ -277,6 +282,54 @@ fn api_error(code: i16, message: &Option<String>) -> KafkaError {
     }
 }
 
+/// Returns `true` if a topic name cannot be represented in an RPC (empty).
+/// Mirrors `KafkaAdminClient.topicNameIsUnrepresentable`.
+fn topic_name_is_unrepresentable(topic_name: &str) -> bool {
+    topic_name.is_empty()
+}
+
+/// Returns `true` if a topic id cannot be represented in an RPC (the zero id).
+/// Mirrors `KafkaAdminClient.topicIdIsUnrepresentable`.
+fn topic_id_is_unrepresentable(topic_id: Uuid) -> bool {
+    topic_id == Uuid::ZERO_UUID
+}
+
+/// Returns the response error message with a fallback to the error code's
+/// default message. Mirrors Java's `ApiError.messageWithFallback`.
+fn message_with_fallback(code: i16, message: &Option<String>) -> String {
+    match message {
+        Some(m) if !m.is_empty() => m.clone(),
+        _ => Errors::for_code(code).message().to_string(),
+    }
+}
+
+/// Completes any future that was retried due to a quota-exceeded error with the
+/// carried [`ThrottlingQuotaExceeded`](KafkaError::ThrottlingQuotaExceeded)
+/// error (reduced by the elapsed throttle time) when the request ultimately
+/// timed out. Mirrors `KafkaAdminClient.maybeCompleteQuotaExceededException`.
+fn maybe_complete_quota_exceeded<K, T>(
+    should_retry_on_quota_violation: bool,
+    error: &KafkaError,
+    futures: &HashMap<K, KafkaFutureImpl<T>>,
+    quota_exceeded_exceptions: &HashMap<K, KafkaError>,
+    throttle_time_delta: i32,
+) where
+    K: std::hash::Hash + Eq,
+    T: Clone + Send + Sync + 'static,
+{
+    if should_retry_on_quota_violation && matches!(error, KafkaError::Timeout(_)) {
+        for (key, quota_error) in quota_exceeded_exceptions {
+            if let Some(future) = futures.get(key) {
+                let throttle = quota_error.throttle_time_ms().unwrap_or(0);
+                future.complete_exceptionally(KafkaError::throttling_quota_exceeded(
+                    (throttle - throttle_time_delta).max(0),
+                    quota_error.message().to_string(),
+                ));
+            }
+        }
+    }
+}
+
 /// Checks a create/delete response for a controller-change error, mirroring
 /// `KafkaAdminClient.handleNotControllerError`. Returns the error to retry with
 /// if the controller changed.
@@ -353,8 +406,10 @@ fn get_create_topics_call(
     futures: Arc<HashMap<String, KafkaFutureImpl<TopicMetadataAndConfig>>>,
     topics_by_name: Arc<HashMap<String, CreatableTopic>>,
     names: Vec<String>,
+    quota_exceeded_exceptions: HashMap<String, KafkaError>,
     validate_only: bool,
     retry_on_quota: bool,
+    now: i64,
     deadline: i64,
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) -> Call {
@@ -382,14 +437,24 @@ fn get_create_topics_call(
         }
         let throttle_time_ms = create_response.throttle_time_ms();
         let mut retry_names: Vec<String> = Vec::new();
+        let mut retry_quota_exceeded: HashMap<String, KafkaError> = HashMap::new();
         for result in &create_response.data().topics {
             let Some(future) = resp_futures.get(&result.name) else {
                 continue;
             };
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
-                if error == Errors::ThrottlingQuotaExceeded && retry_on_quota {
-                    retry_names.push(result.name.clone());
+                if error == Errors::ThrottlingQuotaExceeded {
+                    let quota_error = KafkaError::throttling_quota_exceeded(
+                        throttle_time_ms,
+                        message_with_fallback(result.error_code, &result.error_message),
+                    );
+                    if retry_on_quota {
+                        retry_names.push(result.name.clone());
+                        retry_quota_exceeded.insert(result.name.clone(), quota_error);
+                    } else {
+                        future.complete_exceptionally(quota_error);
+                    }
                 } else {
                     future.complete_exceptionally(api_error(result.error_code, &result.error_message));
                 }
@@ -406,7 +471,18 @@ fn get_create_topics_call(
                     .configs
                     .as_ref()
                     .map(|configs| {
-                        Config::new(configs.iter().map(|c| ConfigEntry::new(c.name.clone(), c.value.clone())))
+                        Config::new(configs.iter().map(|c| {
+                            ConfigEntry::with_metadata(
+                                c.name.clone(),
+                                c.value.clone(),
+                                ConfigSource::for_id(c.config_source),
+                                c.is_sensitive,
+                                c.read_only,
+                                Vec::new(),
+                                ConfigType::Unknown,
+                                None,
+                            )
+                        }))
                     })
                     .unwrap_or_else(|| Config::new(std::iter::empty()));
                 future.complete(TopicMetadataAndConfig::new(
@@ -417,31 +493,43 @@ fn get_create_topics_call(
                 ));
             }
         }
-        let _ = throttle_time_ms;
         if retry_names.is_empty() {
             complete_unrealized(&resp_futures, |topic| {
                 format!("The controller response did not contain a result for topic {topic}")
             });
             HandleResult::Done
         } else {
-            let now = (resp_time)();
+            let retry_now = (resp_time)();
             let call = get_create_topics_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
                 Arc::clone(&resp_topics),
                 retry_names,
+                retry_quota_exceeded,
                 validate_only,
                 retry_on_quota,
+                retry_now,
                 deadline,
                 Arc::clone(&resp_time),
             );
-            let _ = now;
             HandleResult::NewCall(Box::new(call))
         }
     });
 
     let fail_futures = Arc::clone(&futures);
+    let fail_time = Arc::clone(&time_provider);
     let handle_failure = Box::new(move |error: &KafkaError| {
+        // If there were any topics retried due to a quota exceeded exception,
+        // propagate the initial error back to the caller if the request timed
+        // out (mirrors maybeCompleteQuotaExceededException).
+        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        maybe_complete_quota_exceeded(
+            retry_on_quota,
+            error,
+            &fail_futures,
+            &quota_exceeded_exceptions,
+            throttle_time_delta,
+        );
         for future in fail_futures.values() {
             future.complete_exceptionally(error.clone());
         }
@@ -469,7 +557,9 @@ fn get_delete_topics_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
     names: Vec<String>,
+    quota_exceeded_exceptions: HashMap<String, KafkaError>,
     retry_on_quota: bool,
+    now: i64,
     deadline: i64,
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) -> Call {
@@ -491,7 +581,9 @@ fn get_delete_topics_call(
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
         }
+        let throttle_time_ms = delete_response.throttle_time_ms();
         let mut retry_names: Vec<String> = Vec::new();
+        let mut retry_quota_exceeded: HashMap<String, KafkaError> = HashMap::new();
         for result in &delete_response.data().responses {
             let Some(name) = result.name.as_ref() else {
                 continue;
@@ -501,8 +593,17 @@ fn get_delete_topics_call(
             };
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
-                if error == Errors::ThrottlingQuotaExceeded && retry_on_quota {
-                    retry_names.push(name.clone());
+                if error == Errors::ThrottlingQuotaExceeded {
+                    let quota_error = KafkaError::throttling_quota_exceeded(
+                        throttle_time_ms,
+                        message_with_fallback(result.error_code, &result.error_message),
+                    );
+                    if retry_on_quota {
+                        retry_names.push(name.clone());
+                        retry_quota_exceeded.insert(name.clone(), quota_error);
+                    } else {
+                        future.complete_exceptionally(quota_error);
+                    }
                 } else {
                     future.complete_exceptionally(api_error(result.error_code, &result.error_message));
                 }
@@ -516,11 +617,14 @@ fn get_delete_topics_call(
             });
             HandleResult::Done
         } else {
+            let retry_now = (resp_time)();
             let call = get_delete_topics_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
                 retry_names,
+                retry_quota_exceeded,
                 retry_on_quota,
+                retry_now,
                 deadline,
                 Arc::clone(&resp_time),
             );
@@ -529,7 +633,16 @@ fn get_delete_topics_call(
     });
 
     let fail_futures = Arc::clone(&futures);
+    let fail_time = Arc::clone(&time_provider);
     let handle_failure = Box::new(move |error: &KafkaError| {
+        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        maybe_complete_quota_exceeded(
+            retry_on_quota,
+            error,
+            &fail_futures,
+            &quota_exceeded_exceptions,
+            throttle_time_delta,
+        );
         for future in fail_futures.values() {
             future.complete_exceptionally(error.clone());
         }
@@ -548,11 +661,14 @@ fn get_delete_topics_call(
 
 /// Builds a `deleteTopics` (by id) [`Call`]. Translated from
 /// `KafkaAdminClient.getDeleteTopicsWithIdsCall`.
+#[allow(clippy::too_many_arguments)]
 fn get_delete_topics_with_ids_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<Uuid, KafkaFutureImpl<()>>>,
     ids: Vec<Uuid>,
+    quota_exceeded_exceptions: HashMap<Uuid, KafkaError>,
     retry_on_quota: bool,
+    now: i64,
     deadline: i64,
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) -> Call {
@@ -582,15 +698,26 @@ fn get_delete_topics_with_ids_call(
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
         }
+        let throttle_time_ms = delete_response.throttle_time_ms();
         let mut retry_ids: Vec<Uuid> = Vec::new();
+        let mut retry_quota_exceeded: HashMap<Uuid, KafkaError> = HashMap::new();
         for result in &delete_response.data().responses {
             let Some(future) = resp_futures.get(&result.topic_id) else {
                 continue;
             };
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
-                if error == Errors::ThrottlingQuotaExceeded && retry_on_quota {
-                    retry_ids.push(result.topic_id);
+                if error == Errors::ThrottlingQuotaExceeded {
+                    let quota_error = KafkaError::throttling_quota_exceeded(
+                        throttle_time_ms,
+                        message_with_fallback(result.error_code, &result.error_message),
+                    );
+                    if retry_on_quota {
+                        retry_ids.push(result.topic_id);
+                        retry_quota_exceeded.insert(result.topic_id, quota_error);
+                    } else {
+                        future.complete_exceptionally(quota_error);
+                    }
                 } else {
                     future.complete_exceptionally(api_error(result.error_code, &result.error_message));
                 }
@@ -610,11 +737,14 @@ fn get_delete_topics_with_ids_call(
             }
             HandleResult::Done
         } else {
+            let retry_now = (resp_time)();
             let call = get_delete_topics_with_ids_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
                 retry_ids,
+                retry_quota_exceeded,
                 retry_on_quota,
+                retry_now,
                 deadline,
                 Arc::clone(&resp_time),
             );
@@ -623,7 +753,16 @@ fn get_delete_topics_with_ids_call(
     });
 
     let fail_futures = Arc::clone(&futures);
+    let fail_time = Arc::clone(&time_provider);
     let handle_failure = Box::new(move |error: &KafkaError| {
+        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        maybe_complete_quota_exceeded(
+            retry_on_quota,
+            error,
+            &fail_futures,
+            &quota_exceeded_exceptions,
+            throttle_time_delta,
+        );
         for future in fail_futures.values() {
             future.complete_exceptionally(error.clone());
         }
@@ -650,8 +789,17 @@ impl Admin for KafkaAdminClient {
         let mut topics_by_name: HashMap<String, CreatableTopic> = HashMap::new();
         for new_topic in new_topics {
             let name = new_topic.name().to_string();
-            handles.entry(name.clone()).or_default();
-            topics_by_name.insert(name, new_topic.convert_to_creatable_topic());
+            if topic_name_is_unrepresentable(&name) {
+                let future: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::InvalidTopicException,
+                    format!("The given topic name '{name}' cannot be represented in a request."),
+                ));
+                handles.insert(name, future);
+            } else if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(name.clone()) {
+                entry.insert(KafkaFutureImpl::new());
+                topics_by_name.insert(name, new_topic.convert_to_creatable_topic());
+            }
         }
         let public: HashMap<String, KafkaFuture<TopicMetadataAndConfig>> =
             handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
@@ -663,8 +811,10 @@ impl Admin for KafkaAdminClient {
                 Arc::new(handles),
                 Arc::new(topics_by_name),
                 names,
+                HashMap::new(),
                 options.should_validate_only(),
                 options.should_retry_on_quota_violation(),
+                now,
                 deadline,
                 Arc::clone(&self.shared.time_provider),
             );
@@ -679,18 +829,30 @@ impl Admin for KafkaAdminClient {
         match topics {
             TopicCollection::TopicNames(names) => {
                 let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
+                let mut valid_topic_names: Vec<String> = Vec::new();
                 for name in &names {
-                    handles.entry(name.clone()).or_default();
+                    if topic_name_is_unrepresentable(name) {
+                        let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+                        future.complete_exceptionally(KafkaError::with_message(
+                            Errors::InvalidTopicException,
+                            format!("The given topic name '{name}' cannot be represented in a request."),
+                        ));
+                        handles.insert(name.clone(), future);
+                    } else if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(name.clone()) {
+                        entry.insert(KafkaFutureImpl::new());
+                        valid_topic_names.push(name.clone());
+                    }
                 }
                 let public: HashMap<String, KafkaFuture<()>> =
                     handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
-                if !handles.is_empty() {
-                    let unique: Vec<String> = handles.keys().cloned().collect();
+                if !valid_topic_names.is_empty() {
                     let call = get_delete_topics_call(
                         self.shared.metadata_manager.clone(),
                         Arc::new(handles),
-                        unique,
+                        valid_topic_names,
+                        HashMap::new(),
                         options.should_retry_on_quota_violation(),
+                        now,
                         deadline,
                         Arc::clone(&self.shared.time_provider),
                     );
@@ -700,17 +862,29 @@ impl Admin for KafkaAdminClient {
             },
             TopicCollection::TopicIds(ids) => {
                 let mut handles: HashMap<Uuid, KafkaFutureImpl<()>> = HashMap::new();
+                let mut valid_topic_ids: Vec<Uuid> = Vec::new();
                 for id in &ids {
-                    handles.entry(*id).or_default();
+                    if topic_id_is_unrepresentable(*id) {
+                        let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+                        future.complete_exceptionally(KafkaError::with_message(
+                            Errors::InvalidTopicException,
+                            format!("The given topic ID '{id}' cannot be represented in a request."),
+                        ));
+                        handles.insert(*id, future);
+                    } else if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(*id) {
+                        entry.insert(KafkaFutureImpl::new());
+                        valid_topic_ids.push(*id);
+                    }
                 }
                 let public: HashMap<Uuid, KafkaFuture<()>> = handles.iter().map(|(k, v)| (*k, v.future())).collect();
-                if !handles.is_empty() {
-                    let unique: Vec<Uuid> = handles.keys().copied().collect();
+                if !valid_topic_ids.is_empty() {
                     let call = get_delete_topics_with_ids_call(
                         self.shared.metadata_manager.clone(),
                         Arc::new(handles),
-                        unique,
+                        valid_topic_ids,
+                        HashMap::new(),
                         options.should_retry_on_quota_violation(),
+                        now,
                         deadline,
                         Arc::clone(&self.shared.time_provider),
                     );
@@ -778,16 +952,26 @@ impl Admin for KafkaAdminClient {
         match topics {
             TopicCollection::TopicNames(names) => {
                 let mut handles: HashMap<String, KafkaFutureImpl<TopicDescription>> = HashMap::new();
+                let mut valid_topic_names: Vec<String> = Vec::new();
                 for name in &names {
-                    handles.entry(name.clone()).or_default();
+                    if topic_name_is_unrepresentable(name) {
+                        let future: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
+                        future.complete_exceptionally(KafkaError::with_message(
+                            Errors::InvalidTopicException,
+                            format!("The given topic name '{name}' cannot be represented in a request."),
+                        ));
+                        handles.insert(name.clone(), future);
+                    } else if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(name.clone()) {
+                        entry.insert(KafkaFutureImpl::new());
+                        valid_topic_names.push(name.clone());
+                    }
                 }
                 let public: HashMap<String, KafkaFuture<TopicDescription>> =
                     handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
-                if !handles.is_empty() {
-                    let unique: Vec<String> = handles.keys().cloned().collect();
+                if !valid_topic_names.is_empty() {
                     let call = get_describe_topics_by_names_call(
                         Arc::new(handles),
-                        unique,
+                        valid_topic_names,
                         options.should_include_authorized_operations(),
                         deadline,
                     );
@@ -796,18 +980,36 @@ impl Admin for KafkaAdminClient {
                 DescribeTopicsResult::of_topic_names(public)
             },
             TopicCollection::TopicIds(ids) => {
-                // The metadata-fallback describe path is name-based (see the
-                // module deviation note); describing by id requires the
-                // DescribeTopicPartitions API, deferred to a later tier.
-                let mut handles: HashMap<Uuid, KafkaFuture<TopicDescription>> = HashMap::new();
-                for id in ids {
-                    let h: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
-                    h.complete_exceptionally(KafkaError::unsupported_version(
-                        "describeTopics by topic id is not supported in this client version",
-                    ));
-                    handles.insert(id, h.future());
+                // Describing by id uses the Metadata API in Java too
+                // (handleDescribeTopicsByIds → convertTopicIdsToMetadataRequestTopic),
+                // not DescribeTopicPartitions, so it is translated faithfully here.
+                let mut handles: HashMap<Uuid, KafkaFutureImpl<TopicDescription>> = HashMap::new();
+                let mut valid_topic_ids: Vec<Uuid> = Vec::new();
+                for id in &ids {
+                    if topic_id_is_unrepresentable(*id) {
+                        let future: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
+                        future.complete_exceptionally(KafkaError::with_message(
+                            Errors::InvalidTopicException,
+                            format!("The given topic id '{id}' cannot be represented in a request."),
+                        ));
+                        handles.insert(*id, future);
+                    } else if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(*id) {
+                        entry.insert(KafkaFutureImpl::new());
+                        valid_topic_ids.push(*id);
+                    }
                 }
-                DescribeTopicsResult::of_topic_ids(handles)
+                let public: HashMap<Uuid, KafkaFuture<TopicDescription>> =
+                    handles.iter().map(|(k, v)| (*k, v.future())).collect();
+                if !valid_topic_ids.is_empty() {
+                    let call = get_describe_topics_by_ids_call(
+                        Arc::new(handles),
+                        valid_topic_ids,
+                        options.should_include_authorized_operations(),
+                        deadline,
+                    );
+                    self.submit(call);
+                }
+                DescribeTopicsResult::of_topic_ids(public)
             },
         }
     }
@@ -914,6 +1116,76 @@ fn get_describe_topics_by_names_call(
     )
 }
 
+/// Builds a `describeTopics` (by id) [`Call`] using the Metadata API.
+/// Translated from `KafkaAdminClient.handleDescribeTopicsByIds`.
+fn get_describe_topics_by_ids_call(
+    futures: Arc<HashMap<Uuid, KafkaFutureImpl<TopicDescription>>>,
+    ids: Vec<Uuid>,
+    include_authorized_operations: bool,
+    deadline: i64,
+) -> Call {
+    let req_ids = ids.clone();
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = crate::metadata_request_data::MetadataRequestData::new();
+        data.set_topics(Some(
+            crate::common::requests::MetadataRequest::convert_topic_ids_to_metadata_request_topic(&req_ids),
+        ));
+        data.set_allow_auto_topic_creation(false);
+        data.set_include_topic_authorized_operations(include_authorized_operations);
+        Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::Metadata(metadata_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+        };
+        let cluster = metadata_response.build_cluster();
+        let errors = metadata_response.errors_by_topic_id();
+        for (topic_id, future) in resp_futures.iter() {
+            let Some(topic_name) = cluster.topic_name(topic_id) else {
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::UnknownTopicId,
+                    format!("TopicId {topic_id} not found."),
+                ));
+                continue;
+            };
+            let topic_name = topic_name.to_string();
+            if let Some(topic_error) = errors.get(topic_id) {
+                future.complete_exceptionally(KafkaError::new(*topic_error));
+                continue;
+            }
+            let authorized_operations = metadata_response
+                .topic_authorized_operations(&topic_name)
+                .unwrap_or(crate::common::requests::metadata_response::AUTHORIZED_OPERATIONS_OMITTED);
+            future.complete(topic_description_from_cluster(
+                &cluster,
+                &topic_name,
+                *topic_id,
+                authorized_operations,
+            ));
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "describeTopicsWithIds",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
 #[cfg(test)]
 impl KafkaAdminClient {
     /// Test-only constructor: wires the client over an arbitrary
@@ -1014,6 +1286,24 @@ mod tests {
         (admin, runnable, time, nodes)
     }
 
+    /// Builds a test environment with extra config properties (e.g. a custom
+    /// `default.api.timeout.ms` or `retry.backoff.ms`).
+    fn env_with_props(
+        extra: &[(&str, &str)],
+    ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = MockClient::new(nodes.clone(), time.provider());
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        for (k, v) in extra {
+            props.insert((*k).to_string(), (*v).to_string());
+        }
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        (admin, runnable, time, nodes)
+    }
+
     async fn pump(runnable: &mut AdminClientRunnable<MockClient>, iters: usize) {
         for _ in 0..iters {
             runnable.run_once().await;
@@ -1032,7 +1322,12 @@ mod tests {
     }
 
     fn create_response(results: Vec<CreatableTopicResult>) -> ConcreteResponse {
+        create_response_throttled(0, results)
+    }
+
+    fn create_response_throttled(throttle_ms: i32, results: Vec<CreatableTopicResult>) -> ConcreteResponse {
         let mut data = CreateTopicsResponseData::new();
+        data.set_throttle_time_ms(throttle_ms);
         data.set_topics(results);
         ConcreteResponse::CreateTopics(CreateTopicsResponse::new(data))
     }
@@ -1044,10 +1339,37 @@ mod tests {
         r
     }
 
+    fn delete_result_with_id(id: Uuid, error: Errors) -> DeletableTopicResult {
+        let mut r = DeletableTopicResult::new();
+        r.set_topic_id(id);
+        r.set_error_code(error.code());
+        r
+    }
+
     fn delete_response(results: Vec<DeletableTopicResult>) -> ConcreteResponse {
+        delete_response_throttled(0, results)
+    }
+
+    fn delete_response_throttled(throttle_ms: i32, results: Vec<DeletableTopicResult>) -> ConcreteResponse {
         let mut data = DeleteTopicsResponseData::new();
+        data.set_throttle_time_ms(throttle_ms);
         data.set_responses(results);
         ConcreteResponse::DeleteTopics(DeleteTopicsResponse::new(data))
+    }
+
+    /// Pumps `run_once` until `done` returns true or `max_iters` is reached,
+    /// mirroring Java's `TestUtils.waitForCondition` over the driven runnable.
+    async fn pump_until(
+        runnable: &mut AdminClientRunnable<MockClient>,
+        max_iters: usize,
+        mut done: impl FnMut(&mut AdminClientRunnable<MockClient>) -> bool,
+    ) {
+        for _ in 0..max_iters {
+            if done(runnable) {
+                return;
+            }
+            runnable.run_once().await;
+        }
     }
 
     fn topic_meta(name: &str, internal: bool, id: Uuid, partitions: i32) -> TopicMetadata {
@@ -1144,6 +1466,185 @@ mod tests {
         result.all().get().await.unwrap();
     }
 
+    /// Mirrors `KafkaAdminClientTest.testCreateTopicsRetryBackoff`: a retry must
+    /// wait for the backoff to elapse before the next attempt is issued. The
+    /// driven-runnable harness has no wall clock, so we assert the retry is
+    /// gated by `next_allowed_try_ms` — it does not fire until the mock time
+    /// advances past the backoff.
+    #[tokio::test]
+    async fn test_create_topics_retry_backoff() {
+        let retry_backoff = 5000;
+        let (admin, mut runnable, time, _nodes) = env_with_props(&[("retry.backoff.ms", &retry_backoff.to_string())]);
+        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        // First attempt disconnects, second succeeds.
+        runnable
+            .client_mut()
+            .prepare_response_disconnected(create_response(vec![]), true);
+        runnable
+            .client_mut()
+            .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
+
+        // Drive until the first (disconnected) attempt has failed and the retry
+        // is scheduled. The success response must remain unconsumed while the
+        // backoff has not yet elapsed.
+        pump_until(&mut runnable, 20, |r| r.client_mut().num_awaiting_responses() == 1).await;
+        assert!(!result.values()["myTopic"].is_done());
+
+        // Pump repeatedly without advancing time: the backoff gate holds and the
+        // retry is not sent, so the success response stays queued.
+        pump(&mut runnable, 5).await;
+        assert_eq!(runnable.client_mut().num_awaiting_responses(), 1);
+        assert!(!result.values()["myTopic"].is_done());
+
+        // Advance past the (jittered) upper-bound backoff; the retry now fires.
+        let upper_bound = (retry_backoff as f64 * RETRY_BACKOFF_EXP_BASE as f64 * (1.0 + RETRY_BACKOFF_JITTER)) as i64;
+        time.sleep(upper_bound);
+        pump_until(&mut runnable, 20, |r| r.client_mut().num_awaiting_responses() == 0).await;
+        result.all().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_topics_handle_not_controller_exception() {
+        let (admin, mut runnable, time, nodes) = env();
+        // First attempt hits the wrong controller; then a metadata refresh
+        // updates the controller; then the retry succeeds.
+        runnable.client_mut().prepare_response(create_response(vec![create_result(
+            "myTopic",
+            Errors::NotController,
+            None,
+        )]));
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                1,
+                Vec::new(),
+            )));
+        runnable
+            .client_mut()
+            .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
+        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        // The NOT_CONTROLLER retry is routed through the retry-backoff gate, so
+        // the mock clock must advance for the retry to become eligible.
+        for _ in 0..30 {
+            if result.values()["myTopic"].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        result.all().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_topics_retry_throttling_exception_when_enabled() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        // topic1 succeeds, topic2 is throttled (retried until success), topic3 already exists.
+        runnable.client_mut().prepare_response(create_response_throttled(
+            1000,
+            vec![
+                create_result("topic1", Errors::None, None),
+                create_result("topic2", Errors::ThrottlingQuotaExceeded, None),
+                create_result("topic3", Errors::TopicAlreadyExists, None),
+            ],
+        ));
+        runnable.client_mut().prepare_response(create_response_throttled(
+            1000,
+            vec![create_result("topic2", Errors::ThrottlingQuotaExceeded, None)],
+        ));
+        runnable
+            .client_mut()
+            .prepare_response(create_response_throttled(0, vec![create_result("topic2", Errors::None, None)]));
+
+        let result = admin.create_topics(
+            &[
+                NewTopic::new("topic1", 1, 1),
+                NewTopic::new("topic2", 1, 1),
+                NewTopic::new("topic3", 1, 1),
+            ],
+            CreateTopicsOptions::new().retry_on_quota_violation(true),
+        );
+        pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
+        result.values()["topic1"].get().await.unwrap();
+        result.values()["topic2"].get().await.unwrap();
+        let err = result.values()["topic3"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAlreadyExists);
+    }
+
+    #[tokio::test]
+    async fn test_create_topics_dont_retry_throttling_exception_when_disabled() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(create_response_throttled(
+            1000,
+            vec![
+                create_result("topic1", Errors::None, None),
+                create_result("topic2", Errors::ThrottlingQuotaExceeded, None),
+                create_result("topic3", Errors::TopicAlreadyExists, None),
+            ],
+        ));
+        let result = admin.create_topics(
+            &[
+                NewTopic::new("topic1", 1, 1),
+                NewTopic::new("topic2", 1, 1),
+                NewTopic::new("topic3", 1, 1),
+            ],
+            CreateTopicsOptions::new().retry_on_quota_violation(false),
+        );
+        pump(&mut runnable, 5).await;
+        result.values()["topic1"].get().await.unwrap();
+        let err = result.values()["topic2"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(1000));
+        let err3 = result.values()["topic3"].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::TopicAlreadyExists);
+    }
+
+    #[tokio::test]
+    async fn test_create_topics_retry_throttling_exception_when_enabled_until_request_timeout() {
+        let default_api_timeout: i64 = 60000;
+        let (admin, mut runnable, time, _nodes) =
+            env_with_props(&[("default.api.timeout.ms", &default_api_timeout.to_string())]);
+        runnable.client_mut().prepare_response(create_response_throttled(
+            1000,
+            vec![
+                create_result("topic1", Errors::None, None),
+                create_result("topic2", Errors::ThrottlingQuotaExceeded, None),
+                create_result("topic3", Errors::TopicAlreadyExists, None),
+            ],
+        ));
+        runnable.client_mut().prepare_response(create_response_throttled(
+            1000,
+            vec![create_result("topic2", Errors::ThrottlingQuotaExceeded, None)],
+        ));
+        let result = admin.create_topics(
+            &[
+                NewTopic::new("topic1", 1, 1),
+                NewTopic::new("topic2", 1, 1),
+                NewTopic::new("topic3", 1, 1),
+            ],
+            CreateTopicsOptions::new().retry_on_quota_violation(true),
+        );
+        // Consume both prepared responses; the third (retry) request stays in flight.
+        pump_until(&mut runnable, 30, |r| {
+            !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
+        })
+        .await;
+        // Advance past the default api timeout to time out the in-flight request.
+        time.sleep(default_api_timeout + 1);
+        pump_until(&mut runnable, 30, |r| {
+            let _ = r;
+            result.values()["topic2"].is_done()
+        })
+        .await;
+        result.values()["topic1"].get().await.unwrap();
+        let err = result.values()["topic2"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(0));
+        let err3 = result.values()["topic3"].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::TopicAlreadyExists);
+    }
+
     // --- deleteTopics --------------------------------------------------------
 
     #[tokio::test]
@@ -1187,6 +1688,225 @@ mod tests {
         runnable.client_mut().prepare_response(delete_response(vec![r]));
         pump(&mut runnable, 5).await;
         result.all().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_topics_partial_response() {
+        // By name: the response omits "myOtherTopic", so its future is
+        // completed by the unrealized-futures sanity check.
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_names(vec!["myTopic".to_string(), "myOtherTopic".to_string()]),
+            DeleteTopicsOptions::new(),
+        );
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![delete_result_named("myTopic", Errors::None)],
+        ));
+        pump(&mut runnable, 5).await;
+        result.topic_name_values().unwrap()["myTopic"].get().await.unwrap();
+        let err = result.topic_name_values().unwrap()["myOtherTopic"].get().await.unwrap_err();
+        assert_eq!(
+            err.message(),
+            "The controller response did not contain a result for topic myOtherTopic"
+        );
+
+        // By id: the response omits topicId2.
+        let (admin, mut runnable, _time, _nodes) = env();
+        let id1 = Uuid::new(1, 1);
+        let id2 = Uuid::new(2, 2);
+        let result = admin.delete_topics(TopicCollection::of_topic_ids(vec![id1, id2]), DeleteTopicsOptions::new());
+        runnable
+            .client_mut()
+            .prepare_response(delete_response_throttled(1000, vec![delete_result_with_id(id1, Errors::None)]));
+        pump(&mut runnable, 5).await;
+        result.topic_id_values().unwrap()[&id1].get().await.unwrap();
+        let err = result.topic_id_values().unwrap()[&id2].get().await.unwrap_err();
+        assert_eq!(
+            err.message(),
+            format!("The controller response did not contain a result for topic {id2}")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_topics_retry_throttling_exception_when_enabled() {
+        // By name.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![
+                delete_result_named("topic1", Errors::None),
+                delete_result_named("topic2", Errors::ThrottlingQuotaExceeded),
+                delete_result_named("topic3", Errors::TopicAlreadyExists),
+            ],
+        ));
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![delete_result_named("topic2", Errors::ThrottlingQuotaExceeded)],
+        ));
+        runnable
+            .client_mut()
+            .prepare_response(delete_response_throttled(0, vec![delete_result_named("topic2", Errors::None)]));
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
+            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+        );
+        pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
+        result.topic_name_values().unwrap()["topic1"].get().await.unwrap();
+        result.topic_name_values().unwrap()["topic2"].get().await.unwrap();
+        let err = result.topic_name_values().unwrap()["topic3"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAlreadyExists);
+
+        // By id.
+        let (admin, mut runnable, _time, _nodes) = env();
+        let id1 = Uuid::new(1, 1);
+        let id2 = Uuid::new(2, 2);
+        let id3 = Uuid::new(3, 3);
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![
+                delete_result_with_id(id1, Errors::None),
+                delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded),
+                delete_result_with_id(id3, Errors::UnknownTopicId),
+            ],
+        ));
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded)],
+        ));
+        runnable
+            .client_mut()
+            .prepare_response(delete_response_throttled(0, vec![delete_result_with_id(id2, Errors::None)]));
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_ids(vec![id1, id2, id3]),
+            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+        );
+        pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
+        result.topic_id_values().unwrap()[&id1].get().await.unwrap();
+        result.topic_id_values().unwrap()[&id2].get().await.unwrap();
+        let err = result.topic_id_values().unwrap()[&id3].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownTopicId);
+    }
+
+    #[tokio::test]
+    async fn test_delete_topics_dont_retry_throttling_exception_when_disabled() {
+        // By name.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![
+                delete_result_named("topic1", Errors::None),
+                delete_result_named("topic2", Errors::ThrottlingQuotaExceeded),
+                delete_result_named("topic3", Errors::TopicAlreadyExists),
+            ],
+        ));
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
+            DeleteTopicsOptions::new().retry_on_quota_violation(false),
+        );
+        pump(&mut runnable, 5).await;
+        result.topic_name_values().unwrap()["topic1"].get().await.unwrap();
+        let err = result.topic_name_values().unwrap()["topic2"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(1000));
+        let err3 = result.topic_name_values().unwrap()["topic3"].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::TopicAlreadyExists);
+
+        // By id.
+        let (admin, mut runnable, _time, _nodes) = env();
+        let id1 = Uuid::new(1, 1);
+        let id2 = Uuid::new(2, 2);
+        let id3 = Uuid::new(3, 3);
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![
+                delete_result_with_id(id1, Errors::None),
+                delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded),
+                delete_result_with_id(id3, Errors::UnknownTopicId),
+            ],
+        ));
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_ids(vec![id1, id2, id3]),
+            DeleteTopicsOptions::new().retry_on_quota_violation(false),
+        );
+        pump(&mut runnable, 5).await;
+        result.topic_id_values().unwrap()[&id1].get().await.unwrap();
+        let err = result.topic_id_values().unwrap()[&id2].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(1000));
+        let err3 = result.topic_id_values().unwrap()[&id3].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::UnknownTopicId);
+    }
+
+    #[tokio::test]
+    async fn test_delete_topics_retry_throttling_exception_when_enabled_until_request_timeout() {
+        let default_api_timeout: i64 = 60000;
+        // By name.
+        let (admin, mut runnable, time, _nodes) =
+            env_with_props(&[("default.api.timeout.ms", &default_api_timeout.to_string())]);
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![
+                delete_result_named("topic1", Errors::None),
+                delete_result_named("topic2", Errors::ThrottlingQuotaExceeded),
+                delete_result_named("topic3", Errors::TopicAlreadyExists),
+            ],
+        ));
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![delete_result_named("topic2", Errors::ThrottlingQuotaExceeded)],
+        ));
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
+            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+        );
+        pump_until(&mut runnable, 30, |r| {
+            !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
+        })
+        .await;
+        time.sleep(default_api_timeout + 1);
+        pump_until(&mut runnable, 30, |_| result.topic_name_values().unwrap()["topic2"].is_done()).await;
+        result.topic_name_values().unwrap()["topic1"].get().await.unwrap();
+        let err = result.topic_name_values().unwrap()["topic2"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(0));
+        let err3 = result.topic_name_values().unwrap()["topic3"].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::TopicAlreadyExists);
+
+        // By id.
+        let (admin, mut runnable, time, _nodes) =
+            env_with_props(&[("default.api.timeout.ms", &default_api_timeout.to_string())]);
+        let id1 = Uuid::new(1, 1);
+        let id2 = Uuid::new(2, 2);
+        let id3 = Uuid::new(3, 3);
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![
+                delete_result_with_id(id1, Errors::None),
+                delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded),
+                delete_result_with_id(id3, Errors::UnknownTopicId),
+            ],
+        ));
+        runnable.client_mut().prepare_response(delete_response_throttled(
+            1000,
+            vec![delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded)],
+        ));
+        let result = admin.delete_topics(
+            TopicCollection::of_topic_ids(vec![id1, id2, id3]),
+            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+        );
+        pump_until(&mut runnable, 30, |r| {
+            !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
+        })
+        .await;
+        time.sleep(default_api_timeout + 1);
+        pump_until(&mut runnable, 30, |_| result.topic_id_values().unwrap()[&id2].is_done()).await;
+        result.topic_id_values().unwrap()[&id1].get().await.unwrap();
+        let err = result.topic_id_values().unwrap()[&id2].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(0));
+        let err3 = result.topic_id_values().unwrap()[&id3].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::UnknownTopicId);
     }
 
     // --- listTopics ----------------------------------------------------------
@@ -1281,13 +2001,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_describe_topics_by_id_unsupported() {
+    async fn test_describe_topics_by_ids() {
+        // Valid id: the metadata response carries the topic, so it is described.
+        let (admin, mut runnable, _time, nodes) = env();
+        let topic_id = Uuid::new(7, 7);
+        let topics = vec![topic_meta("test-topic", false, topic_id, 1)];
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                topics,
+            )));
+        let result = admin.describe_topics(TopicCollection::of_topic_ids(vec![topic_id]), DescribeTopicsOptions::new());
+        pump(&mut runnable, 5).await;
+        let all = result.all_topic_ids().unwrap().get().await.unwrap();
+        assert_eq!(all[&topic_id].name(), "test-topic");
+
+        // Id not present in the brokers: UnknownTopicId with the Java message.
+        let (admin, mut runnable, _time, nodes) = env();
+        let non_exist = Uuid::new(9, 9);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )));
+        let result =
+            admin.describe_topics(TopicCollection::of_topic_ids(vec![non_exist]), DescribeTopicsOptions::new());
+        pump(&mut runnable, 5).await;
+        let err = result.all_topic_ids().unwrap().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownTopicId);
+        assert_eq!(err.message(), format!("TopicId {non_exist} not found."));
+
+        // The zero id cannot be represented in a request; no request is sent.
         let (admin, _runnable, _time, _nodes) = env();
         let result = admin.describe_topics(
-            TopicCollection::of_topic_ids(vec![Uuid::new(1, 1)]),
+            TopicCollection::of_topic_ids(vec![Uuid::ZERO_UUID]),
             DescribeTopicsOptions::new(),
         );
         let err = result.all_topic_ids().unwrap().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(
+            err.message(),
+            "The given topic id 'AAAAAAAAAAAAAAAAAAAAAA' cannot be represented in a request."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_topics_response_config_metadata() {
+        use crate::create_topics_response_data::CreatableTopicConfigs;
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.create_topics(
+            &[NewTopic::new("myTopic", 1, 1)],
+            CreateTopicsOptions::new().validate_only(true),
+        );
+        let mut config = CreatableTopicConfigs::new();
+        config.set_name("cleanup.policy".to_string());
+        config.set_value(Some("compact".to_string()));
+        config.set_read_only(true);
+        config.set_is_sensitive(false);
+        config.set_config_source(1); // DYNAMIC_TOPIC_CONFIG
+        let mut r = create_result("myTopic", Errors::None, None);
+        r.set_configs(Some(vec![config]));
+        runnable.client_mut().prepare_response(create_response(vec![r]));
+        pump(&mut runnable, 5).await;
+        let cfg = result.config("myTopic").get().await.unwrap();
+        let entry = cfg.get("cleanup.policy").expect("cleanup.policy present");
+        assert_eq!(entry.value(), Some("compact"));
+        assert!(entry.is_read_only());
+        assert!(!entry.is_sensitive());
+        assert_eq!(entry.source(), ConfigSource::DynamicTopicConfig);
+    }
+
+    #[tokio::test]
+    async fn test_create_topics_invalid_name_unrepresentable() {
+        let (admin, _runnable, _time, _nodes) = env();
+        let result = admin.create_topics(&[NewTopic::new("", 1, 1)], CreateTopicsOptions::new());
+        let err = result.values()[""].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
+    }
+
+    #[tokio::test]
+    async fn test_delete_topics_invalid_name_unrepresentable() {
+        let (admin, _runnable, _time, _nodes) = env();
+        let result =
+            admin.delete_topics(TopicCollection::of_topic_names(vec![String::new()]), DeleteTopicsOptions::new());
+        let err = result.topic_name_values().unwrap()[""].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
     }
 }

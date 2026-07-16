@@ -73,6 +73,30 @@ pub enum ConfigSource {
     Unknown,
 }
 
+impl ConfigSource {
+    /// Maps a `DescribeConfigsResponse.ConfigSource` wire id (also carried on
+    /// `CreatableTopicConfigs.configSource`) to the public [`ConfigSource`].
+    ///
+    /// Mirrors the composition of `DescribeConfigsResponse.ConfigSource.forId`
+    /// and `KafkaAdminClient.configSource`. Unlike Java's `configSource`, which
+    /// throws `IllegalArgumentException` for the `UNKNOWN` / client-metrics /
+    /// group ids, this returns [`ConfigSource::Unknown`] for unrecognized ids so
+    /// response parsing never panics on a recoverable path (CLAUDE.md §10).
+    pub(crate) fn for_id(id: i8) -> ConfigSource {
+        match id {
+            1 => ConfigSource::DynamicTopicConfig,
+            2 => ConfigSource::DynamicBrokerConfig,
+            3 => ConfigSource::DynamicDefaultBrokerConfig,
+            4 => ConfigSource::StaticBrokerConfig,
+            5 => ConfigSource::DefaultConfig,
+            6 => ConfigSource::DynamicBrokerLoggerConfig,
+            7 => ConfigSource::DynamicClientMetricsConfig,
+            8 => ConfigSource::DynamicGroupConfig,
+            _ => ConfigSource::Unknown,
+        }
+    }
+}
+
 /// A configuration synonym of a [`ConfigEntry`].
 ///
 /// Corresponds to `ConfigEntry.ConfigSynonym`.
