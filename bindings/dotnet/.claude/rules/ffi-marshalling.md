@@ -461,6 +461,17 @@ spawn") and the Python design.
   - Cancel is safe + frees handles; high-concurrency produce doesn't starve the
     thread pool.
 
+**Future direction — push-based completion (proposal; not in the ABI).** Add
+`Producer_send_cb(…, on_complete, user_data)`: the Rust core fires `on_complete`
+when each send resolves, from **one shared completion task** spawned per producer
+in `KafkaProducer_new` (CLAUDE.md §11 — not a spawn per send). Then .NET drops
+the pump — `SendAsync` just registers a kept-alive Cdecl callback (§6) with a
+`GCHandle` over the `TaskCompletionSource` as `user_data`; the callback (on a
+tokio worker thread → `RunContinuationsAsynchronously` + no-throw) completes the
+TCS and frees the handle. Zero blocked threads, per-message — but it needs a
+core/ABI change (Actor/Critic), so the pull-based pump above is the current
+design.
+
 ---
 
 ## 8. Native library loading, packaging & AOT

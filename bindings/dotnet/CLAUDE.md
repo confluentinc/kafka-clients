@@ -246,7 +246,7 @@ The `kafka_*` function already exists in the header:
    transient handles are read-and-freed, not wrapped.
 3. **Managed API** — the Java-shaped method in `Producer.cs`; marshal
    strings/bytes (ffi §3–4), map errors (ffi §5), bridge async to `Task` (ffi §7).
-4. **Test** — against `MockProducer`, no broker (§6).
+4. **Build & Test** — against `MockProducer`, no broker (§6).
 
 ### 5.3 Mode B — full-stack port (the C-ABI-first loop)
 
