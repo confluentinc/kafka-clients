@@ -35,7 +35,7 @@ use crate::kafka_client::KafkaClient;
 use crate::{kafka_debug, kafka_trace};
 
 use super::admin_metadata_manager::AdminMetadataManager;
-use super::call::{Call, HandleResult, NodeProvider};
+use super::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 
 /// Sentinel for "no hard-shutdown deadline set".
 const NO_HARD_SHUTDOWN: i64 = i64::MIN;
@@ -572,8 +572,13 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             self.handle_timeout_failure(call, now, error);
             return;
         }
-        // Otherwise, retry: `maybeRetry` re-queues into pending calls.
-        self.pending_calls.push(call);
+        // Otherwise, retry. `maybeRetry` re-queues into pending calls by
+        // default; the driver's override may instead re-issue lookup requests
+        // (on a disconnect) and take over, leaving nothing to re-queue.
+        match call.maybe_retry(&error, now) {
+            MaybeRetryOutcome::Requeue => self.pending_calls.push(call),
+            MaybeRetryOutcome::Handled => {},
+        }
     }
 
     /// Wraps a non-timeout cause as a timeout and fails the call terminally.

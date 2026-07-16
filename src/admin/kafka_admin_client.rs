@@ -60,26 +60,36 @@ use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
 use crate::common::requests::{
-    ConcreteResponse, CreateTopicsRequestBuilder, DeleteTopicsRequestBuilder, MetadataRequestBuilder, RequestBuilder,
+    ConcreteResponse, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteTopicsRequestBuilder,
+    MetadataRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
 use crate::common::utils::{ExponentialBackoff, LogContext};
-use crate::common::{Cluster, KafkaError, KafkaFuture, TopicCollection, TopicPartitionInfo, Uuid};
+use crate::common::{Cluster, KafkaError, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
+use crate::create_partitions_request_data::{
+    CreatePartitionsAssignment, CreatePartitionsRequestData, CreatePartitionsTopic,
+};
 use crate::create_topics_request_data::{CreatableTopic, CreateTopicsRequestData};
 use crate::delete_topics_request_data::{DeleteTopicState, DeleteTopicsRequestData};
 use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 
+use super::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
 use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSignal};
 use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
-use super::internals::call::{Call, HandleResult, NodeProvider};
+use super::internals::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
+use super::internals::delete_records_handler::DeleteRecordsHandler;
+use super::internals::partition_leader_cache::PartitionLeaderCache;
+use super::records_to_delete::RecordsToDelete;
 use super::{
-    Admin, AdminClientConfig, Config, ConfigEntry, ConfigSource, ConfigType, CreateTopicsOptions, CreateTopicsResult,
+    Admin, AdminClientConfig, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
+    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
     DeleteTopicsOptions, DeleteTopicsResult, DescribeTopicsOptions, DescribeTopicsResult, ListTopicsOptions,
-    ListTopicsResult, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    ListTopicsResult, NewPartitions, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
+use crate::common::Node;
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
 const RETRY_BACKOFF_EXP_BASE: i32 = 2;
@@ -98,6 +108,13 @@ struct Shared {
     metadata_manager: AdminMetadataManager,
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     bg_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Retry-backoff parameters for the `AdminApiDriver` (mirrors the fields
+    /// passed to the driver in `invokeDriver`).
+    retry_backoff_ms: i64,
+    retry_backoff_max_ms: i64,
+    /// Cache of partition-to-leader mappings shared across driver-backed calls
+    /// (`deleteRecords`), mirroring `KafkaAdminClient.partitionLeaderCache`.
+    partition_leader_cache: Arc<PartitionLeaderCache>,
 }
 
 /// The administrative client for Kafka.
@@ -223,6 +240,9 @@ impl KafkaAdminClient {
             metadata_manager,
             time_provider,
             bg_handle: Mutex::new(None),
+            retry_backoff_ms: config.retry_backoff_ms(),
+            retry_backoff_max_ms: config.retry_backoff_max_ms(),
+            partition_leader_cache: Arc::new(PartitionLeaderCache::new()),
         };
         (Self { shared: Arc::new(shared) }, runnable)
     }
@@ -264,6 +284,144 @@ impl KafkaAdminClient {
     fn now(&self) -> i64 {
         (self.shared.time_provider)()
     }
+
+    /// Builds the context used to submit `AdminApiDriver`-generated calls
+    /// (mirrors the closure over `runnable` in `KafkaAdminClient.maybeSendRequests`).
+    fn driver_context(&self) -> DriverContext {
+        DriverContext {
+            tx: self.shared.admin_tx.clone(),
+            wakeup: Arc::clone(&self.shared.wakeup),
+            time_provider: Arc::clone(&self.shared.time_provider),
+        }
+    }
+}
+
+/// Shared handle used to submit `AdminApiDriver`-generated [`Call`]s onto the
+/// background task, mirroring the `runnable.call(...)` closure in
+/// `KafkaAdminClient.newCall` / `maybeSendRequests`.
+#[derive(Clone)]
+struct DriverContext {
+    tx: mpsc::UnboundedSender<Call>,
+    wakeup: Arc<Notify>,
+    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+}
+
+/// Kicks off a driver-backed RPC: polls the driver for its initial requests and
+/// submits them. Mirrors `KafkaAdminClient.invokeDriver` + the initial
+/// `maybeSendRequests`.
+fn invoke_driver<K, V>(driver: AdminApiDriver<K, V>, ctx: DriverContext, now: i64)
+where
+    K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
+    V: Send + 'static,
+{
+    let driver = Arc::new(Mutex::new(driver));
+    maybe_send_requests(&driver, &ctx, now);
+}
+
+/// Polls the driver and submits one [`Call`] per produced request spec.
+/// Mirrors `KafkaAdminClient.maybeSendRequests`.
+fn maybe_send_requests<K, V>(driver: &Arc<Mutex<AdminApiDriver<K, V>>>, ctx: &DriverContext, _now: i64)
+where
+    K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
+    V: Send + 'static,
+{
+    let specs = driver.lock().unwrap().poll();
+    for spec in specs {
+        let call = new_driver_call(Arc::clone(driver), spec, ctx.clone());
+        match ctx.tx.send(call) {
+            Ok(()) => ctx.wakeup.notify_one(),
+            Err(mpsc::error::SendError(mut call)) => {
+                call.handle_failure(&KafkaError::illegal_state("The AdminClient thread has exited."));
+            },
+        }
+    }
+}
+
+/// Wraps a driver [`RequestSpec`] in a [`Call`] whose hooks feed responses and
+/// failures back into the driver. Mirrors `KafkaAdminClient.newCall`.
+fn new_driver_call<K, V>(driver: Arc<Mutex<AdminApiDriver<K, V>>>, spec: RequestSpec<K>, ctx: DriverContext) -> Call
+where
+    K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
+    V: Send + 'static,
+{
+    let RequestSpec { name, scope, keys, request, next_allowed_try_ms, deadline_ms, tries } = spec;
+    let node_provider = match scope.destination_broker_id() {
+        Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+        None => NodeProvider::LeastLoaded,
+    };
+    // A minimal node used only for the handler's `broker.id()` in log/sanity
+    // messages; the real endpoint is resolved by the node provider on send.
+    let node = Node::new(scope.destination_broker_id().unwrap_or(-1), String::new(), -1);
+
+    // create_request: hand over the pre-built builder on first send; rebuild
+    // from the driver on the rare non-disconnect retriable re-send.
+    let mut prebuilt: Option<Box<dyn RequestBuilder>> = Some(request);
+    let cr_driver = Arc::clone(&driver);
+    let cr_scope = scope.clone();
+    let cr_keys = keys.clone();
+    let create_request = Box::new(move |_timeout_ms: i32| match prebuilt.take() {
+        Some(rb) => Ok(rb),
+        None => cr_driver
+            .lock()
+            .unwrap()
+            .build_request_for_spec(&cr_scope, &cr_keys)
+            .ok_or_else(|| KafkaError::illegal_state("AdminApiDriver produced no request on retry")),
+    });
+
+    let hr_driver = Arc::clone(&driver);
+    let hr_ctx = ctx.clone();
+    let hr_scope = scope.clone();
+    let hr_keys = keys.clone();
+    let hr_node = node.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, now: i64| {
+        hr_driver
+            .lock()
+            .unwrap()
+            .on_response(now, &hr_scope, &hr_keys, response, &hr_node);
+        maybe_send_requests(&hr_driver, &hr_ctx, now);
+        HandleResult::Done
+    });
+
+    let hf_driver = Arc::clone(&driver);
+    let hf_ctx = ctx.clone();
+    let hf_scope = scope.clone();
+    let hf_keys = keys.clone();
+    let hf_time = Arc::clone(&ctx.time_provider);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        let now = (hf_time)();
+        hf_driver.lock().unwrap().on_failure(now, &hf_scope, &hf_keys, error);
+        maybe_send_requests(&hf_driver, &hf_ctx, now);
+    });
+
+    let mut call = Call::new(
+        name,
+        deadline_ms,
+        node_provider,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    );
+    call.next_allowed_try_ms = next_allowed_try_ms;
+    call.tries = tries;
+
+    // maybeRetry override: a disconnect retries lookup via the driver rather
+    // than re-sending to the (possibly dead) node. Mirrors `newCall.maybeRetry`.
+    let mr_driver = Arc::clone(&driver);
+    let mr_ctx = ctx.clone();
+    let mr_scope = scope;
+    let mr_keys = keys;
+    call.set_maybe_retry_fn(Box::new(move |error: &KafkaError, now: i64| {
+        if error.error() == Errors::NetworkException {
+            mr_driver.lock().unwrap().on_failure(now, &mr_scope, &mr_keys, error);
+            maybe_send_requests(&mr_driver, &mr_ctx, now);
+            MaybeRetryOutcome::Handled
+        } else {
+            MaybeRetryOutcome::Requeue
+        }
+    }));
+
+    call
 }
 
 /// Computes the absolute deadline for a call. Mirrors
@@ -537,6 +695,125 @@ fn get_create_topics_call(
 
     Call::new(
         "createTopics",
+        deadline,
+        NodeProvider::Controller,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// createPartitions
+// ---------------------------------------------------------------------------
+
+/// Builds a `createPartitions` [`Call`]. Free function so the quota-retry path
+/// can rebuild a fresh call with the same futures. Translated from
+/// `KafkaAdminClient.getCreatePartitionsCall`.
+#[allow(clippy::too_many_arguments)]
+fn get_create_partitions_call(
+    mm: AdminMetadataManager,
+    futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
+    topics_by_name: Arc<HashMap<String, CreatePartitionsTopic>>,
+    names: Vec<String>,
+    quota_exceeded_exceptions: HashMap<String, KafkaError>,
+    validate_only: bool,
+    retry_on_quota: bool,
+    now: i64,
+    deadline: i64,
+    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+) -> Call {
+    let req_names = names.clone();
+    let req_topics = Arc::clone(&topics_by_name);
+    let create_request = Box::new(move |timeout_ms: i32| {
+        let mut data = CreatePartitionsRequestData::new();
+        let topics: Vec<CreatePartitionsTopic> = req_names.iter().filter_map(|n| req_topics.get(n).cloned()).collect();
+        data.set_topics(topics);
+        data.set_timeout_ms(timeout_ms);
+        data.set_validate_only(validate_only);
+        Ok(Box::new(CreatePartitionsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_mm = mm.clone();
+    let resp_futures = Arc::clone(&futures);
+    let resp_topics = Arc::clone(&topics_by_name);
+    let resp_time = Arc::clone(&time_provider);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::CreatePartitions(create_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreatePartitions response"));
+        };
+        if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
+            return HandleResult::Retry(err);
+        }
+        let throttle_time_ms = create_response.throttle_time_ms();
+        let mut retry_names: Vec<String> = Vec::new();
+        let mut retry_quota_exceeded: HashMap<String, KafkaError> = HashMap::new();
+        for result in &create_response.data().results {
+            let Some(future) = resp_futures.get(&result.name) else {
+                continue;
+            };
+            let error = Errors::for_code(result.error_code);
+            if error != Errors::None {
+                if error == Errors::ThrottlingQuotaExceeded {
+                    let quota_error = KafkaError::throttling_quota_exceeded(
+                        throttle_time_ms,
+                        message_with_fallback(result.error_code, &result.error_message),
+                    );
+                    if retry_on_quota {
+                        retry_names.push(result.name.clone());
+                        retry_quota_exceeded.insert(result.name.clone(), quota_error);
+                    } else {
+                        future.complete_exceptionally(quota_error);
+                    }
+                } else {
+                    future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                }
+            } else {
+                future.complete(());
+            }
+        }
+        if retry_names.is_empty() {
+            complete_unrealized(&resp_futures, |topic| {
+                format!("The controller response did not contain a result for topic {topic}")
+            });
+            HandleResult::Done
+        } else {
+            let retry_now = (resp_time)();
+            let call = get_create_partitions_call(
+                resp_mm.clone(),
+                Arc::clone(&resp_futures),
+                Arc::clone(&resp_topics),
+                retry_names,
+                retry_quota_exceeded,
+                validate_only,
+                retry_on_quota,
+                retry_now,
+                deadline,
+                Arc::clone(&resp_time),
+            );
+            HandleResult::NewCall(Box::new(call))
+        }
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let fail_time = Arc::clone(&time_provider);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        maybe_complete_quota_exceeded(
+            retry_on_quota,
+            error,
+            &fail_futures,
+            &quota_exceeded_exceptions,
+            throttle_time_delta,
+        );
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "createPartitions",
         deadline,
         NodeProvider::Controller,
         create_request,
@@ -1014,6 +1291,93 @@ impl Admin for KafkaAdminClient {
         }
     }
 
+    fn create_partitions(
+        &self,
+        new_partitions: &HashMap<String, NewPartitions>,
+        options: CreatePartitionsOptions,
+    ) -> CreatePartitionsResult {
+        let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
+        let mut topics_by_name: HashMap<String, CreatePartitionsTopic> = HashMap::new();
+        for (topic, new_partition) in new_partitions {
+            let assignments = new_partition.assignments().map(|new_assignments| {
+                new_assignments
+                    .iter()
+                    .map(|broker_ids| {
+                        let mut a = CreatePartitionsAssignment::new();
+                        a.set_broker_ids(broker_ids.clone());
+                        a
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let mut created = CreatePartitionsTopic::new();
+            created.set_name(topic.clone());
+            created.set_count(new_partition.total_count());
+            created.set_assignments(assignments);
+            topics_by_name.insert(topic.clone(), created);
+            handles.insert(topic.clone(), KafkaFutureImpl::new());
+        }
+        let public: HashMap<String, KafkaFuture<()>> = handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+
+        if !topics_by_name.is_empty() {
+            let now = self.now();
+            let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+            let names: Vec<String> = topics_by_name.keys().cloned().collect();
+            let call = get_create_partitions_call(
+                self.shared.metadata_manager.clone(),
+                Arc::new(handles),
+                Arc::new(topics_by_name),
+                names,
+                HashMap::new(),
+                options.should_validate_only(),
+                options.should_retry_on_quota_violation(),
+                now,
+                deadline,
+                Arc::clone(&self.shared.time_provider),
+            );
+            self.submit(call);
+        }
+        CreatePartitionsResult::new(public)
+    }
+
+    fn delete_records(
+        &self,
+        records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
+        options: DeleteRecordsOptions,
+    ) -> DeleteRecordsResult {
+        let keys: std::collections::HashSet<TopicPartition> = records_to_delete.keys().cloned().collect();
+        let future = DeleteRecordsHandler::new_future(keys, Arc::clone(&self.shared.partition_leader_cache));
+        let result_map = future.all();
+
+        let timeout_ms = options.timeout().unwrap_or(self.shared.default_api_timeout_ms);
+        let handler = DeleteRecordsHandler::new(
+            records_to_delete.clone(),
+            LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
+            timeout_ms,
+        );
+
+        let now = self.now();
+        // Java calc: calcDeadlineMs(now, options.timeoutMs()) — the raw option
+        // (which may be null → default), not the resolved handler timeout.
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = ExponentialBackoff::new(
+            self.shared.retry_backoff_ms,
+            RETRY_BACKOFF_EXP_BASE,
+            self.shared.retry_backoff_max_ms,
+            RETRY_BACKOFF_JITTER,
+        )
+        .expect("ExponentialBackoff::new only fails on invalid jitter");
+        let driver = AdminApiDriver::new(
+            Box::new(handler),
+            Box::new(future),
+            deadline,
+            retry_backoff,
+            LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
+        );
+        invoke_driver(driver, self.driver_context(), now);
+
+        DeleteRecordsResult::new(result_map)
+    }
+
     async fn close(&self, timeout: Duration) {
         let now = self.now();
         let deadline = now.saturating_add(timeout.as_millis() as i64);
@@ -1222,9 +1586,14 @@ mod tests {
     use crate::common::protocol::Errors;
     use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, PartitionMetadata, TopicMetadata};
     use crate::common::requests::request_test_utils;
+    use crate::common::requests::{CreatePartitionsResponse, DeleteRecordsResponse};
     use crate::common::requests::{CreateTopicsResponse, DeleteTopicsResponse};
     use crate::common::{TopicCollection, TopicPartition, Uuid};
+    use crate::create_partitions_response_data::{CreatePartitionsResponseData, CreatePartitionsTopicResult};
     use crate::create_topics_response_data::{CreatableTopicResult, CreateTopicsResponseData};
+    use crate::delete_records_response_data::{
+        DeleteRecordsPartitionResult, DeleteRecordsResponseData, DeleteRecordsTopicResult,
+    };
     use crate::delete_topics_response_data::{DeletableTopicResult, DeleteTopicsResponseData};
     use crate::mock_client::MockClient;
 
@@ -2094,5 +2463,344 @@ mod tests {
         let err = result.topic_name_values().unwrap()[""].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidTopicException);
         assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
+    }
+
+    // --- createPartitions ----------------------------------------------------
+
+    fn create_partitions_result_item(name: &str, error: Errors, msg: Option<&str>) -> CreatePartitionsTopicResult {
+        let mut r = CreatePartitionsTopicResult::new();
+        r.set_name(name.to_string());
+        r.set_error_code(error.code());
+        r.set_error_message(msg.map(str::to_string));
+        r
+    }
+
+    fn create_partitions_response(throttle_ms: i32, results: Vec<CreatePartitionsTopicResult>) -> ConcreteResponse {
+        let mut data = CreatePartitionsResponseData::new();
+        data.set_throttle_time_ms(throttle_ms);
+        data.set_results(results);
+        ConcreteResponse::CreatePartitions(CreatePartitionsResponse::new(data))
+    }
+
+    fn new_partitions_counts() -> HashMap<String, NewPartitions> {
+        let mut counts = HashMap::new();
+        counts.insert("my_topic".to_string(), NewPartitions::increase_to(3));
+        counts.insert(
+            "other_topic".to_string(),
+            NewPartitions::increase_to_with_assignments(3, vec![vec![2], vec![3]]),
+        );
+        counts
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testCreatePartitions`.
+    #[tokio::test]
+    async fn test_create_partitions() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.create_partitions(&new_partitions_counts(), CreatePartitionsOptions::new());
+        runnable.client_mut().prepare_response(create_partitions_response(
+            1000,
+            vec![
+                create_partitions_result_item("my_topic", Errors::None, None),
+                create_partitions_result_item(
+                    "other_topic",
+                    Errors::InvalidTopicException,
+                    Some("some detailed reason"),
+                ),
+            ],
+        ));
+        pump(&mut runnable, 5).await;
+        result.values()["my_topic"].get().await.unwrap();
+        let err = result.values()["other_topic"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.message(), "some detailed reason");
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testCreatePartitionsRetryThrottlingExceptionWhenEnabled`.
+    #[tokio::test]
+    async fn test_create_partitions_retry_throttling_exception_when_enabled() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(create_partitions_response(
+            1000,
+            vec![
+                create_partitions_result_item("topic1", Errors::None, None),
+                create_partitions_result_item("topic2", Errors::ThrottlingQuotaExceeded, None),
+                create_partitions_result_item("topic3", Errors::TopicAlreadyExists, None),
+            ],
+        ));
+        runnable.client_mut().prepare_response(create_partitions_response(
+            1000,
+            vec![create_partitions_result_item(
+                "topic2",
+                Errors::ThrottlingQuotaExceeded,
+                None,
+            )],
+        ));
+        runnable.client_mut().prepare_response(create_partitions_response(
+            0,
+            vec![create_partitions_result_item("topic2", Errors::None, None)],
+        ));
+
+        let mut counts = HashMap::new();
+        counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
+        counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
+        counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
+        let result = admin.create_partitions(&counts, CreatePartitionsOptions::new().retry_on_quota_violation(true));
+
+        pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
+        result.values()["topic1"].get().await.unwrap();
+        result.values()["topic2"].get().await.unwrap();
+        let err = result.values()["topic3"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAlreadyExists);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testCreatePartitionsDontRetryThrottlingExceptionWhenDisabled`.
+    #[tokio::test]
+    async fn test_create_partitions_dont_retry_throttling_exception_when_disabled() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(create_partitions_response(
+            1000,
+            vec![
+                create_partitions_result_item("topic1", Errors::None, None),
+                create_partitions_result_item("topic2", Errors::ThrottlingQuotaExceeded, None),
+                create_partitions_result_item("topic3", Errors::TopicAlreadyExists, None),
+            ],
+        ));
+        let mut counts = HashMap::new();
+        counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
+        counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
+        counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
+        let result = admin.create_partitions(&counts, CreatePartitionsOptions::new().retry_on_quota_violation(false));
+
+        pump(&mut runnable, 5).await;
+        result.values()["topic1"].get().await.unwrap();
+        let err = result.values()["topic2"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(1000));
+        let err3 = result.values()["topic3"].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::TopicAlreadyExists);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testCreatePartitionsRetryThrottlingExceptionWhenEnabledUntilRequestTimeOut`.
+    #[tokio::test]
+    async fn test_create_partitions_retry_throttling_exception_when_enabled_until_request_timeout() {
+        let default_api_timeout: i64 = 60000;
+        let (admin, mut runnable, time, _nodes) =
+            env_with_props(&[("default.api.timeout.ms", &default_api_timeout.to_string())]);
+        runnable.client_mut().prepare_response(create_partitions_response(
+            1000,
+            vec![
+                create_partitions_result_item("topic1", Errors::None, None),
+                create_partitions_result_item("topic2", Errors::ThrottlingQuotaExceeded, None),
+                create_partitions_result_item("topic3", Errors::TopicAlreadyExists, None),
+            ],
+        ));
+        runnable.client_mut().prepare_response(create_partitions_response(
+            1000,
+            vec![create_partitions_result_item(
+                "topic2",
+                Errors::ThrottlingQuotaExceeded,
+                None,
+            )],
+        ));
+        let mut counts = HashMap::new();
+        counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
+        counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
+        counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
+        let result = admin.create_partitions(&counts, CreatePartitionsOptions::new().retry_on_quota_violation(true));
+
+        pump_until(&mut runnable, 30, |r| {
+            !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
+        })
+        .await;
+        time.sleep(default_api_timeout + 1);
+        pump_until(&mut runnable, 30, |_r| result.values()["topic2"].is_done()).await;
+        result.values()["topic1"].get().await.unwrap();
+        let err = result.values()["topic2"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ThrottlingQuotaExceeded);
+        assert_eq!(err.throttle_time_ms(), Some(0));
+        let err3 = result.values()["topic3"].get().await.unwrap_err();
+        assert_eq!(err3.error(), Errors::TopicAlreadyExists);
+    }
+
+    // --- deleteRecords -------------------------------------------------------
+
+    fn topic_meta_error(name: &str, error: Errors) -> TopicMetadata {
+        TopicMetadata {
+            error,
+            topic: name.to_string(),
+            topic_id: Uuid::ZERO_UUID,
+            is_internal: false,
+            partition_metadata: Vec::new(),
+            authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
+        }
+    }
+
+    fn topic_meta_leaders(name: &str, leaders: &[(i32, i32)]) -> TopicMetadata {
+        let partition_metadata = leaders
+            .iter()
+            .map(|(partition, leader)| PartitionMetadata {
+                error: Errors::None,
+                topic_partition: TopicPartition::new(name.to_string(), *partition),
+                leader_id: Some(*leader),
+                leader_epoch: Some(0),
+                replica_ids: vec![*leader],
+                in_sync_replica_ids: vec![*leader],
+                offline_replica_ids: vec![],
+            })
+            .collect();
+        TopicMetadata {
+            error: Errors::None,
+            topic: name.to_string(),
+            topic_id: Uuid::ZERO_UUID,
+            is_internal: false,
+            partition_metadata,
+            authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
+        }
+    }
+
+    fn metadata_resp(nodes: &[Node], topics: Vec<TopicMetadata>) -> ConcreteResponse {
+        ConcreteResponse::Metadata(request_test_utils::metadata_response(nodes, Some("mock-cluster"), 0, topics))
+    }
+
+    fn delete_records_partition(index: i32, error: Errors, low_watermark: i64) -> DeleteRecordsPartitionResult {
+        let mut p = DeleteRecordsPartitionResult::new();
+        p.set_partition_index(index);
+        p.set_error_code(error.code());
+        p.set_low_watermark(low_watermark);
+        p
+    }
+
+    fn delete_records_resp(topic: &str, partitions: Vec<DeleteRecordsPartitionResult>) -> ConcreteResponse {
+        let mut topic_result = DeleteRecordsTopicResult::new();
+        topic_result.set_name(topic.to_string());
+        topic_result.set_partitions(partitions);
+        let mut data = DeleteRecordsResponseData::new();
+        data.set_topics(vec![topic_result]);
+        ConcreteResponse::DeleteRecords(DeleteRecordsResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDeleteRecords`: two retriable metadata
+    /// lookups precede a successful one, then a fulfillment response carries a
+    /// success, an offset-out-of-range error, an authorization failure, and a
+    /// missing partition (sanity-check failure).
+    #[tokio::test]
+    async fn test_delete_records() {
+        let (admin, mut runnable, _time, nodes) = env();
+        // Lookup retries: LEADER_NOT_AVAILABLE, then UNKNOWN_TOPIC_OR_PARTITION
+        // (tolerated), then success mapping all partitions to node0.
+        runnable.client_mut().prepare_response(metadata_resp(
+            &nodes,
+            vec![topic_meta_error("my_topic", Errors::LeaderNotAvailable)],
+        ));
+        runnable.client_mut().prepare_response(metadata_resp(
+            &nodes,
+            vec![topic_meta_error("my_topic", Errors::UnknownTopicOrPartition)],
+        ));
+        runnable.client_mut().prepare_response(metadata_resp(
+            &nodes,
+            vec![topic_meta_leaders("my_topic", &[(0, 0), (1, 0), (2, 0), (3, 0)])],
+        ));
+        runnable.client_mut().prepare_response(delete_records_resp(
+            "my_topic",
+            vec![
+                delete_records_partition(0, Errors::None, 3),
+                delete_records_partition(1, Errors::OffsetOutOfRange, -1),
+                delete_records_partition(2, Errors::TopicAuthorizationFailed, -1),
+                // partition 3 omitted → sanity-check failure
+            ],
+        ));
+
+        let mut records = HashMap::new();
+        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::before_offset(3));
+        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::before_offset(10));
+        let result = admin.delete_records(&records, DeleteRecordsOptions::new());
+
+        let values = result.low_watermarks();
+        pump_until(&mut runnable, 40, |_r| values.values().all(|f| f.is_done())).await;
+
+        assert_eq!(
+            values[&TopicPartition::new("my_topic", 0)].get().await.unwrap().low_watermark(),
+            3
+        );
+        assert_eq!(
+            values[&TopicPartition::new("my_topic", 1)].get().await.unwrap_err().error(),
+            Errors::OffsetOutOfRange
+        );
+        assert_eq!(
+            values[&TopicPartition::new("my_topic", 2)].get().await.unwrap_err().error(),
+            Errors::TopicAuthorizationFailed
+        );
+        let p3_err = values[&TopicPartition::new("my_topic", 3)].get().await.unwrap_err();
+        assert!(p3_err.message().contains("did not contain a result for topic partition"));
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDeleteRecordsTopicAuthorizationError`: a
+    /// topic-level authorization failure during lookup fails the partition.
+    #[tokio::test]
+    async fn test_delete_records_topic_authorization_error() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response(metadata_resp(
+            &nodes,
+            vec![topic_meta_error("foo", Errors::TopicAuthorizationFailed)],
+        ));
+
+        let mut records = HashMap::new();
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset(10));
+        let result = admin.delete_records(&records, DeleteRecordsOptions::new());
+
+        let values = result.low_watermarks();
+        pump_until(&mut runnable, 20, |_r| values.values().all(|f| f.is_done())).await;
+        let err = values[&TopicPartition::new("foo", 0)].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDeleteRecordsMultipleSends`: partitions
+    /// spread across two leaders produce two fulfillment requests, and each
+    /// broker's result completes independently.
+    ///
+    /// Deviation: Java fails one broker with a pending `SaslAuthenticationException`
+    /// (a connection-level failure). `MockClient` cannot simulate a pending
+    /// authentication error (its `authentication_error` always returns `None`),
+    /// so this port substitutes a per-partition fatal error on the second broker
+    /// to exercise the same multi-broker fan-out and independent completion.
+    #[tokio::test]
+    async fn test_delete_records_multiple_sends() {
+        let (admin, mut runnable, _time, nodes) = env();
+        // tp0 -> node0, tp1 -> node1.
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0), (1, 1)])]));
+        runnable.client_mut().prepare_response_for_node(
+            delete_records_resp("foo", vec![delete_records_partition(0, Errors::None, 3)]),
+            &nodes[0],
+        );
+        runnable.client_mut().prepare_response_for_node(
+            delete_records_resp("foo", vec![delete_records_partition(1, Errors::TopicAuthorizationFailed, -1)]),
+            &nodes[1],
+        );
+
+        let mut records = HashMap::new();
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset(10));
+        let result = admin.delete_records(&records, DeleteRecordsOptions::new());
+
+        let values = result.low_watermarks();
+        pump_until(&mut runnable, 40, |_r| values.values().all(|f| f.is_done())).await;
+        assert_eq!(values[&TopicPartition::new("foo", 0)].get().await.unwrap().low_watermark(), 3);
+        assert_eq!(
+            values[&TopicPartition::new("foo", 1)].get().await.unwrap_err().error(),
+            Errors::TopicAuthorizationFailed
+        );
+    }
+
+    /// The mock's `delete_records` returns an empty result for an empty request.
+    #[tokio::test]
+    async fn test_mock_delete_records_empty() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.delete_records(&HashMap::new(), DeleteRecordsOptions::new());
+        assert!(result.low_watermarks().is_empty());
     }
 }
