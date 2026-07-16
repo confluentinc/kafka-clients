@@ -50,16 +50,42 @@ were needed — those are deferred to a later tier. This collapsed a large chunk
   KafkaProducer::from_config but PLAINTEXT-only + `with_metadata_updater`, seeds the
   bootstrap cluster, spawns the runnable.
 
-**Deviations (documented in code + defensible to Critic):**
+**Deviations:** only ONE remains after the Critic fix cycle:
 1. describeTopics by NAME uses the Metadata-API fallback (Java's
    generateDescribeTopicsCallWithMetadataApi), NOT DescribeTopicPartitions — module
-   doc-comment explains. describeTopics by ID fails futures with unsupported_version
-   (DescribeTopicPartitions deferred). All noted in `kafka_admin_client.rs` module docs.
-2. quota-retry-on-timeout nuance (`maybeCompleteQuotaExceededException`) simplified to
-   completeAllExceptionally on failure — the quota-timeout test slice was NOT translated.
-   Straight quota-RETRY (resubmit retry topics) IS implemented.
-3. CreateTopics config in TopicMetadataAndConfig uses `ConfigEntry::new(name,value)`
-   (source/sensitive metadata simplified) — Phase-1 tests don't assert those.
+   doc-comment explains. (describeTopics by ID also uses the Metadata API, exactly
+   like Java's handleDescribeTopicsByIds — NO deviation there.)
+
+**Critic fix-cycle (N=1) resolutions — all 7 COMMENTS.1 items fixed, see COMMENTS.DONE.1.md:**
+- describe-by-id is now REAL via `get_describe_topics_by_ids_call` (Metadata API +
+  `convert_topic_ids_to_metadata_request_topic` + `cluster.topic_name(id)` +
+  `errors_by_topic_id()`). The old "requires DescribeTopicPartitions" rationale was
+  factually wrong (Java's by-id path is Metadata-API based too).
+- Quota carry-forward implemented faithfully: added `KafkaError::ThrottlingQuotaExceeded`
+  variant (struct `ThrottlingQuotaExceededError{throttle_time_ms}`, ctor
+  `throttling_quota_exceeded`, accessor `throttle_time_ms() -> Option<i32>`). Each
+  create/delete/delete-by-id Call carries a per-key quota-exception map forward across
+  retries + its creation `now`; `maybe_complete_quota_exceeded` (mirrors
+  `maybeCompleteQuotaExceededException`) re-completes on Timeout with reduced throttle.
+- CreateTopics response configs now use `ConfigEntry::with_metadata` + new
+  `ConfigSource::for_id(i8)` (maps CreatableTopicConfigs.config_source byte).
+- Client-side representability guards (`topic_name_is_unrepresentable` /
+  `topic_id_is_unrepresentable`) in all by-name + both by-id paths.
+
+**KEY TEST-HARNESS GOTCHA (cost the fix cycle a hang):** quota retries use
+`HandleResult::NewCall` (fresh Call, next_allowed_try_ms=0 → NO backoff gate), so quota
+tests pass WITHOUT advancing the mock clock. But NOT_CONTROLLER and disconnect retries
+route through `fail_call` which sets `next_allowed_try_ms = now + backoff` — those tests
+MUST advance `time.sleep(...)` per pump iteration or the retry never becomes eligible and
+`future.get().await` HANGS forever (pump_until is bounded, the await is not). Mirror the
+existing `test_create_topics_retries_on_disconnect` loop shape.
+
+**Until-request-timeout tests ARE feasible in the pump harness:** send the retry request
+(no prepared response → sits in MockClient.requests / in-flight), `time.sleep(default_api_timeout+1)`,
+pump → runnable handle_timeouts disconnects the in-flight node → disconnect response →
+fail_call sees deadline passed → handle_timeout_failure (Timeout) → handle_failure →
+maybe_complete_quota_exceeded. All 6 quota slices (create+delete × enabled/disabled/until-timeout)
+are translated; nothing deferred.
 
 **Unit-test harness gotcha (cost ~15 min):** `create_for_test` does NOT spawn; the test
 drives `runnable.run_once()` manually (like SenderTest) and prepares responses on
