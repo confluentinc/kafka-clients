@@ -30,6 +30,8 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
 use super::ApiVersionsResponse;
 use super::ConsumerGroupHeartbeatResponse;
+use super::CreateTopicsResponse;
+use super::DeleteTopicsResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::ListOffsetsResponse;
@@ -79,6 +81,10 @@ pub enum ConcreteResponse {
     OffsetCommit(OffsetCommitResponse),
     /// An OffsetFetch response.
     OffsetFetch(OffsetFetchResponse),
+    /// A CreateTopics response.
+    CreateTopics(CreateTopicsResponse),
+    /// A DeleteTopics response.
+    DeleteTopics(DeleteTopicsResponse),
 }
 
 impl ConcreteResponse {
@@ -97,6 +103,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::CreateTopics(r) => r.api_key(),
+            Self::DeleteTopics(r) => r.api_key(),
         }
     }
 
@@ -121,6 +129,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::CreateTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DeleteTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -169,6 +179,12 @@ impl ConcreteResponse {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::CreateTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -193,6 +209,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -221,6 +239,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
             Self::OffsetCommit(r) => r.error_counts(),
             Self::OffsetFetch(r) => r.error_counts(),
+            Self::CreateTopics(r) => r.error_counts(),
+            Self::DeleteTopics(r) => r.error_counts(),
         }
     }
 
@@ -241,6 +261,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
             Self::OffsetCommit(r) => r.throttle_time_ms(),
             Self::OffsetFetch(r) => r.throttle_time_ms(),
+            Self::CreateTopics(r) => r.throttle_time_ms(),
+            Self::DeleteTopics(r) => r.throttle_time_ms(),
         }
     }
 
@@ -260,6 +282,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::CreateTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DeleteTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -278,6 +302,8 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
             Self::OffsetCommit(r) => r.should_client_throttle(version),
             Self::OffsetFetch(r) => r.should_client_throttle(version),
+            Self::CreateTopics(r) => r.should_client_throttle(version),
+            Self::DeleteTopics(r) => r.should_client_throttle(version),
         }
     }
 
@@ -374,6 +400,14 @@ impl ConcreteResponse {
                 let response = OffsetFetchResponse::parse(readable, version)?;
                 Ok(Self::OffsetFetch(response))
             },
+            ApiKeys::CREATE_TOPICS => {
+                let response = CreateTopicsResponse::parse(readable, version)?;
+                Ok(Self::CreateTopics(response))
+            },
+            ApiKeys::DELETE_TOPICS => {
+                let response = DeleteTopicsResponse::parse(readable, version)?;
+                Ok(Self::DeleteTopics(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -397,6 +431,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::CreateTopics(r) => write!(f, "{r}"),
+            Self::DeleteTopics(r) => write!(f, "{r}"),
         }
     }
 }

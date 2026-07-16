@@ -24,6 +24,10 @@ pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
+pub mod create_topics_request;
+pub mod create_topics_response;
+pub mod delete_topics_request;
+pub mod delete_topics_response;
 pub mod fetch_metadata;
 pub mod fetch_request;
 pub mod fetch_response;
@@ -62,6 +66,12 @@ pub use consumer_group_heartbeat_request::{
     REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
 };
 pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use create_topics_request::{
+    CreateTopicsRequest, CreateTopicsRequestBuilder, NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR,
+};
+pub use create_topics_response::CreateTopicsResponse;
+pub use delete_topics_request::{DeleteTopicsRequest, DeleteTopicsRequestBuilder};
+pub use delete_topics_response::DeleteTopicsResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
 pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{
