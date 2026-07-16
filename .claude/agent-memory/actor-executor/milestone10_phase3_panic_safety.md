@@ -1,6 +1,6 @@
 ---
 name: milestone10-phase3-panic-safety
-description: Panic-safe async FFI dispatch — PanicCompletionGuard disarm-return pattern, disjoint-capture Send pitfall, teeth-proof by neutering Drop
+description: Panic-safe async FFI dispatch — IncompleteOpGuard (RAII, disarm-return pattern), disjoint-capture Send pitfall, teeth-proof by neutering Drop. Guard fires on panic OR teardown cancellation.
 metadata:
   type: project
 ---
@@ -20,17 +20,24 @@ Reusable patterns for any future async FFI dispatch (Python layer Phases 4-6):
   panicking task at the task boundary via internal catch_unwind — the worker thread
   survives, the process does NOT abort. During unwind, in-scope RAII `Drop`s run.
 
-- **`PanicCompletionGuard<P>` (disarm-returns-payload):** one-shot RAII "bomb" armed
-  before the `.await`. `armed: Option<(P, PanicAction<P>)>` where
-  `type PanicAction<P> = Box<dyn FnOnce(P) + Send>`. On armed `drop` (only reachable via
-  panic unwind) runs `on_panic(payload)`. Normal path calls `disarm(self) -> P` which
+- **`IncompleteOpGuard<P>` (disarm-returns-payload)** — renamed from `PanicCompletionGuard`
+  by Critic COMMENTS.1 F1 (2026-07-16, commit `0477c4c`): one-shot RAII "bomb" armed
+  before the `.await`. `armed: Option<(P, IncompleteOpAction<P>)>` where
+  `type IncompleteOpAction<P> = Box<dyn FnOnce(P) + Send>`. An **armed** drop fires
+  `on_incomplete(payload)` and has **two** triggers, not just panic: (a) a panic
+  unwinding the task, AND (b) task cancellation when `ShareConsumer_destroy` drops the
+  multi-thread tokio runtime while an op is suspended at `.await` (dropping the runtime
+  drops suspended task futures, running their `Drop`). The original "only on a panic
+  unwind" wording was the F1 imprecision. Normal path calls `disarm(self) -> P` which
   `.take()`s the Option (returns payload, drops the boxed action WITHOUT calling it) —
   so guard released once + callback fires once, never both. Needed the payload-return
   form because value-op's `complete: FnOnce` + `ud` are move-only and consumed by
-  exactly one of {panic path, normal path}; disarm hands them back. Void/poll payload =
-  `()` (their `target` is `Copy`, so bomb + normal path each hold a copy).
+  exactly one of {incomplete path, normal path}; disarm hands them back. Void/poll
+  payload = `()` (their `target` is `Copy`, so bomb + normal path each hold a copy).
+  Teardown-safe because `destroy` runs the runtime-shutdown (hence the drop + enqueue)
+  BEFORE freeing the handle box, and the enqueued job captures only owned data.
 
-- **Panic path mirrors each helper's normal completion** (poll reuses `PollCompletion`
+- **Incomplete-op path mirrors each helper's normal completion** (poll reuses `PollCompletion`
   whose `fire()` releases+fires; void/value release in the enqueued job before firing) —
   release happens via the owner Arc clone (teardown-safe, never derefs the handle) and
   the error is `KafkaError::illegal_state("KafkaShareConsumer operation failed unexpectedly.")`.
