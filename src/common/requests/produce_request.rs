@@ -153,8 +153,8 @@ impl ProduceRequest {
     /// # Errors
     ///
     /// Returns an error if validation fails.
-    pub fn validate_records(version: i16, records_bytes: &Option<Vec<u8>>) -> io::Result<()> {
-        let bytes = match records_bytes {
+    pub fn validate_records(version: i16, records_bytes: &Option<bytes::Bytes>) -> io::Result<()> {
+        let bytes: &[u8] = match records_bytes {
             Some(b) if !b.is_empty() => b,
             _ => {
                 return Err(io::Error::new(

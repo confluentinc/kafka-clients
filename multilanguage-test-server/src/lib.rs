@@ -14,15 +14,19 @@
 
 //! Generated tonic stubs for the multilanguage integration test harness.
 //!
-//! See `proto/producer_service.proto` for the wire schema. The Python
-//! and C++ servers regenerate their own stubs from the same `.proto`
-//! file, so this crate is the single source of truth.
+//! See `proto/producer_service.proto` and `proto/consumer_service.proto` for
+//! the wire schema. Both share the `confluent.kafka.test` package, so a single
+//! `include_proto!` pulls in both services. The Python and C++ servers
+//! regenerate their own stubs from the same `.proto` files, so this crate is
+//! the single source of truth.
 
 /// Generated proto types and gRPC service stubs.
 ///
-/// `producer_service_client::ProducerServiceClient` is the client used by
-/// the Rust `MultilanguageProducer`; `producer_service_server::ProducerServiceServer`
-/// is available for an in-process Rust reference server (not currently used).
+/// `producer_service_client::ProducerServiceClient` and
+/// `consumer_service_client::ConsumerServiceClient` are the clients used by the
+/// Rust `MultilanguageProducer` / `MultilanguageConsumer`; the matching
+/// `*_server` modules are available for in-process Rust reference servers
+/// (not currently used).
 pub mod proto {
     tonic::include_proto!("confluent.kafka.test");
 }

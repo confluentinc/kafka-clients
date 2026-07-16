@@ -77,8 +77,12 @@ pub trait Writable {
     ///
     /// The default implementation copies the bytes into the main buffer.
     /// Scatter-gather implementations override this to store the buffer
-    /// separately for vectored I/O, avoiding the copy.
-    fn write_records(&mut self, data: Vec<u8>) -> io::Result<()> {
+    /// separately for vectored I/O, avoiding the copy. The data is a
+    /// refcounted [`bytes::Bytes`] so the records payload travels from the
+    /// [`MemoryRecords`] buffer to the wire without an intermediate copy.
+    ///
+    /// [`MemoryRecords`]: crate::common::record::MemoryRecords
+    fn write_records(&mut self, data: bytes::Bytes) -> io::Result<()> {
         self.write_byte_array(&data)
     }
 }

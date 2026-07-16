@@ -1248,7 +1248,7 @@ mod round_trip {
             pd.set_last_stable_offset(last_stable_offset);
             pd.set_log_start_offset(0);
             pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
-            pd.set_records(records);
+            pd.set_records(records.map(bytes::Bytes::from));
             self.push_partition(topic, topic_id, pd)
         }
 
@@ -1303,7 +1303,7 @@ mod round_trip {
         pd.set_last_stable_offset(last_stable_offset);
         pd.set_log_start_offset(0);
         pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
-        pd.set_records(Some(records));
+        pd.set_records(Some(bytes::Bytes::from(records)));
         let txns: Vec<AbortedTransaction> = aborted
             .into_iter()
             .map(|(pid, first)| {
@@ -2579,7 +2579,7 @@ mod round_trip {
         pd.set_last_stable_offset(-1);
         pd.set_log_start_offset(0);
         pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
-        pd.set_records(Some(records));
+        pd.set_records(Some(bytes::Bytes::from(records)));
         pd
     }
 

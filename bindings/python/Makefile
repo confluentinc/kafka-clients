@@ -2,8 +2,9 @@ RUST_PROJECT_ROOT ?= $(realpath ../..)
 PROFILE ?= release
 CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
+GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test grpc-image clean
+.PHONY: build test grpc-image grpc-image-async clean
 
 build:
 	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
@@ -24,6 +25,14 @@ grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc \
+		$(RUST_PROJECT_ROOT)
+
+# Build the *async* Python gRPC server image (python_async backend). Same build
+# context and prerequisites as grpc-image; runs grpc_server_async.py.
+grpc-image-async:
+	docker build \
+		-t $(GRPC_ASYNC_IMAGE_TAG) \
+		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async \
 		$(RUST_PROJECT_ROOT)
 
 clean:
