@@ -345,6 +345,11 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
         future = Native.kafka_producer_Producer_send(handle, topicPtr, partition,
             timestamp, (IntPtr)k, key is null ? -1 : key.Length, /* value… */ out err);
     ```
+    **Note:** `fixed` also yields a null pointer for an **empty** (non-null)
+    array — not just for `null` — and the core rejects `(null, len ≥ 0)`. So an
+    **empty** key/value (`Length == 0`) must pass a **non-null** pointer (a stack
+    sentinel byte, or `GCHandle.AddrOfPinnedObject`), not the `fixed` null. (Python
+    is unaffected — an empty `bytes` is non-null.)
   - This call-scoped rule depends on §7's inline-send decision; a deferred-send
     design (a background send thread, as in the Python binding) would have to hold
     the buffer until the deferred send runs.
