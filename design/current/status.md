@@ -272,3 +272,28 @@ tests, all green.
   `admin-client.md` §9 clarified (mock-unsupported rule applies only to methods
   Java's own mock leaves unimplemented). See
   `design/history/Milestone-11/Phase-3/COMMENTS.DONE.1.md`.
+
+## Phase 4 — Log dirs ✓ (2026-07-17)
+
+Translated `describe_log_dirs`, `alter_replica_log_dirs`, `describe_replica_log_dirs`,
+Rust core + unit tests + real-broker integration tests, all green.
+
+- **`describe_log_dirs`** (`DescribeLogDirsRequest`, per-broker fan-out — one
+  `Call` per requested broker), **`alter_replica_log_dirs`**
+  (`AlterReplicaLogDirsRequest`, replica→logdir assignments routed per
+  destination broker), **`describe_replica_log_dirs`** (built on
+  `DescribeLogDirsRequest`, reshaped into `ReplicaLogDirInfo` current/future dir).
+- **New types**: `common::TopicPartitionReplica`, `LogDirDescription` +
+  `ReplicaInfo`, `Describe{LogDirs,ReplicaLogDirs}Options`/`Result`,
+  `AlterReplicaLogDirsOptions`/`Result`. Wire wrappers: `DescribeLogDirs`,
+  `AlterReplicaLogDirs` request+response.
+
+### Tests
+- **Rust lib suite: 2289 passing.**
+- **Integration**: `tests/integration/admin_log_dirs_test.rs` — 4/4 green against
+  a real broker, including a genuine **cross-directory replica move** exercised
+  via a dedicated broker fixture with two `KAFKA_LOG_DIRS` (not a documented
+  limitation — a real move).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: **clean on first pass — no fix cycle needed.** See
+  `design/history/Milestone-11/Phase-4/COMMENTS.DONE.1.md`.

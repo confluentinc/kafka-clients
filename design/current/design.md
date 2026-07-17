@@ -374,3 +374,11 @@ decodes `authorized_operations` via `common::utils::from_32_bit_field` +
 `common::acl::AclOperation`. Introduced `common::config::ConfigResource` and
 `admin::AlterConfigOp`; the `ListConfigResourcesRequest` wire wrapper is shared
 with Tier 3's future `listClientMetricsResources`.
+
+**Phase 4 (2026-07-17) — log directories.** `describe_log_dirs` (per-broker
+fan-out), `alter_replica_log_dirs` (replica→logdir assignments routed per
+destination broker), `describe_replica_log_dirs` (built on `DescribeLogDirsRequest`,
+reshaped into current/future-dir `ReplicaLogDirInfo`). All plain `Call` path.
+Introduced `common::TopicPartitionReplica` and `admin::LogDirDescription`/`ReplicaInfo`.
+The integration suite exercises a genuine cross-directory replica move via a
+broker fixture configured with two `KAFKA_LOG_DIRS`.
