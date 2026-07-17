@@ -39,6 +39,7 @@ pub mod topic_collection;
 pub mod topic_id_partition;
 pub mod topic_partition;
 pub mod topic_partition_info;
+pub mod topic_partition_replica;
 pub mod utils;
 pub mod uuid;
 
@@ -55,4 +56,5 @@ pub use topic_collection::TopicCollection;
 pub use topic_id_partition::TopicIdPartition;
 pub use topic_partition::TopicPartition;
 pub use topic_partition_info::TopicPartitionInfo;
+pub use topic_partition_replica::TopicPartitionReplica;
 pub use uuid::Uuid;

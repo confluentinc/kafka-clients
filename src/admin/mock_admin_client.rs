@@ -25,23 +25,32 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::admin::{
-    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, Config, ConfigEntry, CreatePartitionsOptions,
-    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
-    DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClusterOptions, DescribeClusterResult,
-    DescribeConfigsOptions, DescribeConfigsResult, DescribeTopicsOptions, DescribeTopicsResult,
-    ListConfigResourcesOptions, ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, NewPartitions,
-    NewTopic, OpType, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterReplicaLogDirsOptions,
+    AlterReplicaLogDirsResult, Config, ConfigEntry, CreatePartitionsOptions, CreatePartitionsResult,
+    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions,
+    DeleteTopicsResult, DeletedRecords, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
+    DescribeConfigsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
+    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ListConfigResourcesOptions,
+    ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitions, NewTopic, OpType,
+    RecordsToDelete, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
+use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
+use crate::common::{
+    KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
+};
 
 use std::collections::{BTreeSet, HashSet};
 
 /// Default cluster id used by the mock (matches Java's `DEFAULT_CLUSTER_ID`).
 const DEFAULT_CLUSTER_ID: &str = "4A5xz_QZTB2CtL4wc0X0Jw";
+
+/// The default log directories seeded per broker (mirrors Java's
+/// `MockAdminClient.DEFAULT_LOG_DIRS`).
+const DEFAULT_LOG_DIRS: &[&str] = &["/tmp/kafka-logs"];
 
 /// Internal per-topic metadata held by the mock.
 #[derive(Clone, Debug)]
@@ -49,6 +58,9 @@ struct TopicMetadata {
     topic_id: Uuid,
     is_internal: bool,
     partitions: Vec<TopicPartitionInfo>,
+    // One log dir per partition (Java's `TopicMetadata.partitionLogDirs`),
+    // taken from the first log dir of each partition's leader broker.
+    partition_log_dirs: Vec<String>,
     // Read by `describe_configs` / `incremental_alter_configs`. Java's
     // `TopicMetadata.configs` is never null (defaults to an empty map); the
     // Rust `Option` treats `None` as an empty map.
@@ -81,6 +93,12 @@ struct State {
     // Defaults overlaid onto group configs on read (mirrors Java's
     // `defaultGroupConfigs`; empty for the `create(num_brokers)` builder).
     default_group_configs: BTreeMap<String, String>,
+    // Per-broker list of log directories (index = broker id), mirroring Java's
+    // `brokerLogDirs`. Seeded with `DEFAULT_LOG_DIRS` for each broker.
+    broker_log_dirs: Vec<Vec<String>>,
+    // Pending replica moves recorded by `alter_replica_log_dirs`, keyed by
+    // replica (mirrors Java's `replicaMoves`).
+    replica_moves: HashMap<TopicPartitionReplica, ReplicaLogDirInfo>,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -131,8 +149,24 @@ impl MockAdminClient {
                 client_metrics_configs: BTreeMap::new(),
                 group_configs: BTreeMap::new(),
                 default_group_configs: BTreeMap::new(),
+                broker_log_dirs: (0..num_brokers)
+                    .map(|_| DEFAULT_LOG_DIRS.iter().map(|s| (*s).to_string()).collect())
+                    .collect(),
+                replica_moves: HashMap::new(),
             }),
         }
+    }
+
+    /// Overrides the log directories for a broker (mirrors Java's
+    /// `Builder.brokerLogDirs`). Useful for exercising multi-log-dir replica
+    /// moves in tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `broker_id` is out of range.
+    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) {
+        let mut state = self.state.lock().unwrap();
+        state.broker_log_dirs[broker_id as usize] = log_dirs;
     }
 
     /// Adds an existing topic to the mock's state.
@@ -150,6 +184,11 @@ impl MockAdminClient {
     ) {
         let mut state = self.state.lock().unwrap();
         assert!(!state.all_topics.contains_key(name), "Topic {name} was already added.");
+        // Each partition starts on the first log directory of its leader broker.
+        let partition_log_dirs: Vec<String> = partitions
+            .iter()
+            .filter_map(|p| p.leader().map(|leader| state.broker_log_dirs[leader.id() as usize][0].clone()))
+            .collect();
         let topic_id = Uuid::random_uuid();
         state.topic_ids.insert(name.to_string(), topic_id);
         state.topic_names.insert(topic_id, name.to_string());
@@ -159,6 +198,7 @@ impl MockAdminClient {
                 topic_id,
                 is_internal: internal,
                 partitions,
+                partition_log_dirs,
                 configs,
                 marked_for_deletion: false,
                 fetches_remaining_until_visible: 0,
@@ -423,6 +463,11 @@ impl Admin for MockAdminClient {
                     )
                 })
                 .collect();
+            // Partitions start off on the first log directory of each broker.
+            let partition_log_dirs: Vec<String> = partitions
+                .iter()
+                .filter_map(|p| p.leader().map(|l| state.broker_log_dirs[l.id() as usize][0].clone()))
+                .collect();
 
             let topic_id = Uuid::random_uuid();
             state.topic_ids.insert(topic_name.clone(), topic_id);
@@ -433,6 +478,7 @@ impl Admin for MockAdminClient {
                     topic_id,
                     is_internal: false,
                     partitions,
+                    partition_log_dirs,
                     configs: new_topic.config_map().cloned(),
                     marked_for_deletion: false,
                     fetches_remaining_until_visible: 0,
@@ -766,6 +812,147 @@ impl Admin for MockAdminClient {
         }
         handle.complete(config_resources.into_iter().collect());
         ListConfigResourcesResult::new(handle.future())
+    }
+
+    /// Mirrors `MockAdminClient.describeLogDirs`.
+    fn describe_log_dirs(&self, brokers: &[i32], _options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
+        let state = self.state.lock().unwrap();
+        let mut unwrapped: HashMap<i32, HashMap<String, LogDirDescription>> = HashMap::new();
+        for &broker in brokers {
+            unwrapped.entry(broker).or_default();
+        }
+
+        for (topic_name, meta) in &state.all_topics {
+            // For tests, we assume there will always be only 1 log-dir entry.
+            let Some(log_dir) = meta.partition_log_dirs.first() else {
+                continue;
+            };
+            for tp_info in &meta.partitions {
+                for node in tp_info.replicas() {
+                    let Some(map) = unwrapped.get_mut(&node.id()) else {
+                        continue;
+                    };
+                    let existing = map
+                        .remove(log_dir)
+                        .unwrap_or_else(|| LogDirDescription::new(None, HashMap::new()));
+                    let mut replica_infos = existing.replica_infos().clone();
+                    replica_infos.insert(
+                        TopicPartition::new(topic_name.clone(), tp_info.partition()),
+                        ReplicaInfo::new(0, 0, false),
+                    );
+                    map.insert(
+                        log_dir.clone(),
+                        LogDirDescription::with_volume_bytes(
+                            existing.error().cloned(),
+                            replica_infos,
+                            existing.total_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+                            existing.usable_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+                        ),
+                    );
+                }
+            }
+        }
+
+        let results = unwrapped
+            .into_iter()
+            .map(|(broker, map)| {
+                let handle: KafkaFutureImpl<HashMap<String, LogDirDescription>> = KafkaFutureImpl::new();
+                handle.complete(map);
+                (broker, handle.future())
+            })
+            .collect();
+        DescribeLogDirsResult::new(results)
+    }
+
+    /// Mirrors `MockAdminClient.alterReplicaLogDirs`.
+    fn alter_replica_log_dirs(
+        &self,
+        replica_assignment: &HashMap<TopicPartitionReplica, String>,
+        _options: AlterReplicaLogDirsOptions,
+    ) -> AlterReplicaLogDirsResult {
+        let mut state = self.state.lock().unwrap();
+        let mut results = HashMap::new();
+        for (replica, new_log_dir) in replica_assignment {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            results.insert(replica.clone(), handle.future());
+
+            let dirs = state.broker_log_dirs.get(replica.broker_id() as usize);
+            if dirs.is_none() {
+                handle.complete_exceptionally(KafkaError::with_message(
+                    Errors::ReplicaNotAvailable,
+                    format!("Can't find {replica}"),
+                ));
+                continue;
+            }
+            if !dirs.unwrap().contains(new_log_dir) {
+                handle.complete_exceptionally(KafkaError::with_message(
+                    Errors::KafkaStorageError,
+                    format!("Log directory {new_log_dir} is offline"),
+                ));
+                continue;
+            }
+            let move_info = match state.all_topics.get(replica.topic()) {
+                Some(meta) if (meta.partitions.len() as i32) > replica.partition() => Some(ReplicaLogDirInfo::new(
+                    Some(meta.partition_log_dirs[replica.partition() as usize].clone()),
+                    0,
+                    Some(new_log_dir.clone()),
+                    0,
+                )),
+                _ => None,
+            };
+            match move_info {
+                Some(info) => {
+                    state.replica_moves.insert(replica.clone(), info);
+                    handle.complete(());
+                },
+                None => {
+                    handle.complete_exceptionally(KafkaError::with_message(
+                        Errors::ReplicaNotAvailable,
+                        format!("Can't find {replica}"),
+                    ));
+                },
+            }
+        }
+        AlterReplicaLogDirsResult::new(results)
+    }
+
+    /// Mirrors `MockAdminClient.describeReplicaLogDirs`.
+    fn describe_replica_log_dirs(
+        &self,
+        replicas: &[TopicPartitionReplica],
+        _options: DescribeReplicaLogDirsOptions,
+    ) -> DescribeReplicaLogDirsResult {
+        let state = self.state.lock().unwrap();
+        let mut results = HashMap::new();
+        for replica in replicas {
+            // Replicas of unknown topics are silently omitted from the result,
+            // mirroring Java's `if (topicMetadata != null)` guard.
+            let Some(meta) = state.all_topics.get(replica.topic()) else {
+                continue;
+            };
+            let handle: KafkaFutureImpl<ReplicaLogDirInfo> = KafkaFutureImpl::new();
+            // `currentLogDir(replica)`: null if the partition has no log dir.
+            let current_log_dir = if (meta.partition_log_dirs.len() as i32) <= replica.partition() {
+                None
+            } else {
+                Some(meta.partition_log_dirs[replica.partition() as usize].clone())
+            };
+            match current_log_dir {
+                None => {
+                    handle.complete(ReplicaLogDirInfo::default());
+                },
+                Some(dir) => {
+                    let info = state
+                        .replica_moves
+                        .get(replica)
+                        .cloned()
+                        .unwrap_or_else(|| ReplicaLogDirInfo::new(Some(dir), 0, None, 0));
+                    handle.complete(info);
+                },
+            }
+            results.insert(replica.clone(), handle.future());
+        }
+        DescribeReplicaLogDirsResult::new(results)
     }
 
     async fn close(&self, _timeout: Duration) {
