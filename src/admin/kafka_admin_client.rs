@@ -96,20 +96,34 @@ use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
 use super::internals::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 use super::internals::delete_records_handler::DeleteRecordsHandler;
+use super::internals::list_offsets_handler::ListOffsetsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::records_to_delete::RecordsToDelete;
 use super::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterReplicaLogDirsOptions,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
+    AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions,
     AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym, ConfigType, CreatePartitionsOptions,
     CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
     DeleteTopicsOptions, DeleteTopicsResult, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
     DescribeConfigsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
-    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ListConfigResourcesOptions,
-    ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitions, NewTopic,
+    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
+    ListConfigResourcesOptions, ListConfigResourcesResult, ListOffsetsOptions, ListOffsetsResult,
+    ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult,
+    LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment,
     ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
-use crate::common::Node;
+use crate::alter_partition_reassignments_request_data::{
+    AlterPartitionReassignmentsRequestData, ReassignablePartition, ReassignableTopic,
+};
 use crate::common::TopicPartitionReplica;
+use crate::common::requests::{
+    AlterPartitionReassignmentsRequestBuilder, ElectLeadersRequestBuilder, ElectLeadersResponse,
+    ListPartitionReassignmentsRequestBuilder,
+};
+use crate::common::{ElectionType, Node};
+use crate::list_partition_reassignments_request_data::{
+    ListPartitionReassignmentsRequestData, ListPartitionReassignmentsTopics,
+};
 use std::collections::{BTreeSet, HashSet};
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
@@ -618,6 +632,254 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
     } else {
         None
     }
+}
+
+/// Maps an [`OffsetSpec`] to the wire-protocol timestamp sentinel used by
+/// `ListOffsets`.
+///
+/// Mirrors `KafkaAdminClient.getOffsetFromSpec`.
+fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
+    use crate::common::requests::list_offsets_request::{
+        EARLIEST_LOCAL_TIMESTAMP, EARLIEST_PENDING_UPLOAD_TIMESTAMP, EARLIEST_TIMESTAMP, LATEST_TIERED_TIMESTAMP,
+        LATEST_TIMESTAMP, MAX_TIMESTAMP,
+    };
+    match offset_spec {
+        OffsetSpec::Timestamp(timestamp) => timestamp,
+        OffsetSpec::Earliest => EARLIEST_TIMESTAMP,
+        OffsetSpec::MaxTimestamp => MAX_TIMESTAMP,
+        OffsetSpec::EarliestLocal => EARLIEST_LOCAL_TIMESTAMP,
+        OffsetSpec::LatestTiered => LATEST_TIERED_TIMESTAMP,
+        OffsetSpec::EarliestPendingUpload => EARLIEST_PENDING_UPLOAD_TIMESTAMP,
+        OffsetSpec::Latest => LATEST_TIMESTAMP,
+    }
+}
+
+/// Builds the `alterPartitionReassignments` controller call.
+///
+/// Mirrors the anonymous `Call` in `KafkaAdminClient.alterPartitionReassignments`.
+#[allow(clippy::type_complexity)]
+fn get_alter_partition_reassignments_call(
+    mm: AdminMetadataManager,
+    futures: Arc<HashMap<TopicPartition, KafkaFutureImpl<()>>>,
+    topics_to_reassignments: Arc<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<i32, Option<NewPartitionReassignment>>>,
+    >,
+    allow_replication_factor_change: bool,
+    expected_responses_count: usize,
+    deadline: i64,
+) -> Call {
+    let req_topics = Arc::clone(&topics_to_reassignments);
+    let create_request = Box::new(move |timeout_ms: i32| {
+        let mut data = AlterPartitionReassignmentsRequestData::new();
+        let mut topics = Vec::new();
+        for (topic_name, partitions_to_reassignments) in req_topics.iter() {
+            let mut reassignable_partitions = Vec::new();
+            for (partition_index, reassignment) in partitions_to_reassignments {
+                let mut reassignable_partition = ReassignablePartition::new();
+                reassignable_partition.set_partition_index(*partition_index);
+                reassignable_partition.set_replicas(reassignment.as_ref().map(|r| r.target_replicas().to_vec()));
+                reassignable_partitions.push(reassignable_partition);
+            }
+            let mut reassignable_topic = ReassignableTopic::new();
+            reassignable_topic.set_name(topic_name.clone());
+            reassignable_topic.set_partitions(reassignable_partitions);
+            topics.push(reassignable_topic);
+        }
+        data.set_topics(topics);
+        data.set_timeout_ms(timeout_ms);
+        data.set_allow_replication_factor_change(allow_replication_factor_change);
+        Ok(Box::new(AlterPartitionReassignmentsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_mm = mm.clone();
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::AlterPartitionReassignments(alter_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterPartitionReassignments response"));
+        };
+        let data = alter_response.data();
+        let mut errors: HashMap<TopicPartition, Option<KafkaError>> = HashMap::new();
+        let mut received_responses_count: usize = 0;
+        let top_level_error = Errors::for_code(data.error_code);
+        match top_level_error {
+            Errors::None => {
+                for topic_response in &data.responses {
+                    for part_response in &topic_response.partitions {
+                        let tp = TopicPartition::new(topic_response.name.as_str(), part_response.partition_index);
+                        let partition_error = Errors::for_code(part_response.error_code);
+                        if partition_error == Errors::None {
+                            errors.insert(tp, None);
+                        } else {
+                            errors.insert(
+                                tp,
+                                Some(KafkaError::with_message(
+                                    partition_error,
+                                    part_response.error_message.clone().unwrap_or_default(),
+                                )),
+                            );
+                        }
+                        received_responses_count += 1;
+                    }
+                }
+            },
+            Errors::NotController => {
+                if let Some(err) = handle_not_controller_error(&resp_mm, &alter_response.error_counts()) {
+                    return HandleResult::Retry(err);
+                }
+            },
+            _ => {
+                for topic_response in &data.responses {
+                    for part_response in &topic_response.partitions {
+                        let tp = TopicPartition::new(topic_response.name.as_str(), part_response.partition_index);
+                        errors.insert(
+                            tp,
+                            Some(KafkaError::with_message(
+                                top_level_error,
+                                data.error_message.clone().unwrap_or_default(),
+                            )),
+                        );
+                        received_responses_count += 1;
+                    }
+                }
+            },
+        }
+
+        // assertResponseCountMatch: if the server returned an inconsistent
+        // number of results, fail every future with an UnknownServerException.
+        if errors.values().all(Option::is_none) && received_responses_count != expected_responses_count {
+            let quantifier = if received_responses_count > expected_responses_count {
+                "many"
+            } else {
+                "less"
+            };
+            let error = KafkaError::with_message(
+                Errors::UnknownServerError,
+                format!(
+                    "The server returned too {quantifier} results.Expected {expected_responses_count} but received {received_responses_count}"
+                ),
+            );
+            for future in resp_futures.values() {
+                future.complete_exceptionally(error.clone());
+            }
+            return HandleResult::Done;
+        }
+
+        for (tp, exception) in errors {
+            let Some(future) = resp_futures.get(&tp) else {
+                continue;
+            };
+            match exception {
+                None => {
+                    future.complete(());
+                },
+                Some(error) => {
+                    future.complete_exceptionally(error);
+                },
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "alterPartitionReassignments",
+        deadline,
+        NodeProvider::Controller,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds the `listPartitionReassignments` controller call.
+///
+/// Mirrors the anonymous `Call` in `KafkaAdminClient.listPartitionReassignments`.
+fn get_list_partition_reassignments_call(
+    mm: AdminMetadataManager,
+    handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>>,
+    request_partitions: Option<Vec<TopicPartition>>,
+    deadline: i64,
+) -> Call {
+    let req_partitions = request_partitions.clone();
+    let create_request = Box::new(move |timeout_ms: i32| {
+        let mut list_data = ListPartitionReassignmentsRequestData::new();
+        list_data.set_timeout_ms(timeout_ms);
+        if let Some(partitions) = &req_partitions {
+            let mut topics_by_name: HashMap<String, ListPartitionReassignmentsTopics> = HashMap::new();
+            for tp in partitions {
+                let topic = topics_by_name.entry(tp.topic().to_string()).or_insert_with(|| {
+                    let mut t = ListPartitionReassignmentsTopics::new();
+                    t.set_name(tp.topic().to_string());
+                    t
+                });
+                topic.partition_indexes.push(tp.partition());
+            }
+            list_data.set_topics(Some(topics_by_name.into_values().collect()));
+        }
+        Ok(Box::new(ListPartitionReassignmentsRequestBuilder::from_data(list_data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_mm = mm.clone();
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::ListPartitionReassignments(list_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a ListPartitionReassignments response"));
+        };
+        let data = list_response.data();
+        let error = Errors::for_code(data.error_code);
+        match error {
+            Errors::None => {},
+            Errors::NotController => {
+                if let Some(err) = handle_not_controller_error(&resp_mm, &list_response.error_counts()) {
+                    return HandleResult::Retry(err);
+                }
+            },
+            _ => {
+                resp_handle.complete_exceptionally(KafkaError::with_message(
+                    error,
+                    data.error_message.clone().unwrap_or_default(),
+                ));
+            },
+        }
+        let mut reassignment_map: HashMap<TopicPartition, PartitionReassignment> = HashMap::new();
+        for topic_reassignment in &data.topics {
+            for partition_reassignment in &topic_reassignment.partitions {
+                reassignment_map.insert(
+                    TopicPartition::new(topic_reassignment.name.as_str(), partition_reassignment.partition_index),
+                    PartitionReassignment::new(
+                        partition_reassignment.replicas.clone(),
+                        partition_reassignment.adding_replicas.clone(),
+                        partition_reassignment.removing_replicas.clone(),
+                    ),
+                );
+            }
+        }
+        // First-writer-wins: a no-op if the future was already failed above.
+        resp_handle.complete(reassignment_map);
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "listPartitionReassignments",
+        deadline,
+        NodeProvider::Controller,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
 }
 
 /// Returns the broker id pertaining to the given resource, or `None` if the
@@ -2279,6 +2541,207 @@ impl Admin for KafkaAdminClient {
         }
 
         DescribeReplicaLogDirsResult::new(public)
+    }
+
+    fn elect_leaders(
+        &self,
+        election_type: ElectionType,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ElectLeadersOptions,
+    ) -> ElectLeadersResult {
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        // Preserve the caller's null-means-all semantics: `None` requests
+        // election for all partitions.
+        let request_partitions: Option<Vec<TopicPartition>> = partitions.map(|set| set.into_iter().collect());
+
+        let req_partitions = request_partitions.clone();
+        let create_request = Box::new(move |timeout_ms: i32| {
+            Ok(Box::new(ElectLeadersRequestBuilder::new(
+                election_type,
+                req_partitions.clone(),
+                timeout_ms,
+            )) as Box<dyn RequestBuilder>)
+        });
+
+        let resp_handle = handle.clone();
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::ElectLeaders(elect_response) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected an ElectLeaders response"));
+            };
+            let result = ElectLeadersResponse::elect_leaders_result(elect_response.data());
+            // For version == 0 the errorCode is 0 which maps to Errors.NONE.
+            let error = Errors::for_code(elect_response.data().error_code);
+            if error != Errors::None {
+                resp_handle.complete_exceptionally(KafkaError::new(error));
+                return HandleResult::Done;
+            }
+            resp_handle.complete(result);
+            HandleResult::Done
+        });
+
+        let fail_handle = handle.clone();
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            fail_handle.complete_exceptionally(error.clone());
+        });
+
+        let call = Call::new(
+            "electLeaders",
+            deadline,
+            NodeProvider::Controller,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        ElectLeadersResult::new(public)
+    }
+
+    fn alter_partition_reassignments(
+        &self,
+        reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+        options: AlterPartitionReassignmentsOptions,
+    ) -> AlterPartitionReassignmentsResult {
+        let mut handles: HashMap<TopicPartition, KafkaFutureImpl<()>> = HashMap::new();
+        // topic -> (partition -> reassignment); BTreeMap keeps a deterministic
+        // topic/partition order, mirroring Java's TreeMap.
+        let mut topics_to_reassignments: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<i32, Option<NewPartitionReassignment>>,
+        > = std::collections::BTreeMap::new();
+
+        for (topic_partition, reassignment) in reassignments {
+            let topic = topic_partition.topic().to_string();
+            let partition = topic_partition.partition();
+            let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handles.insert(topic_partition.clone(), future.clone());
+
+            if topic_name_is_unrepresentable(&topic) {
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::InvalidTopicException,
+                    format!("The given topic name '{topic}' cannot be represented in a request."),
+                ));
+            } else if partition < 0 {
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::InvalidTopicException,
+                    format!("The given partition index {partition} is not valid."),
+                ));
+            } else {
+                topics_to_reassignments
+                    .entry(topic)
+                    .or_default()
+                    .insert(partition, reassignment.clone());
+            }
+        }
+
+        let public: HashMap<TopicPartition, KafkaFuture<()>> =
+            handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+
+        if !topics_to_reassignments.is_empty() {
+            let now = self.now();
+            let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+            let allow_replication_factor_change = options.should_allow_replication_factor_change();
+            let expected_responses_count: usize =
+                topics_to_reassignments.values().map(std::collections::BTreeMap::len).sum();
+            let call = get_alter_partition_reassignments_call(
+                self.shared.metadata_manager.clone(),
+                Arc::new(handles),
+                Arc::new(topics_to_reassignments),
+                allow_replication_factor_change,
+                expected_responses_count,
+                deadline,
+            );
+            self.submit(call);
+        }
+        AlterPartitionReassignmentsResult::new(public)
+    }
+
+    fn list_partition_reassignments(
+        &self,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult {
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>> = KafkaFutureImpl::new();
+
+        // Client-side validation, mirroring Java: an unrepresentable topic name
+        // or negative partition fails the whole future and is never sent.
+        if let Some(partitions) = &partitions {
+            for tp in partitions {
+                if topic_name_is_unrepresentable(tp.topic()) {
+                    handle.complete_exceptionally(KafkaError::with_message(
+                        Errors::InvalidTopicException,
+                        format!("The given topic name '{}' cannot be represented in a request.", tp.topic()),
+                    ));
+                } else if tp.partition() < 0 {
+                    handle.complete_exceptionally(KafkaError::with_message(
+                        Errors::InvalidTopicException,
+                        format!("The given partition index {} is not valid.", tp.partition()),
+                    ));
+                }
+                if handle.future().is_done() {
+                    return ListPartitionReassignmentsResult::new(handle.future());
+                }
+            }
+        }
+
+        let public = handle.future();
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let request_partitions: Option<Vec<TopicPartition>> = partitions.map(|set| set.into_iter().collect());
+        let call = get_list_partition_reassignments_call(
+            self.shared.metadata_manager.clone(),
+            handle,
+            request_partitions,
+            deadline,
+        );
+        self.submit(call);
+        ListPartitionReassignmentsResult::new(public)
+    }
+
+    fn list_offsets(
+        &self,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        options: ListOffsetsOptions,
+    ) -> ListOffsetsResult {
+        let keys: HashSet<TopicPartition> = topic_partition_offsets.keys().cloned().collect();
+        let future = ListOffsetsHandler::new_future(keys, Arc::clone(&self.shared.partition_leader_cache));
+        let result_map = future.all();
+
+        let offset_queries_by_partition: HashMap<TopicPartition, i64> = topic_partition_offsets
+            .iter()
+            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(*spec)))
+            .collect();
+
+        let handler = ListOffsetsHandler::new(
+            offset_queries_by_partition,
+            options.clone(),
+            LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
+            self.shared.default_api_timeout_ms,
+        );
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = ExponentialBackoff::new(
+            self.shared.retry_backoff_ms,
+            RETRY_BACKOFF_EXP_BASE,
+            self.shared.retry_backoff_max_ms,
+            RETRY_BACKOFF_JITTER,
+        )
+        .expect("ExponentialBackoff::new only fails on invalid jitter");
+        let driver = AdminApiDriver::new(
+            Box::new(handler),
+            Box::new(future),
+            deadline,
+            retry_backoff,
+            LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
+        );
+        invoke_driver(driver, self.driver_context(), now);
+
+        ListOffsetsResult::new(result_map)
     }
 
     async fn close(&self, timeout: Duration) {
