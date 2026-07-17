@@ -363,3 +363,14 @@ fulfillment requests by node, and unmaps + re-looks-up keys on stale-leader /
 disconnect errors (via the new `Call::set_maybe_retry_fn` / `MaybeRetryOutcome`
 hook). It runs on the same single bg task (no per-key/request `tokio::spawn`) and
 now underpins Tier 1 Phase 5, all of Tier 2's `CoordinatorStrategy`, and Tier 3.
+
+**Phase 3 (2026-07-17) — cluster & config administration.** `describe_cluster`,
+`describe_configs`, `incremental_alter_configs`, `list_config_resources`, all on
+the plain `Call` path. Key design point preserved from Java: **per-resource-type
+routing** — `describe_configs`/`incremental_alter_configs` send broker /
+broker-logger resources to that specific broker node and topic/other resources to
+the controller or least-loaded node, rather than a single node. `describe_cluster`
+decodes `authorized_operations` via `common::utils::from_32_bit_field` +
+`common::acl::AclOperation`. Introduced `common::config::ConfigResource` and
+`admin::AlterConfigOp`; the `ListConfigResourcesRequest` wire wrapper is shared
+with Tier 3's future `listClientMetricsResources`.

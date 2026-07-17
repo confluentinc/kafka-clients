@@ -238,3 +238,37 @@ real-broker integration tests, all green.
 - `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
 - Critic: 1 should-fix (untested driver branches), resolved in fix cycle then
   re-verified clean; see `design/history/Milestone-11/Phase-2/COMMENTS.DONE.1.md`.
+
+## Phase 3 — Cluster & configs ✓ (2026-07-17)
+
+Translated `describe_cluster`, `describe_configs`, `incremental_alter_configs`,
+`list_config_resources`, Rust core + unit tests + real-broker integration
+tests, all green.
+
+- **`describe_cluster`** (`DescribeClusterRequest`, `NodeProvider::LeastLoadedBrokerOrActiveKController`;
+  `authorized_operations` decoded via `from_32_bit_field` + `AclOperation`,
+  reused from Phase 1).
+- **`describe_configs`** and **`incremental_alter_configs`** with Java's
+  **per-resource-type routing**: broker / broker-logger resources route to that
+  specific broker node, topic/other to the controller / least-loaded node.
+- **`list_config_resources`** (`ListConfigResourcesRequest`) — this wire wrapper
+  is reused later by Tier 3's `listClientMetricsResources`.
+- **New types**: `common::config::ConfigResource` (+ its resource-type enum),
+  `AlterConfigOp` (+ `OpType`), `Describe{Cluster,Configs}{Options,Result}`,
+  `AlterConfigsOptions`/`AlterConfigsResult`, `ListConfigResources{Options,Result}`
+  (reusing Phase 1's `Config`/`ConfigEntry`).
+- **Wire wrappers**: `DescribeCluster`, `DescribeConfigs`, `IncrementalAlterConfigs`,
+  `ListConfigResources` request+response.
+
+### Tests
+- **Rust lib suite: 2246 passing.**
+- **Integration**: `tests/integration/admin_cluster_configs_test.rs` — 5/5 green
+  against a real broker (describe-cluster nodes/controller/id; describe-configs
+  broker + topic; list-config-resources; incremental-alter-configs SET+DELETE).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 2 should-fix (both `MockAdminClient` — `describe_cluster` timeout never
+  decremented; three config methods wrongly stubbed as "unsupported" when Java's
+  mock fully implements them), resolved in fix cycle then re-verified clean.
+  `admin-client.md` §9 clarified (mock-unsupported rule applies only to methods
+  Java's own mock leaves unimplemented). See
+  `design/history/Milestone-11/Phase-3/COMMENTS.DONE.1.md`.
