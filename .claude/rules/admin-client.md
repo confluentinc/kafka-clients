@@ -224,15 +224,38 @@ Wire wrappers go in `src/common/requests/`.
 
 `MockAdminClient` is a user-facing test helper (mirrors Java's
 `MockAdminClient`), with in-memory state and immediately-resolved
-`KafkaFuture`s. For Phase 1's topic methods Java's mock is real logic —
-translate it faithfully.
+`KafkaFuture`s.
 
-For the Tier 3 methods Java's mock leaves as
-`UnsupportedOperationException("Not implemented yet")`, the Rust mock
-returns a `KafkaError` "unsupported" variant (NOT a `panic!` — CLAUDE.md
-§10.1), documented as an explicit deviation. Mock-specific configuration
-methods (e.g. seeding brokers/topics, `set_*`) are inherent methods on the
-concrete `MockAdminClient`, not on the `Admin` trait.
+**The governing principle: mirror Java's `MockAdminClient` method-for-method.**
+Whether a Rust mock method gets a real in-memory implementation or an
+"unsupported" error is decided **solely by what the Java `MockAdminClient`
+does for that same method** — not by which tier/phase the method belongs to:
+
+  - **If Java's `MockAdminClient` implements the method with real in-memory
+    logic** (against `allTopics`, `brokerConfigs`, `clientMetricsConfigs`,
+    `groupConfigs`, etc.), the Rust mock MUST translate that logic faithfully,
+    seeding whatever in-memory maps/fields Java uses. This applies regardless
+    of tier — e.g. the topic methods (`createTopics`/`deleteTopics`/
+    `listTopics`/`describeTopics`), `describeCluster`, **and** the config
+    methods `describeConfigs` / `incrementalAlterConfigs` /
+    `listConfigResources` are ALL fully implemented by Java's mock, so all
+    must be implemented in Rust. "No in-scope test exercises it" is NOT a
+    licence to stub a method Java's mock implements — implement it anyway.
+
+  - **Only** for the methods Java's own `MockAdminClient` leaves as
+    `throw new UnsupportedOperationException("Not implemented yet")` (e.g.
+    `createPartitions`, and the non-empty `deleteRecords` path) may the Rust
+    mock return a `KafkaError::unsupported_version("Not implemented yet")`
+    (NOT a `panic!` — CLAUDE.md §10.1). This is a faithful translation of the
+    Java behavior, not a scope deferral, and every such site MUST cite the
+    exact Java line that throws so the claim is verifiable. Do NOT attach a
+    "Java throws unsupported" justification to a method Java actually
+    implements — that is a false statement of the Java contract and will be
+    flagged.
+
+Mock-specific configuration methods (e.g. seeding brokers/topics, `set_*`)
+are inherent methods on the concrete `MockAdminClient`, not on the `Admin`
+trait.
 
 ## 10. Definition-of-Done adjustments for Admin
 

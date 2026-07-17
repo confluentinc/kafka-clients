@@ -6,6 +6,76 @@ Actor (N=1) in the fix cycle and verified against the Java source
 
 ---
 
+# Tier 1 Phase 3 (Cluster & configs)
+
+## Should-fix
+
+## RESOLVED — `MockAdminClient::describe_cluster` never decremented `timeout_next_requests`
+- **File**: `src/admin/mock_admin_client.rs` (`describe_cluster`)
+- **Java Reference**: `MockAdminClient.java:340-360` (`describeCluster`, the
+  `--timeoutNextRequests` on the timeout branch)
+- **Fix**: `describe_cluster` now takes `let mut state` and decrements
+  `state.timeout_next_requests -= 1` inside the timeout branch, mirroring Java
+  and every sibling mock method. A seeded timeout now recovers on the next call
+  instead of timing out forever. Also switched the timeout error from the ad-hoc
+  `KafkaError::timeout("Mock timeout")` to the shared `timeout_error()` helper
+  (`"The mock timed out the request."`) used by the other methods for
+  consistency. New tests: `describe_cluster_timeout_recovers_on_next_call`
+  (asserts every future times out on call 1, then call 2 succeeds) and
+  `describe_cluster_returns_brokers_and_controller`.
+
+## RESOLVED — mock `describe_configs` / `incremental_alter_configs` / `list_config_resources` wrongly stubbed as "unsupported"
+- **File**: `src/admin/mock_admin_client.rs` (the three config methods + `State`)
+- **Java Reference**: `MockAdminClient.java:821-895` (`describeConfigs` +
+  `getResourceDescription` + `toConfigObject`), `897-1029`
+  (`incrementalAlterConfigs` + `handleIncrementalResourceAlteration`),
+  `1398-1427` (`listConfigResources`), and constructor `241-276` (seeds
+  `brokerConfigs` with `default.replication.factor`)
+- **Fix**: All three now translate Java's real in-memory logic. Added the
+  backing maps to `State`: `broker_configs: Vec<BTreeMap<String,String>>` (one
+  per broker, seeded with `default.replication.factor` in `create()`),
+  `client_metrics_configs`, `group_configs`, and `default_group_configs`
+  (mirroring Java's fields). `describe_configs` honors the seeded-timeout branch
+  (decrementing the counter) then reads per-resource-type config via a new
+  `get_resource_description` helper (BROKER → broker config, TOPIC → topic
+  configs with `fetchesRemainingUntilVisible` decrement + UnknownTopicOrPartition,
+  CLIENT_METRICS/GROUP with empty-name InvalidRequest, GROUP overlays
+  `default_group_configs` via `putIfAbsent`). `incremental_alter_configs`
+  applies SET/DELETE ops per resource via `handle_incremental_resource_alteration`
+  + `apply_alter_ops` (Append/Subtract → InvalidRequest, matching Java's
+  `default` branch), creating CLIENT_METRICS/GROUP resources on demand.
+  `list_config_resources` lists TOPIC/BROKER/BROKER_LOGGER/CLIENT_METRICS/GROUP
+  from the in-memory maps, honoring the empty-set-means-all filter. Removed the
+  factually-incorrect comment claiming Java throws
+  `UnsupportedOperationException` for `listConfigResources`. New tests:
+  `describe_configs_topic_returns_stored_configs`,
+  `describe_configs_broker_returns_default_replication_factor`,
+  `describe_configs_unknown_topic_is_unknown_topic_error` (exact message),
+  `describe_configs_unknown_broker_is_invalid_request` (exact message),
+  `describe_configs_timeout_recovers_on_next_call`,
+  `incremental_alter_configs_topic_set_and_delete`,
+  `incremental_alter_configs_unknown_topic_is_unknown_topic_error` (exact
+  message), `incremental_alter_configs_client_metrics_creates_resource`,
+  `incremental_alter_configs_empty_client_metrics_name_is_invalid_request`
+  (exact message), `list_config_resources_all_types_when_empty`,
+  `list_config_resources_filters_by_type`.
+
+## Rule clarification (applied)
+- **File**: `.claude/rules/admin-client.md` §9
+- **Fix**: Rewrote §9 to state the governing principle explicitly — the
+  mock-method decision (real logic vs. unsupported error) is driven **solely by
+  what Java's own `MockAdminClient` does for that same method**, not by
+  tier/phase. Methods Java implements (topics, `describeCluster`, and the three
+  config methods) MUST be translated faithfully; "no in-scope test exercises it"
+  is not a licence to stub. Only methods Java leaves as
+  `UnsupportedOperationException` (e.g. `createPartitions`, non-empty
+  `deleteRecords`) may return `KafkaError::unsupported_version`, and every such
+  site must cite the exact Java line that throws (added line citations to the
+  two remaining stubs). Attaching a "Java throws unsupported" justification to a
+  method Java actually implements is now explicitly a flaggable false statement.
+
+---
+
 # Tier 1 Phase 2 (Partitions & records)
 
 ## Should-fix

@@ -15,7 +15,8 @@
 //! An in-memory [`Admin`] implementation for tests.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.MockAdminClient` (restricted
-//! to the topic methods that are in scope for Tier 1 Phase 1).
+//! to the topic, cluster, and config methods that are in scope through Tier 1
+//! Phase 3).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -29,7 +30,7 @@ use crate::admin::{
     DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClusterOptions, DescribeClusterResult,
     DescribeConfigsOptions, DescribeConfigsResult, DescribeTopicsOptions, DescribeTopicsResult,
     ListConfigResourcesOptions, ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, NewPartitions,
-    NewTopic, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    NewTopic, OpType, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
@@ -48,8 +49,9 @@ struct TopicMetadata {
     topic_id: Uuid,
     is_internal: bool,
     partitions: Vec<TopicPartitionInfo>,
-    // Stored for describeConfigs (Tier 1 Phase 3); not read by the topic RPCs.
-    #[allow(dead_code)]
+    // Read by `describe_configs` / `incremental_alter_configs`. Java's
+    // `TopicMetadata.configs` is never null (defaults to an empty map); the
+    // Rust `Option` treats `None` as an empty map.
     configs: Option<BTreeMap<String, String>>,
     marked_for_deletion: bool,
     fetches_remaining_until_visible: i32,
@@ -69,13 +71,24 @@ struct State {
     default_partitions: i32,
     default_replication_factor: i16,
     timeout_next_requests: i32,
+    // Per-broker config maps (index = broker id), mirroring Java's
+    // `brokerConfigs`. Each is seeded with `default.replication.factor`.
+    broker_configs: Vec<BTreeMap<String, String>>,
+    // Client-metrics subscription configs, keyed by resource name.
+    client_metrics_configs: BTreeMap<String, BTreeMap<String, String>>,
+    // Group configs, keyed by group id.
+    group_configs: BTreeMap<String, BTreeMap<String, String>>,
+    // Defaults overlaid onto group configs on read (mirrors Java's
+    // `defaultGroupConfigs`; empty for the `create(num_brokers)` builder).
+    default_group_configs: BTreeMap<String, String>,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.MockAdminClient`. Only the
-/// topic methods are implemented in Phase 1; other RPCs will be added with
-/// their tiers. All futures returned are immediately resolved.
+/// Corresponds to `org.apache.kafka.clients.admin.MockAdminClient`. The topic,
+/// cluster, and config methods are implemented through Tier 1 Phase 3; other
+/// RPCs will be added with their tiers. All futures returned are immediately
+/// resolved.
 #[derive(Debug)]
 pub struct MockAdminClient {
     state: Mutex<State>,
@@ -94,6 +107,15 @@ impl MockAdminClient {
             .cloned()
             .unwrap_or_else(|| Node::new(0, "localhost".to_string(), 1000));
         let default_replication_factor = num_brokers.clamp(0, 3) as i16;
+        // Seed one config map per broker with `default.replication.factor`
+        // (mirrors Java's constructor).
+        let broker_configs: Vec<BTreeMap<String, String>> = (0..num_brokers)
+            .map(|_| {
+                let mut config = BTreeMap::new();
+                config.insert("default.replication.factor".to_string(), default_replication_factor.to_string());
+                config
+            })
+            .collect();
         Self {
             state: Mutex::new(State {
                 brokers,
@@ -105,6 +127,10 @@ impl MockAdminClient {
                 default_partitions: 1,
                 default_replication_factor,
                 timeout_next_requests: 0,
+                broker_configs,
+                client_metrics_configs: BTreeMap::new(),
+                group_configs: BTreeMap::new(),
+                default_group_configs: BTreeMap::new(),
             }),
         }
     }
@@ -175,6 +201,162 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
         })
         .unwrap_or_default();
     Config::new(entries)
+}
+
+/// Builds a [`Config`] from an in-memory config map.
+///
+/// Corresponds to `MockAdminClient.toConfigObject`.
+fn to_config_object(map: &BTreeMap<String, String>) -> Config {
+    let entries = map
+        .iter()
+        .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
+        .collect::<Vec<_>>();
+    Config::new(entries)
+}
+
+/// Applies a sequence of [`AlterConfigOp`]s to an in-memory config map.
+///
+/// Returns an error for an unsupported op type (mirrors Java's
+/// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
+/// that Java's mock does not implement, matching its `default` branch.
+fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), KafkaError> {
+    for op in ops {
+        match op.op_type() {
+            OpType::Set => {
+                map.insert(
+                    op.config_entry().name().to_string(),
+                    op.config_entry().value().unwrap_or_default().to_string(),
+                );
+            },
+            OpType::Delete => {
+                map.remove(op.config_entry().name());
+            },
+            other => {
+                return Err(KafkaError::with_message(
+                    Errors::InvalidRequest,
+                    format!("Unsupported op type {other:?}"),
+                ));
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Reads the config description for a single resource.
+///
+/// Corresponds to `MockAdminClient.getResourceDescription`.
+fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, KafkaError> {
+    match resource.resource_type() {
+        ConfigResourceType::Broker => {
+            let broker_id: usize = resource.name().parse().map_err(|_| {
+                KafkaError::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
+            })?;
+            match state.broker_configs.get(broker_id) {
+                Some(config) => Ok(to_config_object(config)),
+                None => Err(KafkaError::with_message(
+                    Errors::InvalidRequest,
+                    format!("Broker {} not found.", resource.name()),
+                )),
+            }
+        },
+        ConfigResourceType::Topic => {
+            if let Some(metadata) = state.all_topics.get_mut(resource.name())
+                && !metadata.marked_for_deletion
+            {
+                if metadata.fetches_remaining_until_visible > 0 {
+                    metadata.fetches_remaining_until_visible = (metadata.fetches_remaining_until_visible - 1).max(0);
+                } else {
+                    let config = metadata.configs.clone().unwrap_or_default();
+                    return Ok(to_config_object(&config));
+                }
+            }
+            Err(KafkaError::with_message(
+                Errors::UnknownTopicOrPartition,
+                format!("Resource {resource} not found."),
+            ))
+        },
+        ConfigResourceType::ClientMetrics => {
+            let resource_name = resource.name();
+            if resource_name.is_empty() {
+                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+            }
+            let config = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
+            Ok(to_config_object(&config))
+        },
+        ConfigResourceType::Group => {
+            let resource_name = resource.name();
+            if resource_name.is_empty() {
+                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+            }
+            let mut group_config = state.group_configs.get(resource_name).cloned().unwrap_or_default();
+            // Overlay defaults for keys not already present (Java's `putIfAbsent`).
+            for (k, v) in &state.default_group_configs {
+                group_config.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            Ok(to_config_object(&group_config))
+        },
+        _ => Err(KafkaError::unsupported_version("Not implemented yet")),
+    }
+}
+
+/// Applies an incremental config alteration to a single resource.
+///
+/// Corresponds to `MockAdminClient.handleIncrementalResourceAlteration`.
+fn handle_incremental_resource_alteration(
+    state: &mut State,
+    resource: &ConfigResource,
+    ops: &[AlterConfigOp],
+) -> Result<(), KafkaError> {
+    match resource.resource_type() {
+        ConfigResourceType::Broker => {
+            let broker_id: usize = resource.name().parse().map_err(|_| {
+                KafkaError::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
+            })?;
+            if broker_id >= state.broker_configs.len() {
+                return Err(KafkaError::with_message(
+                    Errors::InvalidRequest,
+                    format!("no such broker as {broker_id}"),
+                ));
+            }
+            let mut new_map = state.broker_configs[broker_id].clone();
+            apply_alter_ops(&mut new_map, ops)?;
+            state.broker_configs[broker_id] = new_map;
+            Ok(())
+        },
+        ConfigResourceType::Topic => {
+            let metadata = state.all_topics.get_mut(resource.name()).ok_or_else(|| {
+                KafkaError::with_message(
+                    Errors::UnknownTopicOrPartition,
+                    format!("No such topic as {}", resource.name()),
+                )
+            })?;
+            let mut new_map = metadata.configs.clone().unwrap_or_default();
+            apply_alter_ops(&mut new_map, ops)?;
+            metadata.configs = Some(new_map);
+            Ok(())
+        },
+        ConfigResourceType::ClientMetrics => {
+            let resource_name = resource.name();
+            if resource_name.is_empty() {
+                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+            }
+            let mut new_map = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
+            apply_alter_ops(&mut new_map, ops)?;
+            state.client_metrics_configs.insert(resource_name.to_string(), new_map);
+            Ok(())
+        },
+        ConfigResourceType::Group => {
+            let resource_name = resource.name();
+            if resource_name.is_empty() {
+                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+            }
+            let mut new_map = state.group_configs.get(resource_name).cloned().unwrap_or_default();
+            apply_alter_ops(&mut new_map, ops)?;
+            state.group_configs.insert(resource_name.to_string(), new_map);
+            Ok(())
+        },
+        _ => Err(KafkaError::unsupported_version("Not implemented yet")),
+    }
 }
 
 #[async_trait]
@@ -435,11 +617,11 @@ impl Admin for MockAdminClient {
         new_partitions: &HashMap<String, NewPartitions>,
         _options: CreatePartitionsOptions,
     ) -> CreatePartitionsResult {
-        // Java's `MockAdminClient.createPartitions` throws
-        // `UnsupportedOperationException("Not implemented yet")`. Per
+        // Java's `MockAdminClient.createPartitions` (MockAdminClient.java:626-628)
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (documented
-        // deviation).
+        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic in new_partitions.keys() {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
@@ -454,12 +636,12 @@ impl Admin for MockAdminClient {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         _options: DeleteRecordsOptions,
     ) -> DeleteRecordsResult {
-        // Java's `MockAdminClient.deleteRecords` returns an empty result for an
-        // empty request and otherwise throws
+        // Java's `MockAdminClient.deleteRecords` (MockAdminClient.java:631-638)
+        // returns an empty result for an empty request and otherwise throws
         // `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the non-empty case returns an
-        // "unsupported" `KafkaError` per key instead of panicking (documented
-        // deviation).
+        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic_partition in records_to_delete.keys() {
             let handle: KafkaFutureImpl<DeletedRecords> = KafkaFutureImpl::new();
@@ -470,18 +652,19 @@ impl Admin for MockAdminClient {
     }
 
     fn describe_cluster(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let nodes: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
         let cluster_id: KafkaFutureImpl<String> = KafkaFutureImpl::new();
         let authorized_operations: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
 
         if state.timeout_next_requests > 0 {
-            let err = KafkaError::timeout("Mock timeout");
+            let err = timeout_error();
             nodes.complete_exceptionally(err.clone());
             controller.complete_exceptionally(err.clone());
             cluster_id.complete_exceptionally(err.clone());
             authorized_operations.complete_exceptionally(err);
+            state.timeout_next_requests -= 1;
         } else {
             nodes.complete(state.brokers.clone());
             controller.complete(Some(state.controller.clone()));
@@ -502,15 +685,26 @@ impl Admin for MockAdminClient {
         config_resources: &[ConfigResource],
         _options: DescribeConfigsOptions,
     ) -> DescribeConfigsResult {
-        // Java's `MockAdminClient.describeConfigs` reads from in-memory broker /
-        // topic config maps that this mock does not model (no in-scope test
-        // exercises them). Per `.claude/rules/admin-client.md` §9 the Rust mock
-        // returns an "unsupported" `KafkaError` per resource instead of
-        // panicking (documented deviation).
+        let mut state = self.state.lock().unwrap();
+
+        if state.timeout_next_requests > 0 {
+            let mut result = HashMap::new();
+            for resource in config_resources {
+                let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
+                handle.complete_exceptionally(timeout_error());
+                result.insert(resource.clone(), handle.future());
+            }
+            state.timeout_next_requests -= 1;
+            return DescribeConfigsResult::new(result);
+        }
+
         let mut result = HashMap::new();
         for resource in config_resources {
             let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            match get_resource_description(&mut state, resource) {
+                Ok(config) => handle.complete(config),
+                Err(e) => handle.complete_exceptionally(e),
+            };
             result.insert(resource.clone(), handle.future());
         }
         DescribeConfigsResult::new(result)
@@ -521,13 +715,14 @@ impl Admin for MockAdminClient {
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         _options: AlterConfigsOptions,
     ) -> AlterConfigsResult {
-        // See `describe_configs`: the mock does not model config storage, so it
-        // returns an "unsupported" `KafkaError` per resource (documented
-        // deviation, `.claude/rules/admin-client.md` §9).
+        let mut state = self.state.lock().unwrap();
         let mut result = HashMap::new();
-        for resource in configs.keys() {
+        for (resource, ops) in configs {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            match handle_incremental_resource_alteration(&mut state, resource, ops) {
+                Ok(()) => handle.complete(()),
+                Err(e) => handle.complete_exceptionally(e),
+            };
             result.insert(resource.clone(), handle.future());
         }
         AlterConfigsResult::new(result)
@@ -535,15 +730,41 @@ impl Admin for MockAdminClient {
 
     fn list_config_resources(
         &self,
-        _config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<ConfigResourceType>,
         _options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult {
-        // Java's `MockAdminClient.listConfigResources` throws
-        // `UnsupportedOperationException("Not implemented yet")`. Per
-        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` instead of panicking (documented deviation).
+        let state = self.state.lock().unwrap();
         let handle: KafkaFutureImpl<Vec<ConfigResource>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        // Collect into a set to de-duplicate, mirroring Java's `HashSet`.
+        let mut config_resources: HashSet<ConfigResource> = HashSet::new();
+        let all = config_resource_types.is_empty();
+
+        if all || config_resource_types.contains(&ConfigResourceType::Topic) {
+            for name in state.all_topics.keys() {
+                config_resources.insert(ConfigResource::new(ConfigResourceType::Topic, name.clone()));
+            }
+        }
+        if all || config_resource_types.contains(&ConfigResourceType::Broker) {
+            for i in 0..state.brokers.len() {
+                config_resources.insert(ConfigResource::new(ConfigResourceType::Broker, i.to_string()));
+            }
+        }
+        if all || config_resource_types.contains(&ConfigResourceType::BrokerLogger) {
+            for i in 0..state.brokers.len() {
+                config_resources.insert(ConfigResource::new(ConfigResourceType::BrokerLogger, i.to_string()));
+            }
+        }
+        if all || config_resource_types.contains(&ConfigResourceType::ClientMetrics) {
+            for name in state.client_metrics_configs.keys() {
+                config_resources.insert(ConfigResource::new(ConfigResourceType::ClientMetrics, name.clone()));
+            }
+        }
+        if all || config_resource_types.contains(&ConfigResourceType::Group) {
+            for name in state.group_configs.keys() {
+                config_resources.insert(ConfigResource::new(ConfigResourceType::Group, name.clone()));
+            }
+        }
+        handle.complete(config_resources.into_iter().collect());
         ListConfigResourcesResult::new(handle.future())
     }
 
@@ -661,5 +882,239 @@ mod tests {
         // Next request succeeds.
         let result2 = client.create_topics(&[NewTopic::new("t2", 1, 1)], CreateTopicsOptions::new());
         result2.all().get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn describe_cluster_returns_brokers_and_controller() {
+        let client = admin();
+        let result = client.describe_cluster(DescribeClusterOptions::new());
+        let nodes = result.nodes().get().await.unwrap();
+        assert_eq!(nodes.len(), 3);
+        let controller = result.controller().get().await.unwrap();
+        assert_eq!(controller.unwrap().id(), 0);
+        assert_eq!(result.cluster_id().get().await.unwrap(), DEFAULT_CLUSTER_ID);
+        assert!(result.authorized_operations().get().await.unwrap().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn describe_cluster_timeout_recovers_on_next_call() {
+        let client = admin();
+        client.timeout_next_request(1);
+        // First call times out on every future.
+        let timed_out = client.describe_cluster(DescribeClusterOptions::new());
+        assert!(matches!(timed_out.nodes().get().await, Err(KafkaError::Timeout(_))));
+        assert!(matches!(timed_out.controller().get().await, Err(KafkaError::Timeout(_))));
+        assert!(matches!(timed_out.cluster_id().get().await, Err(KafkaError::Timeout(_))));
+        // The counter is decremented, so the next call succeeds.
+        let recovered = client.describe_cluster(DescribeClusterOptions::new());
+        assert_eq!(recovered.nodes().get().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn describe_configs_topic_returns_stored_configs() {
+        let client = admin();
+        let mut configs = BTreeMap::new();
+        configs.insert("retention.ms".to_string(), "1000".to_string());
+        let new_topic = NewTopic::new("t", 1, 1).configs(configs);
+        client
+            .create_topics(&[new_topic], CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
+        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let config = result.values()[&resource].get().await.unwrap();
+        assert_eq!(config.get("retention.ms").unwrap().value(), Some("1000"));
+    }
+
+    #[tokio::test]
+    async fn describe_configs_broker_returns_default_replication_factor() {
+        let client = admin();
+        let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let config = result.values()[&resource].get().await.unwrap();
+        assert_eq!(config.get("default.replication.factor").unwrap().value(), Some("3"));
+    }
+
+    #[tokio::test]
+    async fn describe_configs_unknown_topic_is_unknown_topic_error() {
+        let client = admin();
+        let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
+        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
+        assert_eq!(err.message(), "Resource ConfigResource(type=Topic, name='missing') not found.");
+    }
+
+    #[tokio::test]
+    async fn describe_configs_unknown_broker_is_invalid_request() {
+        let client = admin();
+        let resource = ConfigResource::new(ConfigResourceType::Broker, "99".to_string());
+        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(err.message(), "Broker 99 not found.");
+    }
+
+    #[tokio::test]
+    async fn describe_configs_timeout_recovers_on_next_call() {
+        let client = admin();
+        client.timeout_next_request(1);
+        let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let timed_out = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        assert!(matches!(timed_out.values()[&resource].get().await, Err(KafkaError::Timeout(_))));
+        let recovered = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        recovered.values()[&resource].get().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incremental_alter_configs_topic_set_and_delete() {
+        let client = admin();
+        client
+            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
+
+        // SET.
+        let set_op = AlterConfigOp::new(
+            ConfigEntry::new("retention.ms".to_string(), Some("42".to_string())),
+            OpType::Set,
+        );
+        let mut configs = HashMap::new();
+        configs.insert(resource.clone(), vec![set_op]);
+        client
+            .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let described = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        assert_eq!(
+            described.values()[&resource]
+                .get()
+                .await
+                .unwrap()
+                .get("retention.ms")
+                .unwrap()
+                .value(),
+            Some("42")
+        );
+
+        // DELETE.
+        let delete_op = AlterConfigOp::new(ConfigEntry::new("retention.ms".to_string(), None), OpType::Delete);
+        let mut configs = HashMap::new();
+        configs.insert(resource.clone(), vec![delete_op]);
+        client
+            .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let described = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        assert!(described.values()[&resource].get().await.unwrap().get("retention.ms").is_none());
+    }
+
+    #[tokio::test]
+    async fn incremental_alter_configs_unknown_topic_is_unknown_topic_error() {
+        let client = admin();
+        let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
+        let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
+        let mut configs = HashMap::new();
+        configs.insert(resource.clone(), vec![op]);
+        let result = client.incremental_alter_configs(&configs, AlterConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
+        assert_eq!(err.message(), "No such topic as missing");
+    }
+
+    #[tokio::test]
+    async fn incremental_alter_configs_client_metrics_creates_resource() {
+        let client = admin();
+        let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, "cm".to_string());
+        let op = AlterConfigOp::new(
+            ConfigEntry::new("interval.ms".to_string(), Some("5000".to_string())),
+            OpType::Set,
+        );
+        let mut configs = HashMap::new();
+        configs.insert(resource.clone(), vec![op]);
+        client
+            .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        // The new client-metrics resource now shows up in list_config_resources.
+        let listed = client
+            .list_config_resources(
+                &HashSet::from([ConfigResourceType::ClientMetrics]),
+                ListConfigResourcesOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.contains(&resource));
+    }
+
+    #[tokio::test]
+    async fn incremental_alter_configs_empty_client_metrics_name_is_invalid_request() {
+        let client = admin();
+        let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, String::new());
+        let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
+        let mut configs = HashMap::new();
+        configs.insert(resource.clone(), vec![op]);
+        let result = client.incremental_alter_configs(&configs, AlterConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(err.message(), "Empty resource name");
+    }
+
+    #[tokio::test]
+    async fn list_config_resources_all_types_when_empty() {
+        let client = admin();
+        client
+            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let listed = client
+            .list_config_resources(&HashSet::new(), ListConfigResourcesOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let set: HashSet<ConfigResource> = listed.into_iter().collect();
+        assert!(set.contains(&ConfigResource::new(ConfigResourceType::Topic, "t".to_string())));
+        // 3 brokers -> broker 0..2 and broker-logger 0..2.
+        for i in 0..3 {
+            assert!(set.contains(&ConfigResource::new(ConfigResourceType::Broker, i.to_string())));
+            assert!(set.contains(&ConfigResource::new(ConfigResourceType::BrokerLogger, i.to_string())));
+        }
+    }
+
+    #[tokio::test]
+    async fn list_config_resources_filters_by_type() {
+        let client = admin();
+        client
+            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let listed = client
+            .list_config_resources(&HashSet::from([ConfigResourceType::Topic]), ListConfigResourcesOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![ConfigResource::new(ConfigResourceType::Topic, "t".to_string())]);
     }
 }
