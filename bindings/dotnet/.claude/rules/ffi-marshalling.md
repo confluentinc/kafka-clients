@@ -134,7 +134,8 @@ pointed at our fixed-width, handle-error ABI.
 **Rule:**
 
   - `[DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]`
-    (Cdecl matches cbindgen `extern "C"`; the bare name maps to
+    (Cdecl matches the Rust exports' `extern "C"` C-ABI — the generated header is
+    plain C with no `extern "C"` block; the bare name maps to
     `confluent_kafka.dll` / `lib….so` / `lib….dylib`). One declaration set for all
     TFMs — no per-TFM `#if`.
   - Set **`EntryPoint`** to the full ABI symbol (`kafka_<pkg>_<Type>_<method>`)
