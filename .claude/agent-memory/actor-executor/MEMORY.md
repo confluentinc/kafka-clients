@@ -81,3 +81,4 @@
 - [M11 Phase 2 Admin driver notes](m11_phase2_admin_driver_notes.md) — createPartitions plain Call + deleteRecords via AdminApiDriver/PartitionLeaderStrategy (pulled fwd); Call maybe_retry+ConstantNodeId; MockClient auth-error gap
 - [M11 Phase 2 driver test notes](m11_phase2_driver_test_notes.md) — AdminApiDriverTest translation; shared #[cfg(test)] pub(crate) fakes; key_to_broker_id; coalesce deviation; maybe_retry hook test
 - [M11 Phase 3 cluster & configs notes](m11_phase3_cluster_configs_notes.md) — describeCluster UV->Metadata failback + per-resource-type routing (node_for) + ConfigResource common type + LeastLoadedBrokerOrActiveKController
+- [M11 Phase 4 log dirs notes](m11_phase4_log_dirs_notes.md) — describeLogDirs/alterReplicaLogDirs/describeReplicaLogDirs per-broker ConstantNodeId fan-out; TopicPartitionReplica; describeReplicaLogDirs built on DescribeLogDirsRequest; multi-KAFKA_LOG_DIRS move testable
