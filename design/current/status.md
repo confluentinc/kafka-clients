@@ -1,4 +1,18 @@
-# Current Status: Milestone 3 Complete (SSL + SASL Authentication)
+# Current Status: Milestone 11 (AdminClient) — Tier 1 Complete
+
+> **Current state (2026-07-17):** Milestone 11 AdminClient **Tier 1 is fully
+> complete** (Phases 1–5: topics CRUD, partitions & records, cluster & configs,
+> log dirs, elections/reassignments/offsets — all Rust core + unit + real-broker
+> integration tests, 2355 lib tests passing). See the "Milestone 11 — AdminClient"
+> sections below for the per-phase detail. Tier 2 (consumer groups & offsets) is
+> next. Scope for this task is **Rust core only** — C FFI / Python bindings are
+> deferred to a separate future task.
+>
+> The sections immediately below (Milestone 1 / Milestone 3) are **historical and
+> stale** — they predate the Producer, Consumer and Admin milestones and are left
+> as-is rather than rewritten with unverified detail.
+
+## (Historical) Milestone 3 Complete (SSL + SASL Authentication)
 
 Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and SASL PLAIN authentication fully implemented with integration tests against real Kafka 4.2.0 broker. 454+ unit tests + 16 integration tests passing.
 
@@ -297,3 +311,42 @@ Rust core + unit tests + real-broker integration tests, all green.
 - `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
 - Critic: **clean on first pass — no fix cycle needed.** See
   `design/history/Milestone-11/Phase-4/COMMENTS.DONE.1.md`.
+
+## Phase 5 — Elections, reassignment, offsets ✓ (2026-07-17)
+
+Translated `elect_leaders`, `alter_partition_reassignments`,
+`list_partition_reassignments`, `list_offsets`, Rust core + unit tests +
+real-broker integration tests, all green. **This completes Tier 1.**
+
+- **`elect_leaders`** (`ElectLeadersRequest`, controller `Call`),
+  **`alter_partition_reassignments`** / **`list_partition_reassignments`**
+  (controller `Call`, cancel-via-`Optional.empty` preserved), and **`list_offsets`**
+  — the canonical `AdminApiDriver` + `PartitionLeaderStrategy` user, wired via a
+  new `internals::ListOffsetsHandler` (lookup partition leader → per-leader
+  `ListOffsetsRequest` fulfillment, leader-unmap + re-lookup on stale-leader).
+- **Reuse (DoD #6)**: the existing Consumer-side `ListOffsetsRequest`/`Response`
+  wire wrapper was reused, not duplicated. New: `common::ElectionType`,
+  `admin::OffsetSpec`, `NewPartitionReassignment`, `PartitionReassignment`, the
+  Options/Result types; wire wrappers `ElectLeaders`,
+  `AlterPartitionReassignments`, `ListPartitionReassignments`.
+
+### Tests
+- **Rust lib suite: 2355 passing.**
+- **Integration**: `tests/integration/admin_elections_reassignments_offsets_test.rs`
+  — 3/3 green against a real broker, including a genuine **cross-broker partition
+  reassignment** on a real 3-broker cluster (elect-preferred-leaders;
+  list-offsets earliest/latest/max-timestamp; alter+list reassignments).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: clean (2 LOW observations, both adjudicated non-blocking). See
+  `design/history/Milestone-11/Phase-5/COMMENTS.DONE.1.md`.
+
+## Tier 1 — COMPLETE ✓ (Phases 1–5)
+
+All of Milestone 11 Tier 1 is implemented, tested (unit + real-broker
+integration), and Critic-clean: **topics CRUD; partitions & records; cluster &
+configs; log dirs; elections, reassignments & offsets.** The two admin dispatch
+patterns are both in place and exercised — the plain `Call`/`NodeProvider` retry
+engine and the multi-step `AdminApiDriver` + `PartitionLeaderStrategy` lookup→
+fulfillment engine. Next: **Tier 2 (consumer groups & offsets)**, starting with
+Phase 1 "Group listing & describe" (which lands the `ConsumerProtocol` /
+`consumer-threading.md` §20 amendment prerequisite).

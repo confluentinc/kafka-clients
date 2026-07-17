@@ -382,3 +382,19 @@ reshaped into current/future-dir `ReplicaLogDirInfo`). All plain `Call` path.
 Introduced `common::TopicPartitionReplica` and `admin::LogDirDescription`/`ReplicaInfo`.
 The integration suite exercises a genuine cross-directory replica move via a
 broker fixture configured with two `KAFKA_LOG_DIRS`.
+
+**Phase 5 (2026-07-17) — elections, reassignments, offsets (completes Tier 1).**
+`elect_leaders`, `alter_partition_reassignments`, `list_partition_reassignments`
+on the plain controller `Call` path; `list_offsets` on the `AdminApiDriver` +
+`PartitionLeaderStrategy` engine (built in Phase 2) via a new `ListOffsetsHandler`
+— the plan's canonical first-class AdminApiDriver user. The Consumer module's
+existing `ListOffsetsRequest`/`Response` wrapper was reused (no duplicate wire
+type). Introduced `common::ElectionType`, `admin::OffsetSpec`,
+`NewPartitionReassignment`/`PartitionReassignment`.
+
+**Tier 1 complete.** Both admin dispatch patterns are implemented and exercised:
+(1) the `Call`/`NodeProvider` retry engine for single-request RPCs, and (2) the
+multi-step `AdminApiDriver`/`AdminApiHandler`/`AdminApiLookupStrategy` +
+`PartitionLeaderStrategy` lookup→fulfillment engine for per-leader RPCs. Tier 2
+(consumer groups & offsets) will add `CoordinatorStrategy` on top of the same
+engine.

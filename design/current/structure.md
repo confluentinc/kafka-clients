@@ -141,3 +141,22 @@ src/common/requests/{describe_log_dirs_request,describe_log_dirs_response,
                      alter_replica_log_dirs_request,alter_replica_log_dirs_response}.rs
 tests/integration/admin_log_dirs_test.rs                    # incl. real cross-dir move (2 KAFKA_LOG_DIRS)
 ```
+
+### Phase 5 additions — Elections, reassignment, offsets (completes Tier 1)
+
+```
+src/admin/
+├── offset_spec.rs, new_partition_reassignment.rs, partition_reassignment.rs
+├── elect_leaders_result.rs, alter_partition_reassignments_result.rs,
+│   list_partition_reassignments_result.rs, list_offsets_result.rs
+├── options/{elect_leaders_options, alter_partition_reassignments_options,
+│           list_partition_reassignments_options, list_offsets_options}.rs
+└── internals/list_offsets_handler.rs   # ListOffsetsHandler on the AdminApiDriver engine
+
+src/common/election_type.rs                                 # ElectionType
+src/common/requests/{elect_leaders_request,elect_leaders_response,
+                     alter_partition_reassignments_request,alter_partition_reassignments_response,
+                     list_partition_reassignments_request,list_partition_reassignments_response}.rs
+# (ListOffsetsRequest/Response reused from the Consumer module — not duplicated)
+tests/integration/admin_elections_reassignments_offsets_test.rs  # incl. real 3-broker reassignment
+```
