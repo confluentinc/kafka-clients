@@ -11,11 +11,14 @@ Each section leads with **Decision** (the intent, one line), then **Rule**,
 ## Thread topology & thread-safety (shared context)
 
 The whole-system picture every section assumes. The C ABI hides all Kafka I/O on
-native threads **owned by the Rust core**. Thread layout differs by client: the
-**producer** adds a single **.NET** completion pump; the **consumer** adds **no**
-.NET thread — the core pushes completions to it from a **native** dispatcher
-thread. So the .NET consumer side is *leaner*, but completions arrive on a
-**foreign** thread.
+native threads **owned by the Rust core**, and **both clients expose a pull *and*
+a push completion surface** — each with its own native dispatcher thread — so the
+thread layout is a **binding choice**, not ABI-fixed. As currently sketched: the
+**consumer** uses push → **no** .NET thread (completions arrive on the core's
+**foreign** dispatcher thread); the **producer**'s completion model is **open**
+(§7) — the pull-pump option below adds one **.NET** pump thread, while the push
+option would use the producer's (already-present) native dispatcher, like the
+consumer.
 
 ```
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
@@ -61,14 +64,17 @@ And the **consumer** — no .NET pump; a native dispatcher fires completions:
     **background task** (single `ConsumerNetworkThread`, consumer-threading §10)
     over ONE async Selector, **plus a dedicated callback-dispatcher thread** — both
     native, created in `KafkaConsumer_new`, torn down by `Consumer_destroy`.
-  - .NET side (consumer): caller thread(s) **only — no pump** (the ABI *pushes*
-    completions, §7). Asymmetry: the producer's pump is a **.NET** thread; the
-    consumer's dispatcher is a **native** (core) thread.
+  - .NET side (consumer): caller thread(s) **only — no pump** (uses the ABI's push
+    surface, §7). Note: the producer core *also* has a native dispatcher (for its
+    own push surface); the producer's **pull-pump** option adds a **.NET** thread
+    instead — an open §7 choice, not an ABI asymmetry.
   - **One operation in flight** per consumer — the access guard serializes ops
     (concurrent → rejection, §5), released just before the callback fires; the
     completion callback runs on the **dispatcher thread (foreign)**, not the caller
     → `RunContinuationsAsynchronously` + no-throw (§6/§7). `Consumer_wakeup`
-    bypasses the guard (§5/§11). Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
+    bypasses the guard (§5 / consumer-threading §11).
+
+**Why:** Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
 librdkafka (a thread per broker + a mandatory `rd_kafka_poll` loop, which
 confluent-kafka-dotnet services with a `LongRunning` `callbackTask`). So our
 native thread count is independent of cluster size, there is no poll loop, and
@@ -76,15 +82,27 @@ the multi-thread runtime is what makes `block_on` from .NET deadlock-free.
 
 **Anti-patterns:**
 
-  - A `callbackTask`-style poll-loop thread — nothing to poll here.
-  - Assuming thread-per-broker, or native threads scaling with cluster size.
-  - A binding-side lock around FFI calls (double-locking; the core serializes).
+  - A `callbackTask`-style poll-loop thread — nothing to poll here *(both)*.
+  - Assuming thread-per-broker / native threads scaling with cluster size *(both)*.
+  - A binding-side lock around **producer** sends — the producer's `Mutex` already
+    serializes concurrent `SendAsync` (don't double-lock). The **consumer** is the
+    opposite: one-op-in-flight, so a concurrent op is **rejected** (§5), not
+    serialized.
+  - **Consumer:** a TCS **without** `RunContinuationsAsynchronously` → the
+    continuation then runs **inline on the dispatcher thread** (stalls it /
+    deadlocks, §6/§7).
 
 **Tests required:**
 
-  - Concurrent `SendAsync` from many .NET threads is correct (the `Mutex` holds).
-  - A long-blocked pump does not stop new sends being enqueued.
-  - `Dispose` joins the pump before destroying the handle (shared with §7).
+  - **Consumer (settled):** a concurrent op → `InvalidOperationException` /
+    `KafkaException`, not corruption (§5); the completion callback doesn't run its
+    continuation inline on the dispatcher.
+  - **Producer:** concurrent `SendAsync` from many threads is correct (the `Mutex`
+    holds).
+  - `Dispose` drains before destroying the handle — **consumer** wakes+awaits the
+    in-flight op; **producer** joins the pump (Option A). *(both)*
+  - *(producer Option A only)* a long-blocked pump doesn't stop new sends being
+    enqueued.
 
 ---
 
@@ -184,10 +202,10 @@ adds (3)+(4):
 
 | Handle | Category | Freed by |
 |---|---|---|
-| `Consumer_t` | 1 — client (`SafeHandle`) | `Consumer_destroy` via `Dispose` (blocking; joins the bg task first, §7) |
+| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: drain → `Consumer_close` → `Consumer_destroy` (destroy is **fire-and-forget** — cancels in-flight ops; §7 + Rule) |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
-| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (§5.4), keep-alive deferred |
+| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §5.4), keep-alive deferred |
 | `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
 | `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
 
@@ -219,17 +237,22 @@ const-ness decides, not the type name:
   - **Prefer `Dispose` over the finalizer:** `Producer_destroy` blocks (drops the
     runtime, waiting for the Sender), which is wrong on the finalizer thread.
     `Dispose` flushes/closes and joins the pump first; guard use-after-dispose
-    with `ObjectDisposedException`. `Consumer_destroy` is the same (joins the bg
-    task first).
+    with `ObjectDisposedException`. **`Consumer_destroy` is the *opposite*** —
+    fire-and-forget: `shutdown_background` **cancels** in-flight async ops (their
+    callbacks never fire) and it does **not** join the bg task (the graceful join
+    is `Consumer_close` / `await_join`, not destroy). So the consumer's `Dispose`
+    must **drain/wakeup the in-flight op → `Consumer_close` (joins the bg task) →
+    `Consumer_destroy`**; relying on destroy alone hangs the `Task` and leaks the
+    `GCHandle` (§7).
   - **Category 3 — owned result / container.** On the **caller's** thread (not the
     pump), after a query or poll: read/iterate, then `_destroy` the root exactly
     once. A **container is a borrow-root** — its elements and any key/value/topic/
-    string bytes borrow into it (§3, §5.4), so it must outlive every borrow taken
+    string bytes borrow into it (§3, CLAUDE.md §5.4), so it must outlive every borrow taken
     from it. **Default: copy-out** — copy each element/byte into an owned managed
     type, then `_destroy`. Metadata collections are always copy-out (small), and
     typed deserialization reads a transient span → owned `T` (copy-out too).
     **Keep-alive** (hold the root, expose zero-copy views, `_destroy` at `Dispose`)
-    is a **deferred** option for the raw-byte surface only — see §5.4.
+    is a **deferred** option for the raw-byte surface only — see CLAUDE.md §5.4.
   - **Category 4 — borrowed view.** `ConsumerRecord_t`, `Node_t`, `_get` elements,
     borrowed strings have **no `_destroy`** — never free them, and never use them
     after their owning container (3) is destroyed. Represent as a transient cursor
@@ -255,7 +278,7 @@ read-and-freed instead (their lifetime is one pump cycle). The blocking
     element, a borrowed string) — double-free / UAF; only the owning container is
     freed.
   - Destroying a **borrow-root** (`ConsumerRecords_t`, a list/map) while a borrowed
-    element or byte slice from it is still in use (§5.4) — use-after-free.
+    element or byte slice from it is still in use (CLAUDE.md §5.4) — use-after-free.
   - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
     map/list), or freeing it twice.
 
@@ -267,7 +290,7 @@ read-and-freed instead (their lifetime is one pump cycle). The blocking
     `ObjectDisposedException`.
   - Poll a batch, read records, then dispose — no leak; a borrowed key/value/topic
     used after the batch is gone is prevented (copy-out) or kept valid by the
-    wrapper (keep-alive), per §5.4.
+    wrapper (keep-alive), per CLAUDE.md §5.4.
   - Each query API (`committed`/`assignment`/`partitions_for`/…) frees its owned
     result exactly once after marshalling; borrowed elements are never freed.
   - Create/close many consumers — no leak; `Dispose` joins the bg task before
@@ -309,7 +332,7 @@ pointer. The rows differ only in (1) termination (NUL-scan vs `out_len`) and
     - **Length-delimited** `const char* + int32_t out_len` (consumer receive
       path) → `Utf8.PtrToString(ptr, out_len)` using the length — **never
       NUL-scan**: the slice borrows into the batch with no terminator, so a scan
-      over-reads into the next field. Valid until `ConsumerRecords_destroy` (§5.4).
+      over-reads into the next field. Valid until `ConsumerRecords_destroy` (CLAUDE.md §5.4).
     In both cases **copy before free / before the callback returns** — the pointer
     dies with the handle; never store the raw pointer.
   - Never `[MarshalAs(LPStr)]` (ANSI) or `LPWStr` (UTF-16); never `LPUTF8Str` /
@@ -324,7 +347,7 @@ strings living in the handle's cached `CString` — except the consumer
 receive-path strings (`ConsumerRecord_topic`, header keys, `Node` host/rack),
 which return a `&str` **slice into the fetch batch** (`str::as_ptr` + `out_len`,
 no terminator) and so take the length form and must be copied out before
-`ConsumerRecords_destroy` (§5.4 / §27).
+`ConsumerRecords_destroy` (CLAUDE.md §5.4 / consumer-threading §27).
 
 **Anti-patterns:**
 
@@ -379,9 +402,11 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     ```
     **Note:** `fixed` also yields a null pointer for an **empty** (non-null)
     array — not just for `null` — and the core rejects `(null, len ≥ 0)`. So an
-    **empty** key/value (`Length == 0`) must pass a **non-null** pointer (a stack
-    sentinel byte, or `GCHandle.AddrOfPinnedObject`), not the `fixed` null. (Python
-    is unaffected — an empty `bytes` is non-null.)
+    **empty** key/value (`Length == 0`) must pass a **non-null** pointer — use a
+    **stack sentinel byte** (guaranteed non-null), not the `fixed` null.
+    (`GCHandle.AddrOfPinnedObject` returns non-null for empty arrays on current
+    runtimes too, but that's **undocumented** — prefer the sentinel. Python is
+    unaffected — an empty `bytes` is non-null.)
   - This call-scoped rule depends on §7's inline-send decision; a deferred-send
     design (a background send thread, as in the Python binding) would have to hold
     the buffer until the deferred send runs.
@@ -395,14 +420,14 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 **Receive (unmanaged → managed) — the mirror.** The consumer path reverses
 everything: the bytes originate in the **native** batch buffer (owned by
 `ConsumerRecords_t`), and `ConsumerRecord_key` / `_value` / `_topic` hand back
-`(ptr, len)` **borrowing** into it (§27, §3).
+`(ptr, len)` **borrowing** into it (consumer-threading §27, §3).
 
   - **No pinning.** Native memory isn't GC-managed — nothing moves, so nothing to
     pin. The `fixed` / `GCHandle` machinery above is send-only.
   - **The hazard flips** from *GC-moves* to *native-frees*: a managed view over
     the batch is a use-after-free the instant `ConsumerRecords_destroy` runs. The
     fix is **lifetime binding**, not pinning — copy before destroy, or keep the
-    batch alive. Ownership rules, anti-patterns, and tests live in §5.4, §2
+    batch alive. Ownership rules, anti-patterns, and tests live in CLAUDE.md §5.4, §2
     (Category 3/4), and §3 (borrowed strings).
   - **"Buffer lifetime"** here is the *native* buffer's validity window
     (batch-scoped, until `_destroy`) — not a managed pin's window (call-scoped).
@@ -417,7 +442,7 @@ copy on receive — because the only zero-copy alternative is a native-backed
 `ReadOnlyMemory` over native memory is a use-after-`Dispose` footgun (Python is
 safe only via its refcounted `memoryview`). So for raw bytes we trade one gen-0
 copy for safety + the Java owned-`ConsumerRecord` shape; keep-alive zero-copy is
-deferred (§5.4).
+deferred (CLAUDE.md §5.4).
 
 **Anti-patterns:**
 
@@ -478,7 +503,7 @@ standard .NET exceptions — never `KafkaException`.
       consumer-threading §11). **Not** a subclass: the Python sibling keeps it flat
       (`pytest.raises(KafkaError)`, message `"woke"`), so do we. Distinct from
       **`CancellationToken`** cancellation → **`OperationCanceledException`** (the
-      .NET-native cancel, §3 / CLAUDE.md §3 — the analog of Python re-raising
+      .NET-native cancel, CLAUDE.md §3 — the analog of Python re-raising
       `CancelledError`).
     - **Concurrent use** (the consumer is one-operation-in-flight) splits by
       method: a sync **state read** (`Assignment` / `Subscription` / `Paused` /
@@ -527,10 +552,12 @@ unchanged.
 
 ## 6. Callback & delegate marshalling
 
-**Decision:** The ABI's one callback (`RecordMetadata_copy`) is synchronous;
-marshal it as a kept-alive `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic —
-no function pointers on the floor), keep the body no-throw, and pass context via a
-`GCHandle` in `user_data`. Using it is optional — the per-field accessors
+**Decision:** `RecordMetadata_copy` is the ABI's one **synchronous** callback (an
+optional copy convenience) — the async *completion* callbacks (producer `*_async`,
+§7; and the consumer's, below) are the other kind. Marshal it as a kept-alive
+`[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on the
+floor), keep the body no-throw, and pass context via a `GCHandle` in `user_data`.
+Using it is optional — the per-field accessors
 (`_offset`/`_partition`/`_topic`/`_timestamp` + `_destroy`) avoid callbacks
 entirely.
 
@@ -583,10 +610,14 @@ channel (→ `GCHandle`).
 `RecordMetadata_copy` (one *optional*, *synchronous* convenience), the consumer's
 **~8 completion callbacks** — `Consumer_poll` / `op` / `position` / `committed` /
 `offsets_for_times` / `long_offsets` / `partitions_for` / `list_topics` — are the
-**primary** mechanism for every async op, shape
-`(result-handle-or-value, KafkaError*, void* user_data)` (exactly one of
-{result, error} non-null). Same *mechanism* as above (kept-alive Cdecl delegate +
-`GCHandle` user_data + no-throw), but three things differ:
+**primary** mechanism for every async op. The shape is **not uniform** — always
+`(…, KafkaError*, void* user_data)` with a non-null `KafkaError*` = failure, but
+the *result* slot varies: an **owned handle** for `poll` / `committed` /
+`offsets_for_times` / `long_offsets` / `partitions_for` / `list_topics`
+(`(handle*, error*, ud)`); a **scalar** for `position` (`(int64_t, error*, ud)`);
+and **none** for `op`, the void-in-Java ops (`(error*, ud)`). Same *mechanism* as
+above (kept-alive Cdecl delegate + `GCHandle` user_data + no-throw), but three
+things differ:
 
   - **Foreign thread → no-throw is mandatory.** The callback fires on the native
     callback-dispatcher thread (§7), not the caller — no caller frame to catch, so
@@ -595,10 +626,11 @@ channel (→ `GCHandle`).
     `TaskCompletionSource`) must stay alive from **submit until the callback
     fires** (the whole op, not a synchronous call), freed **exactly once** by the
     callback — including the inline guard-rejection error path.
-  - **The callback owns the result.** It receives an owned `result` **or** an
-    owned `KafkaError` (§2 Category 3) and must consume it — marshal the result
-    (copy-out §5.4) or build the exception (`FromHandle`, §5), free the handle,
-    then complete the TCS.
+  - **The callback owns any handle it gets.** For the **owned-handle** forms it
+    consumes the result — marshal it (copy-out CLAUDE.md §5.4) then `_destroy`
+    (§2 Category 3); `position`'s scalar needs no free; `op` has no result. On
+    failure it builds the exception (`FromHandle`, §5) and frees the `KafkaError`.
+    Then it completes the TCS.
 
   The async *flow* (submit → dispatcher → `SetResult` with
   `RunContinuationsAsynchronously`; one-op-in-flight; `Dispose`) is **§7** — this
@@ -626,19 +658,26 @@ channel (→ `GCHandle`).
 
 ## 7. Async / Future completion → `TaskCompletionSource`
 
-**Two completion models, set by the ABI.** The **producer** ABI is *pull*
-(`get`/`get_all` block, `is_done` polls — no callback) → one background **pump**
-does the blocking waits. The **consumer** ABI is *push* (every async op takes a
-completion callback, §6) → the callback completes the `TaskCompletionSource`
-directly, **no pump**. Both bridge to `Task<T>` via a `TaskCompletionSource` built
-with `RunContinuationsAsynchronously`.
+**Both clients expose BOTH a pull and a push surface** (verified in the header) —
+the *pull* shape differs by client: the **producer** returns a future you
+block/poll (`get` / `get_all` / `is_done`); the **consumer** blocks *directly*
+(`Consumer_poll` / `commit_sync` / …). **Push (both):** the `*_async` fns take a
+completion callback (§6) fired on a per-client **dispatcher thread**. So the
+completion model is a **binding choice**, not ABI-forced:
 
-**Decision (producer — pull pump):** Java `Future<RecordMetadata>` → .NET `Task<RecordMetadata>`,
-completed by **one** background pump that does the blocking waits. `SendAsync`
-enqueues and returns instantly with a `TaskCompletionSource`-backed `Task`; the
-pump blocks on the batched `get_all` and completes each TCS. (The ABI is
-pull-only: `get`/`get_all` block, `is_done` polls — no push callback. Mirrors the
-Python binding's `poll_futures_thread`, python-ffi.md §6.)
+- **Consumer → push** (settled): one-operation-in-flight (nothing to batch) and
+  `poll_async` → TCS needs **no pump**.
+- **Producer → OPEN** (pull pump vs push callback): both are viable and *shipped*;
+  the trade-off is below, decision deferred.
+
+Both bridge to `Task<T>` via a `TaskCompletionSource` built with
+`RunContinuationsAsynchronously`.
+
+**Producer — Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
+`Task<RecordMetadata>`, completed by **one** background pump. `SendAsync` enqueues
+and returns instantly with a `TaskCompletionSource`-backed `Task`; the pump blocks
+on the batched `get_all` and completes each TCS. Mirrors the Python binding's
+`poll_futures_thread` (python-ffi.md §6).
 
 ```
 Caller thread                         Completion pump (one bg thread)
@@ -670,12 +709,12 @@ Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pend
     `flush`/`close` → release the producer `SafeHandle`. Optional fast path: if
     `is_done` at send time, complete synchronously (a `ValueTask`, no queue).
 
-**Why:** the core's own runtime already drives the work, so the binding only
-bridges each resolved future to a `Task`; a pull ABI forces the wait onto some
-thread, and one pump gives bounded threads. The alternative — `Task.Run(get)` per
-send — parks a thread-pool thread per in-flight message and starves the pool
-(sync-over-async). Matches CLAUDE.md §11 ("shared completion task, not per-message
-spawn") and the Python design.
+**Why (Option A's case):** `Producer_send` copies key/value **synchronously** → a
+**call-scoped pin** (§4), and one pump batches many completions per `get_all` —
+O(1) threads for unbounded in-flight sends. (The naive `Task.Run(get)` per send
+parks a pool thread per message — sync-over-async — which the pump avoids; matches
+CLAUDE.md §11 "shared completion task, not per-message spawn" and the Python
+design.)
 
 **Anti-patterns:**
 
@@ -693,7 +732,7 @@ spawn") and the Python design.
   - Cancel is safe + frees handles; high-concurrency produce doesn't starve the
     thread pool.
 
-**Consumer — push, no pump.** The consumer ABI is *push*: every async op
+**Consumer — push, no pump.** The consumer uses the ABI's *push* surface: every async op
 (`Consumer_poll_async` / `commit_async` / `position_async` / …) takes a completion
 callback (§6) that fires when the op resolves. So the consumer needs **no pump** —
 the callback *is* the bridge:
@@ -718,7 +757,7 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
     runs the op on a runtime worker, then hands the completed op over a channel to
     that one thread, so callbacks are **serialized** on a single foreign thread
     (guard-rejection fires inline on the caller; shutdown, inline on the worker).
-    It marshals the result (copy-out §5.4, or an error via `FromHandle` §5), frees
+    It marshals the result (copy-out CLAUDE.md §5.4, or an error via `FromHandle` §5), frees
     the handles it owns (§2 Category 3), and completes the TCS — with
     **`RunContinuationsAsynchronously`** (essential: the continuation must not run
     on that dispatcher thread), exactly once, on every path (incl. the inline
@@ -731,8 +770,11 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
   - **Cancellation** = `CancellationToken` → `wakeup()` (aborts the in-flight op)
     → the callback fires with a Wakeup error → the `Task` cancels/faults
     (best-effort; §5, consumer-threading §11).
-  - **`Dispose`**: await or `wakeup` the in-flight op, then `Consumer_destroy`
-    (join the dispatcher; parent-outlives-children, §2).
+  - **`Dispose`**: drain / `wakeup` the in-flight op → **`Consumer_close`**
+    (graceful — joins the bg task via `await_join`) → `Consumer_destroy`
+    (fire-and-forget free: it **cancels** any remaining in-flight op and does
+    **not** join, §2). Relying on `Consumer_destroy` alone hangs the `Task` +
+    leaks the `GCHandle`.
 
 **Consumer anti-patterns:**
 
@@ -758,14 +800,25 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
   - `Dispose` with an op in flight returns (doesn't hang) — the wakeup/join
     regression.
 
-**Future direction — producer push (the consumer already does this).** The
-consumer's push model above is exactly what the producer would gain from a
-`Producer_send_cb(…, on_complete, user_data)`: the core fires `on_complete` from
-**one shared completion task** per producer (CLAUDE.md §11 — not a spawn per
-send), .NET drops the pump, and `SendAsync` just registers a kept-alive Cdecl
-callback (§6) + a `GCHandle` over the `TaskCompletionSource` — zero blocked
-threads. It needs a core/ABI change (Actor/Critic), so the producer's pull pump
-above stays the current design; the consumer shows the target.
+**Producer — Option B: push callback (available *now*, not future).** The producer
+ABI *already* ships `Producer_send_async(…, callback, user_data)` (verified:
+`src/ffi/producer.rs`, `confluent_kafka.h`), firing on a per-producer dispatcher
+thread with `(RecordMetadata*, KafkaError*)` — identical to the consumer's push.
+`SendAsync` would register a kept-alive Cdecl callback (§6) + a `GCHandle`(TCS);
+the callback completes the TCS. **Zero blocked threads, per-message, no pump.**
+
+**Open decision — pull pump (A) vs push callback (B):**
+
+  - **A (pull pump)** favors **call-scoped pinning** (`Producer_send` copies
+    synchronously, §4) + **`get_all` batching** of many completions; costs one
+    pump thread. Python makes this choice.
+  - **B (push)** favors **zero blocked threads** + producer/consumer symmetry —
+    but the header says `send_async` **borrows** key/value *"until `callback`
+    fires"*, so the **pin lasts until completion** (weaker than A's call-scoped
+    pin, §4), and it's one callback per send (no `get_all` batching).
+
+Not committed — decide when the producer send path is built (as CLAUDE.md §5.4 defers the
+consumer's copy-out-vs-keep-alive).
 
 ---
 
