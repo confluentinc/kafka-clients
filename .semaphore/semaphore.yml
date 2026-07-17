@@ -113,6 +113,8 @@ blocks:
 promotions:
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
+  - name: Build Rust FFI artifacts
+    pipeline_file: rust-build.yml
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
