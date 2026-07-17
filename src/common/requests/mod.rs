@@ -20,6 +20,8 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod alter_partition_reassignments_request;
+pub mod alter_partition_reassignments_response;
 pub mod alter_replica_log_dirs_request;
 pub mod alter_replica_log_dirs_response;
 pub mod api_versions_request;
@@ -40,6 +42,8 @@ pub mod describe_configs_request;
 pub mod describe_configs_response;
 pub mod describe_log_dirs_request;
 pub mod describe_log_dirs_response;
+pub mod elect_leaders_request;
+pub mod elect_leaders_response;
 pub mod fetch_metadata;
 pub mod fetch_request;
 pub mod fetch_response;
@@ -51,6 +55,8 @@ pub mod list_config_resources_request;
 pub mod list_config_resources_response;
 pub mod list_offsets_request;
 pub mod list_offsets_response;
+pub mod list_partition_reassignments_request;
+pub mod list_partition_reassignments_response;
 pub mod metadata_request;
 pub mod metadata_response;
 pub mod offset_commit_request;
@@ -74,6 +80,10 @@ pub mod send_builder;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use alter_partition_reassignments_request::{
+    AlterPartitionReassignmentsRequest, AlterPartitionReassignmentsRequestBuilder,
+};
+pub use alter_partition_reassignments_response::AlterPartitionReassignmentsResponse;
 pub use alter_replica_log_dirs_request::{AlterReplicaLogDirsRequest, AlterReplicaLogDirsRequestBuilder};
 pub use alter_replica_log_dirs_response::AlterReplicaLogDirsResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
@@ -102,6 +112,8 @@ pub use describe_configs_request::{DescribeConfigsRequest, DescribeConfigsReques
 pub use describe_configs_response::DescribeConfigsResponse;
 pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsRequestBuilder};
 pub use describe_log_dirs_response::DescribeLogDirsResponse;
+pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
+pub use elect_leaders_response::ElectLeadersResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
 pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{
@@ -114,6 +126,10 @@ pub use list_config_resources_request::{ListConfigResourcesRequest, ListConfigRe
 pub use list_config_resources_response::ListConfigResourcesResponse;
 pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
 pub use list_offsets_response::ListOffsetsResponse;
+pub use list_partition_reassignments_request::{
+    ListPartitionReassignmentsRequest, ListPartitionReassignmentsRequestBuilder,
+};
+pub use list_partition_reassignments_response::ListPartitionReassignmentsResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
 pub use offset_commit_request::{OffsetCommitRequest, OffsetCommitRequestBuilder};

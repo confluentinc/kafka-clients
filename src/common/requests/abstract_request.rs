@@ -23,6 +23,7 @@
 
 use std::io;
 
+use crate::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
 use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
@@ -36,11 +37,13 @@ use crate::delete_topics_request_data::DeleteTopicsRequestData;
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::DescribeConfigsRequestData;
 use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
+use crate::elect_leaders_request_data::ElectLeadersRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
 use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
+use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
 use crate::offset_fetch_request_data::OffsetFetchRequestData;
@@ -49,6 +52,7 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
+use super::AlterPartitionReassignmentsRequest;
 use super::AlterReplicaLogDirsRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
@@ -60,11 +64,13 @@ use super::DeleteTopicsRequest;
 use super::DescribeClusterRequest;
 use super::DescribeConfigsRequest;
 use super::DescribeLogDirsRequest;
+use super::ElectLeadersRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::IncrementalAlterConfigsRequest;
 use super::ListConfigResourcesRequest;
 use super::ListOffsetsRequest;
+use super::ListPartitionReassignmentsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
 use super::OffsetFetchRequest;
@@ -160,6 +166,12 @@ pub enum ConcreteRequest {
     DescribeLogDirs(DescribeLogDirsRequest),
     /// An AlterReplicaLogDirs request.
     AlterReplicaLogDirs(AlterReplicaLogDirsRequest),
+    /// An ElectLeaders request.
+    ElectLeaders(ElectLeadersRequest),
+    /// An AlterPartitionReassignments request.
+    AlterPartitionReassignments(AlterPartitionReassignmentsRequest),
+    /// A ListPartitionReassignments request.
+    ListPartitionReassignments(ListPartitionReassignmentsRequest),
 }
 
 impl ConcreteRequest {
@@ -188,6 +200,9 @@ impl ConcreteRequest {
             Self::DescribeCluster(r) => r.version(),
             Self::DescribeLogDirs(r) => r.version(),
             Self::AlterReplicaLogDirs(r) => r.version(),
+            Self::ElectLeaders(r) => r.version(),
+            Self::AlterPartitionReassignments(r) => r.version(),
+            Self::ListPartitionReassignments(r) => r.version(),
         }
     }
 
@@ -216,6 +231,9 @@ impl ConcreteRequest {
             Self::DescribeCluster(r) => r.api_key(),
             Self::DescribeLogDirs(r) => r.api_key(),
             Self::AlterReplicaLogDirs(r) => r.api_key(),
+            Self::ElectLeaders(r) => r.api_key(),
+            Self::AlterPartitionReassignments(r) => r.api_key(),
+            Self::ListPartitionReassignments(r) => r.api_key(),
         }
     }
 
@@ -250,6 +268,9 @@ impl ConcreteRequest {
             Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AlterReplicaLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ElectLeaders(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -350,6 +371,15 @@ impl ConcreteRequest {
             Self::AlterReplicaLogDirs(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::ElectLeaders(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -385,6 +415,9 @@ impl ConcreteRequest {
             Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -431,6 +464,9 @@ impl ConcreteRequest {
             Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AlterReplicaLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ElectLeaders(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -548,6 +584,24 @@ impl ConcreteRequest {
                 let data = AlterReplicaLogDirsRequestData::read(readable, api_version)?;
                 Ok(Self::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, api_version)))
             },
+            ApiKeys::ELECT_LEADERS => {
+                let data = ElectLeadersRequestData::read(readable, api_version)?;
+                Ok(Self::ElectLeaders(ElectLeadersRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_PARTITION_REASSIGNMENTS => {
+                let data = AlterPartitionReassignmentsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::LIST_PARTITION_REASSIGNMENTS => {
+                let data = ListPartitionReassignmentsRequestData::read(readable, api_version)?;
+                Ok(Self::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -581,6 +635,9 @@ impl std::fmt::Display for ConcreteRequest {
             Self::DescribeCluster(r) => write!(f, "{r}"),
             Self::DescribeLogDirs(r) => write!(f, "{r}"),
             Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
+            Self::ElectLeaders(r) => write!(f, "{r}"),
+            Self::AlterPartitionReassignments(r) => write!(f, "{r}"),
+            Self::ListPartitionReassignments(r) => write!(f, "{r}"),
         }
     }
 }
