@@ -2,14 +2,15 @@ version: v1.0
 name: Build Python wheels
 
 # Builds the Python binding wheels with cibuildwheel and verifies them.
-#   Build blocks:  compile the C extension (_confluentkafka.c) inside
-#     manylinux_2_28 against the Rust library pulled from the artifact store,
-#     repair with auditwheel (vendors the .so + stamps the manylinux tag), and
-#     push the wheels to the artifact store.
+#   Build blocks:  compile the C extension (_confluentkafka.c) against the Rust
+#     library pulled from the artifact store -- on Linux inside manylinux_2_28,
+#     on macOS natively -- then repair each wheel so it is self-contained
+#     (auditwheel vendors the .so and stamps the manylinux tag; delocate vendors
+#     the .dylib) and push the wheels to the artifact store.
 #   Verify blocks: pull the wheels and, via .semaphore/test-wheels.sh, test
-#     every wheel on every distro x Python version -- install, import, run the
-#     unit tests, and a compression/TLS smoke -- proving they are self-contained
-#     and portable across distros / glibc versions.
+#     every wheel on every Python version -- install, import, run the unit
+#     tests, and a compression/TLS smoke -- proving they are self-contained and
+#     portable (Linux additionally across distros / glibc versions).
 
 agent:
   machine:
@@ -53,7 +54,7 @@ blocks:
             # cibuildwheel copies the whole repo to /project and builds the
             # subdir, so $PWD is the repo root -- point at bindings/python/native.
             # Keep $PWD literal; cibuildwheel expands it inside the container.
-            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/bindings/python/native/lib'
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
@@ -74,7 +75,7 @@ blocks:
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
             - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
-            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/bindings/python/native/lib'
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
@@ -110,5 +111,85 @@ blocks:
         - name: verify
           commands:
             - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Build wheels: macOS x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-amd64-6
+      env_vars:
+        - name: ARCH
+          value: x64
+        - name: CIBW_ARCHS
+          value: x86_64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
+            - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib MACOSX_DEPLOYMENT_TARGET=10.13'
+            - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
+
+  - name: "Build wheels: macOS arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: ARCH
+          value: arm64
+        - name: CIBW_ARCHS
+          value: arm64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
+            - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib MACOSX_DEPLOYMENT_TARGET=11.0'
+            - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
+
+  - name: "Verify wheels: macOS x64"
+    dependencies:
+      - "Build wheels: macOS x64"
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-amd64-6
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-macos-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Verify wheels: macOS arm64"
+    dependencies:
+      - "Build wheels: macOS arm64"
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-macos-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse

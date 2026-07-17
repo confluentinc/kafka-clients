@@ -15,16 +15,18 @@
 # limitations under the License.
 #
 #
-# Build the FFI shared library (libconfluent_kafka.so) and the cbindgen header
-# (confluent_kafka.h) inside a manylinux container, producing a glibc-portable
-# library. The script spins up the container on the host and re-execs itself
-# inside it via --in-docker. Must be POSIX sh.
+# Build the FFI shared library (libconfluent_kafka.{so,dylib}) and the cbindgen
+# header (confluent_kafka.h), then stage them under dist/. On Linux the build
+# runs inside a manylinux container for a glibc-portable library; the script
+# spins up the container on the host and re-execs itself inside it via
+# --in-docker. On macOS it builds natively on the runner. Must be POSIX sh.
 #
-# Usage (host):      .semaphore/build-ffi-artifact.sh <docker-image>
+# Usage (Linux):     .semaphore/build-ffi-artifact.sh <docker-image>
+# Usage (macOS):     .semaphore/build-ffi-artifact.sh
 # Usage (internal):  .semaphore/build-ffi-artifact.sh --in-docker
 #
 # Run from the repo root. Outputs:
-#   dist/libconfluent_kafka.so
+#   dist/libconfluent_kafka.{so,dylib}
 #   dist/confluent_kafka.h
 
 set -eu
@@ -60,6 +62,38 @@ if [ "${1:-}" = "--in-docker" ]; then
 
     mkdir -p /io/dist
     cp "$lib" target/include/confluent_kafka.h /io/dist/
+    exit 0
+fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    set -x
+
+    if ! command -v cargo >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+    fi
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+    # aws-lc-rs (rustls crypto backend) build deps: cmake always, nasm only on
+    # x86_64.
+    command -v cmake >/dev/null 2>&1 || brew install cmake
+    if [ "$(uname -m)" = "x86_64" ]; then
+        command -v nasm >/dev/null 2>&1 || brew install nasm
+    fi
+
+    cargo build --features ffi --release
+
+    lib=target/release/libconfluent_kafka.dylib
+    # Give the dylib an @rpath install name so the wheel build links against
+    # @rpath/... and delocate can vendor it, not this machine's absolute path.
+    install_name_tool -id @rpath/libconfluent_kafka.dylib "$lib"
+    echo "== LINKAGE =="; otool -L "$lib" || true
+    echo "== INSTALL NAME =="; otool -D "$lib" || true
+    echo "== MINIMUM OS VERSION =="; otool -l "$lib" | grep -A3 LC_BUILD_VERSION || true
+    echo "== SHA256 =="; shasum -a 256 "$lib" target/include/confluent_kafka.h || true
+
+    mkdir -p dist
+    cp "$lib" target/include/confluent_kafka.h dist/
     exit 0
 fi
 
