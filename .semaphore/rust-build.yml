@@ -1,8 +1,8 @@
 version: v1.0
 name: Build Rust FFI library
 
-# Builds the FFI library (libconfluent_kafka.so) and cbindgen header
-# (confluent_kafka.h) for each target architecture via
+# Builds the FFI library (libconfluent_kafka.{so,dylib}) and cbindgen header
+# (confluent_kafka.h) for each target platform via
 # .semaphore/build-ffi-artifact.sh, and pushes them to the workflow artifact
 # store.
 
@@ -58,6 +58,40 @@ blocks:
             - artifact push workflow dist/libconfluent_kafka.so --destination rust-linux-${ARCH}/libconfluent_kafka.so --force
             - artifact push workflow dist/confluent_kafka.h --destination rust-linux-${ARCH}/confluent_kafka.h --force
 
+  - name: "Rust build: macOS x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-amd64-6
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: build
+          commands:
+            - sh .semaphore/build-ffi-artifact.sh
+            - ls -l dist/libconfluent_kafka.dylib dist/confluent_kafka.h
+            - artifact push workflow dist/libconfluent_kafka.dylib --destination rust-macos-${ARCH}/libconfluent_kafka.dylib --force
+            - artifact push workflow dist/confluent_kafka.h --destination rust-macos-${ARCH}/confluent_kafka.h --force
+
+  - name: "Rust build: macOS arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: build
+          commands:
+            - sh .semaphore/build-ffi-artifact.sh
+            - ls -l dist/libconfluent_kafka.dylib dist/confluent_kafka.h
+            - artifact push workflow dist/libconfluent_kafka.dylib --destination rust-macos-${ARCH}/libconfluent_kafka.dylib --force
+            - artifact push workflow dist/confluent_kafka.h --destination rust-macos-${ARCH}/confluent_kafka.h --force
+
 promotions:
-  - name: Build Python wheels 
+  - name: Build Python wheels
     pipeline_file: python-wheels.yml

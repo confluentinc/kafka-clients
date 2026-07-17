@@ -15,19 +15,42 @@
 # limitations under the License.
 #
 #
-# Verify the built wheels on bare Linux distro containers, across every
-# supported Python version. For each distro x Python it installs the wheel and
-# runs: import, the binding unit tests, and a compression/TLS feature smoke.
-# uv provides each Python as a portable standalone build, so a distro's own
-# Python version does not limit coverage. Must be POSIX sh.
+# Verify the built wheels across every supported Python version. On Linux the
+# matrix runs on bare distro containers; on macOS it runs natively on the
+# runner. For each environment it installs the wheel and runs: import, the
+# binding unit tests, and a compression/TLS feature smoke. uv provides each
+# Python as a portable standalone build, so a host's own Python version does
+# not limit coverage. Must be POSIX sh.
 #
 # Usage: .semaphore/test-wheels.sh <wheelhouse-dir>
-# Override the distro list with DISTRO_IMAGES="img1 img2 ...".
+# Override the distro list (Linux) with DISTRO_IMAGES="img1 img2 ...".
 
 set -eu
 
 wheelhouse="${1:?Usage: $0 <wheelhouse-dir>}"
 PY_VERSIONS="3.10 3.11 3.12 3.13 3.14"
+
+# $1 is the source root the wheelhouse and bindings are found under.
+run_matrix() {
+    base="$1"
+    export PATH="$HOME/.local/bin:$PATH"
+    uv python install $PY_VERSIONS
+
+    # Neutral test dir so 'import producer' resolves to the installed wheel.
+    testtmp=$(mktemp -d)
+    cp -r "$base/bindings/python/test" "$testtmp/"
+
+    for py in $PY_VERSIONS; do
+        echo "== Python $py =="
+        uv venv --python "$py" "/tmp/v$py"
+        vpy="/tmp/v$py/bin/python"
+        uv pip install --python "$vpy" --no-index --find-links "$base/$wheelhouse" confluent-kafka-rust-python
+        uv pip install --python "$vpy" pytest
+        "$vpy" -c "import _confluentkafka; print('import OK: Python $py')"
+        ( cd "$testtmp" && "$vpy" -m pytest test/unit -q )
+        "$vpy" -c "from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() or print('OK: compression '+c) for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('OK: security.protocol=SSL')"
+    done
+}
 
 if [ "${IN_DOCKER:-0}" = "1" ]; then
     set -x
@@ -44,23 +67,14 @@ if [ "${IN_DOCKER:-0}" = "1" ]; then
 
     export HOME=/root
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="/root/.local/bin:$PATH"
-    uv python install $PY_VERSIONS
+    run_matrix /io
+    exit 0
+fi
 
-    # Neutral test dir so 'import producer' resolves to the installed wheel.
-    testtmp=$(mktemp -d)
-    cp -r /io/bindings/python/test "$testtmp/"
-
-    for py in $PY_VERSIONS; do
-        echo "== Python $py =="
-        uv venv --python "$py" "/tmp/v$py"
-        vpy="/tmp/v$py/bin/python"
-        uv pip install --python "$vpy" --no-index --find-links "/io/$wheelhouse" confluent-kafka-rust-python
-        uv pip install --python "$vpy" pytest
-        "$vpy" -c "import _confluentkafka; print('import OK: Python $py')"
-        ( cd "$testtmp" && "$vpy" -m pytest test/unit -q )
-        "$vpy" -c "from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() or print('OK: compression '+c) for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('OK: security.protocol=SSL')"
-    done
+if [ "$(uname -s)" = "Darwin" ]; then
+    set -x
+    command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+    run_matrix "$PWD"
     exit 0
 fi
 
