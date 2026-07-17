@@ -11,8 +11,11 @@ Each section leads with **Decision** (the intent, one line), then **Rule**,
 ## Thread topology & thread-safety (shared context)
 
 The whole-system picture every section assumes. The C ABI hides all Kafka I/O on
-native threads **owned by the Rust core**; the binding adds only the caller
-threads and a single completion pump.
+native threads **owned by the Rust core**. Thread layout differs by client: the
+**producer** adds a single **.NET** completion pump; the **consumer** adds **no**
+.NET thread — the core pushes completions to it from a **native** dispatcher
+thread. So the .NET consumer side is *leaner*, but completions arrive on a
+**foreign** thread.
 
 ```
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
@@ -23,6 +26,20 @@ threads and a single completion pump.
      get_all(futures) ─block_on─────►│──────►│     NetworkClient + ONE async Selector
      ◄── per-message metadata/err ───│◄──────│       ↕ multiplexes ALL brokers (event-driven)
    Dispose: join pump → flush/close  │       │   (created in KafkaProducer_new, dropped on _destroy)
+```
+
+And the **consumer** — no .NET pump; a native dispatcher fires completions:
+
+```
+   .NET (managed)                    │ C ABI │       Rust core (native, per consumer)
+   ─────────────                     │       │       ─────────────────────────────────
+   caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
+     PollAsync → *_async(…, cb) ─────│──────►│     consumer bg task (ConsumerNetworkThread):
+       returns Task; guard acquired  │       │       NetworkClient + ONE async Selector
+   (NO .NET pump)                    │       │       ↕ multiplexes ALL brokers (event-driven)
+     ◄── cb fires here (→ TCS) ──────│◄──────│     callback-dispatcher thread (1, native):
+         on the dispatcher thread    │       │       fires completion callbacks
+   Dispose: wakeup+await → close     │       │   (created in KafkaConsumer_new, dropped on _destroy)
 ```
 
 **Rule:**
@@ -40,8 +57,18 @@ threads and a single completion pump.
     the runtime's worker threads, so a blocked pump can't deadlock it.
   - The one callback (`RecordMetadata_copy`) fires synchronously on the caller's
     (pump) thread — not a foreign thread (§6).
-
-**Why:** Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
+  - **Consumer** (per real `KafkaConsumer`): the core runs the consumer's own
+    **background task** (single `ConsumerNetworkThread`, consumer-threading §10)
+    over ONE async Selector, **plus a dedicated callback-dispatcher thread** — both
+    native, created in `KafkaConsumer_new`, torn down by `Consumer_destroy`.
+  - .NET side (consumer): caller thread(s) **only — no pump** (the ABI *pushes*
+    completions, §7). Asymmetry: the producer's pump is a **.NET** thread; the
+    consumer's dispatcher is a **native** (core) thread.
+  - **One operation in flight** per consumer — the access guard serializes ops
+    (concurrent → rejection, §5), released just before the callback fires; the
+    completion callback runs on the **dispatcher thread (foreign)**, not the caller
+    → `RunContinuationsAsynchronously` + no-throw (§6/§7). `Consumer_wakeup`
+    bypasses the guard (§5/§11). Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
 librdkafka (a thread per broker + a mandatory `rd_kafka_poll` loop, which
 confluent-kafka-dotnet services with a `LongRunning` `callbackTask`). So our
 native thread count is independent of cluster size, there is no poll loop, and
@@ -554,9 +581,16 @@ channel (→ `GCHandle`).
 
 ---
 
-## 7. Async / Future completion — pull-based pump + `TaskCompletionSource`
+## 7. Async / Future completion → `TaskCompletionSource`
 
-**Decision:** Java `Future<RecordMetadata>` → .NET `Task<RecordMetadata>`,
+**Two completion models, set by the ABI.** The **producer** ABI is *pull*
+(`get`/`get_all` block, `is_done` polls — no callback) → one background **pump**
+does the blocking waits. The **consumer** ABI is *push* (every async op takes a
+completion callback, §6) → the callback completes the `TaskCompletionSource`
+directly, **no pump**. Both bridge to `Task<T>` via a `TaskCompletionSource` built
+with `RunContinuationsAsynchronously`.
+
+**Decision (producer — pull pump):** Java `Future<RecordMetadata>` → .NET `Task<RecordMetadata>`,
 completed by **one** background pump that does the blocking waits. `SendAsync`
 enqueues and returns instantly with a `TaskCompletionSource`-backed `Task`; the
 pump blocks on the batched `get_all` and completes each TCS. (The ABI is
@@ -616,16 +650,79 @@ spawn") and the Python design.
   - Cancel is safe + frees handles; high-concurrency produce doesn't starve the
     thread pool.
 
-**Future direction — push-based completion (proposal; not in the ABI).** Add
-`Producer_send_cb(…, on_complete, user_data)`: the Rust core fires `on_complete`
-when each send resolves, from **one shared completion task** spawned per producer
-in `KafkaProducer_new` (CLAUDE.md §11 — not a spawn per send). Then .NET drops
-the pump — `SendAsync` just registers a kept-alive Cdecl callback (§6) with a
-`GCHandle` over the `TaskCompletionSource` as `user_data`; the callback (on a
-tokio worker thread → `RunContinuationsAsynchronously` + no-throw) completes the
-TCS and frees the handle. Zero blocked threads, per-message — but it needs a
-core/ABI change (Actor/Critic), so the pull-based pump above is the current
-design.
+**Consumer — push, no pump.** The consumer ABI is *push*: every async op
+(`Consumer_poll_async` / `commit_async` / `position_async` / …) takes a completion
+callback (§6) that fires when the op resolves. So the consumer needs **no pump** —
+the callback *is* the bridge:
+
+```
+Caller thread                       Core: runtime worker ──▶ dispatcher thread (1/consumer)
+─────────────                       ────────────────────────────────────────────────────
+PollAsync():                        worker task: poll(timeout).await   ← runs the op
+  tcs = new TaskCompletionSource                 build (records | error)
+  ud  = GCHandle.Alloc(tcs)  (§6)                enqueue completion ──┐
+  Consumer_poll_async(…, cb, ud) ─► (guard held submit→op-complete)   ▼
+  return tcs.Task                   dispatcher:  release guard, then
+  … await tcs.Task                    cb(records | error, ud): marshal + free handles (§2)
+     ◄── continuation on pool ─────   tcs.SetResult / SetException  (RunContinuationsAsync)
+                                    no pump · one op in flight
+```
+
+  - `PollAsync` (etc.) makes a `TaskCompletionSource`, `GCHandle.Alloc`s it as
+    `user_data` (§6), submits the `*_async` op with a kept-alive Cdecl callback,
+    and returns `tcs.Task` immediately — no blocked thread.
+  - The callback fires on a **dedicated callback-dispatcher thread** — the core
+    runs the op on a runtime worker, then hands the completed op over a channel to
+    that one thread, so callbacks are **serialized** on a single foreign thread
+    (guard-rejection fires inline on the caller; shutdown, inline on the worker).
+    It marshals the result (copy-out §5.4, or an error via `FromHandle` §5), frees
+    the handles it owns (§2 Category 3), and completes the TCS — with
+    **`RunContinuationsAsynchronously`** (essential: the continuation must not run
+    on that dispatcher thread), exactly once, on every path (incl. the inline
+    guard-rejection error).
+  - **One operation in flight** per consumer (the access guard) → at most one
+    pending `(callback, TCS)` at a time — no batching, unlike the producer pump.
+    The guard is **released just before the callback fires** (held for the
+    submit→op-complete window), so an `await`-then-resubmit from the continuation
+    is safe — it won't hit the one-op rejection.
+  - **Cancellation** = `CancellationToken` → `wakeup()` (aborts the in-flight op)
+    → the callback fires with a Wakeup error → the `Task` cancels/faults
+    (best-effort; §5, consumer-threading §11).
+  - **`Dispose`**: await or `wakeup` the in-flight op, then `Consumer_destroy`
+    (join the dispatcher; parent-outlives-children, §2).
+
+**Consumer anti-patterns:**
+
+  - A TCS without `RunContinuationsAsynchronously` — the awaiter's continuation
+    runs on the core's dispatcher/worker thread → stalls the core (or deadlocks if
+    the continuation calls back into the consumer).
+  - Wrapping the *sync* variants (`Consumer_poll` + `block_on`) in a pump /
+    `Task.Run` per op — sync-over-async; the push ABI makes it needless.
+  - Letting the callback throw (unwinds into native, §6); completing the TCS
+    twice; or not freeing the result/error handle + the `GCHandle` on some path
+    (especially the inline guard-rejection error).
+  - `Consumer_destroy` before the in-flight op's callback fires (use-after-free);
+    a `Dispose` that doesn't `wakeup` + await the op.
+
+**Consumer tests:**
+
+  - `PollAsync` resolves with records / faults with `KafkaException` (mock
+    `set_poll_error`); the result/error handle + `GCHandle` are freed exactly once.
+  - `wakeup()` during an in-flight `poll` cancels/faults the `Task` **once**, then
+    the consumer is reusable (§5); a `CancellationToken` cancel →
+    `OperationCanceledException`.
+  - A concurrent second op → `InvalidOperationException` (§5).
+  - `Dispose` with an op in flight returns (doesn't hang) — the wakeup/join
+    regression.
+
+**Future direction — producer push (the consumer already does this).** The
+consumer's push model above is exactly what the producer would gain from a
+`Producer_send_cb(…, on_complete, user_data)`: the core fires `on_complete` from
+**one shared completion task** per producer (CLAUDE.md §11 — not a spawn per
+send), .NET drops the pump, and `SendAsync` just registers a kept-alive Cdecl
+callback (§6) + a `GCHandle` over the `TaskCompletionSource` — zero blocked
+threads. It needs a core/ABI change (Actor/Critic), so the producer's pull pump
+above stays the current design; the consumer shows the target.
 
 ---
 
