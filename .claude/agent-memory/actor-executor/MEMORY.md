@@ -80,3 +80,4 @@
 - [M11 Phase 1 Admin notes](m11_phase1_admin_notes.md) — Admin foundation done (rules + completable KafkaFuture + common leaf types); scope conflicts vs PLAN needing decisions; remaining-work order
 - [M11 Phase 2 Admin driver notes](m11_phase2_admin_driver_notes.md) — createPartitions plain Call + deleteRecords via AdminApiDriver/PartitionLeaderStrategy (pulled fwd); Call maybe_retry+ConstantNodeId; MockClient auth-error gap
 - [M11 Phase 2 driver test notes](m11_phase2_driver_test_notes.md) — AdminApiDriverTest translation; shared #[cfg(test)] pub(crate) fakes; key_to_broker_id; coalesce deviation; maybe_retry hook test
+- [M11 Phase 3 cluster & configs notes](m11_phase3_cluster_configs_notes.md) — describeCluster UV->Metadata failback + per-resource-type routing (node_for) + ConfigResource common type + LeastLoadedBrokerOrActiveKController
