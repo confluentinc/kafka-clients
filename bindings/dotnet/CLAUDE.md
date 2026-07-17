@@ -14,7 +14,7 @@ them explicitly (never rely on nested auto-loading).
 **The one law:** the binding restores the Java **shape** in C# **idiom** and holds **no Kafka
 logic** — batching, partitioning, retries, offsets all live once, in the Rust
 core. So it's **not a 1:1 mirror** — expect host-only types with no Java/C-ABI
-counterpart: `NativeMethods`, `SafeHandle` subclasses, `IDisposable`, marshalling
+counterpart: `Native`, `SafeHandle` subclasses, `IDisposable`, marshalling
 helpers, the C-callback→delegate adapter, the `TaskCompletionSource` bridge.
 That's expected scaffolding — plumbing for the shape + safe resource management,
 never Kafka behavior. If you're writing Kafka behavior in C#, you're in the wrong
@@ -43,8 +43,8 @@ producer.SendAsync(record)  ──►  Task<RecordMetadata>
    Rust   Producer::send(ProducerRecord) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
-**Status:** The C ABI exposes the **producer** and **consumer** 
-variants. Admin / transactions are **not** exposed yet. Source of truth for the
+**Status:** The C ABI exposes the **producer** and **consumer** (each with sync
+and `_async`/callback variants). Admin / transactions are **not** exposed yet. Source of truth for the
 surface = `src/ffi/*.rs` + `cbindgen.toml` (the header is generated, not checked
 in).
 
@@ -295,9 +295,9 @@ This file (CLAUDE.md) never restates those; it references them by section.
 ```
 Is the feature already exposed at the C ABI (src/ffi)?
         │
-   yes ─┤→ MODE A · .NET-only    (Native decl + SafeHandle + managed wrapper)        → 5.2
+   yes ─┤→ MODE A · .NET-only    (Native decl + SafeHandle + managed wrapper)        → 6.2
         │
-   no ──┘→ MODE B · Full-stack   (src/ffi → header → Native → managed API)           → 5.3
+   no ──┘→ MODE B · Full-stack   (src/ffi → header → Native → managed API)           → 6.3
 ```
 
 ### 6.2 Mode A — .NET-only port
@@ -399,7 +399,7 @@ Never build .NET before Rust — the native won't exist.
 |---|---|
 | Build the native | `cargo build --features ffi [--release]` |
 | Build the binding | `dotnet build` (copies the native to output) |
-| Unit tests (**no broker**) | `dotnet test` (MockProducer) |
+| Unit tests (**no broker**) | `dotnet test` (`MockProducer` / `MockConsumer`) |
 | Rust tests | `cargo test` |
 | Format / lint (Rust) | `cargo xtask format` / `cargo xtask lint` |
 | Format (C#) | `dotnet format` |
@@ -412,18 +412,19 @@ touch the public Java shape (§3/§4).
 
 ### 7.3 Running against a broker
 
-- **No broker** — `MockProducer` (unit tests; also how to iterate without infra).
+- **No broker** — `MockProducer` / `MockConsumer` (unit tests; also how to iterate without infra).
 - **Your own local broker** — `bootstrap.servers` is just a config key.
 - **Integration** — spin a broker via testcontainers (needs Docker), not a
   checked-in compose file.
 
 ### 7.4 Test conventions
-- Unit tests hold a `MockProducer` (auto- or manual-complete via
-  `complete_next`/`error_next`), and `await` the returned `Task` with a timeout —
-  the timeout doubles as the **completion / deadlock regression guard** (the
-  producer pull-pump's join; the consumer/push dispatcher hand-off)
-- **TFM-matrix smoke test**: the binding loads and a `MockProducer` round-trips on
-  **net462** (via netstandard2.0), **net8.0**, **net10.0**
+- Unit tests hold a `MockProducer` / `MockConsumer` (manual-drive via
+  `complete_next`/`error_next` and `add_record`/`set_poll_error`), and `await` the
+  returned `Task` with a timeout — the timeout doubles as the **completion /
+  deadlock regression guard** (the producer pull-pump's join; the consumer/push
+  dispatcher hand-off)
+- **TFM-matrix smoke test**: the binding loads and a `MockProducer` / `MockConsumer`
+  round-trip on **net462** (via netstandard2.0), **net8.0**, **net10.0**
 - Parity obligations (`definition-of-done.md §3`): mirror the Java/Rust tests,
   **assert error-message content**, and add a per-record **allocation-budget**
   test — on the **send path** (producer) and, for the consumer, on the
@@ -432,7 +433,7 @@ touch the public Java shape (§3/§4).
 ### 7.5 Definition of done
 
 A port is not done until it builds on the TFM matrix, unit tests pass against
-`MockProducer`, lint/format are clean, and the `ffi-marshalling.md` anti-patterns
+`MockProducer` / `MockConsumer`, lint/format are clean, and the `ffi-marshalling.md` anti-patterns
 are satisfied (`definition-of-done.md`). Integration/multi-language suites are opt-in until
 CI-stable.
 
