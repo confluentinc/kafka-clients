@@ -20,6 +20,8 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod alter_replica_log_dirs_request;
+pub mod alter_replica_log_dirs_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod consumer_group_heartbeat_request;
@@ -36,6 +38,8 @@ pub mod describe_cluster_request;
 pub mod describe_cluster_response;
 pub mod describe_configs_request;
 pub mod describe_configs_response;
+pub mod describe_log_dirs_request;
+pub mod describe_log_dirs_response;
 pub mod fetch_metadata;
 pub mod fetch_request;
 pub mod fetch_response;
@@ -70,6 +74,8 @@ pub mod send_builder;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use alter_replica_log_dirs_request::{AlterReplicaLogDirsRequest, AlterReplicaLogDirsRequestBuilder};
+pub use alter_replica_log_dirs_response::AlterReplicaLogDirsResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
 pub use consumer_group_heartbeat_request::{
@@ -94,6 +100,8 @@ pub use describe_cluster_request::{
 pub use describe_cluster_response::DescribeClusterResponse;
 pub use describe_configs_request::{DescribeConfigsRequest, DescribeConfigsRequestBuilder};
 pub use describe_configs_response::DescribeConfigsResponse;
+pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsRequestBuilder};
+pub use describe_log_dirs_response::DescribeLogDirsResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
 pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{

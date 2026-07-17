@@ -28,6 +28,7 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
+use super::AlterReplicaLogDirsResponse;
 use super::ApiVersionsResponse;
 use super::ConsumerGroupHeartbeatResponse;
 use super::CreatePartitionsResponse;
@@ -36,6 +37,7 @@ use super::DeleteRecordsResponse;
 use super::DeleteTopicsResponse;
 use super::DescribeClusterResponse;
 use super::DescribeConfigsResponse;
+use super::DescribeLogDirsResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::IncrementalAlterConfigsResponse;
@@ -103,6 +105,10 @@ pub enum ConcreteResponse {
     ListConfigResources(ListConfigResourcesResponse),
     /// A DescribeCluster response.
     DescribeCluster(DescribeClusterResponse),
+    /// A DescribeLogDirs response.
+    DescribeLogDirs(DescribeLogDirsResponse),
+    /// An AlterReplicaLogDirs response.
+    AlterReplicaLogDirs(AlterReplicaLogDirsResponse),
 }
 
 impl ConcreteResponse {
@@ -129,6 +135,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.api_key(),
             Self::ListConfigResources(r) => r.api_key(),
             Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeLogDirs(r) => r.api_key(),
+            Self::AlterReplicaLogDirs(r) => r.api_key(),
         }
     }
 
@@ -161,6 +169,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListConfigResources(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeCluster(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeLogDirs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -233,6 +243,12 @@ impl ConcreteResponse {
             Self::DescribeCluster(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterReplicaLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -265,6 +281,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -301,6 +319,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.error_counts(),
             Self::ListConfigResources(r) => r.error_counts(),
             Self::DescribeCluster(r) => r.error_counts(),
+            Self::DescribeLogDirs(r) => r.error_counts(),
+            Self::AlterReplicaLogDirs(r) => r.error_counts(),
         }
     }
 
@@ -329,6 +349,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.throttle_time_ms(),
             Self::ListConfigResources(r) => r.throttle_time_ms(),
             Self::DescribeCluster(r) => r.throttle_time_ms(),
+            Self::DescribeLogDirs(r) => r.throttle_time_ms(),
+            Self::AlterReplicaLogDirs(r) => r.throttle_time_ms(),
         }
     }
 
@@ -356,6 +378,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListConfigResources(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeCluster(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeLogDirs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AlterReplicaLogDirs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -382,6 +406,8 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.should_client_throttle(version),
             Self::ListConfigResources(r) => r.should_client_throttle(version),
             Self::DescribeCluster(r) => r.should_client_throttle(version),
+            Self::DescribeLogDirs(r) => r.should_client_throttle(version),
+            Self::AlterReplicaLogDirs(r) => r.should_client_throttle(version),
         }
     }
 
@@ -510,6 +536,14 @@ impl ConcreteResponse {
                 let response = DescribeClusterResponse::parse(readable, version)?;
                 Ok(Self::DescribeCluster(response))
             },
+            ApiKeys::DESCRIBE_LOG_DIRS => {
+                let response = DescribeLogDirsResponse::parse(readable, version)?;
+                Ok(Self::DescribeLogDirs(response))
+            },
+            ApiKeys::ALTER_REPLICA_LOG_DIRS => {
+                let response = AlterReplicaLogDirsResponse::parse(readable, version)?;
+                Ok(Self::AlterReplicaLogDirs(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -541,6 +575,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
             Self::ListConfigResources(r) => write!(f, "{r}"),
             Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeLogDirs(r) => write!(f, "{r}"),
+            Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
         }
     }
 }

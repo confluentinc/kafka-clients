@@ -23,6 +23,7 @@
 
 use std::io;
 
+use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
@@ -34,6 +35,7 @@ use crate::delete_records_request_data::DeleteRecordsRequestData;
 use crate::delete_topics_request_data::DeleteTopicsRequestData;
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::DescribeConfigsRequestData;
+use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
@@ -47,6 +49,7 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
+use super::AlterReplicaLogDirsRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatRequest;
@@ -56,6 +59,7 @@ use super::DeleteRecordsRequest;
 use super::DeleteTopicsRequest;
 use super::DescribeClusterRequest;
 use super::DescribeConfigsRequest;
+use super::DescribeLogDirsRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::IncrementalAlterConfigsRequest;
@@ -152,6 +156,10 @@ pub enum ConcreteRequest {
     ListConfigResources(ListConfigResourcesRequest),
     /// A DescribeCluster request.
     DescribeCluster(DescribeClusterRequest),
+    /// A DescribeLogDirs request.
+    DescribeLogDirs(DescribeLogDirsRequest),
+    /// An AlterReplicaLogDirs request.
+    AlterReplicaLogDirs(AlterReplicaLogDirsRequest),
 }
 
 impl ConcreteRequest {
@@ -178,6 +186,8 @@ impl ConcreteRequest {
             Self::IncrementalAlterConfigs(r) => r.version(),
             Self::ListConfigResources(r) => r.version(),
             Self::DescribeCluster(r) => r.version(),
+            Self::DescribeLogDirs(r) => r.version(),
+            Self::AlterReplicaLogDirs(r) => r.version(),
         }
     }
 
@@ -204,6 +214,8 @@ impl ConcreteRequest {
             Self::IncrementalAlterConfigs(r) => r.api_key(),
             Self::ListConfigResources(r) => r.api_key(),
             Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeLogDirs(r) => r.api_key(),
+            Self::AlterReplicaLogDirs(r) => r.api_key(),
         }
     }
 
@@ -236,6 +248,8 @@ impl ConcreteRequest {
             Self::IncrementalAlterConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListConfigResources(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterReplicaLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -330,6 +344,12 @@ impl ConcreteRequest {
             Self::DescribeCluster(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterReplicaLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -363,6 +383,8 @@ impl ConcreteRequest {
             Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -407,6 +429,8 @@ impl ConcreteRequest {
             Self::IncrementalAlterConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListConfigResources(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterReplicaLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -516,6 +540,14 @@ impl ConcreteRequest {
                 let data = DescribeClusterRequestData::read(readable, api_version)?;
                 Ok(Self::DescribeCluster(DescribeClusterRequest::new(data, api_version)))
             },
+            ApiKeys::DESCRIBE_LOG_DIRS => {
+                let data = DescribeLogDirsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeLogDirs(DescribeLogDirsRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_REPLICA_LOG_DIRS => {
+                let data = AlterReplicaLogDirsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -547,6 +579,8 @@ impl std::fmt::Display for ConcreteRequest {
             Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
             Self::ListConfigResources(r) => write!(f, "{r}"),
             Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeLogDirs(r) => write!(f, "{r}"),
+            Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
         }
     }
 }

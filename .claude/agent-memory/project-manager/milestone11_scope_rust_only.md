@@ -20,6 +20,17 @@ lives unmerged in PR #116 "C and python consumer bindings" (branch
 `dev/c_and_python_consumer_bindings`, `src/ffi/common.rs`). Only the
 synchronous producer FFI is merged; there is no consumer FFI or `consumer.py`.
 
+**Execution cadence (updated 2026-07-17):** the user authorized *continuous
+unattended progression* — the Manager proceeds phase-to-phase across Tiers
+1→2→3 (Tier 4 excluded) without waiting for a per-phase user go-ahead, and
+does NOT pause at tier boundaries (overrides PLAN.md's "pause at tier
+boundaries" language), using the phase breakdowns already in PLAN.md. Still
+run the full Actor→Critic→fix→verify loop and hand off each phase; the
+coordinator re-verifies each report. **One hard stop remains:** Tier 3 Phase 3
+(SCRAM) needs a new PBKDF2 crate — CLAUDE.md §1.2 requires asking the user
+before any `Cargo.toml` dependency add, so stop there and surface that specific
+question before starting SCRAM Rust-core work.
+
 **How to apply:** Do not spawn Actors for FFI/Python work on any Milestone 11
 phase. Each phase's Definition of Done = Rust core + unit tests + integration
 tests green (CMake/CTest and pytest runs are deferred, not part of this
