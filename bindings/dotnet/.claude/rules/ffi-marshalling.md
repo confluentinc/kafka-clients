@@ -319,9 +319,14 @@ no terminator) and so take the length form and must be copied out before
 
 ---
 
-## 4. Zero-copy & buffer lifetime (pinning)
+## 4. Zero-copy & buffer lifetime
 
-**Decision:** Pass key/value as `IntPtr` (address of the user's `byte[]`) + `int
+**Two directions, mirror-image mechanics.** **Send** (managed → unmanaged, below)
+pins a managed buffer and passes a pointer out — a *GC-moves* hazard. **Receive**
+(unmanaged → managed, at the end) borrows a view over the native batch — a
+*native-frees* hazard. **Pinning applies only to send.**
+
+**Decision (send):** Pass key/value as `IntPtr` (address of the user's `byte[]`) + `int
 len` with **no intermediate copy**, pinned **only for the send call** — the pin
 is call-scoped, not Task-scoped.
 
@@ -360,6 +365,33 @@ Mirrors confluent-kafka-dotnet (pin around `produceva` with `MSG_F_COPY`, `Free`
 in `finally`). Any intermediate copy (`AllocHGlobal`+`Copy`, `ToArray()`) is the
 per-message allocation CLAUDE.md §12 exists to prevent.
 
+**Receive (unmanaged → managed) — the mirror.** The consumer path reverses
+everything: the bytes originate in the **native** batch buffer (owned by
+`ConsumerRecords_t`), and `ConsumerRecord_key` / `_value` / `_topic` hand back
+`(ptr, len)` **borrowing** into it (§27, §3).
+
+  - **No pinning.** Native memory isn't GC-managed — nothing moves, so nothing to
+    pin. The `fixed` / `GCHandle` machinery above is send-only.
+  - **The hazard flips** from *GC-moves* to *native-frees*: a managed view over
+    the batch is a use-after-free the instant `ConsumerRecords_destroy` runs. The
+    fix is **lifetime binding**, not pinning — copy before destroy, or keep the
+    batch alive. Ownership rules, anti-patterns, and tests live in §5.4, §2
+    (Category 3/4), and §3 (borrowed strings).
+  - **"Buffer lifetime"** here is the *native* buffer's validity window
+    (batch-scoped, until `_destroy`) — not a managed pin's window (call-scoped).
+
+**Raw bytes are the one copy-out case — and why.** The typed path is zero-copy:
+`IDeserializer<T>.Deserialize(ReadOnlySpan<byte>)` reads a span **directly over the
+native bytes** and returns an owned `T`; a ref-struct `Span` can't be stored or
+awaited, so it can't outlive the batch (safe). But the **raw-byte surface**
+(`ConsumerRecord.Value` as bytes) is **copy-out by default** — the single place we
+copy on receive — because the only zero-copy alternative is a native-backed
+`ReadOnlyMemory<byte>` coupled to the batch lifetime, and in .NET a stored
+`ReadOnlyMemory` over native memory is a use-after-`Dispose` footgun (Python is
+safe only via its refcounted `memoryview`). So for raw bytes we trade one gen-0
+copy for safety + the Java owned-`ConsumerRecord` shape; keep-alive zero-copy is
+deferred (§5.4).
+
 **Anti-patterns:**
 
   - Any intermediate copy of key/value; keeping the pin alive until the `Task`
@@ -393,7 +425,10 @@ standard .NET exceptions — never `KafkaException`.
 
 **Rule:**
 
-  - **Operational:** null out-param = success, non-null = error.
+  - **Operational:** the error handle arrives via the `out_error` param (fns that
+    also return a value — `send`, `poll`, `_new`) **or as the return value** (fns
+    that are `void` in Java — consumer `assign` / `subscribe` / `seek` /
+    `unsubscribe`); **null = success** in both, non-null = error.
     `KafkaException.FromHandle` reads the accessors (message **before** free),
     then `_destroy` in a `finally` — freed exactly once even if construction
     throws (§2, §3); the exception holds copied values, not the handle. Sync
@@ -406,9 +441,24 @@ standard .NET exceptions — never `KafkaException`.
     `ArgumentOutOfRangeException` (a **negative partition** — the ABI silently
     maps negative to "unset", so the binding must reject it — or a negative
     timeout), or `ObjectDisposedException` / `InvalidOperationException` (closed
-    producer). **Mandatory**, not optional: the ABI doesn't validate preconditions
+    producer/consumer). **Mandatory**, not optional: the ABI doesn't validate preconditions
     (CLAUDE.md §3) and some functions `assert!`/panic on violation — a panic
     across FFI is UB.
+  - **Consumer additions** (the model is shared; the consumer adds two shapes):
+    - **`wakeup()`** → the interrupted `poll` / `commit` / … surfaces a flat
+      `KafkaException` with a **Wakeup** code (Java `WakeupException` semantics —
+      raised **once**, then the flag clears and the op works again;
+      consumer-threading §11). **Not** a subclass: the Python sibling keeps it flat
+      (`pytest.raises(KafkaError)`, message `"woke"`), so do we. Distinct from
+      **`CancellationToken`** cancellation → **`OperationCanceledException`** (the
+      .NET-native cancel, §3 / CLAUDE.md §3 — the analog of Python re-raising
+      `CancelledError`).
+    - **Concurrent use** (the consumer is one-operation-in-flight) splits by
+      method: a sync **state read** (`Assignment` / `Subscription` / `Paused` /
+      `GroupMetadata`) → **`InvalidOperationException`** ("not safe for
+      multi-threaded access"); a concurrent **async op** (`PollAsync` /
+      `CommitAsync`) → **`KafkaException`** (ConcurrentModification). Mirrors
+      Python (`RuntimeError` for state reads, `KafkaError` for blocking ops).
 
 **Why:** a flat `KafkaException` matches what the ABI exposes and the Python
 sibling. Preconditions are a separate surface because they are programmer errors,
@@ -433,6 +483,9 @@ the native call. Ours must too, *and must* because the ABI would otherwise panic
   - Null topic/record → `ArgumentNullException`; post-`Dispose` →
     `ObjectDisposedException`; negative partition → `ArgumentOutOfRangeException` —
     each before any native call.
+  - Consumer: `wakeup()` → the next `poll`/`commit` throws `KafkaException`
+    (Wakeup) **once**, then the consumer works again; a concurrent sync state read
+    → `InvalidOperationException`.
 
 ---
 
