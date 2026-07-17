@@ -1077,7 +1077,7 @@ fn ctx_prefix<'a>(prefixed_topic: &'a str, base: &str) -> &'a str {
 async fn end_offset_with_retry(consumer: &mut BytesConsumer, tp: &TopicPartition, deadline_duration: Duration) -> i64 {
     let deadline = Instant::now() + deadline_duration;
     while Instant::now() < deadline {
-        match consumer.end_offsets(&[tp.clone()]).await {
+        match consumer.end_offsets(std::slice::from_ref(tp)).await {
             Ok(map) => {
                 if let Some(v) = map.get(tp).copied() {
                     return v;

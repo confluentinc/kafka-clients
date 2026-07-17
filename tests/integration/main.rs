@@ -22,6 +22,11 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod admin_cluster_configs_test;
+mod admin_elections_reassignments_offsets_test;
+mod admin_log_dirs_test;
+mod admin_partitions_records_test;
+mod admin_topics_test;
 mod api_versions_test;
 mod connection_test;
 mod consumer_test;

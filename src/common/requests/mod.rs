@@ -20,17 +20,43 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod alter_partition_reassignments_request;
+pub mod alter_partition_reassignments_response;
+pub mod alter_replica_log_dirs_request;
+pub mod alter_replica_log_dirs_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
+pub mod create_partitions_request;
+pub mod create_partitions_response;
+pub mod create_topics_request;
+pub mod create_topics_response;
+pub mod delete_records_request;
+pub mod delete_records_response;
+pub mod delete_topics_request;
+pub mod delete_topics_response;
+pub mod describe_cluster_request;
+pub mod describe_cluster_response;
+pub mod describe_configs_request;
+pub mod describe_configs_response;
+pub mod describe_log_dirs_request;
+pub mod describe_log_dirs_response;
+pub mod elect_leaders_request;
+pub mod elect_leaders_response;
 pub mod fetch_metadata;
 pub mod fetch_request;
 pub mod fetch_response;
 pub mod find_coordinator_request;
 pub mod find_coordinator_response;
+pub mod incremental_alter_configs_request;
+pub mod incremental_alter_configs_response;
+pub mod list_config_resources_request;
+pub mod list_config_resources_response;
 pub mod list_offsets_request;
 pub mod list_offsets_response;
+pub mod list_partition_reassignments_request;
+pub mod list_partition_reassignments_response;
 pub mod metadata_request;
 pub mod metadata_response;
 pub mod offset_commit_request;
@@ -54,6 +80,12 @@ pub mod send_builder;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use alter_partition_reassignments_request::{
+    AlterPartitionReassignmentsRequest, AlterPartitionReassignmentsRequestBuilder,
+};
+pub use alter_partition_reassignments_response::AlterPartitionReassignmentsResponse;
+pub use alter_replica_log_dirs_request::{AlterReplicaLogDirsRequest, AlterReplicaLogDirsRequestBuilder};
+pub use alter_replica_log_dirs_response::AlterReplicaLogDirsResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
 pub use consumer_group_heartbeat_request::{
@@ -62,14 +94,42 @@ pub use consumer_group_heartbeat_request::{
     REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
 };
 pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use create_partitions_request::{CreatePartitionsRequest, CreatePartitionsRequestBuilder};
+pub use create_partitions_response::CreatePartitionsResponse;
+pub use create_topics_request::{
+    CreateTopicsRequest, CreateTopicsRequestBuilder, NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR,
+};
+pub use create_topics_response::CreateTopicsResponse;
+pub use delete_records_request::{DeleteRecordsRequest, DeleteRecordsRequestBuilder};
+pub use delete_records_response::{DeleteRecordsResponse, INVALID_LOW_WATERMARK};
+pub use delete_topics_request::{DeleteTopicsRequest, DeleteTopicsRequestBuilder};
+pub use delete_topics_response::DeleteTopicsResponse;
+pub use describe_cluster_request::{
+    DescribeClusterRequest, DescribeClusterRequestBuilder, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
+};
+pub use describe_cluster_response::DescribeClusterResponse;
+pub use describe_configs_request::{DescribeConfigsRequest, DescribeConfigsRequestBuilder};
+pub use describe_configs_response::DescribeConfigsResponse;
+pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsRequestBuilder};
+pub use describe_log_dirs_response::DescribeLogDirsResponse;
+pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
+pub use elect_leaders_response::ElectLeadersResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
 pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{
     CoordinatorType, FindCoordinatorRequest, FindCoordinatorRequestBuilder, MIN_BATCHED_VERSION,
 };
 pub use find_coordinator_response::FindCoordinatorResponse;
+pub use incremental_alter_configs_request::{IncrementalAlterConfigsRequest, IncrementalAlterConfigsRequestBuilder};
+pub use incremental_alter_configs_response::IncrementalAlterConfigsResponse;
+pub use list_config_resources_request::{ListConfigResourcesRequest, ListConfigResourcesRequestBuilder};
+pub use list_config_resources_response::ListConfigResourcesResponse;
 pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
 pub use list_offsets_response::ListOffsetsResponse;
+pub use list_partition_reassignments_request::{
+    ListPartitionReassignmentsRequest, ListPartitionReassignmentsRequestBuilder,
+};
+pub use list_partition_reassignments_response::ListPartitionReassignmentsResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
 pub use offset_commit_request::{OffsetCommitRequest, OffsetCommitRequestBuilder};

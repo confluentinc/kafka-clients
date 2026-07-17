@@ -28,11 +28,24 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
+use super::AlterPartitionReassignmentsResponse;
+use super::AlterReplicaLogDirsResponse;
 use super::ApiVersionsResponse;
 use super::ConsumerGroupHeartbeatResponse;
+use super::CreatePartitionsResponse;
+use super::CreateTopicsResponse;
+use super::DeleteRecordsResponse;
+use super::DeleteTopicsResponse;
+use super::DescribeClusterResponse;
+use super::DescribeConfigsResponse;
+use super::DescribeLogDirsResponse;
+use super::ElectLeadersResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
+use super::IncrementalAlterConfigsResponse;
+use super::ListConfigResourcesResponse;
 use super::ListOffsetsResponse;
+use super::ListPartitionReassignmentsResponse;
 use super::MetadataResponse;
 use super::OffsetCommitResponse;
 use super::OffsetFetchResponse;
@@ -79,6 +92,32 @@ pub enum ConcreteResponse {
     OffsetCommit(OffsetCommitResponse),
     /// An OffsetFetch response.
     OffsetFetch(OffsetFetchResponse),
+    /// A CreateTopics response.
+    CreateTopics(CreateTopicsResponse),
+    /// A DeleteTopics response.
+    DeleteTopics(DeleteTopicsResponse),
+    /// A CreatePartitions response.
+    CreatePartitions(CreatePartitionsResponse),
+    /// A DeleteRecords response.
+    DeleteRecords(DeleteRecordsResponse),
+    /// A DescribeConfigs response.
+    DescribeConfigs(DescribeConfigsResponse),
+    /// An IncrementalAlterConfigs response.
+    IncrementalAlterConfigs(IncrementalAlterConfigsResponse),
+    /// A ListConfigResources response.
+    ListConfigResources(ListConfigResourcesResponse),
+    /// A DescribeCluster response.
+    DescribeCluster(DescribeClusterResponse),
+    /// A DescribeLogDirs response.
+    DescribeLogDirs(DescribeLogDirsResponse),
+    /// An AlterReplicaLogDirs response.
+    AlterReplicaLogDirs(AlterReplicaLogDirsResponse),
+    /// An ElectLeaders response.
+    ElectLeaders(ElectLeadersResponse),
+    /// An AlterPartitionReassignments response.
+    AlterPartitionReassignments(AlterPartitionReassignmentsResponse),
+    /// A ListPartitionReassignments response.
+    ListPartitionReassignments(ListPartitionReassignmentsResponse),
 }
 
 impl ConcreteResponse {
@@ -97,6 +136,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::CreateTopics(r) => r.api_key(),
+            Self::DeleteTopics(r) => r.api_key(),
+            Self::CreatePartitions(r) => r.api_key(),
+            Self::DeleteRecords(r) => r.api_key(),
+            Self::DescribeConfigs(r) => r.api_key(),
+            Self::IncrementalAlterConfigs(r) => r.api_key(),
+            Self::ListConfigResources(r) => r.api_key(),
+            Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeLogDirs(r) => r.api_key(),
+            Self::AlterReplicaLogDirs(r) => r.api_key(),
+            Self::ElectLeaders(r) => r.api_key(),
+            Self::AlterPartitionReassignments(r) => r.api_key(),
+            Self::ListPartitionReassignments(r) => r.api_key(),
         }
     }
 
@@ -121,6 +173,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::CreateTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DeleteTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::CreatePartitions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DeleteRecords(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeConfigs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ListConfigResources(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeCluster(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeLogDirs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ElectLeaders(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AlterPartitionReassignments(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ListPartitionReassignments(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -169,6 +234,45 @@ impl ConcreteResponse {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::CreateTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreatePartitions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteRecords(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::IncrementalAlterConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListConfigResources(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeCluster(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterReplicaLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ElectLeaders(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -193,6 +297,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreatePartitions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteRecords(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -221,6 +338,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
             Self::OffsetCommit(r) => r.error_counts(),
             Self::OffsetFetch(r) => r.error_counts(),
+            Self::CreateTopics(r) => r.error_counts(),
+            Self::DeleteTopics(r) => r.error_counts(),
+            Self::CreatePartitions(r) => r.error_counts(),
+            Self::DeleteRecords(r) => r.error_counts(),
+            Self::DescribeConfigs(r) => r.error_counts(),
+            Self::IncrementalAlterConfigs(r) => r.error_counts(),
+            Self::ListConfigResources(r) => r.error_counts(),
+            Self::DescribeCluster(r) => r.error_counts(),
+            Self::DescribeLogDirs(r) => r.error_counts(),
+            Self::AlterReplicaLogDirs(r) => r.error_counts(),
+            Self::ElectLeaders(r) => r.error_counts(),
+            Self::AlterPartitionReassignments(r) => r.error_counts(),
+            Self::ListPartitionReassignments(r) => r.error_counts(),
         }
     }
 
@@ -241,6 +371,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
             Self::OffsetCommit(r) => r.throttle_time_ms(),
             Self::OffsetFetch(r) => r.throttle_time_ms(),
+            Self::CreateTopics(r) => r.throttle_time_ms(),
+            Self::DeleteTopics(r) => r.throttle_time_ms(),
+            Self::CreatePartitions(r) => r.throttle_time_ms(),
+            Self::DeleteRecords(r) => r.throttle_time_ms(),
+            Self::DescribeConfigs(r) => r.throttle_time_ms(),
+            Self::IncrementalAlterConfigs(r) => r.throttle_time_ms(),
+            Self::ListConfigResources(r) => r.throttle_time_ms(),
+            Self::DescribeCluster(r) => r.throttle_time_ms(),
+            Self::DescribeLogDirs(r) => r.throttle_time_ms(),
+            Self::AlterReplicaLogDirs(r) => r.throttle_time_ms(),
+            Self::ElectLeaders(r) => r.throttle_time_ms(),
+            Self::AlterPartitionReassignments(r) => r.throttle_time_ms(),
+            Self::ListPartitionReassignments(r) => r.throttle_time_ms(),
         }
     }
 
@@ -260,6 +403,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::CreateTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DeleteTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::CreatePartitions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DeleteRecords(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeConfigs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::IncrementalAlterConfigs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ListConfigResources(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeCluster(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeLogDirs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AlterReplicaLogDirs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ElectLeaders(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AlterPartitionReassignments(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ListPartitionReassignments(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -278,6 +434,19 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
             Self::OffsetCommit(r) => r.should_client_throttle(version),
             Self::OffsetFetch(r) => r.should_client_throttle(version),
+            Self::CreateTopics(r) => r.should_client_throttle(version),
+            Self::DeleteTopics(r) => r.should_client_throttle(version),
+            Self::CreatePartitions(r) => r.should_client_throttle(version),
+            Self::DeleteRecords(r) => r.should_client_throttle(version),
+            Self::DescribeConfigs(r) => r.should_client_throttle(version),
+            Self::IncrementalAlterConfigs(r) => r.should_client_throttle(version),
+            Self::ListConfigResources(r) => r.should_client_throttle(version),
+            Self::DescribeCluster(r) => r.should_client_throttle(version),
+            Self::DescribeLogDirs(r) => r.should_client_throttle(version),
+            Self::AlterReplicaLogDirs(r) => r.should_client_throttle(version),
+            Self::ElectLeaders(r) => r.should_client_throttle(version),
+            Self::AlterPartitionReassignments(r) => r.should_client_throttle(version),
+            Self::ListPartitionReassignments(r) => r.should_client_throttle(version),
         }
     }
 
@@ -374,6 +543,58 @@ impl ConcreteResponse {
                 let response = OffsetFetchResponse::parse(readable, version)?;
                 Ok(Self::OffsetFetch(response))
             },
+            ApiKeys::CREATE_TOPICS => {
+                let response = CreateTopicsResponse::parse(readable, version)?;
+                Ok(Self::CreateTopics(response))
+            },
+            ApiKeys::DELETE_TOPICS => {
+                let response = DeleteTopicsResponse::parse(readable, version)?;
+                Ok(Self::DeleteTopics(response))
+            },
+            ApiKeys::CREATE_PARTITIONS => {
+                let response = CreatePartitionsResponse::parse(readable, version)?;
+                Ok(Self::CreatePartitions(response))
+            },
+            ApiKeys::DELETE_RECORDS => {
+                let response = DeleteRecordsResponse::parse(readable, version)?;
+                Ok(Self::DeleteRecords(response))
+            },
+            ApiKeys::DESCRIBE_CONFIGS => {
+                let response = DescribeConfigsResponse::parse(readable, version)?;
+                Ok(Self::DescribeConfigs(response))
+            },
+            ApiKeys::INCREMENTAL_ALTER_CONFIGS => {
+                let response = IncrementalAlterConfigsResponse::parse(readable, version)?;
+                Ok(Self::IncrementalAlterConfigs(response))
+            },
+            ApiKeys::LIST_CONFIG_RESOURCES => {
+                let response = ListConfigResourcesResponse::parse(readable, version)?;
+                Ok(Self::ListConfigResources(response))
+            },
+            ApiKeys::DESCRIBE_CLUSTER => {
+                let response = DescribeClusterResponse::parse(readable, version)?;
+                Ok(Self::DescribeCluster(response))
+            },
+            ApiKeys::DESCRIBE_LOG_DIRS => {
+                let response = DescribeLogDirsResponse::parse(readable, version)?;
+                Ok(Self::DescribeLogDirs(response))
+            },
+            ApiKeys::ALTER_REPLICA_LOG_DIRS => {
+                let response = AlterReplicaLogDirsResponse::parse(readable, version)?;
+                Ok(Self::AlterReplicaLogDirs(response))
+            },
+            ApiKeys::ELECT_LEADERS => {
+                let response = ElectLeadersResponse::parse(readable, version)?;
+                Ok(Self::ElectLeaders(response))
+            },
+            ApiKeys::ALTER_PARTITION_REASSIGNMENTS => {
+                let response = AlterPartitionReassignmentsResponse::parse(readable, version)?;
+                Ok(Self::AlterPartitionReassignments(response))
+            },
+            ApiKeys::LIST_PARTITION_REASSIGNMENTS => {
+                let response = ListPartitionReassignmentsResponse::parse(readable, version)?;
+                Ok(Self::ListPartitionReassignments(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -397,6 +618,19 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::CreateTopics(r) => write!(f, "{r}"),
+            Self::DeleteTopics(r) => write!(f, "{r}"),
+            Self::CreatePartitions(r) => write!(f, "{r}"),
+            Self::DeleteRecords(r) => write!(f, "{r}"),
+            Self::DescribeConfigs(r) => write!(f, "{r}"),
+            Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
+            Self::ListConfigResources(r) => write!(f, "{r}"),
+            Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeLogDirs(r) => write!(f, "{r}"),
+            Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
+            Self::ElectLeaders(r) => write!(f, "{r}"),
+            Self::AlterPartitionReassignments(r) => write!(f, "{r}"),
+            Self::ListPartitionReassignments(r) => write!(f, "{r}"),
         }
     }
 }

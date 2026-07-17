@@ -23,14 +23,27 @@
 
 use std::io;
 
+use crate::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
+use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+use crate::create_partitions_request_data::CreatePartitionsRequestData;
+use crate::create_topics_request_data::CreateTopicsRequestData;
+use crate::delete_records_request_data::DeleteRecordsRequestData;
+use crate::delete_topics_request_data::DeleteTopicsRequestData;
+use crate::describe_cluster_request_data::DescribeClusterRequestData;
+use crate::describe_configs_request_data::DescribeConfigsRequestData;
+use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
+use crate::elect_leaders_request_data::ElectLeadersRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
+use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
+use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
 use crate::offset_fetch_request_data::OffsetFetchRequestData;
@@ -39,12 +52,25 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
+use super::AlterPartitionReassignmentsRequest;
+use super::AlterReplicaLogDirsRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatRequest;
+use super::CreatePartitionsRequest;
+use super::CreateTopicsRequest;
+use super::DeleteRecordsRequest;
+use super::DeleteTopicsRequest;
+use super::DescribeClusterRequest;
+use super::DescribeConfigsRequest;
+use super::DescribeLogDirsRequest;
+use super::ElectLeadersRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
+use super::IncrementalAlterConfigsRequest;
+use super::ListConfigResourcesRequest;
 use super::ListOffsetsRequest;
+use super::ListPartitionReassignmentsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
 use super::OffsetFetchRequest;
@@ -120,6 +146,32 @@ pub enum ConcreteRequest {
     OffsetCommit(OffsetCommitRequest),
     /// An OffsetFetch request.
     OffsetFetch(OffsetFetchRequest),
+    /// A CreateTopics request.
+    CreateTopics(CreateTopicsRequest),
+    /// A DeleteTopics request.
+    DeleteTopics(DeleteTopicsRequest),
+    /// A CreatePartitions request.
+    CreatePartitions(CreatePartitionsRequest),
+    /// A DeleteRecords request.
+    DeleteRecords(DeleteRecordsRequest),
+    /// A DescribeConfigs request.
+    DescribeConfigs(DescribeConfigsRequest),
+    /// An IncrementalAlterConfigs request.
+    IncrementalAlterConfigs(IncrementalAlterConfigsRequest),
+    /// A ListConfigResources request.
+    ListConfigResources(ListConfigResourcesRequest),
+    /// A DescribeCluster request.
+    DescribeCluster(DescribeClusterRequest),
+    /// A DescribeLogDirs request.
+    DescribeLogDirs(DescribeLogDirsRequest),
+    /// An AlterReplicaLogDirs request.
+    AlterReplicaLogDirs(AlterReplicaLogDirsRequest),
+    /// An ElectLeaders request.
+    ElectLeaders(ElectLeadersRequest),
+    /// An AlterPartitionReassignments request.
+    AlterPartitionReassignments(AlterPartitionReassignmentsRequest),
+    /// A ListPartitionReassignments request.
+    ListPartitionReassignments(ListPartitionReassignmentsRequest),
 }
 
 impl ConcreteRequest {
@@ -138,6 +190,19 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
+            Self::CreateTopics(r) => r.version(),
+            Self::DeleteTopics(r) => r.version(),
+            Self::CreatePartitions(r) => r.version(),
+            Self::DeleteRecords(r) => r.version(),
+            Self::DescribeConfigs(r) => r.version(),
+            Self::IncrementalAlterConfigs(r) => r.version(),
+            Self::ListConfigResources(r) => r.version(),
+            Self::DescribeCluster(r) => r.version(),
+            Self::DescribeLogDirs(r) => r.version(),
+            Self::AlterReplicaLogDirs(r) => r.version(),
+            Self::ElectLeaders(r) => r.version(),
+            Self::AlterPartitionReassignments(r) => r.version(),
+            Self::ListPartitionReassignments(r) => r.version(),
         }
     }
 
@@ -156,6 +221,19 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::CreateTopics(r) => r.api_key(),
+            Self::DeleteTopics(r) => r.api_key(),
+            Self::CreatePartitions(r) => r.api_key(),
+            Self::DeleteRecords(r) => r.api_key(),
+            Self::DescribeConfigs(r) => r.api_key(),
+            Self::IncrementalAlterConfigs(r) => r.api_key(),
+            Self::ListConfigResources(r) => r.api_key(),
+            Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeLogDirs(r) => r.api_key(),
+            Self::AlterReplicaLogDirs(r) => r.api_key(),
+            Self::ElectLeaders(r) => r.api_key(),
+            Self::AlterPartitionReassignments(r) => r.api_key(),
+            Self::ListPartitionReassignments(r) => r.api_key(),
         }
     }
 
@@ -180,6 +258,19 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreatePartitions(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteRecords(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::IncrementalAlterConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListConfigResources(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterReplicaLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ElectLeaders(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -250,6 +341,45 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::CreateTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreatePartitions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteRecords(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::IncrementalAlterConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListConfigResources(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeCluster(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterReplicaLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ElectLeaders(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -275,6 +405,19 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreatePartitions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteRecords(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -311,6 +454,19 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreatePartitions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteRecords(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::IncrementalAlterConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListConfigResources(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterReplicaLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ElectLeaders(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -385,6 +541,67 @@ impl ConcreteRequest {
                 let data = OffsetFetchRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
             },
+            ApiKeys::CREATE_TOPICS => {
+                let data = CreateTopicsRequestData::read(readable, api_version)?;
+                Ok(Self::CreateTopics(CreateTopicsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_TOPICS => {
+                let data = DeleteTopicsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteTopics(DeleteTopicsRequest::new(data, api_version)))
+            },
+            ApiKeys::CREATE_PARTITIONS => {
+                let data = CreatePartitionsRequestData::read(readable, api_version)?;
+                Ok(Self::CreatePartitions(CreatePartitionsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_RECORDS => {
+                let data = DeleteRecordsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteRecords(DeleteRecordsRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_CONFIGS => {
+                let data = DescribeConfigsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeConfigs(DescribeConfigsRequest::new(data, api_version)))
+            },
+            ApiKeys::INCREMENTAL_ALTER_CONFIGS => {
+                let data = IncrementalAlterConfigsRequestData::read(readable, api_version)?;
+                Ok(Self::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::LIST_CONFIG_RESOURCES => {
+                let data = ListConfigResourcesRequestData::read(readable, api_version)?;
+                Ok(Self::ListConfigResources(ListConfigResourcesRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_CLUSTER => {
+                let data = DescribeClusterRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeCluster(DescribeClusterRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_LOG_DIRS => {
+                let data = DescribeLogDirsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeLogDirs(DescribeLogDirsRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_REPLICA_LOG_DIRS => {
+                let data = AlterReplicaLogDirsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, api_version)))
+            },
+            ApiKeys::ELECT_LEADERS => {
+                let data = ElectLeadersRequestData::read(readable, api_version)?;
+                Ok(Self::ElectLeaders(ElectLeadersRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_PARTITION_REASSIGNMENTS => {
+                let data = AlterPartitionReassignmentsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::LIST_PARTITION_REASSIGNMENTS => {
+                let data = ListPartitionReassignmentsRequestData::read(readable, api_version)?;
+                Ok(Self::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -408,6 +625,19 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::CreateTopics(r) => write!(f, "{r}"),
+            Self::DeleteTopics(r) => write!(f, "{r}"),
+            Self::CreatePartitions(r) => write!(f, "{r}"),
+            Self::DeleteRecords(r) => write!(f, "{r}"),
+            Self::DescribeConfigs(r) => write!(f, "{r}"),
+            Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
+            Self::ListConfigResources(r) => write!(f, "{r}"),
+            Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeLogDirs(r) => write!(f, "{r}"),
+            Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
+            Self::ElectLeaders(r) => write!(f, "{r}"),
+            Self::AlterPartitionReassignments(r) => write!(f, "{r}"),
+            Self::ListPartitionReassignments(r) => write!(f, "{r}"),
         }
     }
 }

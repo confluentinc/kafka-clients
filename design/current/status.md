@@ -1,4 +1,18 @@
-# Current Status: Milestone 3 Complete (SSL + SASL Authentication)
+# Current Status: Milestone 11 (AdminClient) — Tier 1 Complete
+
+> **Current state (2026-07-17):** Milestone 11 AdminClient **Tier 1 is fully
+> complete** (Phases 1–5: topics CRUD, partitions & records, cluster & configs,
+> log dirs, elections/reassignments/offsets — all Rust core + unit + real-broker
+> integration tests, 2355 lib tests passing). See the "Milestone 11 — AdminClient"
+> sections below for the per-phase detail. Tier 2 (consumer groups & offsets) is
+> next. Scope for this task is **Rust core only** — C FFI / Python bindings are
+> deferred to a separate future task.
+>
+> The sections immediately below (Milestone 1 / Milestone 3) are **historical and
+> stale** — they predate the Producer, Consumer and Admin milestones and are left
+> as-is rather than rewritten with unverified detail.
+
+## (Historical) Milestone 3 Complete (SSL + SASL Authentication)
 
 Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and SASL PLAIN authentication fully implemented with integration tests against real Kafka 4.2.0 broker. 454+ unit tests + 16 integration tests passing.
 
@@ -127,3 +141,212 @@ Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and
 - Layer 3: `kafka/clients/src/main/java/org/apache/kafka/common/requests/`
 - Layer 4-5: `kafka/clients/src/main/java/org/apache/kafka/common/network/`
 - Layer 6: `kafka/clients/src/main/java/org/apache/kafka/clients/`
+
+---
+
+# Milestone 11 — AdminClient (Tier 1 Phase 1) ✓ (2026-07-16)
+
+> Note: the sections above this line are stale (they predate the Producer and
+> Consumer milestones). This section documents only the Milestone 11 Tier 1
+> Phase 1 delta. Scope for this task is **Rust core + tests only — no C FFI /
+> Python bindings** (deferred to a separate future task; see
+> `design/history/Milestone-11/PLAN.md` scope banner). Plan and phase
+> breakdown for all of Tiers 1–3 live there.
+
+## Phase 1 — Foundation + Topics CRUD ✓
+
+Translated `org.apache.kafka.clients.admin` foundation and the four topic-CRUD
+RPCs, Rust core + unit tests + real-broker integration tests, all green.
+
+- **`Admin` trait + `new_admin_client()` factory** (`src/admin/mod.rs`): per-RPC
+  methods are plain sync `fn` returning a `*Result` holding one `KafkaFuture<T>`
+  per key; only `close()` is `async fn` (the sole blocking-in-Java method). No
+  `#[async_trait]` bleed into per-RPC methods or internal types. Design rules
+  captured in `.claude/rules/admin-client.md`.
+- **Dispatch engine** (`src/admin/internals/`): `Call` + `NodeProvider` retry
+  engine (`call.rs`), `AdminMetadataManager` (`admin_metadata_manager.rs`),
+  `AdminUtils` (`admin_utils.rs`), and a single-`tokio::spawn` generic
+  `AdminClientRunnable<C: KafkaClient>` background task (`admin_client_runnable.rs`),
+  mirroring the producer's `Sender<C>`. Reuses `NetworkClient`/`KafkaClient`.
+- **`KafkaAdminClient`** (`kafka_admin_client.rs`), **`MockAdminClient`**
+  (`mock_admin_client.rs`, faithful in-memory), **`AdminClientConfig`**.
+- **RPCs**: `create_topics`, `delete_topics`, `list_topics`, `describe_topics`
+  (both by-name and by-id, via the Metadata-API path — see accepted deviations).
+- **POJOs / Options / Results**: `NewTopic`, `TopicListing`, `TopicDescription`,
+  `Config`, `ConfigEntry` (+ `ConfigSource`/`ConfigSynonym`/`ConfigType`), and
+  `{Create,Delete,List,Describe}Topics{Options,Result}`.
+- **New common types**: `common::acl::{AclOperation, AclPermissionType}`,
+  `common::TopicCollection`, `common::TopicPartitionInfo`,
+  `common::utils::{from_32_bit_field, to_32_bit_field}`; `KafkaFuture` extended
+  to be completable (`KafkaFutureImpl<T>` + `all_of`/`then_apply`/`then_apply_try`/
+  `join_map`); `KafkaError::ThrottlingQuotaExceeded` added (quota carry-forward).
+- **Wire wrappers**: `CreateTopics`/`DeleteTopics` request+response (new
+  `ConcreteRequest`/`ConcreteResponse` enum variants; `Metadata` reused for
+  list/describe).
+
+### Accepted deviations (documented, Critic-approved)
+- `describe_topics` uses the **Metadata-API fallback** (Java's
+  `generateDescribeTopicsCallWithMetadataApi` / `handleDescribeTopicsByIds`),
+  not `DescribeTopicPartitions` cursor pagination — behavior-faithful for both
+  by-name and by-id.
+- `TopicDescription`'s `PartialEq` excludes `topic_id` — matches Java's `equals`.
+- id-XOR-name modeled as a closed enum (`TopicCollection`) — Java's input is
+  already a sealed id-XOR-name type; no lost behavior.
+- `KafkaFuture::join_map` is a new combinator (no Java equivalent) required by
+  the get-driven future model; error propagation matches `all_of`.
+
+### Tests
+- **Rust lib suite: 2117 passing** (24 in `admin::kafka_admin_client`).
+- **Integration**: `tests/integration/admin_topics_test.rs` — 4/4 green against
+  a real Kafka 4.2.0 broker via testcontainers (create→list/describe; describe
+  nonexistent → `UNKNOWN_TOPIC_OR_PARTITION`; delete→gone; partition/RF
+  round-trip).
+- Translated `KafkaAdminClientTest` slices incl. describe-by-ids, quota-retry
+  (WhenEnabled / DontRetryWhenDisabled, create+delete), NOT_CONTROLLER retry,
+  partial-response, retry-backoff — with exact error-message assertions.
+- `cargo build` / `cargo xtask format-check` / `cargo xtask lint`: clean.
+- DoD #10 (hot-path allocation audit) N/A for Admin (batch/administrative, not
+  per-record). One Critic review round: 7 findings (0 blocker, 4 should-fix, 3
+  minor), all resolved; see `design/history/Milestone-11/Phase-1/COMMENTS.DONE.1.md`.
+
+## Phase 2 — Partitions & records ✓ (2026-07-17)
+
+Translated `create_partitions` and `delete_records`, Rust core + unit tests +
+real-broker integration tests, all green.
+
+- **`create_partitions`** (`CreatePartitionsRequest`, plain `Call` on the
+  controller) and **`delete_records`**.
+- **`AdminApiDriver` engine pulled forward from Phase 5**: Java's
+  `delete_records` genuinely dispatches via `AdminApiDriver` +
+  `PartitionLeaderStrategy` (not a plain `Call`), so the multi-step
+  lookup→fulfillment dispatch engine was built now: `internals/{admin_api_driver,
+  admin_api_handler, admin_api_lookup_strategy, admin_api_future,
+  api_request_scope, partition_leader_strategy, partition_leader_cache,
+  delete_records_handler}.rs`, plus `Call::set_maybe_retry_fn`/`MaybeRetryOutcome`
+  and `NodeProvider::ConstantNodeId(i32)`. Runs on the existing single bg task.
+  **This engine now also backs Tier 1 Phase 5 and all of Tier 2's
+  CoordinatorStrategy / Tier 3.**
+- **POJOs / Options / Results**: `NewPartitions`, `RecordsToDelete`,
+  `DeletedRecords`, `{CreatePartitions,DeleteRecords}{Options,Result}`.
+- **Wire wrappers**: `CreatePartitions`/`DeleteRecords` request+response.
+
+### Accepted deviations (documented, Critic-approved)
+- `ApiRequestScope` modeled as a closed enum (`SingleLookup | Fulfillment`) vs
+  Java's open interface — sufficient for current RPCs; revisit at Tier 2's
+  `CoordinatorStrategy` if a per-group scope key is needed.
+- `Batched`/`Unbatched` handler split folded into one shape (batching preserved
+  for `delete_records`).
+- `testDeleteRecordsMultipleSends`: substituted a per-broker fatal partition
+  error for Java's SASL-auth connection error (Rust `MockClient::authentication_error`
+  always returns `None`); same multi-send code path exercised.
+- Java's 917-line `AdminApiDriverTest` not translated wholesale; the driver's
+  two defining branches (fulfillment→unmap→re-lookup, disconnect→retry-lookup)
+  are covered by dedicated driver-level unit tests added in the fix cycle.
+
+### Tests
+- **Rust lib suite: 2179 passing.**
+- **Integration**: `tests/integration/admin_partitions_records_test.rs` — 5/5
+  green against a real broker (create-partitions increases count; decreasing
+  fails; delete-records advances low-water-mark; offset-out-of-range fails;
+  nonexistent-partition fails).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 1 should-fix (untested driver branches), resolved in fix cycle then
+  re-verified clean; see `design/history/Milestone-11/Phase-2/COMMENTS.DONE.1.md`.
+
+## Phase 3 — Cluster & configs ✓ (2026-07-17)
+
+Translated `describe_cluster`, `describe_configs`, `incremental_alter_configs`,
+`list_config_resources`, Rust core + unit tests + real-broker integration
+tests, all green.
+
+- **`describe_cluster`** (`DescribeClusterRequest`, `NodeProvider::LeastLoadedBrokerOrActiveKController`;
+  `authorized_operations` decoded via `from_32_bit_field` + `AclOperation`,
+  reused from Phase 1).
+- **`describe_configs`** and **`incremental_alter_configs`** with Java's
+  **per-resource-type routing**: broker / broker-logger resources route to that
+  specific broker node, topic/other to the controller / least-loaded node.
+- **`list_config_resources`** (`ListConfigResourcesRequest`) — this wire wrapper
+  is reused later by Tier 3's `listClientMetricsResources`.
+- **New types**: `common::config::ConfigResource` (+ its resource-type enum),
+  `AlterConfigOp` (+ `OpType`), `Describe{Cluster,Configs}{Options,Result}`,
+  `AlterConfigsOptions`/`AlterConfigsResult`, `ListConfigResources{Options,Result}`
+  (reusing Phase 1's `Config`/`ConfigEntry`).
+- **Wire wrappers**: `DescribeCluster`, `DescribeConfigs`, `IncrementalAlterConfigs`,
+  `ListConfigResources` request+response.
+
+### Tests
+- **Rust lib suite: 2246 passing.**
+- **Integration**: `tests/integration/admin_cluster_configs_test.rs` — 5/5 green
+  against a real broker (describe-cluster nodes/controller/id; describe-configs
+  broker + topic; list-config-resources; incremental-alter-configs SET+DELETE).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 2 should-fix (both `MockAdminClient` — `describe_cluster` timeout never
+  decremented; three config methods wrongly stubbed as "unsupported" when Java's
+  mock fully implements them), resolved in fix cycle then re-verified clean.
+  `admin-client.md` §9 clarified (mock-unsupported rule applies only to methods
+  Java's own mock leaves unimplemented). See
+  `design/history/Milestone-11/Phase-3/COMMENTS.DONE.1.md`.
+
+## Phase 4 — Log dirs ✓ (2026-07-17)
+
+Translated `describe_log_dirs`, `alter_replica_log_dirs`, `describe_replica_log_dirs`,
+Rust core + unit tests + real-broker integration tests, all green.
+
+- **`describe_log_dirs`** (`DescribeLogDirsRequest`, per-broker fan-out — one
+  `Call` per requested broker), **`alter_replica_log_dirs`**
+  (`AlterReplicaLogDirsRequest`, replica→logdir assignments routed per
+  destination broker), **`describe_replica_log_dirs`** (built on
+  `DescribeLogDirsRequest`, reshaped into `ReplicaLogDirInfo` current/future dir).
+- **New types**: `common::TopicPartitionReplica`, `LogDirDescription` +
+  `ReplicaInfo`, `Describe{LogDirs,ReplicaLogDirs}Options`/`Result`,
+  `AlterReplicaLogDirsOptions`/`Result`. Wire wrappers: `DescribeLogDirs`,
+  `AlterReplicaLogDirs` request+response.
+
+### Tests
+- **Rust lib suite: 2289 passing.**
+- **Integration**: `tests/integration/admin_log_dirs_test.rs` — 4/4 green against
+  a real broker, including a genuine **cross-directory replica move** exercised
+  via a dedicated broker fixture with two `KAFKA_LOG_DIRS` (not a documented
+  limitation — a real move).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: **clean on first pass — no fix cycle needed.** See
+  `design/history/Milestone-11/Phase-4/COMMENTS.DONE.1.md`.
+
+## Phase 5 — Elections, reassignment, offsets ✓ (2026-07-17)
+
+Translated `elect_leaders`, `alter_partition_reassignments`,
+`list_partition_reassignments`, `list_offsets`, Rust core + unit tests +
+real-broker integration tests, all green. **This completes Tier 1.**
+
+- **`elect_leaders`** (`ElectLeadersRequest`, controller `Call`),
+  **`alter_partition_reassignments`** / **`list_partition_reassignments`**
+  (controller `Call`, cancel-via-`Optional.empty` preserved), and **`list_offsets`**
+  — the canonical `AdminApiDriver` + `PartitionLeaderStrategy` user, wired via a
+  new `internals::ListOffsetsHandler` (lookup partition leader → per-leader
+  `ListOffsetsRequest` fulfillment, leader-unmap + re-lookup on stale-leader).
+- **Reuse (DoD #6)**: the existing Consumer-side `ListOffsetsRequest`/`Response`
+  wire wrapper was reused, not duplicated. New: `common::ElectionType`,
+  `admin::OffsetSpec`, `NewPartitionReassignment`, `PartitionReassignment`, the
+  Options/Result types; wire wrappers `ElectLeaders`,
+  `AlterPartitionReassignments`, `ListPartitionReassignments`.
+
+### Tests
+- **Rust lib suite: 2355 passing.**
+- **Integration**: `tests/integration/admin_elections_reassignments_offsets_test.rs`
+  — 3/3 green against a real broker, including a genuine **cross-broker partition
+  reassignment** on a real 3-broker cluster (elect-preferred-leaders;
+  list-offsets earliest/latest/max-timestamp; alter+list reassignments).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: clean (2 LOW observations, both adjudicated non-blocking). See
+  `design/history/Milestone-11/Phase-5/COMMENTS.DONE.1.md`.
+
+## Tier 1 — COMPLETE ✓ (Phases 1–5)
+
+All of Milestone 11 Tier 1 is implemented, tested (unit + real-broker
+integration), and Critic-clean: **topics CRUD; partitions & records; cluster &
+configs; log dirs; elections, reassignments & offsets.** The two admin dispatch
+patterns are both in place and exercised — the plain `Call`/`NodeProvider` retry
+engine and the multi-step `AdminApiDriver` + `PartitionLeaderStrategy` lookup→
+fulfillment engine. Next: **Tier 2 (consumer groups & offsets)**, starting with
+Phase 1 "Group listing & describe" (which lands the `ConsumerProtocol` /
+`consumer-threading.md` §20 amendment prerequisite).
