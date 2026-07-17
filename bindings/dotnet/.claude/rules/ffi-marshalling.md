@@ -131,18 +131,50 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
 
 ## 2. Handle ownership & lifecycle (`SafeHandle`)
 
-**Decision:** Two tiers. **Long-lived** handles (producer, properties) → a
-`SafeHandle` that frees exactly once. **Transient** per-message handles (future /
-metadata / error) → read-and-free promptly on the pump; do **not** wrap them (a
-finalizable object per record is hot-path waste).
+**Decision:** Four ownership categories — producer uses (1)+(2); the consumer
+adds (3)+(4):
 
-| Handle | Created by | Freed by (not consumed elsewhere) |
+1. **Client / config** (producer, consumer, properties) → a `SafeHandle` that
+   frees exactly once (the client's blocking destroy joins its background task
+   first).
+2. **Flat transient** (future / metadata / error) → read-and-free promptly,
+   **not** wrapped (a finalizable object per op is hot-path waste).
+3. **Owned result / container** (the consumer poll batch + every query-result
+   list/map) → the caller frees once after reading; a container is a
+   *borrow-root* whose `_destroy` invalidates the elements/bytes borrowed from it.
+4. **Borrowed view** (`ConsumerRecord`, `Node`, every `_get` element) → **never
+   freed** by the binding.
+
+| Handle | Category | Created by | Freed by |
+|---|---|---|---|
+| `Producer_t` | 1 — client (`SafeHandle`) | `KafkaProducer_new` / `MockProducer_new` | `ReleaseHandle → Producer_destroy` (via `Dispose`) |
+| `ProducerProperties_t` | 1 — config (`SafeHandle`, short) | `ProducerProperties_new` / `_from_configs` | the binding, after `KafkaProducer_new` |
+| `FutureRecordMetadata_t` | 2 — flat transient | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (`get_all` doesn't consume) |
+| `RecordMetadata_t` | 2 — flat transient | `_get` / `_get_all` | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
+| `KafkaError_t` | 2 — flat transient | any `out_error` slot | the reader: read accessors, then `_destroy` |
+
+**Consumer handles** (category per the cross-cutting rule below):
+
+| Handle | Category | Freed by |
 |---|---|---|
-| `Producer_t` | `KafkaProducer_new` / `MockProducer_new` | `SafeProducerHandle.ReleaseHandle → Producer_destroy` (via `Dispose`) |
-| `ProducerProperties_t` | `ProducerProperties_new` / `_from_configs` | the binding, after `KafkaProducer_new` (not consumed by it) |
-| `FutureRecordMetadata_t` | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (not consumed by `get_all`) |
-| `RecordMetadata_t` | `_get` / `_get_all` | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
-| `KafkaError_t` | any `out_error` slot | the reader: read accessors, then `_destroy` |
+| `Consumer_t` | 1 — client (`SafeHandle`) | `Consumer_destroy` via `Dispose` (blocking; joins the bg task first, §7) |
+| `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
+| `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
+| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; freed per the §5.4 lifetime decision (see Rule) |
+| `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
+| `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
+
+**Note — classify by the accessor, not the type.** The returning function's
+const-ness decides, not the type name:
+
+  - `const *` return (or a type with no `_destroy` of its own) → **borrowed**;
+    never free it (Category 4).
+  - non-`const` return with a `_destroy` → **owned**; free it once after use
+    (Category 1/3).
+  - the same type can be owned in one call and borrowed in another — e.g.
+    `PartitionInfoList_t` is owned from `partitions_for` but borrowed as a
+    `TopicPartitionInfoMap` value; `OffsetAndMetadata_t` is a borrowed `OffsetMap`
+    element.
 
 **Rule:**
 
@@ -160,7 +192,22 @@ finalizable object per record is hot-path waste).
   - **Prefer `Dispose` over the finalizer:** `Producer_destroy` blocks (drops the
     runtime, waiting for the Sender), which is wrong on the finalizer thread.
     `Dispose` flushes/closes and joins the pump first; guard use-after-dispose
-    with `ObjectDisposedException`.
+    with `ObjectDisposedException`. `Consumer_destroy` is the same (joins the bg
+    task first).
+  - **Category 3 — owned result / container.** On the **caller's** thread (not the
+    pump), after a query or poll: read/iterate, then `_destroy` the root exactly
+    once. A **container is a borrow-root** — its elements and any key/value/topic/
+    string bytes borrow into it (§3, §5.4), so it must outlive every borrow taken
+    from it. **Copy-out vs keep-alive is an open design decision (§5.4), not fixed
+    here:** either copy each element/byte into a managed type then `_destroy`
+    (copy-out), or keep the root alive under a managed wrapper exposing spans and
+    `_destroy` at `Dispose` (keep-alive). Metadata collections are trivially
+    copy-out (small); only the byte-owning `ConsumerRecords_t` batch makes the
+    trade-off consequential — decide it in §5.4.
+  - **Category 4 — borrowed view.** `ConsumerRecord_t`, `Node_t`, `_get` elements,
+    borrowed strings have **no `_destroy`** — never free them, and never use them
+    after their owning container (3) is destroyed. Represent as a transient cursor
+    over the parent; don't let it escape the parent's lifetime.
 
 **Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
 through exceptions; `IsInvalid == zero` matches our null-safe destroy. This is
@@ -178,6 +225,13 @@ read-and-freed instead (their lifetime is one pump cycle). The blocking
     slots, or a handle `RecordMetadata_copy` already freed).
   - Relying on the finalizer for the producer; destroying it before joining the
     pump (use-after-free).
+  - Freeing a **borrowed** view (Category 4: `ConsumerRecord`, `Node`, a `_get`
+    element, a borrowed string) — double-free / UAF; only the owning container is
+    freed.
+  - Destroying a **borrow-root** (`ConsumerRecords_t`, a list/map) while a borrowed
+    element or byte slice from it is still in use (§5.4) — use-after-free.
+  - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
+    map/list), or freeing it twice.
 
 **Tests required:**
 
@@ -185,6 +239,13 @@ read-and-freed instead (their lifetime is one pump cycle). The blocking
     count returns to baseline (covers `_destroy_all`).
   - Double-`Dispose` is safe; a call after `Dispose` throws
     `ObjectDisposedException`.
+  - Poll a batch, read records, then dispose — no leak; a borrowed key/value/topic
+    used after the batch is gone is prevented (copy-out) or kept valid by the
+    wrapper (keep-alive), per §5.4.
+  - Each query API (`committed`/`assignment`/`partitions_for`/…) frees its owned
+    result exactly once after marshalling; borrowed elements are never freed.
+  - Create/close many consumers — no leak; `Dispose` joins the bg task before
+    `Consumer_destroy`.
 
 ---
 

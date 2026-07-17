@@ -288,7 +288,7 @@ path had no such problem (bytes go *in*, a small handle comes back). Here the cr
 decision is how .NET surfaces those **borrowed slices**, which want to become
 owned `byte[]` / `ReadOnlyMemory<byte>`:
 
-- **Copy-out (default)** — copy each key/value into a managed array before
+- **Copy-out** — copy each key/value into a managed array before
   `ConsumerRecords_destroy`. Simple, safe, one copy per record (matches Java's own
   allocation behavior).
 - **Keep-alive spans** — hold the `ConsumerRecords_t` handle alive and hand out
