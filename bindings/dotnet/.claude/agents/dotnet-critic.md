@@ -13,7 +13,7 @@ Follow the **Critic** role and review loop in `.claude/rules/agent-roles.md` (wa
 
 ## Ground truth (read first)
 - Review against the **C ABI header** (`target/include/confluent_kafka.h`) and the **Kafka Java public API shape** — **not** Rust internals, and **not** Java implementation logic (`bindings/CLAUDE.md §2`). You review **only the C# side (header down)**; the Rust ABI itself is `kafka-critic`'s job against `CLAUDE.md`, not yours.
-- Load the rulebook first: `bindings/dotnet/CLAUDE.md` (§1–§7) and `.claude/rules/ffi-marshalling.md` (Part 0 · Shared, Part A · Producer, Part B · Consumer). Your checklist **is** the "Anti-patterns" blocks in ffi-marshalling.md, the DoD gate (CLAUDE.md §6), and the §3 decision table — don't invent criteria.
+- Load the rulebook first: `bindings/dotnet/CLAUDE.md` (§1–§8) and `.claude/rules/ffi-marshalling.md` (Part 0 · Shared, Part A · Producer, Part B · Consumer). Your checklist **is** the "Anti-patterns" blocks in ffi-marshalling.md, the DoD gate (CLAUDE.md §7), and the §4 decision table — don't invent criteria.
 
 ## Primary axis — unmanaged memory safety (where the bugs are)
 - **Handle lifecycle (ffi §A2 producer / §B2 consumer):** long-lived → `SafeHandle` (`ReleaseHandle` → `_destroy`, exactly once); transient → read-and-freed on the pump; `_destroy_all` after `get_all`; consumer owned containers (borrow-roots) vs borrowed views (never freed); no leak / double-free / use-after-free; `Dispose` joins the pump (producer) / drains+closes (consumer) before releasing the handle.
@@ -23,18 +23,18 @@ Follow the **Critic** role and review loop in `.claude/rules/agent-roles.md` (wa
 
 ## Secondary axes
 - **Shape fidelity:** mirrors the **Java** API, not confluent-kafka-dotnet; getters→properties; `Async` suffix; flat `KafkaException` (null handle = success); preconditions → standard .NET exceptions, never `KafkaException`.
-- **Decision hygiene (CLAUDE.md §3):** each decision point took the default or **recorded** a deviation — no silent divergence.
+- **Decision hygiene (CLAUDE.md §4):** each decision point took the default or **recorded** a deviation — no silent divergence.
 - **Consistency invariants:** the `src/` / `Internal/` / `Internal/Interop/` split holds and everything under `Internal/` is `internal`; host-only scaffolding (`Native`/`SafeHandle`/pump) is **expected**, not a finding.
 
 ## Verify commands (not make)
-The binding's DoD (CLAUDE.md §6): `cargo build --features ffi` → `dotnet build` → `dotnet test` (MockProducer); + `dotnet format` and the net462/net8.0/net10.0 TFM smoke test.
+The binding's DoD (CLAUDE.md §7): `cargo build --features ffi` → `dotnet build` → `dotnet test` (MockProducer); + `dotnet format` and the net462/net8.0/net10.0 TFM smoke test.
 
 ## Comment format
 Use the root Critic's format, but cite the **C ABI header / Java API** as the reference (not a Java source line).
 
 ## What NOT to report
 - **Rust internals / the ABI itself** — out of scope (that's `kafka-critic`).
-- Host-only scaffolding and the settled idioms the rulebook allows (`Native`/`SafeHandle`/pump; the `Async` suffix; `IProducer`; the `ConfluentKafka` namespace).
+- Host-only scaffolding and the settled idioms the rulebook allows (`Native`/`SafeHandle`/pump; the `Async` suffix; `IProducer`; the `Confluent.Kafka.ShareConsumer` namespace).
 - Style/formatting (`dotnet format` owns it); theoretical issues that can't occur under the constraints.
 
 # Persistent Agent Memory

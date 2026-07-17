@@ -11,15 +11,7 @@ rulebooks: root `CLAUDE.md` → `bindings/CLAUDE.md` → this file. Heavy deep-d
 live in `.claude/rules/*.md` and are read **on demand** — this rulebook links
 them explicitly (never rely on nested auto-loading).
 
-**Status (incremental guide).** No .NET code exists yet — this rulebook precedes
-and directs it; the C# signatures below are the *target*, not current code. The
-**rules & decisions** here are durable, but the **status markers are
-point-in-time and must be refreshed as the binding lands** — namely: this line,
-§1 *What's real* + the producer-parity table, and the file map's *(intended)*
-tags. Update those as code/ABI arrives; leave the shape, decisions, and boundary
-rules unless a decision actually changes.
-
-**The one law:** the binding restores the Java **shape** and holds **no Kafka
+**The one law:** the binding restores the Java **shape** in C# **idiom** and holds **no Kafka
 logic** — batching, partitioning, retries, offsets all live once, in the Rust
 core. So it's **not a 1:1 mirror** — expect host-only types with no Java/C-ABI
 counterpart: `NativeMethods`, `SafeHandle` subclasses, `IDisposable`, marshalling
@@ -51,49 +43,46 @@ producer.SendAsync(record)  ──►  Task<RecordMetadata>
    Rust   Producer::send(ProducerRecord) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
-**What's real.** The C ABI exposes the **producer** (~30 fns across Producer /
-Properties / Future / RecordMetadata / KafkaError / MockProducer families;
-`src/ffi/producer.rs`) **and the KIP-848 consumer** (~130 fns across Consumer /
-ConsumerProperties / ConsumerRecord(s) / TopicPartition(List) / OffsetAndMetadata
-/ OffsetAndTimestamp / ConsumerGroupMetadata / PartitionInfo / MockConsumer + map
-helpers; `src/ffi/consumer.rs`) — both with sync **and** `_async`/callback
+**Status:** The C ABI exposes the **producer** and **consumer** 
 variants. Admin / transactions are **not** exposed yet. Source of truth for the
 surface = `src/ffi/*.rs` + `cbindgen.toml` (the header is generated, not checked
 in).
 
-**To full producer parity** — Java producer features not yet in the sketch (each
-tracked where its decision lives; the *Unblocked by* tag routes the work):
+---
 
-| Gap (vs Java) | Unblocked by | Tracked in |
-|---|---|---|
-| typed `Producer<TKey,TValue>` + serializers | **.NET-side** (serialize above the bytes ABI) | §3 Serializers |
-| `ProducerRecord.Headers` | **ABI** (struct has no headers field) | §2 clipped note |
-| `RecordMetadata` serialized-size / `Has*` accessors | **ABI** accessors | §2 clipped note |
-| `MockProducer.History()` (full record list) | **ABI** (only a count today) | §2 clipped note |
-| interceptors | **.NET-side**, deferred | §3 Interceptors |
+## 2 · Project layout
 
-The **consumer** ABI has now landed (Mode A — build the .NET surface directly,
-§5.2; its receive-path ownership decision is §5.4). Admin / transactions are
-still separate *families* that need the C ABI first (Mode B, §5.3).
+**Intended file map** — one project rooted at `Confluent.Kafka.ShareConsumer/`
+(under `bindings/dotnet/`, named for the package id — §4), split by visibility so
+the public *shape* is auditable at a glance and the unsafe boundary is
+quarantined:
 
-**Intended file map** — split by visibility, so the public *shape* is auditable
-at a glance and the unsafe boundary is quarantined. (Folders are organizational;
-C# accessibility is still the `internal` keyword + the assembly.) Every type under
-`Internal/` is explicitly `internal` (and `sealed` where practical); `public` is
-reserved for `src/` — wanting a type under `Internal/` to be `public` is the
-signal it belongs in `src/`.
+```
+bindings/dotnet/
+└─ Confluent.Kafka.ShareConsumer/     ← the project (named for the package id, §4)
+   ├─ src/                            ← public API
+   │  └─ Internal/                    ← internal scaffolding
+   │     └─ Interop/                  ← P/Invoke boundary — unsafe lives only here
+   └─ tests/                          ← Mock* unit tests
+```
 
-- `src/` — **all public API**, whatever the C# kind: the client types *and*
-  supporting value types / enums (`ProducerRecord`, `RecordMetadata`, `Headers`,
-  `TopicPartition`, later `ConsumerRecord` / `OffsetAndMetadata` / enums). If a
-  user can name it, it lives here.
-- `src/Internal/` — **internal** managed scaffolding (`ConfluentKafka.Internal`):
-  the async-completion bridge (the consumer's callback→`TaskCompletionSource`
-  adapter; the producer's pull-pump *or* push adapter — open, ffi §A7), config →
-  properties marshalling.
+(Folders are organizational; C# accessibility is still the `internal` keyword +
+the assembly.) Every type under `Internal/` is explicitly `internal` (and
+`sealed` where practical); `public` is reserved for `src/` — wanting a type under
+`Internal/` to be `public` is the signal it belongs in `src/`.
+
+- `src/` — **all public API** (namespace `Confluent.Kafka.ShareConsumer`),
+  whatever the C# kind: the client types *and* supporting value types / enums
+  (`ProducerRecord`, `RecordMetadata`, `Headers`, `TopicPartition`, later
+  `ConsumerRecord` / `OffsetAndMetadata` / enums). If a user can name it, it
+  lives here.
+- `src/Internal/` — **internal** managed scaffolding
+  (`Confluent.Kafka.ShareConsumer.Internal`): the async-completion bridge (the
+  consumer's callback→`TaskCompletionSource` adapter; the producer's pull-pump
+  *or* push adapter — open, ffi §A7), config → properties marshalling.
 - `src/Internal/Interop/` — the **P/Invoke boundary**
-  (`ConfluentKafka.Internal.Interop`): the `Native` `[DllImport]` class,
-  `SafeHandle`s, `Utf8` helpers, callback delegates, and the blittable
+  (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `Native` `[DllImport]`
+  class, `SafeHandle`s, `Utf8` helpers, callback delegates, and the blittable
   `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
   interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
   with `ffi-marshalling.md`.
@@ -102,13 +91,13 @@ signal it belongs in `src/`.
 
 ---
 
-## 2 · The target: the .NET API shape
+## 3 · The target: the .NET API shape
 
 Mirror the **Java** client in idiomatic C#. The producer surface we're building
-toward (bytes-only interim per the serializer decision in §3):
+toward (bytes-only interim per the serializer decision in §4):
 
 ```csharp
-namespace ConfluentKafka;   // NOT Confluent.Kafka — see §3
+namespace Confluent.Kafka.ShareConsumer;   // interim id; folds into Confluent.Kafka later — §4
 
 public sealed class ProducerRecord {
     public string Topic { get; }
@@ -127,7 +116,7 @@ public sealed class RecordMetadata {            // getters → properties
     public long Timestamp { get; }
 }
 
-public class KafkaException : Exception {        // flat, for now (§3, ffi §A5)
+public class KafkaException : Exception {        // flat, for now (§4, ffi §A5)
     public int Code { get; }
     public bool IsRetriable { get; }
     public bool IsFatal { get; }
@@ -159,8 +148,8 @@ and `MockProducer.history()` (Java returns the full record list; the ABI gives
 only a count, hence `HistoryCount`). Add each when the ABI grows to cover it.
 
 **Consumer** follows the identical pattern — the Java surface in C# idiom. Its C
-ABI has **landed**, so it's a **Mode A** build (§5.2); the receive-path key/value
-ownership decision is §5.4. The surface we're building toward (bytes-only interim,
+ABI has **landed**, so it's a **Mode A** build (§6.2); the receive-path key/value
+ownership decision is §6.4. The surface we're building toward (bytes-only interim,
 clipped to today's ABI):
 
 ```csharp
@@ -169,14 +158,14 @@ public sealed class ConsumerRecord {             // Java `ConsumerRecord`, gette
     public int Partition { get; }
     public long Offset { get; }
     public long Timestamp { get; }
-    public ReadOnlyMemory<byte>? Key { get; }    // owned — copied out of the batch (§5.4)
+    public ReadOnlyMemory<byte>? Key { get; }    // owned — copied out of the batch (§6.4)
     public ReadOnlyMemory<byte>? Value { get; }  // owned; null = tombstone
 }
 
 public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord> { }  // Java `ConsumerRecords`
 
 public interface IConsumer : IAsyncDisposable, IDisposable {   // Java `Consumer`
-    // blocking-in-Java / callback-at-ABI → async (Async suffix, §3)
+    // blocking-in-Java / callback-at-ABI → async (Async suffix, §4)
     Task<ConsumerRecords> PollAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
     Task SubscribeAsync(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
     Task UnsubscribeAsync(CancellationToken cancellationToken = default);
@@ -184,7 +173,7 @@ public interface IConsumer : IAsyncDisposable, IDisposable {   // Java `Consumer
     Task<long> PositionAsync(TopicPartition partition, CancellationToken cancellationToken = default);
     Task CloseAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
 
-    void CommitSync();                            // Java commitSync — genuinely sync, blocks (§3 note)
+    void CommitSync();                            // Java commitSync — genuinely sync, blocks (§4 note)
 
     // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1)
     IReadOnlyCollection<TopicPartition> Assignment { get; }   // Java returns a Set; IReadOnlySet is
@@ -208,10 +197,10 @@ each piece is wired (async/sync split per the idiom map): `Assign`/`Seek`/`Pause
 `Resume`, `CommittedAsync`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
 `PartitionsFor`/`ListTopics`, headers on `ConsumerRecord`, and a
 `ConsumerRebalanceListener` argument on `SubscribeAsync`. A typed
-`Consumer<TKey,TValue>` arrives with deserializers (§3), same as the producer.
+`Consumer<TKey,TValue>` arrives with deserializers (§4), same as the producer.
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
-ABI lands (§5.3).
+ABI lands (§6.3).
 
 **The Java → C# idiom map** — the binding's spine. Each row: the Java construct,
 its C# realization, and where the enforcing rule lives.
@@ -219,18 +208,22 @@ its C# realization, and where the enforcing rule lives.
 | Java | C# idiom | Rule / detail |
 |---|---|---|
 | `Future<RecordMetadata>` | `Task<RecordMetadata>` | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §A7/§B7 |
-| blocking / `Future`-returning / I/O call (`send`, `flush`, `close`) | `async Task` + `CancellationToken` | best-effort cancel — ffi §A7/§B7, §3 |
+| blocking / `Future`-returning / I/O call (producer `send`/`flush`/`close`; consumer `poll`/`commit`/`position`) | `async Task` + `CancellationToken` | best-effort cancel — ffi §A7/§B7, §4 |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
 | `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §A5 |
-| `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` / `ObjectDisposedException` | validate **before** the FFI call — ffi §A5 |
-| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `PollAsync`/`CommitAsync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
+| `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` (family) / `InvalidOperationException` (`ObjectDisposedException` when used after close) | validate **before** the FFI call — ffi §A5 |
+| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `PollAsync`/`CommitAsync`/`CommitSync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
+| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` (async) | invoked on the **caller's task** during `poll`/`commit`/`close` — consumer-threading §31 |
+| `OffsetCommitCallback` | `IOffsetCommitCallback` (async) | same caller's-task model — consumer-threading §31 |
 | **non-blocking / instantaneous** call (`offset()`, `assignment()`, mock helpers) | **stays sync** — property (`Offset`) or plain method | not everything becomes async — `consumer-threading.md §1` |
-| method `send`, `flush` | PascalCase + `Async` suffix (`SendAsync`) | §3 |
-| `byte[]` key/value | `ReadOnlyMemory<byte>` | pinned zero-copy (send) — ffi §A4; receive borrow — ffi §B4 |
+| method `send`, `flush`, `poll` | PascalCase + `Async` suffix (`SendAsync`, `PollAsync`) | §4 |
+| `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
-| `Producer<K,V>` (generic) | non-generic bytes **now**; generic `Producer<TKey,TValue>` when serializers land | §3 |
+| `Duration` (timeouts: `poll`/`close`/`committed`) | `TimeSpan` | ABI takes `int64_t` ms |
+| `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
+| `Producer<K,V>` / `Consumer<K,V>` (generic) | non-generic bytes **now**; generic `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` when serializers land | §4 |
 
 **Do NOT build:** the ecosystem `confluent-kafka-dotnet` shape (`ProduceAsync`,
 delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
@@ -238,7 +231,7 @@ delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
 
 ---
 
-## 3 · Design decisions
+## 4 · Design decisions
 
 Defaults + rationale; the implementing agent takes the default unless the feature
 argues otherwise, and records any deviation (phase PLAN, COMMENTS.DONE, or a code
@@ -246,13 +239,13 @@ comment).
 
 | Decision | Default | Why / when |
 |---|---|---|
-| **Namespace / package id** | `ConfluentKafka` — **distinct from the ecosystem client's `Confluent.Kafka`** (distinct FQN lets both coexist). | before any public type |
-| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `CloseAsync(TimeSpan)`. | first client type |
-| **Cancellation** | `CancellationToken` on every async method, honored best-effort — cancels the *wait*, never aborts an enqueued send (ffi §A7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
+| **Namespace / package id** | **Now:** `Confluent.Kafka.ShareConsumer` — a **distinct** package id / assembly / namespace, so it coexists with ckd's `Confluent.Kafka` 2.x (NuGet resolves **one version per package id** and the CLR binds **one assembly per simple name** — a distinct id is the only way to run alongside 2.x; `extern alias` can't bypass either wall). **Later:** switch to the bare `Confluent.Kafka` (new major, e.g. 4.x) once this client is a full **superset that replaces** 2.x. | before any public type |
+| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `CloseAsync(TimeSpan)`. *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. | first client type |
+| **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
 | **Async naming** | `Async` suffix on `Task`-returning methods (`SendAsync`); ffi-marshalling assumes this. Deviation: strict-Java `Send`. | first async method |
-| **Interface naming** | `IProducer` — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it), same idiom-layering as `Async`; the root name "Producer" stays recognizable. Deviation: strict-Java bare `Producer` (fights CA1715 / dev expectation). | first interface type |
-| **Key/value type** | `ReadOnlyMemory<byte>` (zero-copy-friendly; pins via `MemoryHandle`, ffi §A4). `byte[]`-only is an acceptable interim. | porting `ProducerRecord` |
-| **Serializers** | ABI is bytes-only; add a .NET-side `ISerializer<T>`/`IDeserializer<T>` producing `byte[]` (makes `Producer<TKey,TValue>` generic later). No per-record callback through the ABI (`CLAUDE.md §11`). | porting (de)serialization |
+| **Interface naming** | `IProducer` / `IConsumer` — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it), same idiom-layering as `Async`; the root name stays recognizable. Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
+| **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
+| **Serializers** | ABI is bytes-only both ways; add .NET-side `ISerializer<T>` (`T → byte[]`) and `IDeserializer<T>` (`ReadOnlySpan<byte> → T`, zero-copy over the batch — ffi §B4) — makes `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` generic later. No per-record callback through the ABI (`CLAUDE.md §11`). | porting (de)serialization |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
 | **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). | if catch-by-type is needed |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
@@ -266,7 +259,7 @@ blocking-native ABI directly (not sync-over-async).
 
 ---
 
-## 4 · Boundary rules → `ffi-marshalling.md`
+## 5 · Boundary rules → `ffi-marshalling.md`
 
 The correctness contracts you must not break live in
 `.claude/rules/ffi-marshalling.md` (read on demand), organized as a **Shared**
@@ -295,9 +288,9 @@ This file (CLAUDE.md) never restates those; it references them by section.
 
 ---
 
-## 5 · Adding & extending
+## 6 · Adding & extending
 
-### 5.1 The decision gate
+### 6.1 The decision gate
 
 ```
 Is the feature already exposed at the C ABI (src/ffi)?
@@ -307,7 +300,7 @@ Is the feature already exposed at the C ABI (src/ffi)?
    no ──┘→ MODE B · Full-stack   (src/ffi → header → Native → managed API)           → 5.3
 ```
 
-### 5.2 Mode A — .NET-only port
+### 6.2 Mode A — .NET-only port
 
 The `kafka_*` function already exists in the header:
 
@@ -317,16 +310,16 @@ The `kafka_*` function already exists in the header:
 3. **Managed API** — the Java-shaped method in the client class (`Producer.cs` /
    `Consumer.cs`); marshal strings/bytes (ffi §A3/§B3, §A4/§B4), map errors
    (ffi §A5/§B5), bridge async to `Task` (ffi §A7/§B7).
-4. **Build & Test** — against `MockProducer` / `MockConsumer`, no broker (§6).
+4. **Build & Test** — against `MockProducer` / `MockConsumer`, no broker (§7).
 
-### 5.3 Mode B — full-stack port (the C-ABI-first loop)
+### 6.3 Mode B — full-stack port (the C-ABI-first loop)
 
 The feature lives only in the Rust core. Walk all four layers, ABI first.
 
 **Ownership split:** steps 1–4 (design + write the Rust ABI, regenerate) are a
 **Rust-core task** — the shared C ABI is authored by the root `actor-executor`
 and reviewed by `kafka-critic` against root `CLAUDE.md` (not the `dotnet-*`
-personas; §7.1/§7.2). The `dotnet-actor` **depends on** them and owns **steps
+personas; §8.1/§8.2). The `dotnet-actor` **depends on** them and owns **steps
 5–7** (from the header down). The Manager sequences the handoff.
 
 1. **Design the ABI surface** — opaque handles, transparent structs, functions
@@ -344,7 +337,7 @@ personas; §7.1/§7.2). The `dotnet-actor` **depends on** them and owns **steps
 **Naming across layers:** `kafka_<pkg-minus-clients>_<Type>_<method>` at the ABI;
 C# casing above it (PascalCase, properties for getters, `Async` suffix).
 
-### 5.4 The consumer receive-path ownership decision (Mode A)
+### 6.4 The consumer receive-path ownership decision (Mode A)
 
 The consumer C ABI confirms the receive-path zero-copy contract
 (`consumer-threading.md §27`): `ConsumerRecord_key` / `_value` / `_topic` return a
@@ -382,11 +375,11 @@ native-backed `ReadOnlyMemory`. Deferred until a concrete need.
 
 ---
 
-## 6 · Build, test, verify
+## 7 · Build, test, verify
 
 The build order, commands, running against a broker, and test conventions.
 
-### 6.1 The build is a two-stage pipeline: Rust → .NET (firm)
+### 7.1 The build is a two-stage pipeline: Rust → .NET (firm)
 
 The .NET binding cannot run until the Rust side has produced the native library:
 
@@ -400,7 +393,7 @@ dotnet build   (an MSBuild step copies the native into $(OutDir))  (build-dotnet
 
 Never build .NET before Rust — the native won't exist.
 
-### 6.2 Commands (intended)
+### 7.2 Commands (intended)
 
 | Goal | Command |
 |---|---|
@@ -415,16 +408,16 @@ Never build .NET before Rust — the native won't exist.
 checked-in `.editorconfig` (`_camelCase`/`s_` fields, PascalCase, Allman braces,
 `System.*` usings first, `I`-prefix per CA1715) and enforced by `dotnet format` +
 `<EnforceCodeStyleInBuild>` analyzers. This is code hygiene only — it does not
-touch the public Java shape (§2/§3).
+touch the public Java shape (§3/§4).
 
-### 6.3 Running against a broker
+### 7.3 Running against a broker
 
 - **No broker** — `MockProducer` (unit tests; also how to iterate without infra).
 - **Your own local broker** — `bootstrap.servers` is just a config key.
 - **Integration** — spin a broker via testcontainers (needs Docker), not a
   checked-in compose file.
 
-### 6.4 Test conventions
+### 7.4 Test conventions
 - Unit tests hold a `MockProducer` (auto- or manual-complete via
   `complete_next`/`error_next`), and `await` the returned `Task` with a timeout —
   the timeout doubles as the **completion / deadlock regression guard** (the
@@ -436,7 +429,7 @@ touch the public Java shape (§2/§3).
   test — on the **send path** (producer) and, for the consumer, on the
   **receive path** (`consumer-threading.md §27`; the copy-out budget).
 
-### 6.5 Definition of done
+### 7.5 Definition of done
 
 A port is not done until it builds on the TFM matrix, unit tests pass against
 `MockProducer`, lint/format are clean, and the `ffi-marshalling.md` anti-patterns
@@ -445,14 +438,14 @@ CI-stable.
 
 ---
 
-## 7 · Governance & review
+## 8 · Governance & review
 
 Who builds and reviews this binding. The *process* is inherited from root
 `agent-roles.md`; the personas add .NET review expertise. The review *criteria*
-live in `ffi-marshalling.md` (anti-patterns) and §6 (verify) — this section
+live in `ffi-marshalling.md` (anti-patterns) and §7 (verify) — this section
 points at them.
 
-### 7.1 Personas
+### 8.1 Personas
 
 - **`dotnet-actor`** and **`dotnet-critic`** (`.claude/agents/dotnet-*.md`)
   inherit the Actor / Critic roles and the `COMMENTS.<N>.md` loop from
@@ -462,26 +455,26 @@ points at them.
   Rust-translation-shaped and don't know P/Invoke / .NET interop.
 - **Scope — the C# side, header-down.** The `dotnet-actor` builds only C# (from
   the generated header down) and **does not author Rust**; the `dotnet-critic`
-  reviews only C#. When a feature needs a new ABI function (Mode B, §5.3
+  reviews only C#. When a feature needs a new ABI function (Mode B, §6.3
   steps 1–4), that's a Rust-core dependency on the root `actor-executor` /
   `kafka-critic`, not the `dotnet-*` personas.
 
-### 7.2 Review ground truth (firm)
+### 8.2 Review ground truth (firm)
 
 Review a change against the **C ABI header** (`confluent_kafka.h`) and the **Kafka
 Java public API shape** — **not** Rust internals, and **not** Java implementation
 logic (`bindings/CLAUDE.md §2`).
 
-### 7.3 The Critic's lens (.NET-specific)
+### 8.3 The Critic's lens (.NET-specific)
 
 `SafeHandle` / `Dispose` correctness · handle leak / double-free / use-after-free ·
 byte pinning & buffer lifetime · `MarshalAs(I1)` for `bool` · UTF-8 (no `LPStr`) ·
 no managed exception through a callback · `RunContinuationsAsynchronously` on the
 completion (pump/dispatcher) · flat `KafkaException` vs precondition .NET exceptions · **shape, not
 logic**. The concrete checklist is the **Anti-patterns** blocks in
-`ffi-marshalling.md` and the decision tables in §2/§3.
+`ffi-marshalling.md` and the decision tables in §3/§4.
 
-### 7.4 Mechanics
+### 8.4 Mechanics
 
 - Review comments: `bindings/dotnet/COMMENTS.<N>.md`; resolved →
   `COMMENTS.DONE.<N>.md`.

@@ -66,7 +66,7 @@ pointed at our fixed-width, handle-error ABI.
     TFMs — no per-TFM `#if`.
   - Set **`EntryPoint`** to the full ABI symbol (`kafka_<pkg>_<Type>_<method>`)
     whenever the C# method uses the short name (dropping the `kafka_<pkg>_` prefix
-    per CLAUDE.md §5.3) — otherwise the marshaller probes the C# name and throws
+    per CLAUDE.md §6.3) — otherwise the marshaller probes the C# name and throws
     `EntryPointNotFoundException` at **runtime**, not compile time.
   - Follow the type map verbatim: sizes are `int`/`long`, `bool` is `I1`, opaque
     handles stay `IntPtr` here (wrapped in a `SafeHandle` one layer up, §A2/§B2),
@@ -618,7 +618,7 @@ TCS. **Zero blocked threads, per-message, no pump.**
     lasts until completion** (weaker than A's call-scoped pin, §A4), and it's one
     callback per send (no `get_all` batching).
 
-Not committed — decide when the producer send path is built (as CLAUDE.md §5.4
+Not committed — decide when the producer send path is built (as CLAUDE.md §6.4
 defers the consumer's copy-out-vs-keep-alive).
 
 **Anti-patterns:**
@@ -719,7 +719,7 @@ the awaiter's continuation would run on — and stall — that thread.
 | `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: drain → `Consumer_close` → `Consumer_destroy` (destroy is **fire-and-forget** — cancels in-flight ops; §B7 + Rule) |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
-| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §5.4), keep-alive deferred |
+| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
 | `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
 | `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
 
@@ -751,13 +751,13 @@ const-ness decides, not the type name:
   - **Category 3 — owned result / container.** On the **caller's** thread (not the
     dispatcher), after a query or poll: read/iterate, then `_destroy` the root
     exactly once. A **container is a borrow-root** — its elements and any
-    key/value/topic/string bytes borrow into it (§B3, §B4, CLAUDE.md §5.4), so it
+    key/value/topic/string bytes borrow into it (§B3, §B4, CLAUDE.md §6.4), so it
     must outlive every borrow taken from it. **Default: copy-out** — copy each
     element/byte into an owned managed type, then `_destroy`. Metadata collections
     are always copy-out (small), and typed deserialization reads a transient span →
     owned `T` (copy-out too). **Keep-alive** (hold the root, expose zero-copy views,
     `_destroy` at `Dispose`) is a **deferred** option for the raw-byte surface only
-    — see CLAUDE.md §5.4.
+    — see CLAUDE.md §6.4.
   - **Category 4 — borrowed view.** `ConsumerRecord_t`, `Node_t`, `_get` elements,
     borrowed strings have **no `_destroy`** — never free them, and never use them
     after their owning container (3) is destroyed. Represent as a transient cursor
@@ -769,7 +769,7 @@ confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern). A per-message
 `SafeHandle` would allocate a finalizable object per record, so transient handles
 and borrowed views are not wrapped. The borrow-root discipline (Category 3
 outlives its Category 4 borrows) is what makes the receive-path zero-copy contract
-(§B4, CLAUDE.md §5.4) safe. `Consumer_destroy` being fire-and-forget is why
+(§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` being fire-and-forget is why
 teardown routes through `Consumer_close` first — otherwise the in-flight op's
 callback is cancelled and its `Task` never completes.
 
@@ -779,7 +779,7 @@ callback is cancelled and its `Task` never completes.
     element, a borrowed string) — double-free / UAF; only the owning container is
     freed.
   - Destroying a **borrow-root** (`ConsumerRecords_t`, a list/map) while a borrowed
-    element or byte slice from it is still in use (CLAUDE.md §5.4) — use-after-free.
+    element or byte slice from it is still in use (CLAUDE.md §6.4) — use-after-free.
   - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
     map/list), or freeing it twice.
   - A bare `Consumer_destroy` without the drain → `Consumer_close` first — hangs
@@ -789,7 +789,7 @@ callback is cancelled and its `Task` never completes.
 
   - Poll a batch, read records, then dispose — no leak; a borrowed key/value/topic
     used after the batch is gone is prevented (copy-out) or kept valid by the
-    wrapper (keep-alive), per CLAUDE.md §5.4.
+    wrapper (keep-alive), per CLAUDE.md §6.4.
   - Each query API (`committed`/`assignment`/`partitions_for`/…) frees its owned
     result exactly once after marshalling; borrowed elements are never freed.
   - Create/close many consumers — no leak; `Dispose` joins the bg task
@@ -832,7 +832,7 @@ handle is freed; it never owns the raw pointer. The two output rows differ only 
     - **Length-delimited** `const char* + int32_t out_len` (the receive path) →
       `Utf8.PtrToString(ptr, out_len)` using the length — **never NUL-scan**: the
       slice borrows into the batch with no terminator, so a scan over-reads into
-      the next field. Valid until `ConsumerRecords_destroy` (CLAUDE.md §5.4).
+      the next field. Valid until `ConsumerRecords_destroy` (CLAUDE.md §6.4).
     In both cases **copy before free** — the pointer dies with the handle; never
     store the raw pointer.
   - Never `[MarshalAs(LPStr)]` (ANSI) or `LPWStr` (UTF-16); never `LPUTF8Str` /
@@ -884,7 +884,7 @@ default**.
   - **The hazard is native-frees:** a managed view over the batch is a
     use-after-free the instant `ConsumerRecords_destroy` runs. The fix is
     **lifetime binding** — copy before destroy, or keep the batch alive. Ownership
-    rules, anti-patterns, and tests live in CLAUDE.md §5.4, §B2 (Category 3/4), and
+    rules, anti-patterns, and tests live in CLAUDE.md §6.4, §B2 (Category 3/4), and
     §B3 (borrowed strings).
   - **"Buffer lifetime"** here is the *native* buffer's validity window
     (batch-scoped, until `_destroy`).
@@ -899,7 +899,7 @@ copy on receive — because the only zero-copy alternative is a native-backed
 `ReadOnlyMemory` over native memory is a use-after-`Dispose` footgun (Python is
 safe only via its refcounted `memoryview`). So for raw bytes we trade one gen-0
 copy for safety + the Java owned-`ConsumerRecord` shape; keep-alive zero-copy is
-deferred (CLAUDE.md §5.4).
+deferred (CLAUDE.md §6.4).
 
 **Anti-patterns:**
 
@@ -910,7 +910,7 @@ deferred (CLAUDE.md §5.4).
 **Tests required:**
 
   - Poll a batch, read a raw `Value`, dispose the batch — the copied bytes remain
-    valid (copy-out) / are kept valid by the wrapper (keep-alive), per CLAUDE.md §5.4.
+    valid (copy-out) / are kept valid by the wrapper (keep-alive), per CLAUDE.md §6.4.
   - **Allocation budget** (DoD §10, consumer-threading §27): per-record receive
     adds only the user-deserializer's `T` allocation — no allocation attributable
     to topic name, key/value on the buffer, or batch traversal.
@@ -1039,7 +1039,7 @@ for `poll` / `committed` / `offsets_for_times` / `long_offsets` / `partitions_fo
     fires** (the whole op, not a synchronous call), freed **exactly once** by the
     callback — including the inline guard-rejection error path.
   - **The callback owns any handle it gets.** For the **owned-handle** forms it
-    consumes the result — marshal it (copy-out CLAUDE.md §5.4) then `_destroy`
+    consumes the result — marshal it (copy-out CLAUDE.md §6.4) then `_destroy`
     (§B2 Category 3); `position`'s scalar needs no free; `op` has no result. On
     failure it builds the exception (`FromHandle`, §B5) and frees the `KafkaError`.
     Then it completes the TCS.
@@ -1106,7 +1106,7 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
     runs the op on a runtime worker, then hands the completed op over a channel to
     that one thread, so callbacks are **serialized** on a single foreign thread
     (guard-rejection fires inline on the caller; shutdown, inline on the worker).
-    It marshals the result (copy-out CLAUDE.md §5.4, or an error via `FromHandle`
+    It marshals the result (copy-out CLAUDE.md §6.4, or an error via `FromHandle`
     §B5), frees the handles it owns (§B2 Category 3), and completes the TCS — with
     **`RunContinuationsAsynchronously`** (essential: the continuation must not run
     on that dispatcher thread), exactly once, on every path (incl. the inline
