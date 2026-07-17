@@ -579,6 +579,49 @@ channel (→ `GCHandle`).
   - Aggressive GC while the callback is in use doesn't crash (keep-alive; shared
     §1).
 
+**Consumer completion callbacks (the primary async path).** Unlike
+`RecordMetadata_copy` (one *optional*, *synchronous* convenience), the consumer's
+**~8 completion callbacks** — `Consumer_poll` / `op` / `position` / `committed` /
+`offsets_for_times` / `long_offsets` / `partitions_for` / `list_topics` — are the
+**primary** mechanism for every async op, shape
+`(result-handle-or-value, KafkaError*, void* user_data)` (exactly one of
+{result, error} non-null). Same *mechanism* as above (kept-alive Cdecl delegate +
+`GCHandle` user_data + no-throw), but three things differ:
+
+  - **Foreign thread → no-throw is mandatory.** The callback fires on the native
+    callback-dispatcher thread (§7), not the caller — no caller frame to catch, so
+    an escaping exception is a crash/UB. `try/catch` all, surface via the TCS.
+  - **Per-op keep-alive.** The delegate + the `GCHandle` (over the
+    `TaskCompletionSource`) must stay alive from **submit until the callback
+    fires** (the whole op, not a synchronous call), freed **exactly once** by the
+    callback — including the inline guard-rejection error path.
+  - **The callback owns the result.** It receives an owned `result` **or** an
+    owned `KafkaError` (§2 Category 3) and must consume it — marshal the result
+    (copy-out §5.4) or build the exception (`FromHandle`, §5), free the handle,
+    then complete the TCS.
+
+  The async *flow* (submit → dispatcher → `SetResult` with
+  `RunContinuationsAsynchronously`; one-op-in-flight; `Dispose`) is **§7** — this
+  section is only the callback *marshalling*.
+
+**Consumer anti-patterns:**
+
+  - A per-op delegate / `GCHandle` not rooted for the whole submit→fire window
+    (collected mid-op → crash).
+  - An exception escaping into the dispatcher thread (no caller to catch → UB).
+  - Not freeing the owned result/error + `GCHandle` on some path (esp. the inline
+    guard-rejection).
+  - Reading a borrowed `topic`/bytes pointer after its batch is destroyed (§3/§4).
+
+**Consumer tests:**
+
+  - Each callback delivers the right result/error and frees the owned handle +
+    `GCHandle` exactly once.
+  - An exception thrown in the callback is caught (no crash, no unwind into native)
+    and faults the `Task`.
+  - Aggressive GC during an in-flight op doesn't collect the delegate (keep-alive
+    across submit→fire).
+
 ---
 
 ## 7. Async / Future completion → `TaskCompletionSource`
