@@ -54,6 +54,9 @@ use tokio::task::JoinHandle;
 
 use crate::ApiVersions;
 use crate::DefaultHostResolver;
+use crate::alter_replica_log_dirs_request_data::{
+    AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequestData,
+};
 use crate::client_utils;
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
@@ -63,8 +66,9 @@ use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
 use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
 use crate::common::requests::{
-    ConcreteResponse, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteTopicsRequestBuilder,
-    DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
+    AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder,
+    DeleteTopicsRequestBuilder, DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder,
+    DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
     IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, MetadataRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
@@ -77,6 +81,7 @@ use crate::create_topics_request_data::{CreatableTopic, CreateTopicsRequestData}
 use crate::delete_topics_request_data::{DeleteTopicState, DeleteTopicsRequestData};
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::{DescribeConfigsRequestData, DescribeConfigsResource};
+use crate::describe_log_dirs_request_data::{DescribableLogDirTopic, DescribeLogDirsRequestData};
 use crate::incremental_alter_configs_request_data::{
     AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequestData,
 };
@@ -94,15 +99,17 @@ use super::internals::delete_records_handler::DeleteRecordsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::records_to_delete::RecordsToDelete;
 use super::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, Config, ConfigEntry,
-    ConfigSource, ConfigSynonym, ConfigType, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions,
-    CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
-    DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
-    DescribeTopicsOptions, DescribeTopicsResult, ListConfigResourcesOptions, ListConfigResourcesResult,
-    ListTopicsOptions, ListTopicsResult, NewPartitions, NewTopic, TopicDescription, TopicListing,
-    TopicMetadataAndConfig,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterReplicaLogDirsOptions,
+    AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym, ConfigType, CreatePartitionsOptions,
+    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
+    DeleteTopicsOptions, DeleteTopicsResult, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
+    DescribeConfigsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
+    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ListConfigResourcesOptions,
+    ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitions, NewTopic,
+    ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 use crate::common::Node;
+use crate::common::TopicPartitionReplica;
 use std::collections::{BTreeSet, HashSet};
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
@@ -764,6 +771,260 @@ fn complete_unrealized<T: Clone + Send + Sync + 'static>(
             future.complete_exceptionally(KafkaError::with_message(Errors::UnknownServerError, message(name)));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// describeLogDirs / alterReplicaLogDirs / describeReplicaLogDirs
+// ---------------------------------------------------------------------------
+
+/// Maps a protocol error code to an optional error, mirroring Java's
+/// `Errors.forCode(code).exception()` which returns `null` for `NONE`.
+fn api_exception(error_code: i16) -> Option<KafkaError> {
+    let error = Errors::for_code(error_code);
+    (error != Errors::None).then(|| KafkaError::new(error))
+}
+
+/// Builds a map from log-directory path to [`LogDirDescription`] from a
+/// `DescribeLogDirs` response. Mirrors `KafkaAdminClient.logDirDescriptions`.
+fn log_dir_descriptions(response: &DescribeLogDirsResponse) -> HashMap<String, LogDirDescription> {
+    let mut result = HashMap::with_capacity(response.data().results.len());
+    for log_dir_result in &response.data().results {
+        let mut replica_info_map = HashMap::new();
+        for t in &log_dir_result.topics {
+            for p in &t.partitions {
+                replica_info_map.insert(
+                    TopicPartition::new(t.name.clone(), p.partition_index),
+                    ReplicaInfo::new(p.partition_size, p.offset_lag, p.is_future_key),
+                );
+            }
+        }
+        result.insert(
+            log_dir_result.log_dir.clone(),
+            LogDirDescription::with_volume_bytes(
+                api_exception(log_dir_result.error_code),
+                replica_info_map,
+                log_dir_result.total_bytes,
+                log_dir_result.usable_bytes,
+            ),
+        );
+    }
+    result
+}
+
+/// Builds a per-broker `describeLogDirs` [`Call`]. Mirrors the anonymous `Call`
+/// in `KafkaAdminClient.describeLogDirs`.
+fn get_describe_log_dirs_call(
+    broker_id: i32,
+    handle: KafkaFutureImpl<HashMap<String, LogDirDescription>>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        // Query selected partitions in all log directories (topics == null).
+        let mut data = DescribeLogDirsRequestData::new();
+        data.set_topics(None);
+        Ok(Box::new(DescribeLogDirsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeLogDirs(resp) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
+        };
+        let descriptions = log_dir_descriptions(resp);
+        if !descriptions.is_empty() {
+            resp_handle.complete(descriptions);
+        } else {
+            // Up to v3 DescribeLogDirsResponse did not have an error code field,
+            // hence it defaults to NONE.
+            let error = if resp.data().error_code == Errors::None.code() {
+                Errors::ClusterAuthorizationFailed
+            } else {
+                Errors::for_code(resp.data().error_code)
+            };
+            resp_handle.complete_exceptionally(KafkaError::new(error));
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle;
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "describeLogDirs",
+        deadline,
+        NodeProvider::ConstantNodeId(broker_id),
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a per-broker `alterReplicaLogDirs` [`Call`]. Mirrors the anonymous
+/// `Call` in `KafkaAdminClient.alterReplicaLogDirs`. `futures` is shared across
+/// all per-broker calls; each call only completes the replicas targeting its
+/// own broker.
+fn get_alter_replica_log_dirs_call(
+    broker_id: i32,
+    assignment: AlterReplicaLogDirsRequestData,
+    futures: Arc<HashMap<TopicPartitionReplica, KafkaFutureImpl<()>>>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        Ok(Box::new(AlterReplicaLogDirsRequestBuilder::from_data(assignment.clone())) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::AlterReplicaLogDirs(resp) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterReplicaLogDirs response"));
+        };
+        for topic_result in &resp.data().results {
+            for partition_result in &topic_result.partitions {
+                let replica = TopicPartitionReplica::new(
+                    topic_result.topic_name.clone(),
+                    partition_result.partition_index,
+                    broker_id,
+                );
+                match resp_futures.get(&replica) {
+                    // The partition in the response was not in the request;
+                    // Java logs a warning and ignores it.
+                    None => {},
+                    Some(future) => {
+                        if partition_result.error_code == Errors::None.code() {
+                            future.complete(());
+                        } else {
+                            future
+                                .complete_exceptionally(KafkaError::new(Errors::for_code(partition_result.error_code)));
+                        }
+                    },
+                }
+            }
+        }
+        // The server should send back a result for every replica. Do a sanity
+        // check anyway (mirrors `completeUnrealizedFutures`).
+        for (replica, future) in resp_futures.iter() {
+            if replica.broker_id() == broker_id && !future.is_done() {
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!("The response from broker {broker_id} did not contain a result for replica {replica}"),
+                ));
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        // Only completes the futures of brokerId.
+        for (replica, future) in fail_futures.iter() {
+            if replica.broker_id() == broker_id {
+                future.complete_exceptionally(error.clone());
+            }
+        }
+    });
+
+    Call::new(
+        "alterReplicaLogDirs",
+        deadline,
+        NodeProvider::ConstantNodeId(broker_id),
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a per-broker `describeReplicaLogDirs` [`Call`]. Mirrors the anonymous
+/// `Call` in `KafkaAdminClient.describeReplicaLogDirs`, which reshapes a
+/// `DescribeLogDirs` response into per-replica `ReplicaLogDirInfo`s.
+fn get_describe_replica_log_dirs_call(
+    broker_id: i32,
+    request_data: DescribeLogDirsRequestData,
+    mut replica_dir_info_by_partition: HashMap<TopicPartition, ReplicaLogDirInfo>,
+    futures: Arc<HashMap<TopicPartitionReplica, KafkaFutureImpl<ReplicaLogDirInfo>>>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        // Query selected partitions in all log directories.
+        Ok(Box::new(DescribeLogDirsRequestBuilder::from_data(request_data.clone())) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeLogDirs(resp) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
+        };
+        for (log_dir, log_dir_info) in log_dir_descriptions(resp) {
+            if let Some(error) = log_dir_info.error() {
+                // No replica info is provided if the log directory is offline.
+                if error.error() == Errors::KafkaStorageError {
+                    continue;
+                }
+                // Any other error for a log directory is illegal (mirrors Java's
+                // `handleFailure(new IllegalStateException(...))`, which fails
+                // every replica future).
+                let illegal = KafkaError::illegal_state(format!(
+                    "The error {:?} for log directory {log_dir} in the response from broker {broker_id} is illegal",
+                    error.error()
+                ));
+                for future in resp_futures.values() {
+                    future.complete_exceptionally(illegal.clone());
+                }
+            }
+
+            for (tp, replica_info) in log_dir_info.replica_infos() {
+                let Some(existing) = replica_dir_info_by_partition.get(tp) else {
+                    // Server response mentioned an unknown partition; Java logs
+                    // a warning.
+                    continue;
+                };
+                let updated = if replica_info.is_future() {
+                    ReplicaLogDirInfo::new(
+                        existing.current_replica_log_dir().map(String::from),
+                        existing.current_replica_offset_lag(),
+                        Some(log_dir.clone()),
+                        replica_info.offset_lag(),
+                    )
+                } else {
+                    ReplicaLogDirInfo::new(
+                        Some(log_dir.clone()),
+                        replica_info.offset_lag(),
+                        existing.future_replica_log_dir().map(String::from),
+                        existing.future_replica_offset_lag(),
+                    )
+                };
+                replica_dir_info_by_partition.insert(tp.clone(), updated);
+            }
+        }
+
+        for (tp, info) in &replica_dir_info_by_partition {
+            let replica = TopicPartitionReplica::new(tp.topic().to_string(), tp.partition(), broker_id);
+            if let Some(future) = resp_futures.get(&replica) {
+                future.complete(info.clone());
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "describeReplicaLogDirs",
+        deadline,
+        NodeProvider::ConstantNodeId(broker_id),
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
 }
 
 /// Builds a [`TopicDescription`] from cluster metadata, mirroring
@@ -1897,6 +2158,127 @@ impl Admin for KafkaAdminClient {
         );
         self.submit(call);
         ListConfigResourcesResult::new(public)
+    }
+
+    fn describe_log_dirs(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        let mut public: HashMap<i32, KafkaFuture<HashMap<String, LogDirDescription>>> = HashMap::new();
+        for &broker_id in brokers {
+            let handle: KafkaFutureImpl<HashMap<String, LogDirDescription>> = KafkaFutureImpl::new();
+            public.insert(broker_id, handle.future());
+            let call = get_describe_log_dirs_call(broker_id, handle, deadline);
+            self.submit(call);
+        }
+
+        DescribeLogDirsResult::new(public)
+    }
+
+    fn alter_replica_log_dirs(
+        &self,
+        replica_assignment: &HashMap<TopicPartitionReplica, String>,
+        options: AlterReplicaLogDirsOptions,
+    ) -> AlterReplicaLogDirsResult {
+        let mut futures: HashMap<TopicPartitionReplica, KafkaFutureImpl<()>> = HashMap::new();
+        for replica in replica_assignment.keys() {
+            futures.insert(replica.clone(), KafkaFutureImpl::new());
+        }
+
+        // Group the requested moves by destination broker, mirroring Java's
+        // `replicaAssignmentByBroker`. Each broker's request carries one entry
+        // per (log dir, topic) with the target partitions.
+        let mut assignment_by_broker: HashMap<i32, AlterReplicaLogDirsRequestData> = HashMap::new();
+        for (replica, log_dir) in replica_assignment {
+            let data = assignment_by_broker
+                .entry(replica.broker_id())
+                .or_insert_with(AlterReplicaLogDirsRequestData::new);
+            if !data.dirs.iter().any(|d| d.path == *log_dir) {
+                let mut d = AlterReplicaLogDir::new();
+                d.set_path(log_dir.clone());
+                data.dirs.push(d);
+            }
+            let dir = data.dirs.iter_mut().find(|d| d.path == *log_dir).expect("dir just inserted");
+            if !dir.topics.iter().any(|t| t.name == replica.topic()) {
+                let mut t = AlterReplicaLogDirTopic::new();
+                t.set_name(replica.topic().to_string());
+                dir.topics.push(t);
+            }
+            let topic = dir
+                .topics
+                .iter_mut()
+                .find(|t| t.name == replica.topic())
+                .expect("topic just inserted");
+            topic.partitions.push(replica.partition());
+        }
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        let public: HashMap<TopicPartitionReplica, KafkaFuture<()>> =
+            futures.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+        let shared = Arc::new(futures);
+        for (broker_id, assignment) in assignment_by_broker {
+            let call = get_alter_replica_log_dirs_call(broker_id, assignment, Arc::clone(&shared), deadline);
+            self.submit(call);
+        }
+
+        AlterReplicaLogDirsResult::new(public)
+    }
+
+    fn describe_replica_log_dirs(
+        &self,
+        replicas: &[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> DescribeReplicaLogDirsResult {
+        let mut futures: HashMap<TopicPartitionReplica, KafkaFutureImpl<ReplicaLogDirInfo>> = HashMap::new();
+        for replica in replicas {
+            futures.insert(replica.clone(), KafkaFutureImpl::new());
+        }
+
+        // Group the requested replicas by broker, mirroring Java's
+        // `partitionsByBroker`.
+        let mut partitions_by_broker: HashMap<i32, DescribeLogDirsRequestData> = HashMap::new();
+        for replica in replicas {
+            let data = partitions_by_broker
+                .entry(replica.broker_id())
+                .or_insert_with(DescribeLogDirsRequestData::new);
+            let topics = data.topics.get_or_insert_with(Vec::new);
+            if let Some(topic) = topics.iter_mut().find(|t| t.topic == replica.topic()) {
+                topic.partitions.push(replica.partition());
+            } else {
+                let mut topic = DescribableLogDirTopic::new();
+                topic.set_topic(replica.topic().to_string());
+                topic.set_partitions(vec![replica.partition()]);
+                topics.push(topic);
+            }
+        }
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        let public: HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> =
+            futures.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+        let shared = Arc::new(futures);
+        for (broker_id, request_data) in partitions_by_broker {
+            // Seed the per-partition result map with the default (empty)
+            // `ReplicaLogDirInfo` for every requested partition.
+            let mut seed: HashMap<TopicPartition, ReplicaLogDirInfo> = HashMap::new();
+            if let Some(topics) = &request_data.topics {
+                for topic in topics {
+                    for &partition_id in &topic.partitions {
+                        seed.insert(
+                            TopicPartition::new(topic.topic.clone(), partition_id),
+                            ReplicaLogDirInfo::default(),
+                        );
+                    }
+                }
+            }
+            let call = get_describe_replica_log_dirs_call(broker_id, request_data, seed, Arc::clone(&shared), deadline);
+            self.submit(call);
+        }
+
+        DescribeReplicaLogDirsResult::new(public)
     }
 
     async fn close(&self, timeout: Duration) {
@@ -3848,5 +4230,622 @@ mod tests {
         assert!(matches!(outcome, MaybeRetryOutcome::Requeue));
         assert_eq!(driver.lock().unwrap().key_to_broker_id(&"foo".to_string()), Some(0));
         assert!(rx.try_recv().is_err());
+    }
+
+    // --- describeLogDirs / alterReplicaLogDirs / describeReplicaLogDirs -------
+
+    use crate::admin::{
+        AlterReplicaLogDirsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, MockAdminClient,
+    };
+    use crate::alter_replica_log_dirs_response_data::{
+        AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult, AlterReplicaLogDirsResponseData,
+    };
+    use crate::common::TopicPartitionReplica;
+    use crate::common::requests::AlterReplicaLogDirsResponse;
+    use crate::describe_log_dirs_response_data::{
+        DescribeLogDirsPartition, DescribeLogDirsResponseData, DescribeLogDirsResult as WireDescribeLogDirsResult,
+        DescribeLogDirsTopic,
+    };
+
+    fn describe_log_dirs_topics(
+        partition_size: i64,
+        offset_lag: i64,
+        topic: &str,
+        partition: i32,
+        is_future: bool,
+    ) -> Vec<DescribeLogDirsTopic> {
+        let mut p = DescribeLogDirsPartition::new();
+        p.set_partition_index(partition);
+        p.set_partition_size(partition_size);
+        p.set_is_future_key(is_future);
+        p.set_offset_lag(offset_lag);
+        let mut t = DescribeLogDirsTopic::new();
+        t.set_name(topic.to_string());
+        t.set_partitions(vec![p]);
+        vec![t]
+    }
+
+    fn describe_log_dirs_result(
+        error: Errors,
+        log_dir: &str,
+        topics: Vec<DescribeLogDirsTopic>,
+    ) -> WireDescribeLogDirsResult {
+        let mut r = WireDescribeLogDirsResult::new();
+        r.set_error_code(error.code());
+        r.set_log_dir(log_dir.to_string());
+        r.set_topics(topics);
+        r
+    }
+
+    fn describe_log_dirs_response(results: Vec<WireDescribeLogDirsResult>) -> ConcreteResponse {
+        let mut data = DescribeLogDirsResponseData::new();
+        data.set_results(results);
+        ConcreteResponse::DescribeLogDirs(DescribeLogDirsResponse::new(data))
+    }
+
+    fn describe_log_dirs_single(
+        error: Errors,
+        log_dir: &str,
+        tp: &TopicPartition,
+        partition_size: i64,
+        offset_lag: i64,
+    ) -> ConcreteResponse {
+        describe_log_dirs_response(vec![describe_log_dirs_result(
+            error,
+            log_dir,
+            describe_log_dirs_topics(partition_size, offset_lag, tp.topic(), tp.partition(), false),
+        )])
+    }
+
+    fn describe_log_dirs_single_with_bytes(
+        error: Errors,
+        log_dir: &str,
+        tp: &TopicPartition,
+        partition_size: i64,
+        offset_lag: i64,
+        total_bytes: i64,
+        usable_bytes: i64,
+    ) -> ConcreteResponse {
+        let mut r = describe_log_dirs_result(
+            error,
+            log_dir,
+            describe_log_dirs_topics(partition_size, offset_lag, tp.topic(), tp.partition(), false),
+        );
+        r.set_total_bytes(total_bytes);
+        r.set_usable_bytes(usable_bytes);
+        describe_log_dirs_response(vec![r])
+    }
+
+    fn empty_describe_log_dirs_response(error: Option<Errors>) -> ConcreteResponse {
+        let mut data = DescribeLogDirsResponseData::new();
+        if let Some(e) = error {
+            data.set_error_code(e.code());
+        }
+        ConcreteResponse::DescribeLogDirs(DescribeLogDirsResponse::new(data))
+    }
+
+    fn replica_describe_log_dirs_result(
+        tpr: &TopicPartitionReplica,
+        log_dir: &str,
+        partition_size: i64,
+        offset_lag: i64,
+        is_future: bool,
+    ) -> WireDescribeLogDirsResult {
+        let mut r = WireDescribeLogDirsResult::new();
+        r.set_error_code(Errors::None.code());
+        r.set_log_dir(log_dir.to_string());
+        r.set_topics(describe_log_dirs_topics(
+            partition_size,
+            offset_lag,
+            tpr.topic(),
+            tpr.partition(),
+            is_future,
+        ));
+        r
+    }
+
+    fn alter_log_dirs_response(error: Errors, topic: &str, partitions: &[i32]) -> ConcreteResponse {
+        let mut topic_result = AlterReplicaLogDirTopicResult::new();
+        topic_result.set_topic_name(topic.to_string());
+        topic_result.set_partitions(
+            partitions
+                .iter()
+                .map(|&partition_id| {
+                    let mut p = AlterReplicaLogDirPartitionResult::new();
+                    p.set_partition_index(partition_id);
+                    p.set_error_code(error.code());
+                    p
+                })
+                .collect(),
+        );
+        let mut data = AlterReplicaLogDirsResponseData::new();
+        data.set_results(vec![topic_result]);
+        ConcreteResponse::AlterReplicaLogDirs(AlterReplicaLogDirsResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeLogDirs`.
+    #[tokio::test]
+    async fn test_describe_log_dirs() {
+        let log_dir = "/var/data/kafka";
+        let tp = TopicPartition::new("topic", 12);
+        let partition_size = 1234567890;
+        let offset_lag = 24;
+        let (admin, mut runnable, _time, nodes) = env();
+
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_single(Errors::None, log_dir, &tp, partition_size, offset_lag),
+            &nodes[0],
+        );
+        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
+
+        let descriptions = result.descriptions();
+        assert_eq!(descriptions.keys().copied().collect::<HashSet<_>>(), HashSet::from([0]));
+        let map = descriptions[&0].get().await.unwrap();
+        assert_description_contains(&map, log_dir, &tp, partition_size, offset_lag, None, None);
+        let all = result.all_descriptions().get().await.unwrap();
+        assert_eq!(all.keys().copied().collect::<HashSet<_>>(), HashSet::from([0]));
+        assert_description_contains(&all[&0], log_dir, &tp, partition_size, offset_lag, None, None);
+
+        // Empty results when not authorized with version < 3.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(empty_describe_log_dirs_response(None), &nodes[0]);
+        let error_result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 10, |_r| error_result.descriptions()[&0].is_done()).await;
+        let err = error_result.all_descriptions().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
+
+        // Empty results with an error with version >= 3.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(empty_describe_log_dirs_response(Some(Errors::UnknownServerError)), &nodes[0]);
+        let error_result2 = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 10, |_r| error_result2.descriptions()[&0].is_done()).await;
+        let err2 = error_result2.all_descriptions().get().await.unwrap_err();
+        assert_eq!(err2.error(), Errors::UnknownServerError);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_description_contains(
+        map: &HashMap<String, LogDirDescription>,
+        log_dir: &str,
+        tp: &TopicPartition,
+        partition_size: i64,
+        offset_lag: i64,
+        total_bytes: Option<i64>,
+        usable_bytes: Option<i64>,
+    ) {
+        assert_eq!(
+            map.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([log_dir.to_string()])
+        );
+        let desc = &map[log_dir];
+        assert!(desc.error().is_none());
+        let infos = desc.replica_infos();
+        assert_eq!(infos.keys().cloned().collect::<HashSet<_>>(), HashSet::from([tp.clone()]));
+        assert_eq!(infos[tp].size(), partition_size);
+        assert_eq!(infos[tp].offset_lag(), offset_lag);
+        assert!(!infos[tp].is_future());
+        assert_eq!(desc.total_bytes(), total_bytes);
+        assert_eq!(desc.usable_bytes(), usable_bytes);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsWithVolumeBytes`.
+    #[tokio::test]
+    async fn test_describe_log_dirs_with_volume_bytes() {
+        let log_dir = "/var/data/kafka";
+        let tp = TopicPartition::new("topic", 12);
+        let partition_size = 1234567890;
+        let offset_lag = 24;
+        let total_bytes = 123;
+        let usable_bytes = 456;
+        let (admin, mut runnable, _time, nodes) = env();
+
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_single_with_bytes(
+                Errors::None,
+                log_dir,
+                &tp,
+                partition_size,
+                offset_lag,
+                total_bytes,
+                usable_bytes,
+            ),
+            &nodes[0],
+        );
+        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
+        let map = result.descriptions()[&0].get().await.unwrap();
+        assert_description_contains(
+            &map,
+            log_dir,
+            &tp,
+            partition_size,
+            offset_lag,
+            Some(total_bytes),
+            Some(usable_bytes),
+        );
+        let all = result.all_descriptions().get().await.unwrap();
+        assert_description_contains(
+            &all[&0],
+            log_dir,
+            &tp,
+            partition_size,
+            offset_lag,
+            Some(total_bytes),
+            Some(usable_bytes),
+        );
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsOfflineDir`.
+    #[tokio::test]
+    async fn test_describe_log_dirs_offline_dir() {
+        let log_dir = "/var/data/kafka";
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_response(vec![describe_log_dirs_result(Errors::KafkaStorageError, log_dir, Vec::new())]),
+            &nodes[0],
+        );
+        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
+        let map = result.descriptions()[&0].get().await.unwrap();
+        assert_eq!(
+            map.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([log_dir.to_string()])
+        );
+        assert_eq!(map[log_dir].error().unwrap().error(), Errors::KafkaStorageError);
+        assert!(map[log_dir].replica_infos().is_empty());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsPartialFailure`.
+    #[tokio::test]
+    async fn test_describe_log_dirs_partial_failure() {
+        let default_api_timeout: i64 = 60000;
+        let (admin, mut runnable, time, nodes) = env_with_props(&[
+            ("default.api.timeout.ms", &default_api_timeout.to_string()),
+            ("retries", "0"),
+        ]);
+        // Provide only node 1's response.
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_response(vec![describe_log_dirs_result(Errors::None, "/data", Vec::new())]),
+            &nodes[1],
+        );
+        let result = admin.describe_log_dirs(&[0, 1], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 30, |r| !r.client_mut().has_pending_responses()).await;
+        time.sleep(default_api_timeout + 1);
+        pump_until(&mut runnable, 30, |_r| {
+            result.descriptions()[&0].is_done() && result.descriptions()[&1].is_done()
+        })
+        .await;
+        assert!(matches!(
+            result.descriptions()[&0].get().await.unwrap_err(),
+            KafkaError::Timeout(_)
+        ));
+        assert!(result.descriptions()[&1].get().await.is_ok());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeReplicaLogDirs`.
+    #[tokio::test]
+    async fn test_describe_replica_log_dirs() {
+        let tpr1 = TopicPartitionReplica::new("topic", 12, 1);
+        let tpr2 = TopicPartitionReplica::new("topic", 12, 2);
+        let (admin, mut runnable, _time, nodes) = env();
+
+        let broker1log0 = "/var/data/kafka0";
+        let broker1log1 = "/var/data/kafka1";
+        let broker2log0 = "/var/data/kafka2";
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_response(vec![
+                replica_describe_log_dirs_result(&tpr1, broker1log0, 987654321, 24, false),
+                replica_describe_log_dirs_result(&tpr1, broker1log1, 123456789, 4321, true),
+            ]),
+            &nodes[1],
+        );
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_response(vec![describe_log_dirs_result(
+                Errors::KafkaStorageError,
+                broker2log0,
+                Vec::new(),
+            )]),
+            &nodes[2],
+        );
+
+        let result =
+            admin.describe_replica_log_dirs(&[tpr1.clone(), tpr2.clone()], DescribeReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| {
+            result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
+        })
+        .await;
+
+        assert_eq!(
+            result.values().keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([tpr1.clone(), tpr2.clone()])
+        );
+        let info1 = result.values()[&tpr1].get().await.unwrap();
+        assert_eq!(info1.current_replica_log_dir(), Some(broker1log0));
+        assert_eq!(info1.current_replica_offset_lag(), 24);
+        assert_eq!(info1.future_replica_log_dir(), Some(broker1log1));
+        assert_eq!(info1.future_replica_offset_lag(), 4321);
+
+        let info2 = result.values()[&tpr2].get().await.unwrap();
+        assert_eq!(info2.current_replica_log_dir(), None);
+        assert_eq!(info2.current_replica_offset_lag(), -1);
+        assert_eq!(info2.future_replica_log_dir(), None);
+        assert_eq!(info2.future_replica_offset_lag(), -1);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeReplicaLogDirsUnexpected`.
+    #[tokio::test]
+    async fn test_describe_replica_log_dirs_unexpected() {
+        let expected = TopicPartitionReplica::new("topic", 12, 1);
+        let unexpected = TopicPartitionReplica::new("topic", 12, 2);
+        let (admin, mut runnable, _time, nodes) = env();
+
+        let broker1log0 = "/var/data/kafka0";
+        let broker1log1 = "/var/data/kafka1";
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_response(vec![
+                replica_describe_log_dirs_result(&expected, broker1log0, 987654321, 24, false),
+                replica_describe_log_dirs_result(&unexpected, broker1log1, 123456789, 4321, true),
+            ]),
+            &nodes[1],
+        );
+
+        let result =
+            admin.describe_replica_log_dirs(std::slice::from_ref(&expected), DescribeReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| result.values()[&expected].is_done()).await;
+
+        assert_eq!(
+            result.values().keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([expected.clone()])
+        );
+        let info = result.values()[&expected].get().await.unwrap();
+        assert_eq!(info.current_replica_log_dir(), Some(broker1log0));
+        assert_eq!(info.current_replica_offset_lag(), 24);
+        assert_eq!(info.future_replica_log_dir(), Some(broker1log1));
+        assert_eq!(info.future_replica_offset_lag(), 4321);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeReplicaLogDirsWithNonExistReplica`.
+    #[tokio::test]
+    async fn test_describe_replica_log_dirs_with_non_exist_replica() {
+        let broker_id = 0;
+        let tpr1 = TopicPartitionReplica::new("topic1", 12, broker_id);
+        let tpr2 = TopicPartitionReplica::new("topic2", 12, broker_id);
+        let (admin, mut runnable, _time, nodes) = env();
+
+        let log_dir = "/var/data/kafka0";
+        let offset_lag = 1;
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_response(vec![replica_describe_log_dirs_result(
+                &tpr1, log_dir, 123456, offset_lag, false,
+            )]),
+            &nodes[broker_id as usize],
+        );
+
+        let result =
+            admin.describe_replica_log_dirs(&[tpr1.clone(), tpr2.clone()], DescribeReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| {
+            result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
+        })
+        .await;
+
+        let info1 = result.values()[&tpr1].get().await.unwrap();
+        assert_eq!(info1.current_replica_log_dir(), Some(log_dir));
+        assert_eq!(info1.future_replica_log_dir(), None);
+        assert_eq!(info1.current_replica_offset_lag(), offset_lag);
+        assert_eq!(info1.future_replica_offset_lag(), -1);
+        let info2 = result.values()[&tpr2].get().await.unwrap();
+        assert_eq!(info2.current_replica_log_dir(), None);
+        assert_eq!(info2.future_replica_log_dir(), None);
+        assert_eq!(info2.current_replica_offset_lag(), -1);
+        assert_eq!(info2.future_replica_offset_lag(), -1);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsSuccess`.
+    #[tokio::test]
+    async fn test_alter_replica_log_dirs_success() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[0]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[1]);
+
+        let tpr0 = TopicPartitionReplica::new("topic", 0, 0);
+        let tpr1 = TopicPartitionReplica::new("topic", 0, 1);
+        let assignment = HashMap::from([
+            (tpr0.clone(), "/data0".to_string()),
+            (tpr1.clone(), "/data1".to_string()),
+        ]);
+        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| {
+            result.values()[&tpr0].is_done() && result.values()[&tpr1].is_done()
+        })
+        .await;
+        result.values()[&tpr0].get().await.unwrap();
+        result.values()[&tpr1].get().await.unwrap();
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsLogDirNotFound`.
+    #[tokio::test]
+    async fn test_alter_replica_log_dirs_log_dir_not_found() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[0]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::LogDirNotFound, "topic", &[0]), &nodes[1]);
+
+        let tpr0 = TopicPartitionReplica::new("topic", 0, 0);
+        let tpr1 = TopicPartitionReplica::new("topic", 0, 1);
+        let assignment = HashMap::from([
+            (tpr0.clone(), "/data0".to_string()),
+            (tpr1.clone(), "/data1".to_string()),
+        ]);
+        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| {
+            result.values()[&tpr0].is_done() && result.values()[&tpr1].is_done()
+        })
+        .await;
+        result.values()[&tpr0].get().await.unwrap();
+        let err = result.values()[&tpr1].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::LogDirNotFound);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsUnrequested`.
+    #[tokio::test]
+    async fn test_alter_replica_log_dirs_unrequested() {
+        let (admin, mut runnable, _time, nodes) = env();
+        // Response contains partitions 1 and 2, but only 1 was requested.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[1, 2]), &nodes[0]);
+
+        let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
+        let assignment = HashMap::from([(tpr1.clone(), "/data1".to_string())]);
+        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| result.values()[&tpr1].is_done()).await;
+        result.values()[&tpr1].get().await.unwrap();
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsPartialResponse`.
+    #[tokio::test]
+    async fn test_alter_replica_log_dirs_partial_response() {
+        let (admin, mut runnable, _time, nodes) = env();
+        // Response contains only partition 1; partition 2 was also requested.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[1]), &nodes[0]);
+
+        let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
+        let tpr2 = TopicPartitionReplica::new("topic", 2, 0);
+        let assignment = HashMap::from([
+            (tpr1.clone(), "/data1".to_string()),
+            (tpr2.clone(), "/data1".to_string()),
+        ]);
+        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 20, |_r| {
+            result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
+        })
+        .await;
+        result.values()[&tpr1].get().await.unwrap();
+        // The sanity check completes the unrequested-in-response future with an
+        // UnknownServerError (mirrors `completeUnrealizedFutures`).
+        let err = result.values()[&tpr2].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownServerError);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAlterReplicaLogDirsPartialFailure`.
+    #[tokio::test]
+    async fn test_alter_replica_log_dirs_partial_failure() {
+        let default_api_timeout: i64 = 60000;
+        let (admin, mut runnable, time, nodes) = env_with_props(&[
+            ("default.api.timeout.ms", &default_api_timeout.to_string()),
+            ("retries", "0"),
+        ]);
+        // Provide only node 1's response.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[2]), &nodes[1]);
+
+        let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
+        let tpr2 = TopicPartitionReplica::new("topic", 2, 1);
+        let assignment = HashMap::from([
+            (tpr1.clone(), "/data1".to_string()),
+            (tpr2.clone(), "/data1".to_string()),
+        ]);
+        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        pump_until(&mut runnable, 30, |r| !r.client_mut().has_pending_responses()).await;
+        time.sleep(default_api_timeout + 1);
+        pump_until(&mut runnable, 30, |_r| {
+            result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
+        })
+        .await;
+        assert!(matches!(
+            result.values()[&tpr1].get().await.unwrap_err(),
+            KafkaError::Timeout(_)
+        ));
+        result.values()[&tpr2].get().await.unwrap();
+    }
+
+    // --- MockAdminClient log-dir methods -------------------------------------
+
+    fn mock_topic_partition_info(partition: i32, leader: &Node, replicas: Vec<Node>) -> TopicPartitionInfo {
+        TopicPartitionInfo::new(partition, Some(leader.clone()), replicas, Vec::new(), Vec::new(), Vec::new())
+    }
+
+    #[tokio::test]
+    async fn test_mock_describe_log_dirs_reports_topic_replicas() {
+        let mock = MockAdminClient::create(2);
+        let leader = Node::new(0, "localhost".to_string(), 1000);
+        let replicas = vec![
+            Node::new(0, "localhost".to_string(), 1000),
+            Node::new(1, "localhost".to_string(), 1001),
+        ];
+        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None);
+
+        let result = mock.describe_log_dirs(&[0, 1], DescribeLogDirsOptions::new());
+        let broker0 = result.descriptions()[&0].get().await.unwrap();
+        assert!(broker0.contains_key("/tmp/kafka-logs"));
+        let infos = broker0["/tmp/kafka-logs"].replica_infos();
+        assert!(infos.contains_key(&TopicPartition::new("topic", 0)));
+        // Broker 1 is a replica for the partition too.
+        let broker1 = result.descriptions()[&1].get().await.unwrap();
+        assert!(
+            broker1["/tmp/kafka-logs"]
+                .replica_infos()
+                .contains_key(&TopicPartition::new("topic", 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_alter_and_describe_replica_log_dirs() {
+        let mock = MockAdminClient::create(1);
+        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()]);
+        let leader = Node::new(0, "localhost".to_string(), 1000);
+        mock.add_topic(
+            false,
+            "topic",
+            vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
+            None,
+        );
+
+        // Before any move, current log dir is the seeded first broker log dir.
+        let tpr = TopicPartitionReplica::new("topic", 0, 0);
+        let before = mock.describe_replica_log_dirs(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
+        let info = before.values()[&tpr].get().await.unwrap();
+        assert_eq!(info.current_replica_log_dir(), Some("/data0"));
+        assert_eq!(info.future_replica_log_dir(), None);
+
+        // Move to /data1; describe should reflect the pending move.
+        let assignment = HashMap::from([(tpr.clone(), "/data1".to_string())]);
+        let alter = mock.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        alter.values()[&tpr].get().await.unwrap();
+        let after = mock.describe_replica_log_dirs(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
+        let moved = after.values()[&tpr].get().await.unwrap();
+        assert_eq!(moved.current_replica_log_dir(), Some("/data0"));
+        assert_eq!(moved.future_replica_log_dir(), Some("/data1"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_alter_replica_log_dirs_offline_dir() {
+        let mock = MockAdminClient::create(1);
+        let leader = Node::new(0, "localhost".to_string(), 1000);
+        mock.add_topic(
+            false,
+            "topic",
+            vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
+            None,
+        );
+        let tpr = TopicPartitionReplica::new("topic", 0, 0);
+        // "/nope" is not among the broker's log dirs -> KafkaStorageError.
+        let assignment = HashMap::from([(tpr.clone(), "/nope".to_string())]);
+        let result = mock.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let err = result.values()[&tpr].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::KafkaStorageError);
     }
 }
