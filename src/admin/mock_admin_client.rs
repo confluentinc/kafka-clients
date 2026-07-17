@@ -25,15 +25,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::admin::{
-    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterReplicaLogDirsOptions,
-    AlterReplicaLogDirsResult, Config, ConfigEntry, CreatePartitionsOptions, CreatePartitionsResult,
-    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions,
-    DeleteTopicsResult, DeletedRecords, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
-    DescribeConfigsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
-    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ListConfigResourcesOptions,
-    ListConfigResourcesResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitions, NewTopic, OpType,
+    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterPartitionReassignmentsOptions,
+    AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, Config, ConfigEntry,
+    CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions,
+    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClusterOptions,
+    DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeLogDirsOptions,
+    DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions,
+    DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, ListConfigResourcesOptions,
+    ListConfigResourcesResult, ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult,
+    LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment,
     RecordsToDelete, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
+use crate::common::ElectionType;
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
@@ -99,6 +103,13 @@ struct State {
     // Pending replica moves recorded by `alter_replica_log_dirs`, keyed by
     // replica (mirrors Java's `replicaMoves`).
     replica_moves: HashMap<TopicPartitionReplica, ReplicaLogDirInfo>,
+    // Current partition reassignments, keyed by partition (mirrors Java's
+    // `reassignments`).
+    reassignments: HashMap<TopicPartition, NewPartitionReassignment>,
+    // Per-partition beginning / end offsets seeded via `update_beginning_offsets`
+    // / `update_end_offsets` (mirrors Java's `beginningOffsets` / `endOffsets`).
+    beginning_offsets: HashMap<TopicPartition, i64>,
+    end_offsets: HashMap<TopicPartition, i64>,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -153,8 +164,29 @@ impl MockAdminClient {
                     .map(|_| DEFAULT_LOG_DIRS.iter().map(|s| (*s).to_string()).collect())
                     .collect(),
                 replica_moves: HashMap::new(),
+                reassignments: HashMap::new(),
+                beginning_offsets: HashMap::new(),
+                end_offsets: HashMap::new(),
             }),
         }
+    }
+
+    /// Seeds the beginning offsets returned by `list_offsets` for the given
+    /// partitions.
+    ///
+    /// Mirrors `MockAdminClient.updateBeginningOffsets`.
+    pub fn update_beginning_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
+        let mut state = self.state.lock().unwrap();
+        state.beginning_offsets.extend(new_offsets);
+    }
+
+    /// Seeds the end offsets returned by `list_offsets` for the given
+    /// partitions.
+    ///
+    /// Mirrors `MockAdminClient.updateEndOffsets`.
+    pub fn update_end_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
+        let mut state = self.state.lock().unwrap();
+        state.end_offsets.extend(new_offsets);
     }
 
     /// Overrides the log directories for a broker (mirrors Java's
@@ -228,6 +260,41 @@ impl MockAdminClient {
 
 fn timeout_error() -> KafkaError {
     KafkaError::Timeout("The mock timed out the request.".to_string())
+}
+
+/// Computes the `PartitionReassignment` for a partition from the mock's stored
+/// reassignments and topic metadata.
+///
+/// Mirrors `MockAdminClient.findPartitionReassignment`. Returns `None` if there
+/// is no stored reassignment for the partition.
+///
+/// # Panics
+///
+/// Panics on an internal invariant violation (a stored reassignment references a
+/// partition with no metadata), mirroring Java's `RuntimeException` — this can
+/// only happen if the mock's internal state is corrupted (CLAUDE.md §10.1).
+fn find_partition_reassignment(state: &State, partition: &TopicPartition) -> Option<PartitionReassignment> {
+    let reassignment = state.reassignments.get(partition)?;
+    let metadata = state.all_topics.get(partition.topic()).unwrap_or_else(|| {
+        panic!("Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata")
+    });
+    let info = metadata.partitions.get(partition.partition() as usize).unwrap_or_else(|| {
+        panic!("Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo")
+    });
+    let target_replicas = reassignment.target_replicas();
+    let mut replicas = Vec::new();
+    let mut removing_replicas = Vec::new();
+    let mut adding_replicas: Vec<i32> = target_replicas.to_vec();
+    for node in info.replicas() {
+        replicas.push(node.id());
+        if !target_replicas.contains(&node.id()) {
+            removing_replicas.push(node.id());
+        }
+        if let Some(pos) = adding_replicas.iter().position(|&id| id == node.id()) {
+            adding_replicas.remove(pos);
+        }
+    }
+    Some(PartitionReassignment::new(replicas, adding_replicas, removing_replicas))
 }
 
 fn config_from_new_topic(new_topic: &NewTopic) -> Config {
@@ -953,6 +1020,103 @@ impl Admin for MockAdminClient {
             results.insert(replica.clone(), handle.future());
         }
         DescribeReplicaLogDirsResult::new(results)
+    }
+
+    /// Mirrors `MockAdminClient.electLeaders`, which throws
+    /// `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:797`). Translated to a future failed with an
+    /// "unsupported" `KafkaError` (CLAUDE.md §10.1: no panic in public API).
+    fn elect_leaders(
+        &self,
+        _election_type: ElectionType,
+        _partitions: Option<HashSet<TopicPartition>>,
+        _options: ElectLeadersOptions,
+    ) -> ElectLeadersResult {
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        ElectLeadersResult::new(handle.future())
+    }
+
+    /// Mirrors `MockAdminClient.alterPartitionReassignments`.
+    fn alter_partition_reassignments(
+        &self,
+        reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+        _options: AlterPartitionReassignmentsOptions,
+    ) -> AlterPartitionReassignmentsResult {
+        let mut state = self.state.lock().unwrap();
+        let mut futures = HashMap::new();
+        for (partition, new_reassignment) in reassignments {
+            let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            let topic_metadata = state.all_topics.get(partition.topic());
+            let out_of_range = partition.partition() < 0
+                || topic_metadata.is_none_or(|m| (m.partitions.len() as i32) <= partition.partition());
+            if out_of_range {
+                future.complete_exceptionally(KafkaError::new(Errors::UnknownTopicOrPartition));
+            } else if let Some(reassignment) = new_reassignment {
+                state.reassignments.insert(partition.clone(), reassignment.clone());
+                future.complete(());
+            } else {
+                state.reassignments.remove(partition);
+                future.complete(());
+            }
+            futures.insert(partition.clone(), future.future());
+        }
+        AlterPartitionReassignmentsResult::new(futures)
+    }
+
+    /// Mirrors `MockAdminClient.listPartitionReassignments`.
+    fn list_partition_reassignments(
+        &self,
+        partitions: Option<HashSet<TopicPartition>>,
+        _options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult {
+        let state = self.state.lock().unwrap();
+        let mut map: HashMap<TopicPartition, PartitionReassignment> = HashMap::new();
+        let requested: Vec<TopicPartition> = match partitions {
+            Some(set) => set.into_iter().collect(),
+            None => state.reassignments.keys().cloned().collect(),
+        };
+        for partition in requested {
+            if let Some(reassignment) = find_partition_reassignment(&state, &partition) {
+                map.insert(partition, reassignment);
+            }
+        }
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>> = KafkaFutureImpl::new();
+        handle.complete(map);
+        ListPartitionReassignmentsResult::new(handle.future())
+    }
+
+    /// Mirrors `MockAdminClient.listOffsets`.
+    ///
+    /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
+    /// (`MockAdminClient.java:1230`); since a synchronous throw is not
+    /// representable in this signature, the affected partition's future is
+    /// failed with an "unsupported" `KafkaError` (CLAUDE.md §10.1).
+    fn list_offsets(
+        &self,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        _options: ListOffsetsOptions,
+    ) -> ListOffsetsResult {
+        let state = self.state.lock().unwrap();
+        let mut futures = HashMap::new();
+        for (tp, spec) in topic_partition_offsets {
+            let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
+            match spec {
+                OffsetSpec::Timestamp(_) => {
+                    future.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+                },
+                OffsetSpec::Earliest => {
+                    let offset = state.beginning_offsets.get(tp).copied().unwrap_or(-1);
+                    future.complete(ListOffsetsResultInfo::new(offset, -1, None));
+                },
+                _ => {
+                    let offset = state.end_offsets.get(tp).copied().unwrap_or(-1);
+                    future.complete(ListOffsetsResultInfo::new(offset, -1, None));
+                },
+            }
+            futures.insert(tp.clone(), future.future());
+        }
+        ListOffsetsResult::new(futures)
     }
 
     async fn close(&self, _timeout: Duration) {

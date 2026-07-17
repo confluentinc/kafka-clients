@@ -22,6 +22,7 @@
 pub mod admin_client_config;
 pub mod alter_config_op;
 pub mod alter_configs_result;
+pub mod alter_partition_reassignments_result;
 pub mod alter_replica_log_dirs_result;
 pub mod config;
 pub mod config_entry;
@@ -35,14 +36,20 @@ pub mod describe_configs_result;
 pub mod describe_log_dirs_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
+pub mod elect_leaders_result;
 pub mod kafka_admin_client;
 pub mod list_config_resources_result;
+pub mod list_offsets_result;
+pub mod list_partition_reassignments_result;
 pub mod list_topics_result;
 pub mod log_dir_description;
 pub mod mock_admin_client;
+pub mod new_partition_reassignment;
 pub mod new_partitions;
 pub mod new_topic;
+pub mod offset_spec;
 pub mod options;
+pub mod partition_reassignment;
 pub mod records_to_delete;
 pub mod replica_info;
 pub mod topic_description;
@@ -53,6 +60,7 @@ pub(crate) mod internals;
 pub use admin_client_config::AdminClientConfig;
 pub use alter_config_op::{AlterConfigOp, OpType};
 pub use alter_configs_result::AlterConfigsResult;
+pub use alter_partition_reassignments_result::AlterPartitionReassignmentsResult;
 pub use alter_replica_log_dirs_result::AlterReplicaLogDirsResult;
 pub use config::Config;
 pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
@@ -68,18 +76,25 @@ pub use describe_configs_result::DescribeConfigsResult;
 pub use describe_log_dirs_result::DescribeLogDirsResult;
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
+pub use elect_leaders_result::ElectLeadersResult;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_config_resources_result::ListConfigResourcesResult;
+pub use list_offsets_result::{ListOffsetsResult, ListOffsetsResultInfo};
+pub use list_partition_reassignments_result::ListPartitionReassignmentsResult;
 pub use list_topics_result::ListTopicsResult;
 pub use log_dir_description::LogDirDescription;
 pub use mock_admin_client::MockAdminClient;
+pub use new_partition_reassignment::NewPartitionReassignment;
 pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
+pub use offset_spec::OffsetSpec;
 pub use options::{
-    AlterConfigsOptions, AlterReplicaLogDirsOptions, CreatePartitionsOptions, CreateTopicsOptions,
-    DeleteRecordsOptions, DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions,
+    AlterConfigsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions,
+    ListConfigResourcesOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
 };
+pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
 pub use replica_info::ReplicaInfo;
 pub use topic_description::TopicDescription;
@@ -90,7 +105,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::common::config::{ConfigResource, ConfigResourceType};
-use crate::common::{KafkaError, TopicCollection, TopicPartition, TopicPartitionReplica};
+use crate::common::{ElectionType, KafkaError, TopicCollection, TopicPartition, TopicPartitionReplica};
 
 use std::collections::HashSet;
 
@@ -203,6 +218,49 @@ pub trait Admin: Send + Sync {
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
     ) -> DescribeReplicaLogDirsResult;
+
+    /// Elect a replica as leader for the given partitions, or for all
+    /// partitions if `partitions` is `None`.
+    ///
+    /// Corresponds to `Admin.electLeaders(ElectionType, Set<TopicPartition>, ElectLeadersOptions)`.
+    fn elect_leaders(
+        &self,
+        election_type: ElectionType,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ElectLeadersOptions,
+    ) -> ElectLeadersResult;
+
+    /// Change the partition reassignments for the given partitions.
+    ///
+    /// A `None` value for a partition cancels an ongoing reassignment.
+    ///
+    /// Corresponds to
+    /// `Admin.alterPartitionReassignments(Map<TopicPartition, Optional<NewPartitionReassignment>>, AlterPartitionReassignmentsOptions)`.
+    fn alter_partition_reassignments(
+        &self,
+        reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+        options: AlterPartitionReassignmentsOptions,
+    ) -> AlterPartitionReassignmentsResult;
+
+    /// List the current partition reassignments, optionally restricted to a set
+    /// of partitions (`None` lists all ongoing reassignments).
+    ///
+    /// Corresponds to
+    /// `Admin.listPartitionReassignments(Optional<Set<TopicPartition>>, ListPartitionReassignmentsOptions)`.
+    fn list_partition_reassignments(
+        &self,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult;
+
+    /// List the offsets for the given partitions and offset specifications.
+    ///
+    /// Corresponds to `Admin.listOffsets(Map<TopicPartition, OffsetSpec>, ListOffsetsOptions)`.
+    fn list_offsets(
+        &self,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        options: ListOffsetsOptions,
+    ) -> ListOffsetsResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.
