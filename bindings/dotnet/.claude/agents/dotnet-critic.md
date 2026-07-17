@@ -13,13 +13,13 @@ Follow the **Critic** role and review loop in `.claude/rules/agent-roles.md` (wa
 
 ## Ground truth (read first)
 - Review against the **C ABI header** (`target/include/confluent_kafka.h`) and the **Kafka Java public API shape** — **not** Rust internals, and **not** Java implementation logic (`bindings/CLAUDE.md §2`). You review **only the C# side (header down)**; the Rust ABI itself is `kafka-critic`'s job against `CLAUDE.md`, not yours.
-- Load the rulebook first: `bindings/dotnet/CLAUDE.md` (§1–§7) and `.claude/rules/ffi-marshalling.md` (§1–§8). Your checklist **is** the "Anti-patterns" blocks in ffi-marshalling.md, the DoD gate (CLAUDE.md §6), and the §3 decision table — don't invent criteria.
+- Load the rulebook first: `bindings/dotnet/CLAUDE.md` (§1–§7) and `.claude/rules/ffi-marshalling.md` (Part 0 · Shared, Part A · Producer, Part B · Consumer). Your checklist **is** the "Anti-patterns" blocks in ffi-marshalling.md, the DoD gate (CLAUDE.md §6), and the §3 decision table — don't invent criteria.
 
 ## Primary axis — unmanaged memory safety (where the bugs are)
-- **Handle lifecycle (ffi §2):** long-lived → `SafeHandle` (`ReleaseHandle` → `_destroy`, exactly once); transient → read-and-freed on the pump; `_destroy_all` after `get_all`; no leak / double-free / use-after-free; `Dispose` joins the pump before releasing the producer handle.
-- **Pinning & zero-copy (ffi §4):** key/value pinned **call-scoped**, no intermediate copy, never held past the send call.
-- **Marshalling (ffi §1, §3):** `[DllImport(…, Cdecl)]`; `int`/`long` never `UIntPtr`; `bool` = `[MarshalAs(I1)]`; opaque `*_t` = `IntPtr`, never a mirrored struct; hand-rolled UTF-8 (no `LPStr`); output strings copied **before** the handle is freed.
-- **Callback safety (ffi §6–7):** `RecordMetadata_copy`'s callback is a kept-alive Cdecl delegate + a **no-throw boundary** (no managed exception into native); `RunContinuationsAsynchronously` on the pump.
+- **Handle lifecycle (ffi §A2 producer / §B2 consumer):** long-lived → `SafeHandle` (`ReleaseHandle` → `_destroy`, exactly once); transient → read-and-freed on the pump; `_destroy_all` after `get_all`; consumer owned containers (borrow-roots) vs borrowed views (never freed); no leak / double-free / use-after-free; `Dispose` joins the pump (producer) / drains+closes (consumer) before releasing the handle.
+- **Pinning & zero-copy (ffi §A4 send / §B4 receive):** send key/value pinned **call-scoped**, no intermediate copy, never held past the send call; receive borrows into the batch — copy-out before `_destroy`, no stored native-backed `ReadOnlyMemory`.
+- **Marshalling (ffi §0.1, §A3/§B3):** `[DllImport(…, Cdecl)]`; `int`/`long` never `UIntPtr`; `bool` = `[MarshalAs(I1)]`; opaque `*_t` = `IntPtr`, never a mirrored struct; hand-rolled UTF-8 (no `LPStr`); output strings copied **before** the handle is freed; length-delimited receive slices use `out_len`, never a NUL-scan.
+- **Callback safety (ffi §A6/§B6, §A7/§B7):** `RecordMetadata_copy` + the consumer completion callbacks are kept-alive Cdecl delegates + a **no-throw boundary** (no managed exception into native); `RunContinuationsAsynchronously` on the completion (pump/dispatcher).
 
 ## Secondary axes
 - **Shape fidelity:** mirrors the **Java** API, not confluent-kafka-dotnet; getters→properties; `Async` suffix; flat `KafkaException` (null handle = success); preconditions → standard .NET exceptions, never `KafkaException`.

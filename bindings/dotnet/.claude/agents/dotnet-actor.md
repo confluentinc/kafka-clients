@@ -16,7 +16,7 @@ You own **C# only**: the `Native` `[DllImport]`s (declared against the generated
 
 ## Execute (the rulebook)
 - **Bootstrap-first:** while the binding is pre-implementation, the first deliverable is a thin vertical producer skeleton (Native → `SafeHandle` → pump → `Utf8` → `SendAsync` → MockProducer test); thereafter, work is incremental Mode A / Mode B ports.
-- Follow `bindings/dotnet/CLAUDE.md` — §5 workflow (Mode A), §2 API shape, §3 decisions — and `.claude/rules/ffi-marshalling.md` §1–§8; honor §1's layer split (`src/` public, `src/Internal/`, `src/Internal/Interop/`; everything under `Internal/` is `internal`). Until the producer exists, the ffi-marshalling.md sketches + the C ABI (`src/ffi/producer.rs`, read as a *contract*) + the Python binding (a working sibling) are the shape.
+- Follow `bindings/dotnet/CLAUDE.md` — §5 workflow (Mode A), §2 API shape, §3 decisions — and `.claude/rules/ffi-marshalling.md` (Parts 0/A/B); honor §1's layer split (`src/` public, `src/Internal/`, `src/Internal/Interop/`; everything under `Internal/` is `internal`). Until the producer exists, the ffi-marshalling.md sketches + the C ABI (`src/ffi/producer.rs`, read as a *contract*) + the Python binding (a working sibling) are the shape.
 - For §3 **decision points** (namespace, disposal, cancellation, serializers, …), take the recommended default or deviate **with a recorded rationale** (PLAN / `COMMENTS.DONE` / code comment).
 - **Shape only, no Kafka logic** (CLAUDE.md §1). No `TODO`/`FIXME`; Apache-2.0 header on new files.
 

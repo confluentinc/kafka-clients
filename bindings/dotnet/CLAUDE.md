@@ -44,7 +44,7 @@ producer.SendAsync(record)  ──►  Task<RecordMetadata>
         │  P/Invoke: Native.Producer_send(handle, …, out err) → future handle
         │  completion pump blocks on get_all(), completes each TCS
         │    (Option A — pull-pump shown; the producer's completion model is
-        │     OPEN, push is Option B — ffi §7. The consumer is push-only, no pump.)
+        │     OPEN, push is Option B — ffi §A7. The consumer is push-only, no pump.)
         ▼
    C ABI  kafka_producer_Producer_send / _get_all   (flat pointers, out-params)
         ▼
@@ -89,7 +89,7 @@ signal it belongs in `src/`.
   user can name it, it lives here.
 - `src/Internal/` — **internal** managed scaffolding (`ConfluentKafka.Internal`):
   the async-completion bridge (the consumer's callback→`TaskCompletionSource`
-  adapter; the producer's pull-pump *or* push adapter — open, ffi §7), config →
+  adapter; the producer's pull-pump *or* push adapter — open, ffi §A7), config →
   properties marshalling.
 - `src/Internal/Interop/` — the **P/Invoke boundary**
   (`ConfluentKafka.Internal.Interop`): the `Native` `[DllImport]` class,
@@ -127,7 +127,7 @@ public sealed class RecordMetadata {            // getters → properties
     public long Timestamp { get; }
 }
 
-public class KafkaException : Exception {        // flat, for now (§3, ffi §5)
+public class KafkaException : Exception {        // flat, for now (§3, ffi §A5)
     public int Code { get; }
     public bool IsRetriable { get; }
     public bool IsFatal { get; }
@@ -218,18 +218,18 @@ its C# realization, and where the enforcing rule lives.
 
 | Java | C# idiom | Rule / detail |
 |---|---|---|
-| `Future<RecordMetadata>` | `Task<RecordMetadata>` | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §7 |
-| blocking / `Future`-returning / I/O call (`send`, `flush`, `close`) | `async Task` + `CancellationToken` | best-effort cancel — ffi §7, §3 |
-| `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §2/§7 |
-| `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §5 |
-| `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` / `ObjectDisposedException` | validate **before** the FFI call — ffi §5 |
-| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `PollAsync`/`CommitAsync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §5 |
-| `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §5 |
+| `Future<RecordMetadata>` | `Task<RecordMetadata>` | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §A7/§B7 |
+| blocking / `Future`-returning / I/O call (`send`, `flush`, `close`) | `async Task` + `CancellationToken` | best-effort cancel — ffi §A7/§B7, §3 |
+| `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
+| `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §A5 |
+| `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` / `ObjectDisposedException` | validate **before** the FFI call — ffi §A5 |
+| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `PollAsync`/`CommitAsync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
+| `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
 | **non-blocking / instantaneous** call (`offset()`, `assignment()`, mock helpers) | **stays sync** — property (`Offset`) or plain method | not everything becomes async — `consumer-threading.md §1` |
 | method `send`, `flush` | PascalCase + `Async` suffix (`SendAsync`) | §3 |
-| `byte[]` key/value | `ReadOnlyMemory<byte>` | pinned zero-copy — ffi §4 |
-| opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §2 |
-| `String` topic / config | UTF-8, hand-marshalled | ffi §3 |
+| `byte[]` key/value | `ReadOnlyMemory<byte>` | pinned zero-copy (send) — ffi §A4; receive borrow — ffi §B4 |
+| opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
+| `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Producer<K,V>` (generic) | non-generic bytes **now**; generic `Producer<TKey,TValue>` when serializers land | §3 |
 
 **Do NOT build:** the ecosystem `confluent-kafka-dotnet` shape (`ProduceAsync`,
@@ -248,13 +248,13 @@ comment).
 |---|---|---|
 | **Namespace / package id** | `ConfluentKafka` — **distinct from the ecosystem client's `Confluent.Kafka`** (distinct FQN lets both coexist). | before any public type |
 | **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `CloseAsync(TimeSpan)`. | first client type |
-| **Cancellation** | `CancellationToken` on every async method, honored best-effort — cancels the *wait*, never aborts an enqueued send (ffi §7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
+| **Cancellation** | `CancellationToken` on every async method, honored best-effort — cancels the *wait*, never aborts an enqueued send (ffi §A7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
 | **Async naming** | `Async` suffix on `Task`-returning methods (`SendAsync`); ffi-marshalling assumes this. Deviation: strict-Java `Send`. | first async method |
 | **Interface naming** | `IProducer` — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it), same idiom-layering as `Async`; the root name "Producer" stays recognizable. Deviation: strict-Java bare `Producer` (fights CA1715 / dev expectation). | first interface type |
-| **Key/value type** | `ReadOnlyMemory<byte>` (zero-copy-friendly; pins via `MemoryHandle`, ffi §4). `byte[]`-only is an acceptable interim. | porting `ProducerRecord` |
+| **Key/value type** | `ReadOnlyMemory<byte>` (zero-copy-friendly; pins via `MemoryHandle`, ffi §A4). `byte[]`-only is an acceptable interim. | porting `ProducerRecord` |
 | **Serializers** | ABI is bytes-only; add a .NET-side `ISerializer<T>`/`IDeserializer<T>` producing `byte[]` (makes `Producer<TKey,TValue>` generic later). No per-record callback through the ABI (`CLAUDE.md §11`). | porting (de)serialization |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
-| **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §5). | if catch-by-type is needed |
+| **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). | if catch-by-type is needed |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
 | **Nullable reference types** | `#nullable enable` project-wide; annotate the P/Invoke surface precisely. | project setup |
 
@@ -269,17 +269,27 @@ blocking-native ABI directly (not sync-over-async).
 ## 4 · Boundary rules → `ffi-marshalling.md`
 
 The correctness contracts you must not break live in
-`.claude/rules/ffi-marshalling.md` (read on demand). Index:
+`.claude/rules/ffi-marshalling.md` (read on demand), organized as a **Shared**
+part + a **Producer** part + a **Consumer** part (each client reads end-to-end).
+Index:
 
-- §1 P/Invoke declarations & type map (`[DllImport]`, `Cdecl`, TFMs)
-- §2 Handle ownership (`SafeHandle` vs transient read-and-free)
-- §3 String marshalling (UTF-8 by hand)
-- §4 Zero-copy & buffer pinning (call-scoped)
-- §5 Error model (flat `KafkaException` + precondition exceptions)
-- §6 Callback & delegate marshalling (`RecordMetadata_copy`)
-- §7 Async / completion → `TaskCompletionSource` (producer pull-pump *vs* push — open; consumer push)
-- §8 Native library loading, packaging & AOT
-- *(preamble)* Thread topology — the whole-system thread picture
+**Part 0 · Shared mechanics**
+- §0.1 P/Invoke declarations & type map (`[DllImport]`, `Cdecl`, TFMs)
+- §0.2 Native library loading, packaging & AOT
+- §0.3 Thread topology & thread-safety (shared framing)
+
+**Part A · Producer** (end to end)
+- §A1 Thread model · §A2 Handle ownership (`SafeHandle` vs transient) ·
+  §A3 String marshalling (UTF-8, the shared mechanism) · §A4 Zero-copy — send
+  (call-scoped pin) · §A5 Error model (flat `KafkaException` + preconditions) ·
+  §A6 Callback marshalling (`RecordMetadata_copy`) · §A7 Async completion
+  (pull-pump *vs* push — open)
+
+**Part B · Consumer** (end to end)
+- §B1 Thread model · §B2 Handle ownership (owned container + borrowed view) ·
+  §B3 String marshalling — receive path (length-delimited borrow) · §B4 Zero-copy
+  — receive (borrow, copy-out) · §B5 Error model additions (wakeup, concurrent) ·
+  §B6 Completion callbacks (foreign thread) · §B7 Async completion (push — settled)
 
 This file (CLAUDE.md) never restates those; it references them by section.
 
@@ -301,12 +311,12 @@ Is the feature already exposed at the C ABI (src/ffi)?
 
 The `kafka_*` function already exists in the header:
 
-1. **P/Invoke** — add the `[DllImport]` declaration to `Native` (ffi §1).
-2. **Ownership** — a `SafeHandle` subclass for any new long-lived handle (ffi §2);
-   transient handles are read-and-freed, not wrapped.
+1. **P/Invoke** — add the `[DllImport]` declaration to `Native` (ffi §0.1).
+2. **Ownership** — a `SafeHandle` subclass for any new long-lived handle
+   (ffi §A2/§B2); transient handles are read-and-freed, not wrapped.
 3. **Managed API** — the Java-shaped method in the client class (`Producer.cs` /
-   `Consumer.cs`); marshal strings/bytes (ffi §3–4), map errors (ffi §5), bridge
-   async to `Task` (ffi §7).
+   `Consumer.cs`); marshal strings/bytes (ffi §A3/§B3, §A4/§B4), map errors
+   (ffi §A5/§B5), bridge async to `Task` (ffi §A7/§B7).
 4. **Build & Test** — against `MockProducer` / `MockConsumer`, no broker (§6).
 
 ### 5.3 Mode B — full-stack port (the C-ABI-first loop)
@@ -347,7 +357,7 @@ The consumer C ABI confirms the receive-path zero-copy contract
 `IDeserializer<T>` reads a transient `ReadOnlySpan<byte>` over the batch during the
 poll loop and returns an **owned `T`** — nothing references the batch afterward, so
 both options behave identically. A `string` / topic likewise **must** be copied (a
-`string` can't borrow native UTF-8; ffi §3). The two options diverge **only** when
+`string` can't borrow native UTF-8; ffi §A3/§B3). The two options diverge **only** when
 the user wants the raw bytes themselves (`byte[]` / `ReadOnlyMemory<byte>`).
 
 **Default — copy-out.** For the raw-byte surface, copy each key/value into an owned
@@ -357,7 +367,7 @@ thread-safe, no memory amplification), and costs one gen-0 array per raw record 
 Java's own allocation behavior. **This is the default.**
 
 **Deferred alternative — keep-alive (zero-copy).** Hold the `ConsumerRecords_t`
-handle alive (a `SafeConsumerRecordsHandle`; ffi §2 Category 3) and expose the
+handle alive (a `SafeConsumerRecordsHandle`; ffi §B2 Category 3) and expose the
 bytes as views over the batch, `_destroy` at `Dispose`. Zero-copy on the raw-byte
 path, but it diverges from the Java shape and couples record lifetime to the
 handle. **Do not** mirror Python's default of native-backed `ReadOnlyMemory<byte>`:
