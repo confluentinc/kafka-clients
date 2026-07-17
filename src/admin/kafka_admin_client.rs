@@ -5311,4 +5311,636 @@ mod tests {
         let err = result.values()[&tpr].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::KafkaStorageError);
     }
+
+    // --- electLeaders / (alter|list)PartitionReassignments / listOffsets -------
+    //
+    // `ElectLeadersResponse`, `ElectionType`, and the `*Options` / POJO types are
+    // already in scope via `use super::*`. Only the wire *data* structs and the
+    // `ListOffsetsResponse` wrapper need importing here.
+
+    use crate::alter_partition_reassignments_response_data::{
+        AlterPartitionReassignmentsResponseData, ReassignablePartitionResponse, ReassignableTopicResponse,
+    };
+    use crate::common::requests::{
+        AlterPartitionReassignmentsResponse, ListOffsetsResponse, ListPartitionReassignmentsResponse,
+    };
+    use crate::elect_leaders_response_data::{ElectLeadersResponseData, PartitionResult, ReplicaElectionResult};
+    use crate::list_offsets_response_data::ListOffsetsResponseData;
+    use crate::list_partition_reassignments_response_data::{
+        ListPartitionReassignmentsResponseData, OngoingPartitionReassignment, OngoingTopicReassignment,
+    };
+
+    fn elect_leaders_resp(top_error: Errors, results: Vec<ReplicaElectionResult>) -> ConcreteResponse {
+        let mut data = ElectLeadersResponseData::new();
+        data.set_error_code(top_error.code());
+        data.set_replica_election_results(results);
+        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new(data))
+    }
+
+    fn election_result(topic: &str, partitions: &[(i32, Errors, Option<&str>)]) -> ReplicaElectionResult {
+        let mut result = ReplicaElectionResult::new();
+        result.set_topic(topic.to_string());
+        for (partition, error, message) in partitions {
+            let mut pr = PartitionResult::new();
+            pr.set_partition_id(*partition);
+            pr.set_error_code(error.code());
+            pr.set_error_message(message.map(str::to_string));
+            result.partition_result.push(pr);
+        }
+        result
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testElectLeaders`.
+    #[tokio::test]
+    async fn test_elect_leaders() {
+        for election_type in ElectionType::values() {
+            let (admin, mut runnable, time, _nodes) = env();
+            let topic1 = TopicPartition::new("topic", 0);
+            let topic2 = TopicPartition::new("topic", 2);
+
+            // A call where both partitions fail with ClusterAuthorizationFailed.
+            runnable.client_mut().prepare_response(elect_leaders_resp(
+                Errors::None,
+                vec![election_result(
+                    "topic",
+                    &[
+                        (0, Errors::ClusterAuthorizationFailed, Some("no")),
+                        (2, Errors::ClusterAuthorizationFailed, Some("no")),
+                    ],
+                )],
+            ));
+            let partitions: HashSet<TopicPartition> = [topic1.clone(), topic2.clone()].into_iter().collect();
+            let result = admin.elect_leaders(election_type, Some(partitions.clone()), ElectLeadersOptions::new());
+            pump(&mut runnable, 5).await;
+            let map = result.partitions().get().await.unwrap();
+            assert_eq!(map[&topic2].as_ref().unwrap().error(), Errors::ClusterAuthorizationFailed);
+
+            // A call where there are no errors.
+            runnable.client_mut().prepare_response(elect_leaders_resp(
+                Errors::None,
+                vec![election_result(
+                    "topic",
+                    &[(0, Errors::None, None), (2, Errors::None, None)],
+                )],
+            ));
+            let result = admin.elect_leaders(election_type, Some(partitions.clone()), ElectLeadersOptions::new());
+            pump(&mut runnable, 5).await;
+            let map = result.partitions().get().await.unwrap();
+            assert!(map[&topic1].is_none());
+            assert!(map[&topic2].is_none());
+
+            // A call that times out (no response prepared).
+            let result = admin.elect_leaders(
+                election_type,
+                Some(partitions),
+                ElectLeadersOptions::new().timeout_ms(Some(100)),
+            );
+            pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
+            time.sleep(200);
+            pump_until(&mut runnable, 30, |_r| result.partitions().is_done()).await;
+            let err = result.partitions().get().await.unwrap_err();
+            assert!(matches!(err, KafkaError::Timeout(_)));
+        }
+    }
+
+    fn alter_reassignments_resp(
+        top_error: Errors,
+        error_message: Option<&str>,
+        responses: Vec<ReassignableTopicResponse>,
+    ) -> ConcreteResponse {
+        let mut data = AlterPartitionReassignmentsResponseData::new();
+        data.set_error_code(top_error.code());
+        data.set_error_message(error_message.map(str::to_string));
+        data.set_responses(responses);
+        ConcreteResponse::AlterPartitionReassignments(AlterPartitionReassignmentsResponse::new(data))
+    }
+
+    fn reassignable_topic_response(
+        name: &str,
+        partitions: &[(i32, Errors, Option<&str>)],
+    ) -> ReassignableTopicResponse {
+        let mut topic = ReassignableTopicResponse::new();
+        topic.set_name(name.to_string());
+        for (index, error, message) in partitions {
+            let mut p = ReassignablePartitionResponse::new();
+            p.set_partition_index(*index);
+            p.set_error_code(error.code());
+            p.set_error_message(message.map(str::to_string));
+            topic.partitions.push(p);
+        }
+        topic
+    }
+
+    fn reassignments_input() -> HashMap<TopicPartition, Option<NewPartitionReassignment>> {
+        let mut reassignments = HashMap::new();
+        reassignments.insert(TopicPartition::new("A", 0), None);
+        reassignments.insert(
+            TopicPartition::new("B", 0),
+            Some(NewPartitionReassignment::new(vec![1, 2, 3]).unwrap()),
+        );
+        reassignments
+    }
+
+    /// Mirrors the too-few-responses scenario of `testAlterPartitionReassignments`.
+    #[tokio::test]
+    async fn test_alter_partition_reassignments_too_few_responses() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        // The server returns a result for A-0 only (expected 2).
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![reassignable_topic_response("A", &[(0, Errors::None, None)])],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let all_err = result.all().get().await.unwrap_err();
+        assert_eq!(all_err.error(), Errors::UnknownServerError);
+        let a0_err = result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err();
+        assert_eq!(a0_err.error(), Errors::UnknownServerError);
+    }
+
+    /// Mirrors the partition-level and top-level error scenarios of
+    /// `testAlterPartitionReassignments`.
+    #[tokio::test]
+    async fn test_alter_partition_reassignments_errors() {
+        // Partition-level error: A-0 fails, B-0 succeeds.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::InvalidReplicaAssignment, Some("bad"))]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err().error(),
+            Errors::InvalidReplicaAssignment
+        );
+        result.values()[&TopicPartition::new("B", 0)].get().await.unwrap();
+
+        // Top-level error: the custom message propagates to every future.
+        let (admin, mut runnable, _time, _nodes) = env();
+        let error_message = "this is custom error message";
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::ClusterAuthorizationFailed,
+            Some(error_message),
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::None, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let all_err = result.all().get().await.unwrap_err();
+        assert_eq!(all_err.error(), Errors::ClusterAuthorizationFailed);
+        assert_eq!(all_err.message(), error_message);
+        assert_eq!(
+            result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err().message(),
+            error_message
+        );
+    }
+
+    /// Mirrors the unrepresentable-topic scenario of `testAlterPartitionReassignments`.
+    #[tokio::test]
+    async fn test_alter_partition_reassignments_unrepresentable() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let invalid_topic = TopicPartition::new("", 0);
+        let invalid_partition = TopicPartition::new("ABC", -1);
+        let valid = TopicPartition::new("A", 0);
+        let mut reassignments = HashMap::new();
+        reassignments.insert(
+            invalid_partition.clone(),
+            Some(NewPartitionReassignment::new(vec![1, 2, 3]).unwrap()),
+        );
+        reassignments.insert(
+            invalid_topic.clone(),
+            Some(NewPartitionReassignment::new(vec![1, 2, 3]).unwrap()),
+        );
+        reassignments.insert(valid.clone(), Some(NewPartitionReassignment::new(vec![1, 2, 3]).unwrap()));
+
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![reassignable_topic_response("A", &[(0, Errors::None, None)])],
+        ));
+        let result = admin.alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            result.values()[&invalid_topic].get().await.unwrap_err().error(),
+            Errors::InvalidTopicException
+        );
+        assert_eq!(
+            result.values()[&invalid_partition].get().await.unwrap_err().error(),
+            Errors::InvalidTopicException
+        );
+        result.values()[&valid].get().await.unwrap();
+    }
+
+    /// Mirrors the NOT_CONTROLLER scenario of `testAlterPartitionReassignments`.
+    #[tokio::test]
+    async fn test_alter_partition_reassignments_not_controller() {
+        let (admin, mut runnable, time, nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::NotController,
+            Some(Errors::NotController.message()),
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::None, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                1,
+                Vec::new(),
+            )));
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::None, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        for _ in 0..30 {
+            if result.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        result.all().get().await.unwrap();
+        result.values()[&TopicPartition::new("A", 0)].get().await.unwrap();
+        result.values()[&TopicPartition::new("B", 0)].get().await.unwrap();
+    }
+
+    fn ongoing_topic(name: &str, partition: i32) -> OngoingTopicReassignment {
+        let mut pr = OngoingPartitionReassignment::new();
+        pr.set_partition_index(partition);
+        pr.set_replicas(vec![1, 2, 3, 4, 5, 6]);
+        pr.set_adding_replicas(vec![4, 5, 6]);
+        pr.set_removing_replicas(vec![1, 2, 3]);
+        let mut topic = OngoingTopicReassignment::new();
+        topic.set_name(name.to_string());
+        topic.set_partitions(vec![pr]);
+        topic
+    }
+
+    fn list_reassignments_resp(top_error: Errors, topics: Vec<OngoingTopicReassignment>) -> ConcreteResponse {
+        let mut data = ListPartitionReassignmentsResponseData::new();
+        data.set_error_code(top_error.code());
+        data.set_error_message(Some(top_error.message().to_string()));
+        data.set_topics(topics);
+        ConcreteResponse::ListPartitionReassignments(ListPartitionReassignmentsResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListPartitionReassignments`.
+    #[tokio::test]
+    async fn test_list_partition_reassignments() {
+        let tp1 = TopicPartition::new("A", 0);
+        let tp2 = TopicPartition::new("B", 0);
+
+        // 1. NOT_CONTROLLER handling then success.
+        let (admin, mut runnable, time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(list_reassignments_resp(Errors::NotController, Vec::new()));
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                1,
+                Vec::new(),
+            )));
+        runnable.client_mut().prepare_response(list_reassignments_resp(
+            Errors::None,
+            vec![ongoing_topic("A", 0), ongoing_topic("B", 0)],
+        ));
+        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        for _ in 0..30 {
+            if result.reassignments().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        result.reassignments().get().await.unwrap();
+
+        // 2. UNKNOWN_TOPIC_OR_PARTITION.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(list_reassignments_resp(Errors::UnknownTopicOrPartition, Vec::new()));
+        let partitions: HashSet<TopicPartition> = [tp1.clone(), tp2.clone()].into_iter().collect();
+        let result = admin.list_partition_reassignments(Some(partitions), ListPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            result.reassignments().get().await.unwrap_err().error(),
+            Errors::UnknownTopicOrPartition
+        );
+
+        // 3. Success — the ongoing reassignments are mapped per partition.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(list_reassignments_resp(
+            Errors::None,
+            vec![ongoing_topic("A", 0), ongoing_topic("B", 0)],
+        ));
+        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let reassignments = result.reassignments().get().await.unwrap();
+        assert_eq!(reassignments[&tp1].adding_replicas(), &[4, 5, 6]);
+        assert_eq!(reassignments[&tp1].removing_replicas(), &[1, 2, 3]);
+        assert_eq!(reassignments[&tp1].replicas(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(reassignments[&tp2].replicas(), &[1, 2, 3, 4, 5, 6]);
+    }
+
+    fn list_offsets_resp_from(results: &[(TopicPartition, Errors, i64, i64, i32)]) -> ConcreteResponse {
+        let mut data = ListOffsetsResponseData::new();
+        let topics = results
+            .iter()
+            .map(|(tp, error, timestamp, offset, epoch)| {
+                ListOffsetsResponse::singleton_list_offsets_topic_response(tp, *error, *timestamp, *offset, *epoch)
+            })
+            .collect();
+        data.set_topics(topics);
+        ConcreteResponse::ListOffsets(ListOffsetsResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListOffsets`.
+    #[tokio::test]
+    async fn test_list_offsets() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let tp0 = TopicPartition::new("foo", 0);
+        let tp1 = TopicPartition::new("bar", 0);
+        let tp2 = TopicPartition::new("baz", 0);
+        let tp3 = TopicPartition::new("qux", 0);
+        // Lookup: all partitions lead by node0.
+        runnable.client_mut().prepare_response(metadata_resp(
+            &nodes,
+            vec![
+                topic_meta_leaders("foo", &[(0, 0)]),
+                topic_meta_leaders("bar", &[(0, 0)]),
+                topic_meta_leaders("baz", &[(0, 0)]),
+                topic_meta_leaders("qux", &[(0, 0)]),
+            ],
+        ));
+        runnable.client_mut().prepare_response(list_offsets_resp_from(&[
+            (tp0.clone(), Errors::None, -1, 123, 321),
+            (tp1.clone(), Errors::None, -1, 234, 432),
+            (tp2.clone(), Errors::None, 123456789, 345, 543),
+            (tp3.clone(), Errors::None, 234567890, 456, 654),
+        ]));
+
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::latest());
+        partitions.insert(tp1.clone(), OffsetSpec::earliest());
+        partitions.insert(tp2.clone(), OffsetSpec::for_timestamp(1_000_000));
+        partitions.insert(tp3.clone(), OffsetSpec::max_timestamp());
+        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+
+        let offsets = result.all().get().await.unwrap();
+        assert_eq!(offsets[&tp0].offset(), 123);
+        assert_eq!(offsets[&tp0].leader_epoch(), Some(321));
+        assert_eq!(offsets[&tp0].timestamp(), -1);
+        assert_eq!(offsets[&tp1].offset(), 234);
+        assert_eq!(offsets[&tp2].offset(), 345);
+        assert_eq!(offsets[&tp2].timestamp(), 123456789);
+        assert_eq!(offsets[&tp3].offset(), 456);
+        assert_eq!(offsets[&tp3].timestamp(), 234567890);
+        assert_eq!(result.partition_result(&tp0).unwrap().get().await.unwrap().offset(), 123);
+        // A partition that was not attempted yields an error.
+        assert!(result.partition_result(&TopicPartition::new("unknown", 0)).is_err());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListOffsetsNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_list_offsets_non_retriable_errors() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let tp0 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
+        runnable.client_mut().prepare_response(list_offsets_resp_from(&[(
+            tp0.clone(),
+            Errors::TopicAuthorizationFailed,
+            -1,
+            -1,
+            -1,
+        )]));
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::latest());
+        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::TopicAuthorizationFailed);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListOffsetsRetriableErrors`: a
+    /// LEADER_NOT_AVAILABLE partition triggers a metadata re-lookup then a retry.
+    #[tokio::test]
+    async fn test_list_offsets_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = env();
+        let tp0 = TopicPartition::new("foo", 0);
+        let tp1 = TopicPartition::new("foo", 1);
+        let tp2 = TopicPartition::new("bar", 0);
+        // Lookup: foo-0/foo-1 -> node0, bar-0 -> node1.
+        runnable.client_mut().prepare_response(metadata_resp(
+            &nodes,
+            vec![
+                topic_meta_leaders("foo", &[(0, 0), (1, 0)]),
+                topic_meta_leaders("bar", &[(0, 1)]),
+            ],
+        ));
+        // node0 fulfillment: foo-0 LEADER_NOT_AVAILABLE (re-lookup), foo-1 ok.
+        runnable.client_mut().prepare_response_for_node(
+            list_offsets_resp_from(&[
+                (tp0.clone(), Errors::LeaderNotAvailable, -1, 123, 321),
+                (tp1.clone(), Errors::None, -1, 987, 789),
+            ]),
+            &nodes[0],
+        );
+        // node1 fulfillment: bar-0 ok.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(list_offsets_resp_from(&[(tp2.clone(), Errors::None, -1, 456, 654)]), &nodes[1]);
+        // metadata re-lookup for the unmapped foo-0.
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0), (1, 0)])]));
+        // node0 fulfillment retry: foo-0 ok.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 345, 543)]), &nodes[0]);
+
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::latest());
+        partitions.insert(tp1.clone(), OffsetSpec::latest());
+        partitions.insert(tp2.clone(), OffsetSpec::latest());
+        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        for _ in 0..60 {
+            if result.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        let offsets = result.all().get().await.unwrap();
+        assert_eq!(offsets[&tp0].offset(), 345);
+        assert_eq!(offsets[&tp1].offset(), 987);
+        assert_eq!(offsets[&tp2].offset(), 456);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListOffsetsMaxTimestampUnsupportedSingleOffsetSpec`.
+    #[tokio::test]
+    async fn test_list_offsets_max_timestamp_unsupported_single_offset_spec() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let tp0 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
+        runnable.client_mut().prepare_unsupported_version_response();
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::max_timestamp());
+        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListOffsetsMaxTimestampUnsupportedMultipleOffsetSpec`:
+    /// only the MAX_TIMESTAMP partition fails; the other is retried and succeeds.
+    #[tokio::test]
+    async fn test_list_offsets_max_timestamp_unsupported_multiple_offset_spec() {
+        let (admin, mut runnable, time, nodes) = env();
+        let tp0 = TopicPartition::new("foo", 0);
+        let tp1 = TopicPartition::new("foo", 1);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0), (1, 0)])]));
+        runnable.client_mut().prepare_unsupported_version_response();
+        // Retry for the non-max partition succeeds.
+        runnable
+            .client_mut()
+            .prepare_response_for_node(list_offsets_resp_from(&[(tp1.clone(), Errors::None, -1, 345, 543)]), &nodes[0]);
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::max_timestamp());
+        partitions.insert(tp1.clone(), OffsetSpec::latest());
+        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        for _ in 0..60 {
+            if result.partition_result(&tp0).unwrap().is_done() && result.partition_result(&tp1).unwrap().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        assert_eq!(
+            result.partition_result(&tp0).unwrap().get().await.unwrap_err().error(),
+            Errors::UnsupportedVersion
+        );
+        assert_eq!(result.partition_result(&tp1).unwrap().get().await.unwrap().offset(), 345);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListOffsetsPartialResponse`: the leader
+    /// omits a result for one partition, which fails the sanity check.
+    #[tokio::test]
+    async fn test_list_offsets_partial_response() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let tp0 = TopicPartition::new("foo", 0);
+        let tp1 = TopicPartition::new("foo", 1);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0), (1, 0)])]));
+        // Only tp0 is present; tp1 is omitted.
+        runnable
+            .client_mut()
+            .prepare_response(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -2, 123, 456)]));
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::latest());
+        partitions.insert(tp1.clone(), OffsetSpec::latest());
+        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert!(result.partition_result(&tp0).unwrap().get().await.is_ok());
+        assert!(result.partition_result(&tp1).unwrap().get().await.is_err());
+        assert!(result.all().get().await.is_err());
+    }
+
+    // Skipped `KafkaAdminClientTest` listOffsets slices (with rationale):
+    // - testListOffsetsEarliestLocalSpecMinVersion / testListOffsetsLatestTierSpecSpecMinVersion
+    //   / testListOffsetsEarliestPendingUploadSpecSpecMinVersion only assert the
+    //   `oldestAllowedVersion()` of the built request (8 / 9 / 11). That version
+    //   selection lives entirely in `ListOffsetsHandler::build_batched_request`
+    //   and is covered directly by `list_offsets_handler::tests::build_request_allowed_versions`
+    //   and the `list_offsets_request` builder tests — re-driving it end-to-end
+    //   through the network mock would add no coverage.
+
+    /// The mock's `list_offsets` serves seeded beginning/end offsets and rejects
+    /// timestamp specs.
+    #[tokio::test]
+    async fn test_mock_list_offsets() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let earliest = TopicPartition::new("t", 0);
+        let latest = TopicPartition::new("t", 1);
+        let ts = TopicPartition::new("t", 2);
+        mock.update_beginning_offsets(HashMap::from([(earliest.clone(), 5)]));
+        mock.update_end_offsets(HashMap::from([(latest.clone(), 99)]));
+        let mut partitions = HashMap::new();
+        partitions.insert(earliest.clone(), OffsetSpec::earliest());
+        partitions.insert(latest.clone(), OffsetSpec::latest());
+        partitions.insert(ts.clone(), OffsetSpec::for_timestamp(123));
+        let result = mock.list_offsets(&partitions, ListOffsetsOptions::new());
+        assert_eq!(result.partition_result(&earliest).unwrap().get().await.unwrap().offset(), 5);
+        assert_eq!(result.partition_result(&latest).unwrap().get().await.unwrap().offset(), 99);
+        assert!(result.partition_result(&ts).unwrap().get().await.is_err());
+    }
+
+    /// The mock's `alter_partition_reassignments` / `list_partition_reassignments`
+    /// track reassignments against added topics.
+    #[tokio::test]
+    async fn test_mock_partition_reassignments() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(3);
+        let leader = Node::new(0, "localhost".to_string(), 1000);
+        let replicas = vec![
+            Node::new(0, "localhost".to_string(), 1000),
+            Node::new(1, "localhost".to_string(), 1001),
+        ];
+        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None);
+        let tp = TopicPartition::new("topic", 0);
+        let mut reassignments = HashMap::new();
+        reassignments.insert(tp.clone(), Some(NewPartitionReassignment::new(vec![1, 2]).unwrap()));
+        let result = mock.alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new());
+        result.values()[&tp].get().await.unwrap();
+
+        let listed = mock
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.contains_key(&tp));
+        // target [1,2] vs current replicas [0,1]: adding 2, removing 0.
+        assert_eq!(listed[&tp].adding_replicas(), &[2]);
+        assert_eq!(listed[&tp].removing_replicas(), &[0]);
+    }
+
+    /// The mock's `elect_leaders` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_elect_leaders_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new());
+        let err = result.partitions().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
 }
