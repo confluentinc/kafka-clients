@@ -160,7 +160,7 @@ adds (3)+(4):
 | `Consumer_t` | 1 — client (`SafeHandle`) | `Consumer_destroy` via `Dispose` (blocking; joins the bg task first, §7) |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
-| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; freed per the §5.4 lifetime decision (see Rule) |
+| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (§5.4), keep-alive deferred |
 | `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
 | `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
 
@@ -198,12 +198,11 @@ const-ness decides, not the type name:
     pump), after a query or poll: read/iterate, then `_destroy` the root exactly
     once. A **container is a borrow-root** — its elements and any key/value/topic/
     string bytes borrow into it (§3, §5.4), so it must outlive every borrow taken
-    from it. **Copy-out vs keep-alive is an open design decision (§5.4), not fixed
-    here:** either copy each element/byte into a managed type then `_destroy`
-    (copy-out), or keep the root alive under a managed wrapper exposing spans and
-    `_destroy` at `Dispose` (keep-alive). Metadata collections are trivially
-    copy-out (small); only the byte-owning `ConsumerRecords_t` batch makes the
-    trade-off consequential — decide it in §5.4.
+    from it. **Default: copy-out** — copy each element/byte into an owned managed
+    type, then `_destroy`. Metadata collections are always copy-out (small), and
+    typed deserialization reads a transient span → owned `T` (copy-out too).
+    **Keep-alive** (hold the root, expose zero-copy views, `_destroy` at `Dispose`)
+    is a **deferred** option for the raw-byte surface only — see §5.4.
   - **Category 4 — borrowed view.** `ConsumerRecord_t`, `Node_t`, `_get` elements,
     borrowed strings have **no `_destroy`** — never free them, and never use them
     after their owning container (3) is destroyed. Represent as a transient cursor

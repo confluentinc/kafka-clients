@@ -278,25 +278,40 @@ personas; §7.1/§7.2). The `dotnet-actor` **depends on** them and owns **steps
 **Naming across layers:** `kafka_<pkg-minus-clients>_<Type>_<method>` at the ABI;
 C# casing above it (PascalCase, properties for getters, `Async` suffix).
 
-### 5.4 ⚠ The consumer receive-path ownership decision (Mode A)
+### 5.4 The consumer receive-path ownership decision (Mode A)
 
-The consumer C ABI has landed, and it **confirms** the receive-path zero-copy
-contract (`consumer-threading.md §27`): `ConsumerRecord_key` / `_value` / `_topic`
-return a `(const uint8_t* / const char*, int32_t len)` pair that **borrows into
-the batch and is valid only until `ConsumerRecords_destroy`**. The producer send
-path had no such problem (bytes go *in*, a small handle comes back). Here the crux
-decision is how .NET surfaces those **borrowed slices**, which want to become
-owned `byte[]` / `ReadOnlyMemory<byte>`:
+The consumer C ABI confirms the receive-path zero-copy contract
+(`consumer-threading.md §27`): `ConsumerRecord_key` / `_value` / `_topic` return a
+`(ptr, int32_t len)` pair that **borrows into the batch and is valid only until
+`ConsumerRecords_destroy`**. The producer send path had no such problem (bytes go
+*in*, a small handle comes back). So .NET must decide how to surface those
+**borrowed slices**.
 
-- **Copy-out** — copy each key/value into a managed array before
-  `ConsumerRecords_destroy`. Simple, safe, one copy per record (matches Java's own
-  allocation behavior).
-- **Keep-alive spans** — hold the `ConsumerRecords_t` handle alive and hand out
-  `ReadOnlySpan`/`ReadOnlyMemory` over the borrowed bytes; zero-copy, but ties
-  record lifetime to the handle and must forbid use-after-`Dispose`.
+**The choice only affects the raw-byte surface.** For a *typed* consumer, the
+`IDeserializer<T>` reads a transient `ReadOnlySpan<byte>` over the batch during the
+poll loop and returns an **owned `T`** — nothing references the batch afterward, so
+both options behave identically. A `string` / topic likewise **must** be copied (a
+`string` can't borrow native UTF-8; ffi §3). The two options diverge **only** when
+the user wants the raw bytes themselves (`byte[]` / `ReadOnlyMemory<byte>`).
 
-Resolve this *before* building the managed `ConsumerRecord` surface — it's the one
-genuinely new marshalling decision the consumer adds over the producer.
+**Default — copy-out.** For the raw-byte surface, copy each key/value into an owned
+managed array, then `ConsumerRecords_destroy`. It matches Java's owned
+`ConsumerRecord` shape, is safe (no `IDisposable`, no use-after-free, async- and
+thread-safe, no memory amplification), and costs one gen-0 array per raw record —
+Java's own allocation behavior. **This is the default.**
+
+**Deferred alternative — keep-alive (zero-copy).** Hold the `ConsumerRecords_t`
+handle alive (a `SafeConsumerRecordsHandle`; ffi §2 Category 3) and expose the
+bytes as views over the batch, `_destroy` at `Dispose`. Zero-copy on the raw-byte
+path, but it diverges from the Java shape and couples record lifetime to the
+handle. **Do not** mirror Python's default of native-backed `ReadOnlyMemory<byte>`:
+Python's keep-alive is safe only because a `memoryview` refcounts the batch
+(GC-managed lifetime), and .NET has no equivalent — a stored `ReadOnlyMemory` over
+native memory is a use-after-`Dispose` footgun. If the niche is ever needed, prefer
+a **compile-time-safe** escape hatch — a `ReadOnlySpan<byte>` accessor or a
+process-in-place `Poll(record => …)` callback (a `Span` / ref-struct can't be
+stored, awaited, or sent cross-thread, so it can't outlive the batch) — not
+native-backed `ReadOnlyMemory`. Deferred until a concrete need.
 
 ---
 
