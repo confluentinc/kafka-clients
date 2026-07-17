@@ -466,6 +466,15 @@ not Kafka outcomes — Java raises `IllegalArgument`/`IllegalState`, Python
 `ValueError`/`TypeError`, confluent-kafka-dotnet `ArgumentException`, all before
 the native call. Ours must too, *and must* because the ABI would otherwise panic.
 
+**Note — flat now, typed later.** The flat `KafkaException` is the *current*
+choice; a Java-style typed hierarchy can be added later **non-breakingly**
+(subclasses derive from `KafkaException`, so `catch (KafkaException)` still
+works). If we do, the changes are localized: `KafkaException.FromHandle` becomes
+a `Code` → subclass factory, and specific cases move from "flat + code" to a type
+— e.g. the consumer's **Wakeup** would become a `WakeupException`. The
+two-surface model, the handle lifecycle, and the precondition exceptions are
+unchanged.
+
 **Anti-patterns:**
 
   - Not checking the out-param; leaking the error handle or reading `_message`
