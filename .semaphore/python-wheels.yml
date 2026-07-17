@@ -132,7 +132,7 @@ blocks:
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
             - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
-            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib MACOSX_DEPLOYMENT_TARGET=10.13'
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=10.13'
             - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
@@ -155,7 +155,7 @@ blocks:
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
             - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
-            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib MACOSX_DEPLOYMENT_TARGET=11.0'
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=11.0'
             - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force

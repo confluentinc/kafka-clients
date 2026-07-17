@@ -45,9 +45,11 @@ run_matrix() {
         uv venv --python "$py" "/tmp/v$py"
         vpy="/tmp/v$py/bin/python"
         uv pip install --python "$vpy" --no-index --find-links "$base/$wheelhouse" confluent-kafka-rust-python
-        uv pip install --python "$vpy" pytest
+        uv pip install --python "$vpy" pytest pytest-asyncio
         "$vpy" -c "import _confluentkafka; print('import OK: Python $py')"
-        ( cd "$testtmp" && "$vpy" -m pytest test/unit -q )
+        # asyncio_mode=auto is set here rather than read from pyproject.toml,
+        # since tests run from a neutral dir without it (see above).
+        ( cd "$testtmp" && "$vpy" -m pytest test/unit -q -o asyncio_mode=auto )
         "$vpy" -c "from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() or print('OK: compression '+c) for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('OK: security.protocol=SSL')"
     done
 }
