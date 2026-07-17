@@ -125,3 +125,19 @@ src/common/requests/{describe_cluster_request,describe_cluster_response,
                      list_config_resources_request,list_config_resources_response}.rs
 tests/integration/admin_cluster_configs_test.rs
 ```
+
+### Phase 4 additions — Log dirs
+
+```
+src/admin/
+├── log_dir_description.rs, replica_info.rs
+├── describe_log_dirs_result.rs, alter_replica_log_dirs_result.rs,
+│   describe_replica_log_dirs_result.rs
+└── options/{describe_log_dirs_options, alter_replica_log_dirs_options,
+            describe_replica_log_dirs_options}.rs
+
+src/common/topic_partition_replica.rs                       # TopicPartitionReplica
+src/common/requests/{describe_log_dirs_request,describe_log_dirs_response,
+                     alter_replica_log_dirs_request,alter_replica_log_dirs_response}.rs
+tests/integration/admin_log_dirs_test.rs                    # incl. real cross-dir move (2 KAFKA_LOG_DIRS)
+```
