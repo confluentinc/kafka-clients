@@ -25,6 +25,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <time.h>
 
 typedef pthread_t       thrd_t;
 typedef pthread_mutex_t mtx_t;
@@ -44,6 +45,7 @@ typedef int (*thrd_start_t)(void *);
 #define cnd_signal(c)          pthread_cond_signal(c)
 #define cnd_destroy(c)         pthread_cond_destroy(c)
 #define thrd_join(t, res)      pthread_join((t), NULL)
+#define thrd_sleep(dur, rem)   nanosleep((dur), (rem))
 
 /* C11's entry point returns int; pthread_create wants void *(*)(void *). */
 struct cf_thrd_arg { thrd_start_t func; void *arg; };
