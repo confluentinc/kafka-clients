@@ -107,3 +107,21 @@ src/common/requests/{create_partitions_request,create_partitions_response,
                      delete_records_request,delete_records_response}.rs
 tests/integration/admin_partitions_records_test.rs
 ```
+
+### Phase 3 additions — Cluster & configs
+
+```
+src/admin/
+├── alter_config_op.rs        # AlterConfigOp (+ OpType)
+├── describe_cluster_result.rs, describe_configs_result.rs,
+│   alter_configs_result.rs, list_config_resources_result.rs
+└── options/{describe_cluster_options, describe_configs_options,
+            alter_configs_options, list_config_resources_options}.rs
+
+src/common/config/config_resource.rs                        # ConfigResource (+ resource-type enum)
+src/common/requests/{describe_cluster_request,describe_cluster_response,
+                     describe_configs_request,describe_configs_response,
+                     incremental_alter_configs_request,incremental_alter_configs_response,
+                     list_config_resources_request,list_config_resources_response}.rs
+tests/integration/admin_cluster_configs_test.rs
+```
