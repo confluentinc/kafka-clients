@@ -19,6 +19,31 @@
 > reuse it, do not reinvent it. The bindings-slice A/B/C grouping below also
 > applies only to that future task.
 
+> ## PROGRESS STATUS (paused here — resume anytime)
+>
+> **Tier 1 (all 5 phases) is COMPLETE** as of 2026-07-17: Topics CRUD,
+> Partitions & records, Cluster & configs, Log dirs, and Elections/
+> reassignment/offsets are all implemented, unit-tested, real-broker-
+> integration-tested, and Critic-clean. See `design/history/Milestone-11/
+> Phase-{1,2,3,4,5}/` for each phase's archived review record, and
+> `design/current/status.md` for the current translated-surface summary.
+>
+> **Tier 2 and Tier 3 are explicitly PAUSED, by user request (2026-07-17),
+> before any code was written.** A Tier 2 Phase 1 ("Group listing &
+> describe") Actor was started and stopped mid-research — it had not yet
+> written any files, so there is zero partial/uncommitted Tier 2 work
+> anywhere in the tree. The full Tier 2 (3 phases) and Tier 3 (7 phases)
+> breakdowns below remain valid and ready to execute as-is — nothing about
+> the plan changed, only the timing. To resume: pick up at **Tier 2, Phase
+> 1** per the breakdown below, following the same Manager → Actor → Critic
+> cadence used throughout Tier 1.
+>
+> One thing to re-confirm at resume time, since it may have changed by
+> then: whether PR #116 (`dev/c_and_python_consumer_bindings`) has merged to
+> `master`, since a couple of Tier 1 findings referenced it (the async
+> dispatcher for the future bindings task). Does not block Tier 2/3
+> Rust-core work either way.
+
 ## Goal
 
 Translate `org.apache.kafka.clients.admin.Admin` (`KafkaAdminClient`,
