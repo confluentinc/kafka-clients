@@ -42,6 +42,20 @@ APIs — `[LibraryImport]`, `delegate* unmanaged`, `[UnmanagedCallersOnly]`,
 don't exist on the floor). Same classic toolkit as confluent-kafka-dotnet,
 pointed at our fixed-width, handle-error ABI.
 
+**Note — support matrix (aligned with ckd 2.15.0).** We target the same reach as
+ckd's `Confluent.Kafka` — **net462 · netstandard2.0 · net8.0 · net10.0** — but
+satisfy **net462 through the `netstandard2.0` asset**, not a separate `net462`
+target. We can because we have **no Framework-specific code**: one self-built
+cdylib resolved by default `[DllImport]` probing (no `NativeLibrary` resolver, no
+distro-variant `NativeMethods`, no `#if NET462`), so a net462 build would be
+byte-identical to the ns2.0 one. ckd ships an explicit `net462` target only
+because librdkafka's loader *is* Framework-specific (`LoadNetFrameworkDelegates`,
+Mono support, hardcoded `alpine`/`centos8` DllNames) — the machinery §0.2 says
+**not** to port. The only net462-via-ns2.0 cost is the `System.Memory` facade +
+binding redirects (automatic in SDK-style projects; proven by the net462 TFM
+smoke test — §0.2 tests / CLAUDE.md §7.4). Add an explicit `net462` target later
+only if that friction bites — cheap and non-breaking.
+
 ### C ABI → C# type map
 
 | C ABI type | C# | Notes |
