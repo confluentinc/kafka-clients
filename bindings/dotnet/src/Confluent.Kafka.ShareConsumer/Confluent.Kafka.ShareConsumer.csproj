@@ -2,8 +2,9 @@
 
   <!--
     The Confluent.Kafka.ShareConsumer library — the P/Invoke binding over the
-    Rust core's C ABI. This phase (M0/P0) is a pure structural skeleton: no
-    [DllImport]s, no SafeHandles, no managed API yet (see design/history/M0).
+    Rust core's C ABI. M1/P1 lands the interop FOUNDATION: the Native [DllImport]
+    class + the Utf8 marshalling helpers under Internal/Interop/ (no SafeHandles,
+    no completion bridge, no public managed API yet — see design/history/M1).
 
     TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): netstandard2.0 is the floor
     and satisfies net462 as well — no separate net462 target, because the binding
@@ -15,7 +16,51 @@
     <RootNamespace>Confluent.Kafka.ShareConsumer</RootNamespace>
     <AssemblyName>Confluent.Kafka.ShareConsumer</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- The Utf8.PtrToString helper reads a NUL-terminated byte* (ffi §A3);
+         `unsafe` is quarantined to Internal/Interop/. LIBRARY csproj ONLY — the
+         test project stays unsafe-free (PLAN D2). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!--
+    Native-copy (PLAN D1, un-defers M0/P0 D2 / ffi §0.2). The binding P/Invokes our
+    own Rust cdylib (the `cargo build` ffi step, CLAUDE.md §7.1 — Rust FIRST). No
+    NuGet, no runtimes/{rid}/native/: an MSBuild Content item copies the native
+    into $(OutDir) where default [DllImport] probing resolves it. <Content> (not
+    <None>) is deliberate so it flows TRANSITIVELY to the referencing test project's
+    output, where the native-load probe finds it at runtime. Path/filename are
+    COMPUTED (never hardcoded, ffi §0.2): the per-OS filename Cargo emits and the
+    cargo profile dir from $(Configuration); the repo root is 4 dir levels up.
+  -->
+  <PropertyGroup>
+    <!-- Per-OS filename Cargo emits — the `lib` prefix / OS suffix must be
+         preserved so the loader (which maps the bare "confluent_kafka" DllName)
+         resolves it. -->
+    <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libconfluent_kafka.dylib</NativeLibraryFileName>
+    <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libconfluent_kafka.so</NativeLibraryFileName>
+    <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">confluent_kafka.dll</NativeLibraryFileName>
+
+    <!-- Cargo profile dir mirrors $(Configuration): Debug -> debug, Release -> release. -->
+    <CargoProfileDir>debug</CargoProfileDir>
+    <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release</CargoProfileDir>
+
+    <!-- Repo root is 4 dir levels up from this project
+         (src/Confluent.Kafka.ShareConsumer -> src -> dotnet -> bindings -> repo). -->
+    <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../../target/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <!-- Fail early with a clear message if the native is missing (reinforces
+       CLAUDE.md §7.1 "never build .NET before Rust"); otherwise a bare
+       DllNotFoundException surfaces only at runtime. -->
+  <Target Name="EnsureNativeLibraryExists" BeforeTargets="Build">
+    <Error Condition="!Exists('$(NativeLibraryPath)')"
+           Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` from the repo root first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
+  </Target>
 
   <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) is built in on net8.0+ but
        needs the facade package on the netstandard2.0 leg only. -->
