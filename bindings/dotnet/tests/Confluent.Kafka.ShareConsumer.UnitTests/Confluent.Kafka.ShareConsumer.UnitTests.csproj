@@ -18,7 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\Confluent.Kafka.ShareConsumer.csproj" />
+    <ProjectReference Include="..\..\src\Confluent.Kafka.ShareConsumer\Confluent.Kafka.ShareConsumer.csproj" />
   </ItemGroup>
 
 </Project>

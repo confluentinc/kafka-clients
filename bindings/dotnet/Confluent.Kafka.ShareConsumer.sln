@@ -2,9 +2,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Confluent.Kafka.ShareConsumer", "Confluent.Kafka.ShareConsumer\Confluent.Kafka.ShareConsumer.csproj", "{11111111-1111-4111-8111-111111111111}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Confluent.Kafka.ShareConsumer", "src\Confluent.Kafka.ShareConsumer\Confluent.Kafka.ShareConsumer.csproj", "{11111111-1111-4111-8111-111111111111}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Confluent.Kafka.ShareConsumer.UnitTests", "Confluent.Kafka.ShareConsumer\tests\Confluent.Kafka.ShareConsumer.UnitTests\Confluent.Kafka.ShareConsumer.UnitTests.csproj", "{22222222-2222-4222-8222-222222222222}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Confluent.Kafka.ShareConsumer.UnitTests", "tests\Confluent.Kafka.ShareConsumer.UnitTests\Confluent.Kafka.ShareConsumer.UnitTests.csproj", "{22222222-2222-4222-8222-222222222222}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
