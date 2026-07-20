@@ -52,42 +52,52 @@ in).
 
 ## 2 · Project layout
 
-**Intended file map** — one project rooted at `Confluent.Kafka.ShareConsumer/`
-(under `bindings/dotnet/`, named for the package id — §4), split by visibility so
-the public *shape* is auditable at a glance and the unsafe boundary is
-quarantined:
+**Intended file map** — the idiomatic dotnet/runtime layout: top-level `src/`
+and `tests/` siblings under `bindings/dotnet/`, one folder per project (the
+shared solution + build config stay at the `bindings/dotnet/` root). The library
+project is split by visibility so the public *shape* is auditable at a glance and
+the unsafe boundary is quarantined:
 
 ```
 bindings/dotnet/
-└─ Confluent.Kafka.ShareConsumer/     ← the project (named for the package id, §4)
-   ├─ src/                            ← public API
-   │  └─ Internal/                    ← internal scaffolding
-   │     └─ Interop/                  ← P/Invoke boundary — unsafe lives only here
-   └─ tests/                          ← Mock* unit tests
+├─ Confluent.Kafka.ShareConsumer.sln    ← solution + shared config at the root
+├─ Directory.Build.props · .editorconfig · .gitignore
+├─ src/
+│  └─ Confluent.Kafka.ShareConsumer/    ← the library project (named for the package id, §4)
+│     └─ Internal/                       ← internal scaffolding
+│        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
+└─ tests/
+   └─ Confluent.Kafka.ShareConsumer.UnitTests/   ← Mock* unit tests
 ```
 
 (Folders are organizational; C# accessibility is still the `internal` keyword +
-the assembly.) Every type under `Internal/` is explicitly `internal` (and
-`sealed` where practical); `public` is reserved for `src/` — wanting a type under
-`Internal/` to be `public` is the signal it belongs in `src/`.
+the assembly.) **`Internal/` is the visibility marker:** every type under
+`Internal/` is explicitly `internal` (and `sealed` where practical), and
+everything at the library project root is `public` — wanting a type under
+`Internal/` to be `public` is the signal it belongs at the project root. There is
+no inner `src/` inside the project: the outer top-level `src/` *is* the library
+project's parent; the project root itself holds the public API.
 
-- `src/` — **all public API** (namespace `Confluent.Kafka.ShareConsumer`),
-  whatever the C# kind: the client types *and* supporting value types / enums
-  (`ProducerRecord`, `RecordMetadata`, `Headers`, `TopicPartition`, later
-  `ConsumerRecord` / `OffsetAndMetadata` / enums). If a user can name it, it
-  lives here.
-- `src/Internal/` — **internal** managed scaffolding
+- **library project root** (`src/Confluent.Kafka.ShareConsumer/`) — **all public
+  API** (namespace `Confluent.Kafka.ShareConsumer`), whatever the C# kind: the
+  client types *and* supporting value types / enums (`ProducerRecord`,
+  `RecordMetadata`, `Headers`, `TopicPartition`, later `ConsumerRecord` /
+  `OffsetAndMetadata` / enums). If a user can name it, it lives here.
+- `Internal/` — **internal** managed scaffolding
   (`Confluent.Kafka.ShareConsumer.Internal`): the async-completion bridge (the
   consumer's callback→`TaskCompletionSource` adapter; the producer's pull-pump
   *or* push adapter — open, ffi §A7), config → properties marshalling.
-- `src/Internal/Interop/` — the **P/Invoke boundary**
+- `Internal/Interop/` — the **P/Invoke boundary**
   (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `Native` `[DllImport]`
   class, `SafeHandle`s, `Utf8` helpers, callback delegates, and the blittable
   `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
   interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
   with `ffi-marshalling.md`.
-- `tests/` — `Mock*` unit tests (`MockProducer`; `MockConsumer` as the consumer
-  lands) — `InternalsVisibleTo` grants access to internals.
+- `tests/Confluent.Kafka.ShareConsumer.UnitTests/` — `Mock*` unit tests
+  (`MockProducer`; `MockConsumer` as the consumer lands), a top-level sibling of
+  `src/` in its own project directory **outside** the library tree — so default
+  SDK compile globbing never pulls test files into the library assembly (no
+  compile-scoping hack needed); `InternalsVisibleTo` grants access to internals.
 
 ---
 
