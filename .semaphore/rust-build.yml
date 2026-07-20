@@ -1,10 +1,10 @@
 version: v1.0
 name: Build Rust FFI library
 
-# Builds the FFI library (libconfluent_kafka.{so,dylib}) and cbindgen header
-# (confluent_kafka.h) for each target platform via
-# .semaphore/build-ffi-artifact.sh, and pushes them to the workflow artifact
-# store.
+# Builds the FFI library (libconfluent_kafka.{so,dylib} / confluent_kafka.dll)
+# and cbindgen header (confluent_kafka.h) for each target platform, and pushes
+# them to the workflow artifact store. Linux/macOS build via
+# .semaphore/build-ffi-artifact.sh; Windows builds natively with MSVC.
 
 agent:
   machine:
@@ -91,6 +91,33 @@ blocks:
             - ls -l dist/libconfluent_kafka.dylib dist/confluent_kafka.h
             - artifact push workflow dist/libconfluent_kafka.dylib --destination rust-macos-${ARCH}/libconfluent_kafka.dylib --force
             - artifact push workflow dist/confluent_kafka.h --destination rust-macos-${ARCH}/confluent_kafka.h --force
+
+  - name: "Rust build: Windows x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: build
+          commands:
+            # aws-lc-rs (rustls backend) needs nasm + cmake on Windows x86_64.
+            - choco install -y --no-progress nasm cmake
+            - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"
+            - if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe; .\rustup-init.exe -y --default-toolchain stable --profile minimal; $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH" }
+            - cargo build --features ffi --release
+            - New-Item -ItemType Directory -Force dist | Out-Null
+            - Copy-Item target\release\confluent_kafka.dll dist\
+            # rustc names the MSVC import library confluent_kafka.dll.lib; the extension links it as confluent_kafka.lib.
+            - if (Test-Path target\release\confluent_kafka.dll.lib) { Copy-Item target\release\confluent_kafka.dll.lib dist\confluent_kafka.lib } else { Copy-Item target\release\confluent_kafka.lib dist\confluent_kafka.lib }
+            - Copy-Item target\include\confluent_kafka.h dist\
+            - Get-ChildItem dist
+            - artifact push workflow dist\confluent_kafka.dll --destination rust-windows-${Env:ARCH}/confluent_kafka.dll --force
+            - artifact push workflow dist\confluent_kafka.lib --destination rust-windows-${Env:ARCH}/confluent_kafka.lib --force
+            - artifact push workflow dist\confluent_kafka.h --destination rust-windows-${Env:ARCH}/confluent_kafka.h --force
 
 promotions:
   - name: Build Python wheels
