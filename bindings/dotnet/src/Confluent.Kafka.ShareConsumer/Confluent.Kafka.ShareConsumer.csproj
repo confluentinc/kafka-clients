@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>$(LibraryTargetFrameworks)</TargetFrameworks>
+    <AssemblyName>Confluent.Kafka.ShareConsumer</AssemblyName>
+    <RootNamespace>Confluent.Kafka.ShareConsumer</RootNamespace>
+    <!--
+      Forward-setup for the P/Invoke boundary (Internal/Interop). No unsafe
+      code exists yet this milestone; the flag is on so the boundary compiles when
+      the hand-marshalling helpers land (ffi-marshalling.md §A3/§A4/§B3/§B4).
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!--
+    Default SDK compile globbing applies: it compiles only this project's own tree
+    (src/Confluent.Kafka.ShareConsumer/**/*.cs). The unit tests live in a sibling
+    tests/ tree outside this project directory, so no compile-scoping hack is
+    needed to keep test files out of the library assembly.
+  -->
+
+  <!-- Grant the unit-test assembly access to internals (Native, SafeHandles, …). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Confluent.Kafka.ShareConsumer.UnitTests" />
+  </ItemGroup>
+
+</Project>
