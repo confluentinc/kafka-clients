@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Confluent.Kafka.ShareConsumer library — the P/Invoke binding over the
+    Rust core's C ABI. This phase (M0/P0) is a pure structural skeleton: no
+    [DllImport]s, no SafeHandles, no managed API yet (see design/history/M0).
+
+    TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): netstandard2.0 is the floor
+    and satisfies net462 as well — no separate net462 target, because the binding
+    has no Framework-specific code.
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.ShareConsumer</RootNamespace>
+    <AssemblyName>Confluent.Kafka.ShareConsumer</AssemblyName>
+  </PropertyGroup>
+
+  <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) is built in on net8.0+ but
+       needs the facade package on the netstandard2.0 leg only. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+  <!-- Grant the unit-test assembly access to internals (Internal/ scaffolding). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Confluent.Kafka.ShareConsumer.UnitTests" />
+  </ItemGroup>
+
+</Project>
