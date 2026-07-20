@@ -1,0 +1,31 @@
+<Project>
+
+  <!--
+    Shared MSBuild properties for every project under bindings/dotnet/.
+    Auto-imported by the SDK for each project below this directory.
+  -->
+
+  <PropertyGroup>
+    <!--
+      Support matrix (ffi-marshalling.md §0.1/§0.2), aligned with confluent-kafka-dotnet 2.15.0:
+      net462 · netstandard2.0 · net8.0 · net10.0. net462 is satisfied via the netstandard2.0
+      asset (we have no Framework-specific code) — there is NO separate net462 target.
+      TFM sets are defined here (shared) and selected per project.
+    -->
+    <LibraryTargetFrameworks>netstandard2.0;net8.0;net10.0</LibraryTargetFrameworks>
+    <!-- netstandard2.0 is not runnable, so tests target only the runnable TFMs. -->
+    <TestTargetFrameworks>net8.0;net10.0</TestTargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- dotnet/runtime style: explicit usings, System.* first (see .editorconfig). -->
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

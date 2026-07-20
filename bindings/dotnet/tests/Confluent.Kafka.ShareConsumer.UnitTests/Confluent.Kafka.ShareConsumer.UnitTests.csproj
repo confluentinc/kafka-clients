@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>$(TestTargetFrameworks)</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <!--
+      Only the net10 runtime is installed on this dev machine; roll a net8.0 test
+      run forward onto it so the TFM-run matrix (net8.0 + net10.0) executes here.
+      The true net8.0-on-net8.0-runtime leg is a CI obligation (see COMMENTS.DONE.1.md).
+    -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Confluent.Kafka.ShareConsumer\Confluent.Kafka.ShareConsumer.csproj" />
+  </ItemGroup>
+
+</Project>
