@@ -490,6 +490,16 @@ logic**. The concrete checklist is the **Anti-patterns** blocks in
 - Review comments: `bindings/dotnet/COMMENTS.<N>.md`; resolved →
   `COMMENTS.DONE.<N>.md`.
 - Agent memory: `bindings/dotnet/.claude/agent-memory/<persona>/`.
+- Plans & design docs: `bindings/dotnet/design/` — the **binding-local** mirror
+  of the repo-root `design/` (do NOT put .NET plans in the root `design/`, which
+  is Rust-core-only). Living status/structure/design go in `design/current/`; the
+  Manager saves each **approved plan** and a copy of the closed
+  `COMMENTS.DONE.<N>.md` under `design/history/<Milestone>/<Phase>/` (per the
+  root `project-manager` mechanics). The binding keeps **its own** milestone /
+  phase numbering, independent of the root `design/`. Split of duties: `PLAN.md`
+  is the forward-looking plan (scope / deliverables / decisions), while
+  `COMMENTS.DONE.<N>.md` records decisions and deviations made *during*
+  execution. Never commit `.DS_Store` here.
 - ⚠ **Nested-agent discovery is unverified** — if the harness does not
   auto-register `bindings/dotnet/.claude/agents/*.md`, place copies under the
   repo-root `.claude/agents/` or invoke with the persona files loaded explicitly.
