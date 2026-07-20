@@ -1,0 +1,5 @@
+# .NET build output (the repo-root .gitignore already ignores `bin`, but not `obj`).
+[Bb]in/
+[Oo]bj/
+[Tt]est[Rr]esults/
+*.user
