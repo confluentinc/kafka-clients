@@ -24,7 +24,7 @@ lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
 
 ext = Extension(
     '_confluentkafka',
-    sources=['_confluentkafka.c'],
+    sources=['_confluentkafka.c', 'tinycthread.c'],
     include_dirs=[include_dir],
     library_dirs=[lib_dir],
     libraries=['confluent_kafka'],
