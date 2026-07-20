@@ -67,3 +67,37 @@ producer/consumer surfaces land:
   boundary; no `unsafe` code exists yet.
 - Added `bindings/dotnet/.gitignore` (`bin/`, `obj/`, `TestResults/`, `*.user`):
   the repo-root `.gitignore` ignores `bin` but not `obj`.
+
+---
+
+## Milestone 1 follow-up — folder restructure A → B (layout)
+
+Restructured the binding to the idiomatic dotnet/runtime layout (commit
+`c985e66`): top-level `src/` + `tests/` siblings under `bindings/dotnet/`, one
+folder per project, dropping the redundant inner `src/` from inside the library
+project. `CLAUDE.md` §2 (file map + prose) was updated to match in a separate
+commit (`152d50c`). The user approved the restructure and authorized the §2 fix
+(the §2 layout as written was mistaken).
+
+New tree: `src/Confluent.Kafka.ShareConsumer/{csproj, Internal/Interop/Native.cs}`
++ `tests/Confluent.Kafka.ShareConsumer.UnitTests/{csproj, ScaffoldingTests.cs}`;
+solution + `Directory.Build.props` / `.editorconfig` / `.gitignore` stay at the
+`bindings/dotnet/` root. All four moves used `git mv` (history preserved).
+
+This **supersedes two D4 statements above**:
+
+- The test project is **no longer nested** under the library project; it is a
+  top-level sibling at `tests/Confluent.Kafka.ShareConsumer.UnitTests/`.
+- The library csproj **no longer** uses the compile-scoping hack
+  (`EnableDefaultCompileItems=false` + explicit `Compile Include="src/**/*.cs"`).
+  With the tests moved outside the library project tree, default SDK compile
+  globbing already compiles only the library's own files — confirmed because the
+  library links with 0 errors and no xunit reference.
+
+Unchanged: namespaces (the old inner `src/` was never a namespace segment —
+`Native.cs` stays `Confluent.Kafka.ShareConsumer.Internal.Interop`), library TFMs
+`netstandard2.0;net8.0;net10.0`, test TFMs `net8.0;net10.0`, `#nullable enable`,
+`AllowUnsafeBlocks`, `InternalsVisibleTo` → `Confluent.Kafka.ShareConsumer.UnitTests`.
+DoD re-verified: `dotnet build` 0 warnings/0 errors, `dotnet test` 2+2 passing,
+`dotnet format --verify-no-changes` clean. The net462-runtime (D1) and
+net8.0-on-net8.0-runtime (D2) CI legs remain carry-forwards.
