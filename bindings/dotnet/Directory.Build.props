@@ -1,0 +1,30 @@
+<Project>
+
+  <!--
+    Shared MSBuild properties for every project in the Confluent.Kafka.ShareConsumer
+    .NET binding. Applied to the library and the unit-test project alike.
+    See bindings/dotnet/CLAUDE.md §4 (decisions) and §7.2 (build/style).
+  -->
+
+  <PropertyGroup>
+    <!-- Language + nullability (CLAUDE.md §4: #nullable enable project-wide). -->
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Style + warnings enforced at build (CLAUDE.md §7.2). -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!-- Common package metadata (Authors/Company = Confluent Inc.). -->
+  <PropertyGroup>
+    <Authors>Confluent Inc.</Authors>
+    <Company>Confluent Inc.</Company>
+    <Product>Confluent.Kafka.ShareConsumer</Product>
+    <Copyright>Copyright 2025 Confluent Inc.</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+  </PropertyGroup>
+
+</Project>
