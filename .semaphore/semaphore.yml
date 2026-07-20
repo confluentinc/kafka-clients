@@ -48,7 +48,12 @@ global_job_config:
         fi
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
-      - sudo apt install -y cmake rustup && rustup default stable
+      # `rust-toolchain.toml` pins the exact channel; running any rustc/cargo
+      # command inside the repo makes rustup auto-install that pinned
+      # version instead of a floating `stable` (which drifted ahead of the
+      # locally installed toolchain and broke lint parity -- see
+      # rust-toolchain.toml history).
+      - sudo apt install -y cmake rustup && rustc --version
       - (cd tools/translation_agent && pip install -e '.[dev]')
       # First sweep on a fresh project will have no artifact yet -- allow
       # the pull to fail so the orchestrator can create the DB from scratch.
