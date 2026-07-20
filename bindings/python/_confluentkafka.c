@@ -2,11 +2,7 @@
 #include <Python.h>
 #include <structmember.h>
 #include <confluent_kafka.h>
-#if defined(__APPLE__)
-#include "threads_shim.h"
-#else
-#include <threads.h>
-#endif
+#include "tinycthread.h"
 #include <string.h>
 #include <stdint.h>
 #ifdef _WIN32
