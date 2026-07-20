@@ -1,1 +1,2 @@
 - [Phase 8a.3 dropped](phase_8a3_dropped.md) — post-8a.2 perf collapse is broker-end, not a sub-phase; no NOTES.md addendum
+- [.NET binding coordination](dotnet-binding-coordination.md) — use dotnet-actor/dotnet-critic (not actor-executor/kafka-critic); COMMENTS.N.md is git-ignored scratch, COMMENTS.DONE.N.md is the tracked record
