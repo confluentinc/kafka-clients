@@ -27,4 +27,17 @@
     <NeutralLanguage>en-US</NeutralLanguage>
   </PropertyGroup>
 
+  <!-- Strong-name signing. Applied to EVERY project (library + tests): a
+       strong-named library can only grant internals to a strong-named friend
+       (InternalsVisibleTo, see the library csproj). One shared key keeps the
+       identity consistent (ckd uses a separate key per project; a single key
+       is simpler for this binding). Decided early on purpose — adding a strong
+       name after the first published package would be a binary-breaking change
+       for consumers. The .snk is committed: a strong name is an identity, not
+       a security secret (publisher trust is NuGet/Authenticode signing). -->
+  <PropertyGroup>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)Confluent.Kafka.ShareConsumer.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+
 </Project>
