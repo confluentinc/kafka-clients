@@ -16,11 +16,21 @@
 
 from setuptools import setup, Extension
 import os
+import sys
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 include_dir = os.path.join(project_root, 'target', 'include')
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
                          os.path.join(project_root, 'target', 'release'))
+
+# MSVC has no rpath (runtime_library_dirs) and rejects the gcc-style -std flag;
+# on Windows the linked DLL is found via delvewheel vendoring it into the wheel.
+if sys.platform == 'win32':
+    extra_compile_args = []
+    runtime_library_dirs = []
+else:
+    extra_compile_args = ['-std=c99']
+    runtime_library_dirs = [lib_dir]
 
 ext = Extension(
     '_confluentkafka',
@@ -28,8 +38,8 @@ ext = Extension(
     include_dirs=[include_dir],
     library_dirs=[lib_dir],
     libraries=['confluent_kafka'],
-    extra_compile_args=['-std=c99'],
-    runtime_library_dirs=[lib_dir],
+    extra_compile_args=extra_compile_args,
+    runtime_library_dirs=runtime_library_dirs,
 )
 
 setup(ext_modules=[ext])
