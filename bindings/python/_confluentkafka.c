@@ -2,7 +2,7 @@
 #include <Python.h>
 #include <structmember.h>
 #include <confluent_kafka.h>
-#include <threads.h>
+#include "tinycthread.h"
 #include <string.h>
 #include <stdint.h>
 #ifdef _WIN32
