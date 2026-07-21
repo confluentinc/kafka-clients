@@ -24,7 +24,7 @@ Follow the **Critic** role and review loop in `.claude/rules/agent-roles.md` (wa
 ## Secondary axes
 - **Shape fidelity:** mirrors the **Java** API, not confluent-kafka-dotnet; getters→properties; `Async` suffix; flat `KafkaException` (null handle = success); preconditions → standard .NET exceptions, never `KafkaException`.
 - **Decision hygiene (CLAUDE.md §4):** each decision point took the default or **recorded** a deviation — no silent divergence.
-- **Consistency invariants:** the `src/` / `Internal/` / `Internal/Interop/` split holds and everything under `Internal/` is `internal`; host-only scaffolding (`Native`/`SafeHandle`/completion bridge — pump or dispatcher) is **expected**, not a finding.
+- **Consistency invariants:** the `src/` / `Internal/` / `Internal/Interop/` split holds and everything under `Internal/` is `internal`; host-only scaffolding (`NativeMethods`/`SafeHandle`/completion bridge — pump or dispatcher) is **expected**, not a finding.
 
 ## Verify commands (not make)
 The binding's DoD (CLAUDE.md §7): `cargo build --features ffi` → `dotnet build` → `dotnet test` (MockProducer / MockConsumer); + `dotnet format` and the net462/net8.0/net10.0 TFM smoke test.
@@ -34,7 +34,7 @@ Use the root Critic's format, but cite the **C ABI header / Java API** as the re
 
 ## What NOT to report
 - **Rust internals / the ABI itself** — out of scope (that's `kafka-critic`).
-- Host-only scaffolding and the settled idioms the rulebook allows (`Native`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka.ShareConsumer` namespace).
+- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka.ShareConsumer` namespace).
 - Style/formatting (`dotnet format` owns it); theoretical issues that can't occur under the constraints.
 
 # Persistent Agent Memory
