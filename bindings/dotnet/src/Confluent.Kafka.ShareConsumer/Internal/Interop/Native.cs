@@ -25,7 +25,7 @@ namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
 ///
 /// Type map (ffi §0.1, verbatim): opaque <c>*_t</c> → <see cref="IntPtr"/>;
 /// <c>const char*</c> (in and out) → <see cref="IntPtr"/> (hand-marshalled via
-/// <see cref="Utf8"/>, §A3/§B3); <c>int32_t</c> → <see cref="int"/>; <c>bool</c> →
+/// <see cref="Utf8Marshal"/>, §A3/§B3); <c>int32_t</c> → <see cref="int"/>; <c>bool</c> →
 /// <c>[MarshalAs(UnmanagedType.I1)]</c> (C <c>bool</c> is 1 byte, not a 4-byte
 /// Win32 <c>BOOL</c>).
 ///

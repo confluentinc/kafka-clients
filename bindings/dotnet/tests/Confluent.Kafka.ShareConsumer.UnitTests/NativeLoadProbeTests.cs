@@ -22,19 +22,19 @@ namespace Confluent.Kafka.ShareConsumer.UnitTests;
 /// Native-load probe for the M1/P1 interop foundation. Proves the cdylib loads via
 /// default <c>[DllImport]</c> probing (the MSBuild native-copy target placed it in
 /// the test output), the first ABI round-trip works over <c>Cdecl</c> and the
-/// ffi §0.1 type map, and <see cref="Utf8"/> marshals UTF-8 both ways (§A3). The
+/// ffi §0.1 type map, and <see cref="Utf8Marshal"/> marshals UTF-8 both ways (§A3). The
 /// probe drives internal interop only — no public API exists yet — through the
 /// existing <c>InternalsVisibleTo</c> grant. The test project stays unsafe-free
-/// (PLAN D2): <see cref="Utf8.PtrToString"/> is <c>unsafe</c> internally but is a
+/// (PLAN D2): <see cref="Utf8Marshal.PtrToString"/> is <c>unsafe</c> internally but is a
 /// plain managed call here.
 /// </summary>
 public sealed class NativeLoadProbeTests
 {
     /// <summary>
     /// Smoke: <c>ConsumerProperties_new</c> → <c>_put</c> (key/value pinned via
-    /// <see cref="Utf8.Pin"/>) → <c>_destroy</c>. Proves the native loads, the
+    /// <see cref="Utf8Marshal.Pin"/>) → <c>_destroy</c>. Proves the native loads, the
     /// first <c>[DllImport]</c> resolves its <c>EntryPoint</c>, and the type map +
-    /// <see cref="Utf8.Pin"/> round-trip a <c>const char*</c> into native.
+    /// <see cref="Utf8Marshal.Pin"/> round-trip a <c>const char*</c> into native.
     /// </summary>
     [Fact]
     public void ConsumerProperties_NewPutDestroy_LoadsNativeAndRoundTrips()
@@ -44,8 +44,8 @@ public sealed class NativeLoadProbeTests
         {
             Assert.NotEqual(IntPtr.Zero, props);
 
-            using Utf8.PinnedUtf8String key = Utf8.Pin("bootstrap.servers");
-            using Utf8.PinnedUtf8String value = Utf8.Pin("localhost:9092");
+            using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("bootstrap.servers");
+            using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("localhost:9092");
             Native.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
         }
         finally
@@ -67,8 +67,8 @@ public sealed class NativeLoadProbeTests
         {
             Assert.NotEqual(IntPtr.Zero, props);
 
-            using Utf8.PinnedUtf8String key = Utf8.Pin("clï.ïd");
-            using Utf8.PinnedUtf8String value = Utf8.Pin("café-brøker-🎉");
+            using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("clï.ïd");
+            using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("café-brøker-🎉");
             Native.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
         }
         finally
@@ -78,10 +78,10 @@ public sealed class NativeLoadProbeTests
     }
 
     /// <summary>
-    /// <see cref="Utf8"/> managed round-trip: <see cref="Utf8.Pin"/> a non-ASCII
-    /// string, then <see cref="Utf8.PtrToString"/> it back and assert equality (a
+    /// <see cref="Utf8Marshal"/> managed round-trip: <see cref="Utf8Marshal.Pin"/> a non-ASCII
+    /// string, then <see cref="Utf8Marshal.PtrToString"/> it back and assert equality (a
     /// 4-byte char sits at the buffer boundary, right before the NUL). Also asserts
-    /// <see cref="Utf8.PtrToString"/> maps <see cref="IntPtr.Zero"/> to
+    /// <see cref="Utf8Marshal.PtrToString"/> maps <see cref="IntPtr.Zero"/> to
     /// <see langword="null"/> (ffi §A3 obligation).
     /// </summary>
     [Fact]
@@ -89,11 +89,11 @@ public sealed class NativeLoadProbeTests
     {
         const string original = "café-brøker-🎉";
 
-        using (Utf8.PinnedUtf8String pinned = Utf8.Pin(original))
+        using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(original))
         {
-            Assert.Equal(original, Utf8.PtrToString(pinned.Pointer));
+            Assert.Equal(original, Utf8Marshal.PtrToString(pinned.Pointer));
         }
 
-        Assert.Null(Utf8.PtrToString(IntPtr.Zero));
+        Assert.Null(Utf8Marshal.PtrToString(IntPtr.Zero));
     }
 }

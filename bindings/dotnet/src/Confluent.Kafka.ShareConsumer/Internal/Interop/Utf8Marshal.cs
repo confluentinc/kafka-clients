@@ -25,7 +25,7 @@ namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
 /// input via <see cref="Pin(string)"/>, output via
 /// <see cref="PtrToString(IntPtr)"/>.
 /// </summary>
-internal static class Utf8
+internal static class Utf8Marshal
 {
     /// <summary>
     /// Encodes <paramref name="value"/> as a NUL-terminated UTF-8 buffer and pins
