@@ -5,6 +5,15 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 ## Current milestone/phase
 
+- **Milestone 2 / Phase 1 — "Error model + first SafeHandle (consumer client
+  lifecycle)": DONE (2026-07-21).** The first PUBLIC type (`KafkaException`) plus
+  the Category-1 owned-handle consumer lifecycle (create → close → destroy), kept
+  INTERNAL (`NativeConsumer`, tested via `InternalsVisibleTo`). Activated the five
+  `kafka_common_KafkaError_*` DllImports (declared in M1/P1) as live callers via
+  `KafkaException.FromHandle`. Mode A (consumer C ABI already landed — no Rust
+  authoring). NO completion bridge, NO poll/subscribe/commit, NO producer, NO
+  Category 3/4 receive-path handles, NO public client type yet — all deferred.
+  Approved plan + closed record: `design/history/M2/P1-error-model-safehandle/`.
 - **Milestone 1 / Phase 1 — "Interop scaffolding + native-load probe": DONE
   (2026-07-20).** The client-agnostic interop FOUNDATION: the `NativeMethods` P/Invoke
   class (8 shared-foundation declarations), the `Utf8Marshal` marshalling helpers, the
@@ -33,25 +42,94 @@ bindings/dotnet/
 │     │                                           IsOSPlatform, profile from $(Configuration),
 │     │                                           repo root 4 levels up, <Content> transitive,
 │     │                                           + <Error> guard if native absent)
+│     ├─ KafkaException.cs                      ← M2/P1: FIRST public type. sealed KafkaException :
+│     │                                            Exception, flat Code/IsRetriable/IsFatal + Message;
+│     │                                            internal FromHandle(IntPtr) (msg before free, copy
+│     │                                            out, destroy in finally); flat-now/typed-later
 │     └─ Internal/
+│        ├─ NativeConsumer.cs                   ← M2/P1: internal lifecycle wrapper (unsafe-free, D4):
+│        │                                         config -> ConsumerProperties_put -> KafkaConsumer_new
+│        │                                         (FromHandle on out_error) -> SafeConsumerHandle;
+│        │                                         graceful Dispose (close_with_timeout -> destroy);
+│        │                                         preconditions -> ArgumentNullException/ArgumentException
 │        └─ Interop/                            ← the P/Invoke boundary — `unsafe` lives ONLY here
-│           ├─ NativeMethods.cs                        ← internal static class NativeMethods: 8 classic
-│           │                                      [DllImport("confluent_kafka", Cdecl)] decls,
-│           │                                      full ABI symbol as EntryPoint, I1 on both bools
+│           ├─ NativeMethods.cs                        ← internal static class NativeMethods: M1/P1 (8
+│           │                                      shared decls) + M2/P1 consumer lifecycle
+│           │                                      (KafkaConsumer_new/MockConsumer_new/close/
+│           │                                      close_with_timeout/destroy) + group-metadata trio
+│           ├─ SafeHandleZeroIsInvalid.cs             ← M2/P1: shared base, IsInvalid => handle==Zero (D2)
+│           ├─ SafeConsumerPropertiesHandle.cs        ← M2/P1: config handle (-> ConsumerProperties_destroy)
+│           ├─ SafeConsumerHandle.cs                  ← M2/P1: client handle (-> Consumer_destroy, bare
+│           │                                            last-resort; graceful close is in NativeConsumer)
 │           └─ Utf8Marshal.cs                          ← internal static class Utf8Marshal: Pin (disposable
 │                                                  call-scoped pinned buffer) + PtrToString
 │                                                  (NUL-terminated form; null for IntPtr.Zero)
 └─ tests/
    └─ Confluent.Kafka.ShareConsumer.UnitTests/  ← TFMs net8.0;net10.0, unsafe-free
       ├─ TfmSentinelTests.cs                    ← M0/P0 TFM-sentinel smoke test (root: harness-level)
+      ├─ KafkaExceptionTests.cs                 ← M2/P1: public-type test (root): classic -> Code 35
+      │                                            + I1 both-false + msg; café msg echo; FromHandle(Zero)
+      ├─ TestTimeout.cs                         ← M2/P1: fail-fast deadline helper (hang -> test failure)
       └─ Interop/                               ← mirrors the library interop area (public test
          │                                         classes; "Interop" not "Internal/Interop" — the
          │                                         Internal visibility marker is library-only, §2)
          ├─ NativeLoadProbeTests.cs             ← M1/P1: 2 tests, both invoke a native [DllImport]
          │                                         (smoke new/put/destroy; non-ASCII put no-crash)
-         └─ Utf8MarshalTests.cs                 ← M1/P1: managed Utf8Marshal codec round-trip
-                                                   + PtrToString(Zero)==null (no native call)
+         ├─ Utf8MarshalTests.cs                 ← M1/P1: managed Utf8Marshal codec round-trip
+         │                                           + PtrToString(Zero)==null (no native call)
+         ├─ SafeConsumerHandleTests.cs          ← M2/P1: lifecycle (mock + real), double-Dispose,
+         │                                           use-after-Dispose, create/dispose many
+         ├─ ConsumerConfigMarshalTests.cs       ← M2/P1: config success + preconditions (null dict /
+         │                                           null value / post-Dispose)
+         └─ Utf8RoundTripTests.cs               ← M2/P1 (D5 CLOSED): non-ASCII group.id -> group_metadata
+                                                   -> group_id readback == input (broker-free)
 ```
+
+## Verification state (M2/P1 DoD — Actor, all green)
+
+- `cargo build --features ffi` — native cdylib + regenerated header present (run
+  FIRST, CLAUDE.md §7.1).
+- `dotnet build` — **0 warnings, 0 errors** across all library TFMs
+  (netstandard2.0, net8.0, net10.0) and both test TFMs (net8.0, net10.0), with
+  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` + `GenerateDocumentationFile`
+  active. CS1591 is enforced on the public `KafkaException`; no analyzer
+  suppressions were needed (the Java-style standard exception constructors satisfy
+  CA1032).
+- `dotnet test -f net10.0` — **19 passed, 0 failed** (4 M1/P1 carried + 15 new:
+  6 error/precondition, 5 lifecycle, 3 config-marshal, 1 D5 round-trip); ~266 ms
+  total (broker-less close is near-instant, so the fail-fast timeout guard never
+  trips).
+- `dotnet format --verify-no-changes` — clean.
+- **CI-only (not blocking):** only the .NET 10 runtime is installed locally; the
+  net8.0 test *run* and net462 (via netstandard2.0) are CI-only. Both *build* legs
+  pass.
+
+## Decisions in force (M2/P1)
+
+- **D2** — `SafeHandleZeroIsInvalid` base (`IsInvalid => handle == Zero`), not
+  `SafeHandleZeroOrMinusOneIsInvalid` (−1 is not our contract; all `_destroy` are
+  null-safe).
+- **D3 (deviation from CLAUDE.md §4)** — synchronous `IDisposable.Dispose()` only
+  this phase; `IAsyncDisposable.DisposeAsync()` deferred with the completion bridge
+  (the only close primitive in scope is the synchronous
+  `Consumer_close_with_timeout`; wiring `DisposeAsync` now would be
+  sync-over-async or depend on the deferred bridge). Recorded in
+  `design/history/M2/P1-error-model-safehandle/COMMENTS.DONE.3.md`.
+- **D4** — the lifecycle wrapper (`NativeConsumer`) lives under `Internal/` (not
+  `Internal/Interop/`): `unsafe`-free (safe `Utf8Marshal.Pin` + `SafeHandle`),
+  keeping `unsafe` quarantined to `Internal/Interop/`.
+- **D5 — CLOSED (verified empirically).** A configured non-ASCII `group.id`
+  surfaces broker-free / pre-join (the core stubs `group_metadata()` from the
+  configured id before join), so the UTF-8 config-value round-trip
+  (`Consumer_group_metadata` → `group_id` → `PtrToString` == input) is kept, not
+  deferred. Adds the three group-metadata DllImports + an owned Category-3 handle
+  marshal-then-destroy in the test.
+- **D6** — `props` passed to `KafkaConsumer_new` as the SafeHandle type (marshaller
+  does DangerousAddRef/Release); disposed in a `finally` after the call (header:
+  caller retains props ownership).
+- **Dispose close-error handling** — `Dispose()` consumes the close error via
+  `FromHandle` (freed exactly once) but does NOT rethrow (Dispose must not throw;
+  surfacing close errors is the future `CloseAsync(TimeSpan)`'s job).
 
 ## Verification state (M1/P1 DoD — Actor AND Critic ran independently, all green)
 
@@ -118,24 +196,24 @@ required (one Actor pass → one Critic pass → close).
 
 ## Governance pointers
 
-- Approved plan: `design/history/M1/P1-interop-scaffolding/PLAN.md`.
-- Closed review record: `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`.
-- Personas: `dotnet-actor` (Actor N=2), `dotnet-critic` (Critic N=2). NEVER the
-  Rust `actor-executor` / `kafka-critic`.
-- The next requirement takes **N=3** with a fresh (gitignored) working
-  `COMMENTS.3.md`; `COMMENTS.2.md` ends this phase with no open items.
+- Approved plans: `design/history/M2/P1-error-model-safehandle/PLAN.md` (current),
+  `design/history/M1/P1-interop-scaffolding/PLAN.md`.
+- Closed review records: `design/history/M2/P1-error-model-safehandle/COMMENTS.DONE.3.md`
+  (current), `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`.
+- Personas: `dotnet-actor` (Actor N=3), `dotnet-critic` (Critic N=3). NEVER the
+  Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.3.md` is
+  gitignored; the archived record is `COMMENTS.DONE.3.md`.
 
 ## Next up (not started)
 
-The first **public managed API + `SafeHandle`** phase (still Mode A — the
-producer/consumer C ABI has landed). Candidates, from the interop foundation
-now in place:
-- The consumer or producer client lifecycle: a `SafeHandle` subclass over
-  `Consumer_t` / `Producer_t` (`new` → `close`/`destroy`), wired to
-  `IAsyncDisposable`/`IDisposable` per ffi §A2/§B2.
-- The flat `KafkaException` + `KafkaException.FromHandle` (the 5 `KafkaError`
-  declarations already staged in `NativeMethods` become live callers — their
-  `EntryPoint`s get their first runtime validation here) per ffi §A5/§B5.
-- Config marshalling (`ConsumerProperties`/`ProducerProperties_put` from an
-  `IReadOnlyDictionary<string,string>`) per CLAUDE.md §4.
+The **completion bridge + first public client operations** (still Mode A). From
+the lifecycle foundation now in place:
+- The consumer push completion bridge (callback → `TaskCompletionSource` with
+  `RunContinuationsAsynchronously`, ffi §B6/§B7), enabling `PollAsync` /
+  `CommitAsync` / `position` and the public `IConsumer` / `KafkaConsumer` /
+  `MockConsumer` types (the lifecycle wrapper folds into the public client).
+- `IAsyncDisposable.DisposeAsync()` (D3-deferred) lands with the bridge
+  (`Consumer_close_async`).
+- Category 3/4 receive-path handles (poll-batch borrow-roots / views) and the
+  copy-out `ConsumerRecord(s)` surface (CLAUDE.md §6.4).
 Sequence and exact scope to be set in the next PLAN (Manager, with approval).
