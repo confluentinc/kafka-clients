@@ -51,6 +51,13 @@ pub mod sasl_authenticate_response;
 pub mod sasl_handshake_request;
 pub mod sasl_handshake_response;
 pub mod send_builder;
+pub mod share_acknowledge_request;
+pub mod share_acknowledge_response;
+pub mod share_fetch_request;
+pub mod share_fetch_response;
+pub mod share_group_heartbeat_request;
+pub mod share_group_heartbeat_response;
+pub mod share_request_metadata;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
@@ -88,6 +95,13 @@ pub use sasl_authenticate_response::SaslAuthenticateResponse;
 pub use sasl_handshake_request::{SaslHandshakeRequest, SaslHandshakeRequestBuilder};
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
+pub use share_acknowledge_request::{ShareAcknowledgeRequest, ShareAcknowledgeRequestBuilder};
+pub use share_acknowledge_response::ShareAcknowledgeResponse;
+pub use share_fetch_request::{ShareFetchRequest, ShareFetchRequestBuilder};
+pub use share_fetch_response::ShareFetchResponse;
+pub use share_group_heartbeat_request::{ShareGroupHeartbeatRequest, ShareGroupHeartbeatRequestBuilder};
+pub use share_group_heartbeat_response::ShareGroupHeartbeatResponse;
+pub use share_request_metadata::ShareRequestMetadata;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
 ///

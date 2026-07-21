@@ -43,6 +43,9 @@ use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
+use super::ShareAcknowledgeResponse;
+use super::ShareFetchResponse;
+use super::ShareGroupHeartbeatResponse;
 
 /// Default throttle time in milliseconds.
 pub const DEFAULT_THROTTLE_TIME: i32 = 0;
@@ -79,6 +82,12 @@ pub enum ConcreteResponse {
     OffsetCommit(OffsetCommitResponse),
     /// An OffsetFetch response.
     OffsetFetch(OffsetFetchResponse),
+    /// A ShareFetch response (KIP-932).
+    ShareFetch(ShareFetchResponse),
+    /// A ShareAcknowledge response (KIP-932).
+    ShareAcknowledge(ShareAcknowledgeResponse),
+    /// A ShareGroupHeartbeat response (KIP-932).
+    ShareGroupHeartbeat(ShareGroupHeartbeatResponse),
 }
 
 impl ConcreteResponse {
@@ -97,6 +106,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::ShareFetch(r) => r.api_key(),
+            Self::ShareAcknowledge(r) => r.api_key(),
+            Self::ShareGroupHeartbeat(r) => r.api_key(),
         }
     }
 
@@ -121,6 +133,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareAcknowledge(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -169,6 +184,15 @@ impl ConcreteResponse {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::ShareFetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareAcknowledge(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareGroupHeartbeat(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -193,6 +217,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareAcknowledge(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -221,6 +248,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
             Self::OffsetCommit(r) => r.error_counts(),
             Self::OffsetFetch(r) => r.error_counts(),
+            Self::ShareFetch(r) => r.error_counts(),
+            Self::ShareAcknowledge(r) => r.error_counts(),
+            Self::ShareGroupHeartbeat(r) => r.error_counts(),
         }
     }
 
@@ -241,6 +271,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
             Self::OffsetCommit(r) => r.throttle_time_ms(),
             Self::OffsetFetch(r) => r.throttle_time_ms(),
+            Self::ShareFetch(r) => r.throttle_time_ms(),
+            Self::ShareAcknowledge(r) => r.throttle_time_ms(),
+            Self::ShareGroupHeartbeat(r) => r.throttle_time_ms(),
         }
     }
 
@@ -260,6 +293,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareAcknowledge(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -278,6 +314,9 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
             Self::OffsetCommit(r) => r.should_client_throttle(version),
             Self::OffsetFetch(r) => r.should_client_throttle(version),
+            Self::ShareFetch(r) => r.should_client_throttle(version),
+            Self::ShareAcknowledge(r) => r.should_client_throttle(version),
+            Self::ShareGroupHeartbeat(r) => r.should_client_throttle(version),
         }
     }
 
@@ -374,6 +413,18 @@ impl ConcreteResponse {
                 let response = OffsetFetchResponse::parse(readable, version)?;
                 Ok(Self::OffsetFetch(response))
             },
+            ApiKeys::SHARE_FETCH => {
+                let response = ShareFetchResponse::parse(readable, version)?;
+                Ok(Self::ShareFetch(response))
+            },
+            ApiKeys::SHARE_ACKNOWLEDGE => {
+                let response = ShareAcknowledgeResponse::parse(readable, version)?;
+                Ok(Self::ShareAcknowledge(response))
+            },
+            ApiKeys::SHARE_GROUP_HEARTBEAT => {
+                let response = ShareGroupHeartbeatResponse::parse(readable, version)?;
+                Ok(Self::ShareGroupHeartbeat(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -397,6 +448,9 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::ShareFetch(r) => write!(f, "{r}"),
+            Self::ShareAcknowledge(r) => write!(f, "{r}"),
+            Self::ShareGroupHeartbeat(r) => write!(f, "{r}"),
         }
     }
 }
