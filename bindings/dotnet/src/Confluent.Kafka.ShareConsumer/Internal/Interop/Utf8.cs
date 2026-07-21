@@ -70,14 +70,18 @@ internal static class Utf8
     }
 
     /// <summary>
-    /// A call-scoped pin over a NUL-terminated UTF-8 buffer. Single-owner: the
-    /// caller uses <c>using</c> so <see cref="Dispose"/> unpins exactly once. The
-    /// pinned buffer's address is exposed as <see cref="Pointer"/> for passing to a
+    /// A call-scoped pin over a NUL-terminated UTF-8 buffer. A reference type (not
+    /// a <c>readonly struct</c>) on purpose: <see cref="Dispose"/> then mutates the
+    /// real <see cref="GCHandle"/> field instead of a compiler defensive copy, so
+    /// the unpin is genuinely idempotent and there is no value-copy double-free
+    /// hazard. The caller wraps it in a <c>using</c> — the pin is call-scoped and
+    /// never held across a <see cref="System.Threading.Tasks.Task"/> (ffi §A4). The
+    /// buffer's address is exposed as <see cref="Pointer"/> for passing to a
     /// <c>const char*</c> ABI parameter.
     /// </summary>
-    internal readonly struct PinnedUtf8String : IDisposable
+    internal sealed class PinnedUtf8String : IDisposable
     {
-        private readonly GCHandle _handle;
+        private GCHandle _handle;
 
         internal PinnedUtf8String(string value)
         {
