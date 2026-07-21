@@ -212,16 +212,12 @@ blocks:
         - name: build
           commands:
             - python -m pip install cibuildwheel==3.2.1
-            - New-Item -ItemType Directory -Force bindings\python\native\lib,bindings\python\native\include | Out-Null
-            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.dll --destination bindings\python\native\lib\confluent_kafka.dll --force
-            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.lib --destination bindings\python\native\lib\confluent_kafka.lib --force
-            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.h --destination bindings\python\native\include\confluent_kafka.h --force
-            - $native = "$PWD\bindings\python\native"
-            # MSVC finds the header + import lib via INCLUDE/LIB; setup.py links
-            # confluent_kafka.lib from CONFLUENT_KAFKA_LIB_DIR; delvewheel vendors the DLL.
-            - $env:CIBW_ENVIRONMENT = "CONFLUENT_KAFKA_LIB_DIR=`"$native\lib`" INCLUDE=`"$native\include;`$INCLUDE`" LIB=`"$native\lib;`$LIB`""
+            - New-Item -ItemType Directory -Force target\include,target\release | Out-Null
+            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.h --destination target\include\confluent_kafka.h --force
+            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.lib --destination target\release\confluent_kafka.lib --force
+            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.dll --destination target\release\confluent_kafka.dll --force
             - $env:CIBW_BEFORE_BUILD = "python -m pip install delvewheel"
-            - $env:CIBW_REPAIR_WHEEL_COMMAND = "python -m delvewheel repair --add-path `"$native\lib`" -w {dest_dir} {wheel}"
+            - $env:CIBW_REPAIR_WHEEL_COMMAND = "python -m delvewheel repair --add-path `"$PWD\target\release`" -w {dest_dir} {wheel}"
             # Run the unit tests inside cibuildwheel for every built Python version.
             - $env:CIBW_TEST_REQUIRES = "pytest pytest-asyncio"
             - $env:CIBW_TEST_COMMAND = "python -m pytest `"{project}\bindings\python\test\unit`" -o asyncio_mode=auto"
