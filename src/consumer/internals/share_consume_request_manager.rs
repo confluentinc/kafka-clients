@@ -3071,7 +3071,7 @@ mod tests {
         pd.partition_index = tip.partition();
         pd.error_code = error.code();
         pd.acknowledge_error_code = acknowledge_error.code();
-        pd.records = Some(records);
+        pd.records = Some(bytes::Bytes::from(records));
         pd.acquired_records = acquired;
         pd
     }

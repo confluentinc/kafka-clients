@@ -445,7 +445,7 @@ mod tests {
                 .to_vec();
         let mut pd = PartitionData::new();
         pd.partition_index = h.topic_a_partition0.partition();
-        pd.records = Some(records);
+        pd.records = Some(bytes::Bytes::from(records));
         pd.acquired_records = acquired_records(0, record_count as i64);
         if let Some(e) = error {
             pd.error_code = e.code();
@@ -472,7 +472,7 @@ mod tests {
 
         let mut pd = PartitionData::new();
         pd.partition_index = 1;
-        pd.records = Some(records);
+        pd.records = Some(bytes::Bytes::from(records));
         pd.acquired_records = acquired_records(0, 5);
         ShareCompletedFetch::new(0, tip, pd, DEFAULT_ACQUISITION_LOCK_TIMEOUT_MS)
     }

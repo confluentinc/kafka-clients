@@ -969,7 +969,7 @@ mod tests {
     fn partition_data(records: Option<Vec<u8>>, acquired: Vec<AcquiredRecords>) -> PartitionData {
         let mut pd = PartitionData::new();
         pd.partition_index = 0;
-        pd.records = records;
+        pd.records = records.map(bytes::Bytes::from);
         pd.acquired_records = acquired;
         pd
     }

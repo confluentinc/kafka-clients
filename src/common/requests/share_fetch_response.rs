@@ -199,7 +199,7 @@ fn to_message(
         // To protect the clients from failing due to null records, we always
         // convert null records to empty records.
         if partition_data.records.is_none() {
-            partition_data.set_records(Some(Vec::new()));
+            partition_data.set_records(Some(bytes::Bytes::new()));
         }
         // Check if the topic is already present in the list.
         let topic_idx = match topic_responses.iter().position(|t| t.topic_id == tip.topic_id()) {
@@ -258,7 +258,7 @@ pub fn partition_response(partition: i32, error: Errors) -> PartitionData {
     let mut pd = PartitionData::new();
     pd.set_partition_index(partition)
         .set_error_code(error.code())
-        .set_records(Some(Vec::new()));
+        .set_records(Some(bytes::Bytes::new()));
     pd
 }
 
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(resp.data().responses.len(), 1);
         assert_eq!(resp.data().responses[0].partitions.len(), 2);
         // Null records converted to empty (non-null) records.
-        assert_eq!(resp.data().responses[0].partitions[0].records, Some(Vec::new()));
+        assert_eq!(resp.data().responses[0].partitions[0].records, Some(bytes::Bytes::new()));
         // Partition index is set from the topic-id-partition key.
         assert_eq!(resp.data().responses[0].partitions[0].partition_index, 0);
         assert_eq!(resp.data().responses[0].partitions[1].partition_index, 1);
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn test_records_helpers() {
         let mut p = PartitionData::new();
-        p.set_records(Some(vec![1, 2, 3]));
+        p.set_records(Some(bytes::Bytes::from(vec![1, 2, 3])));
         assert_eq!(records_or_fail(&p), &[1, 2, 3]);
         assert_eq!(records_size(&p), 3);
         p.set_records(None);
