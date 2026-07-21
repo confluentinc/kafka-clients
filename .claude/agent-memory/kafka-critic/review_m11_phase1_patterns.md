@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase1-patterns
-description: M9 KIP-932 share wire layer review — test-fidelity gaps vs faithful impl; loop-restructuring equivalence; omitted nested Validator
+description: M11 KIP-932 share wire layer review — test-fidelity gaps vs faithful impl; loop-restructuring equivalence; omitted nested Validator
 metadata:
   type: project
 ---
 
-Milestone 9 Phase 1 (share wire protocol layer) review findings and heuristics.
+Milestone 11 Phase 1 (share wire protocol layer) review findings and heuristics.
 
 **Where the defects actually were (Phase 1): test fidelity, not runtime logic.**
 The wire wrappers (ShareFetch/ShareAcknowledge Request/Response, ShareRequestMetadata),

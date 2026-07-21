@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase7-patterns
-description: M9 Phase 7 share-consumer production wiring — response routing, bg-loop reconcile orchestration, test-teeth gap
+description: M11 Phase 7 share-consumer production wiring — response routing, bg-loop reconcile orchestration, test-teeth gap
 metadata:
   type: project
 ---
 
-# M9 Phase 7 (new_share_consumer pipeline + response routing + bg-loop reconcile)
+# M11 Phase 7 (new_share_consumer pipeline + response routing + bg-loop reconcile)
 
 **Load-bearing orchestration wiring can be test-teeth-free even when its pieces are
 unit-tested.** Phase 7's central change (bg-loop drives `ShareMembershipManager::reconcile`

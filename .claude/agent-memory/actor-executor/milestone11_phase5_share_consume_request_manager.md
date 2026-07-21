@@ -1,11 +1,11 @@
 ---
-name: milestone9-phase5-share-consume-request-manager
+name: milestone11-phase5-share-consume-request-manager
 description: KIP-932 Phase 5 — ShareConsumeRequestManager + share events translation decisions, response-handler wiring, and test-harness gotchas
 metadata:
   type: project
 ---
 
-Milestone 9 Phase 5 (branch `milestone9-share-consumer`): translated
+Milestone 11 Phase 5 (branch `milestone11-share-consumer`): translated
 `ShareConsumeRequestManager` (~1571 Java lines) + 10 share event files +
 `ShareConsumeRequestManagerTest`. Files:
 `src/consumer/internals/share_consume_request_manager.rs`,

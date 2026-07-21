@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase2-patterns
-description: M9 Phase 2 share-consumer acknowledgement core types — review patterns for move-semantics rewrites, standalone exception structs, ownership-consuming deviations
+description: M11 Phase 2 share-consumer acknowledgement core types — review patterns for move-semantics rewrites, standalone exception structs, ownership-consuming deviations
 metadata:
   type: project
 ---
 
-M9 Phase 2 (`b81267d`) = ShareInFlightBatch, ShareInFlightBatchException,
+M11 Phase 2 (`b81267d`) = ShareInFlightBatch, ShareInFlightBatchException,
 ShareAcknowledgementMode, AcknowledgementCommitCallback(+Handler). Reviewed clean.
 
 **Reusable audit heuristics that paid off here:**

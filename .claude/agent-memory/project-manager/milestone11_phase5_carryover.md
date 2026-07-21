@@ -1,6 +1,6 @@
 ---
-name: milestone9-phase5-carryover
-description: Two ownership-deviation consequences from M9 Phase 2 that Phase 5 (ShareConsumeRequestManager / ShareFetch) must handle
+name: milestone11-phase5-carryover
+description: Two ownership-deviation consequences from M11 Phase 2 that Phase 5 (ShareConsumeRequestManager / ShareFetch) must handle
 metadata:
   type: project
 ---
@@ -17,5 +17,5 @@ these explicitly so they aren't discovered late:
    and `take_acknowledged_records` drops acknowledged records. Design the collector→user
    handoff accordingly.
 
-See [[milestone9-share-consumer]]. Applies when spawning the Phase 5 actor
+See [[milestone11-share-consumer]]. Applies when spawning the Phase 5 actor
 (ShareConsumeRequestManager + events).

@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase4-patterns
-description: M9 Phase 4 share membership/heartbeat/metadata — duplicated-reconcile test-gap heuristic; "shared pipeline" deferral rationale audit
+description: M11 Phase 4 share membership/heartbeat/metadata — duplicated-reconcile test-gap heuristic; "shared pipeline" deferral rationale audit
 metadata:
   type: project
 ---
 
-M9 Phase 4 (`44b8d40`) = ShareMembershipManager, ShareHeartbeatRequestManager,
+M11 Phase 4 (`44b8d40`) = ShareMembershipManager, ShareHeartbeatRequestManager,
 ShareConsumerMetadata (+ tests). Reviewed substantially clean; ONE
 Missing-Requirement finding, no correctness bugs. All 34 new tests pass.
 
@@ -24,7 +24,7 @@ short-circuit have ZERO share-module coverage — the one reconcile test starts
 from an empty owned set so `revoked` is always empty. **Heuristic: when an Actor
 defers tests citing "shared/covered elsewhere", grep the abstract layer for the
 method. If it's duplicated per-subclass, the cousin's tests do NOT cover this
-copy — demand translation or a corrected rationale.** (Recurring M9 pattern:
+copy — demand translation or a corrected rationale.** (Recurring M11 pattern:
 Phase 1/3 also had "weaker/deferred tests" with shaky justifications.)
 
 **Faithfulness confirmations that saved false positives:**

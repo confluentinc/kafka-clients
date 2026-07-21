@@ -1,11 +1,11 @@
 ---
-name: milestone9-phase6-integration
+name: milestone11-phase6-integration
 description: KIP-932 Phase 6 (ShareConsumerImpl + public API) — DONE; only production bg-pipeline + KafkaShareConsumerTest deferred to Phase 7
 metadata:
   type: project
 ---
 
-Milestone 9 Phase 6 (branch `milestone9-share-consumer`): ShareConsumerImpl +
+Milestone 11 Phase 6 (branch `milestone11-share-consumer`): ShareConsumerImpl +
 public API + Mock + app-side event wiring. Core is DONE, green, committed.
 
 **DONE + committed (all green, lint-clean):**

@@ -1,11 +1,11 @@
 ---
-name: milestone9-phase2-ack-core
-description: M9 Phase 2 KIP-932 acknowledgement core types — callback trait, handler, ShareInFlightBatch move semantics
+name: milestone11-phase2-ack-core
+description: M11 Phase 2 KIP-932 acknowledgement core types — callback trait, handler, ShareInFlightBatch move semantics
 metadata:
   type: project
 ---
 
-Milestone 9 (KIP-932 share consumer) Phase 2 translated the acknowledgement core types.
+Milestone 11 (KIP-932 share consumer) Phase 2 translated the acknowledgement core types.
 
 **Why:** These are dependency-closure types for `ShareConsumeRequestManager` (Phase 5). Callback invocation wiring is deferred to Phase 5/6.
 

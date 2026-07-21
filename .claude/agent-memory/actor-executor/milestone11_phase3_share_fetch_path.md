@@ -1,12 +1,12 @@
 ---
-name: milestone9-phase3-share-fetch-path
+name: milestone11-phase3-share-fetch-path
 description: KIP-932 Phase 3 share fetch data path — ShareFetch/ShareCompletedFetch/ShareFetchBuffer/ShareFetchCollector translation decisions and gotchas
 metadata:
   type: project
 ---
 
-Phase 3 of Milestone 9 (KIP-932 share consumer): translated the share fetch data
-path on branch `milestone9-share-consumer`. Files under
+Phase 3 of Milestone 11 (KIP-932 share consumer): translated the share fetch data
+path on branch `milestone11-share-consumer`. Files under
 `src/consumer/internals/`: `share_fetch.rs`, `share_completed_fetch.rs`,
 `share_fetch_buffer.rs`, `share_fetch_collector.rs`, `share_fetch_exception.rs`,
 plus blocker `node_acknowledgements.rs`.

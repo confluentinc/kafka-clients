@@ -1,11 +1,11 @@
 ---
-name: milestone9-phase7-production-pipeline
+name: milestone11-phase7-production-pipeline
 description: KIP-932 Phase 7 — new_share_consumer production pipeline, share bg-loop reconcile, response routing, Clone bound, integration test gating
 metadata:
   type: project
 ---
 
-Milestone 9 Phase 7 (branch `milestone9-share-consumer`): wired the real
+Milestone 11 Phase 7 (branch `milestone11-share-consumer`): wired the real
 production share-consumer pipeline end to end. All 4 DoD checks green
 (build, `cargo test --lib` = 2256 pass, format-check, lint). Commits 1-6/N.
 

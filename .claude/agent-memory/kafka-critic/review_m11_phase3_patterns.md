@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase3-patterns
-description: M9 Phase 3 share fetch data path — corrupt-error/illegal_state escape-hatch divergence; peek-then-reparse interleave equivalence heuristic
+description: M11 Phase 3 share fetch data path — corrupt-error/illegal_state escape-hatch divergence; peek-then-reparse interleave equivalence heuristic
 metadata:
   type: project
 ---
 
-M9 Phase 3 (`507fc3f`) = ShareFetch, ShareCompletedFetch, ShareFetchBuffer,
+M11 Phase 3 (`507fc3f`) = ShareFetch, ShareCompletedFetch, ShareFetchBuffer,
 ShareFetchCollector, ShareFetchException, NodeAcknowledgements (blocker),
 ShareInFlightBatch.take_in_flight_records. Reviewed substantially clean; ONE real
 behavioral divergence + two minor test-fidelity notes.

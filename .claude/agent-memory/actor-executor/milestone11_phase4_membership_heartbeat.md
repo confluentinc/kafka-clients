@@ -1,12 +1,12 @@
 ---
-name: milestone9-phase4-membership-heartbeat
+name: milestone11-phase4-membership-heartbeat
 description: KIP-932 Phase 4 — ShareMembershipManager/ShareHeartbeatRequestManager/ShareConsumerMetadata reuse of KIP-848 abstractions
 metadata:
   type: project
 ---
 
-Milestone 9 Phase 4 translated the share-group membership + heartbeat +
-metadata managers on branch `milestone9-share-consumer`. Key decisions,
+Milestone 11 Phase 4 translated the share-group membership + heartbeat +
+metadata managers on branch `milestone11-share-consumer`. Key decisions,
 useful for later phases and cousins:
 
 **Reuse without touching the abstractions** — `AbstractMembershipManager`

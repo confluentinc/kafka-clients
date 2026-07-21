@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase6-patterns
-description: M9 Phase 6 share-consumer core — zero-copy-vs-RENEW gap, entries() order reversal, §31 test-teeth verification
+description: M11 Phase 6 share-consumer core — zero-copy-vs-RENEW gap, entries() order reversal, §31 test-teeth verification
 metadata:
   type: project
 ---
 
-# M9 Phase 6 (ShareConsumerImpl + trait + mock + config + factory)
+# M11 Phase 6 (ShareConsumerImpl + trait + mock + config + factory)
 
 **Zero-copy move-out breaks RENEW (systemic pattern).** The blocker-1 fix moved
 `ConsumerRecord`s out of `ShareInFlightBatch` to the user (`take_in_flight_records`,

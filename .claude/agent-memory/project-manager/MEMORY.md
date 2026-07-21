@@ -1,2 +1,2 @@
 - [Phase 8a.3 dropped](phase_8a3_dropped.md) — post-8a.2 perf collapse is broker-end, not a sub-phase; no NOTES.md addendum
-- [Milestone 9 share consumer](milestone9_share_consumer.md) — KIP-932 client share consumer now in scope (N=1), supersedes consumer-threading §20 deferral
+- [Milestone 11 share consumer](milestone11_share_consumer.md) — KIP-932 client share consumer now in scope (N=1), supersedes consumer-threading §20 deferral

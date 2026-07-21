@@ -1,11 +1,11 @@
 ---
 name: review-m9-phase5-patterns
-description: M9 Phase 5 ShareConsumeRequestManager review — timer-reset now=0 bug, per-node ack slot routing, undocumented single-node test drop
+description: M11 Phase 5 ShareConsumeRequestManager review — timer-reset now=0 bug, per-node ack slot routing, undocumented single-node test drop
 metadata:
   type: project
 ---
 
-Milestone 9 Phase 5 (`share_consume_request_manager.rs`, ~4945 lines incl. tests;
+Milestone 11 Phase 5 (`share_consume_request_manager.rs`, ~4945 lines incl. tests;
 Java 1571). Findings and durable review heuristics:
 
 **BUG found — `now_ms = 0` hardcode in a reset path.** Java
