@@ -90,14 +90,20 @@ Deviations recorded during execution (see the archived review record under
   comments — reworded).
 - `.gitkeep` deletion grouped into the csproj commit (commit-grouping only).
 
-## Watch-item for future phases (NOT a current finding)
+## Watch-item for future phases — RESOLVED post-close (`9ae31fa`)
 
-- `PinnedUtf8String` is a `readonly struct` holding a `GCHandle`; `Dispose()`
-  frees a compiler defensive copy. Correct under M1/P1's single-`using`
+- `PinnedUtf8String` was a `readonly struct` holding a `GCHandle`; `Dispose()`
+  freed a compiler defensive copy. Correct under M1/P1's single-`using`
   ownership, but a later phase that **stores or copies** a `PinnedUtf8String`
-  must revisit the "idempotent for a single owner" claim (double-`Dispose` /
-  disposed by-value copy would not be idempotent). Recorded in
+  would have hit the false "idempotent for a single owner" claim (double-`Dispose`
+  / disposed by-value copy would double-free the runtime handle). Recorded in
   `.claude/agent-memory/dotnet-critic/interop_review_patterns.md`.
+- **Resolved in `9ae31fa`:** `PinnedUtf8String` is now a `sealed class`, so
+  `Dispose()` mutates the real `GCHandle` field (no defensive copy) — the unpin
+  is genuinely idempotent and the value-copy double-free hazard is gone. Verified:
+  `dotnet build` 0/0 all TFMs, `dotnet test -f net10.0` 4/4, format clean. The
+  archived `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md` is left
+  unchanged as the phase-close snapshot.
 
 ## Review outcome (M1/P1)
 
