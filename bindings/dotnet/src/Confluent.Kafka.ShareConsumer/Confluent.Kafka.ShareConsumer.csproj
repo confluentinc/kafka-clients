@@ -3,7 +3,7 @@
   <!--
     The Confluent.Kafka.ShareConsumer library — the P/Invoke binding over the
     Rust core's C ABI. M1/P1 lands the interop FOUNDATION: the Native [DllImport]
-    class + the Utf8 marshalling helpers under Internal/Interop/ (no SafeHandles,
+    class + the Utf8Marshal helpers under Internal/Interop/ (no SafeHandles,
     no completion bridge, no public managed API yet — see design/history/M1).
 
     TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): netstandard2.0 is the floor
@@ -17,7 +17,7 @@
     <AssemblyName>Confluent.Kafka.ShareConsumer</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
 
-    <!-- The Utf8.PtrToString helper reads a NUL-terminated byte* (ffi §A3);
+    <!-- The Utf8Marshal.PtrToString helper reads a NUL-terminated byte* (ffi §A3);
          `unsafe` is quarantined to Internal/Interop/. LIBRARY csproj ONLY — the
          test project stays unsafe-free (PLAN D2). -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
