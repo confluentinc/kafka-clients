@@ -34,11 +34,13 @@ namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
 /// otherwise the marshaller probes the short name and throws
 /// <see cref="EntryPointNotFoundException"/> at runtime.
 ///
-/// M1/P1 declares only the shared <c>KafkaError</c> foundation plus the
-/// <c>ConsumerProperties</c> trio exercised by the native-load probe. The
-/// <c>KafkaError</c> functions are declared but not yet called — that is
-/// intentional (the shared error foundation later phases build on); their
-/// <c>EntryPoint</c>s are runtime-validated once a caller lands.
+/// The shared <c>KafkaError</c> foundation (declared in M1/P1) is now live:
+/// <see cref="KafkaException.FromHandle(IntPtr)"/> reads the four accessors and
+/// frees the handle (ffi §A5/§B5) — the first runtime validation of their
+/// <c>EntryPoint</c>s and the <c>I1</c> bools. M2/P1 adds the consumer client
+/// lifecycle (<c>KafkaConsumer_new</c> / <c>MockConsumer_new</c> / <c>close</c> /
+/// <c>close_with_timeout</c> / <c>destroy</c>, ffi §B2) plus the group-metadata
+/// getter trio used to round-trip a UTF-8 config value (ffi §B3).
 /// </summary>
 internal static class NativeMethods
 {
@@ -80,4 +82,80 @@ internal static class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerProperties_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerPropertiesDestroy(IntPtr props);
+
+    // ---- kafka_consumer_Consumer_t — client lifecycle (ffi §B2) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_KafkaConsumer_new</c> — creates a real (KIP-848) consumer
+    /// from a properties handle. Fallible: on failure returns
+    /// <see cref="IntPtr.Zero"/> and writes a non-null error handle to
+    /// <paramref name="outError"/> (null = success). <paramref name="props"/> is
+    /// typed as the <see cref="SafeConsumerPropertiesHandle"/> so the marshaller
+    /// keeps it alive across the call (DangerousAddRef/Release — PLAN D6); the
+    /// caller retains ownership and frees it afterward.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_KafkaConsumer_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr KafkaConsumerNew(SafeConsumerPropertiesHandle props, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_new</c> — creates a broker-less mock consumer.
+    /// <paramref name="autoOffsetReset"/> is a NUL-terminated reset-strategy name
+    /// or <see cref="IntPtr.Zero"/> for the default (<c>"latest"</c>). Returns a
+    /// non-null consumer handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerNew(IntPtr autoOffsetReset);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_close</c> — graceful close with the default
+    /// timeout (sync; joins the background task). Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerClose(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_close_with_timeout</c> — graceful close bounded by
+    /// <paramref name="timeoutMs"/> (sync; joins the background task). Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCloseWithTimeout(IntPtr consumer, long timeoutMs);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_destroy</c> — fire-and-forget free (cancels any
+    /// in-flight op, does NOT join the background task). Graceful teardown routes
+    /// through <see cref="ConsumerClose"/> / <see cref="ConsumerCloseWithTimeout"/>
+    /// first (ffi §B2); this is the last-resort release. Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerDestroy(IntPtr consumer);
+
+    // ---- kafka_consumer_ConsumerGroupMetadata_t — owned result (ffi §B2/§B3) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_group_metadata</c> — returns an owned
+    /// (Category-3) group-metadata handle, or <see cref="IntPtr.Zero"/> on a
+    /// concurrent-access rejection. Free it with
+    /// <see cref="ConsumerGroupMetadataDestroy"/> after reading.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_group_metadata", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupMetadata(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerGroupMetadata_group_id</c> — the group id as a
+    /// NUL-terminated <c>const char*</c> owned by the metadata handle (borrowed;
+    /// copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupMetadataGroupId(IntPtr meta);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerGroupMetadata_destroy</c> — frees an owned
+    /// group-metadata handle. Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerGroupMetadataDestroy(IntPtr meta);
 }
