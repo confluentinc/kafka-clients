@@ -85,7 +85,7 @@ bindings/dotnet/
                                                    -> group_id readback == input (broker-free)
 ```
 
-## Verification state (M2/P1 DoD — Actor, all green)
+## Verification state (M2/P1 DoD — Actor + Critic, all green)
 
 - `cargo build --features ffi` — native cdylib + regenerated header present (run
   FIRST, CLAUDE.md §7.1).
@@ -187,6 +187,21 @@ Deviations recorded during execution (see the archived review record under
   `dotnet build` 0/0 all TFMs, `dotnet test -f net10.0` 4/4, format clean. The
   archived `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md` is left
   unchanged as the phase-close snapshot.
+
+## Review outcome (M2/P1)
+
+Critic (N=3) review of commits `558de6a`..`c45f914` (via `git log`/`git show`,
+not `cargo xtask await-commit`): **0 genuine findings** — clean. Verified the
+full boundary: every `[DllImport]` matches the header (Cdecl, `int64_t`→`long`,
+`[MarshalAs(I1)]` on the bool getters, hand-marshalled UTF-8, `out IntPtr` for
+`KafkaError_t**`); `FromHandle` (null=success, message-before-free, copy-out,
+`_destroy` in `finally`, freed exactly once); `SafeHandle` lifecycle
+(`IsInvalid => Zero`, graceful `close_with_timeout` → release, props as the
+SafeHandle D6, D5 group-metadata handle read-then-destroy once); preconditions →
+`Argument*`/`ObjectDisposedException` (never `KafkaException`); `KafkaException`
+the only new public type; D2/D3/D5/D6 recorded; no persona/agent-memory files
+committed. No fix cycle required (one Actor pass → one Critic pass → close, as
+M1/P1).
 
 ## Review outcome (M1/P1)
 
