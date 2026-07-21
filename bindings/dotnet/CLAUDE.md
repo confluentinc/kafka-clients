@@ -89,7 +89,7 @@ project's parent; the project root itself holds the public API.
   *or* push adapter — open, ffi §A7), config → properties marshalling.
 - `Internal/Interop/` — the **P/Invoke boundary**
   (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `Native` `[DllImport]`
-  class, `SafeHandle`s, `Utf8` helpers, callback delegates, and the blittable
+  class, `SafeHandle`s, `Utf8Marshal` helpers, callback delegates, and the blittable
   `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
   interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
   with `ffi-marshalling.md`.
