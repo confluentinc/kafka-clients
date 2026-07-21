@@ -377,9 +377,19 @@ static int Producer_poll_futures_thread(void* arg) {
 }
 
 static int64_t current_time_ns() {
+#ifdef _WIN32
+    // clock_gettime/CLOCK_MONOTONIC are POSIX; use the Win32 monotonic clock.
+    // Split seconds/fraction so the *1e9 scaling can't overflow int64.
+    LARGE_INTEGER freq, ctr;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&ctr);
+    return (ctr.QuadPart / freq.QuadPart) * 1000000000LL
+           + ((ctr.QuadPart % freq.QuadPart) * 1000000000LL) / freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
+#endif
 }
 
 
