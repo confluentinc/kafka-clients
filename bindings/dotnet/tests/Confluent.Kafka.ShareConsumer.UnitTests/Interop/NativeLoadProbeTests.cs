@@ -16,17 +16,16 @@ using System;
 using Confluent.Kafka.ShareConsumer.Internal.Interop;
 using Xunit;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests;
+namespace Confluent.Kafka.ShareConsumer.UnitTests.Interop;
 
 /// <summary>
 /// Native-load probe for the M1/P1 interop foundation. Proves the cdylib loads via
 /// default <c>[DllImport]</c> probing (the MSBuild native-copy target placed it in
-/// the test output), the first ABI round-trip works over <c>Cdecl</c> and the
-/// ffi §0.1 type map, and <see cref="Utf8Marshal"/> marshals UTF-8 both ways (§A3). The
-/// probe drives internal interop only — no public API exists yet — through the
-/// existing <c>InternalsVisibleTo</c> grant. The test project stays unsafe-free
-/// (PLAN D2): <see cref="Utf8Marshal.PtrToString"/> is <c>unsafe</c> internally but is a
-/// plain managed call here.
+/// the test output), and the first ABI round-trip works over <c>Cdecl</c> and the
+/// ffi §0.1 type map — driving <see cref="Native"/> directly through the existing
+/// <c>InternalsVisibleTo</c> grant (no public API exists yet). Every test here
+/// invokes a native <c>[DllImport]</c>; the managed-only <see cref="Utf8Marshal"/>
+/// codec coverage lives in <c>Utf8MarshalTests</c>.
 /// </summary>
 public sealed class NativeLoadProbeTests
 {
@@ -55,12 +54,16 @@ public sealed class NativeLoadProbeTests
     }
 
     /// <summary>
-    /// Non-ASCII variant of the smoke flow. Guards UTF-8 marshalling INTO native
-    /// (catches an <c>LPStr</c>/ANSI mistake that would corrupt multi-byte input);
-    /// <c>_put</c> returns <c>void</c>, so the assertion is "no crash / corruption".
+    /// Non-ASCII variant of the smoke flow. Exercises the multi-byte UTF-8 encode +
+    /// pin path across a real native call and asserts it does not crash / AV. It does
+    /// NOT verify the stored value: <c>_put</c> returns <c>void</c> and the ABI
+    /// exposes no <c>ConsumerProperties</c> getter, so a true corruption round-trip is
+    /// deferred to a phase with a config readback path (e.g. reading a config value
+    /// back through <c>ConsumerGroupMetadata_group_id</c>). The managed UTF-8 codec
+    /// correctness itself is covered in <c>Utf8MarshalTests</c>.
     /// </summary>
     [Fact]
-    public void ConsumerProperties_NonAsciiConfig_MarshalsWithoutCorruption()
+    public void ConsumerProperties_NonAsciiConfig_MarshalsWithoutCrashing()
     {
         IntPtr props = Native.ConsumerPropertiesNew();
         try
@@ -75,25 +78,5 @@ public sealed class NativeLoadProbeTests
         {
             Native.ConsumerPropertiesDestroy(props);
         }
-    }
-
-    /// <summary>
-    /// <see cref="Utf8Marshal"/> managed round-trip: <see cref="Utf8Marshal.Pin"/> a non-ASCII
-    /// string, then <see cref="Utf8Marshal.PtrToString"/> it back and assert equality (a
-    /// 4-byte char sits at the buffer boundary, right before the NUL). Also asserts
-    /// <see cref="Utf8Marshal.PtrToString"/> maps <see cref="IntPtr.Zero"/> to
-    /// <see langword="null"/> (ffi §A3 obligation).
-    /// </summary>
-    [Fact]
-    public void Utf8_PinThenPtrToString_RoundTripsAndHandlesNull()
-    {
-        const string original = "café-brøker-🎉";
-
-        using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(original))
-        {
-            Assert.Equal(original, Utf8Marshal.PtrToString(pinned.Pointer));
-        }
-
-        Assert.Null(Utf8Marshal.PtrToString(IntPtr.Zero));
     }
 }
