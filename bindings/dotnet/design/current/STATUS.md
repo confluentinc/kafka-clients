@@ -7,7 +7,7 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 - **Milestone 1 / Phase 1 — "Interop scaffolding + native-load probe": DONE
   (2026-07-20).** The client-agnostic interop FOUNDATION: the `Native` P/Invoke
-  class (8 shared-foundation declarations), the `Utf8` marshalling helpers, the
+  class (8 shared-foundation declarations), the `Utf8Marshal` marshalling helpers, the
   native-copy MSBuild target (un-defers M0/P0 decision D2), and a consumer-namespaced
   native-load probe. Mode A (C ABI already landed — no Rust authoring). NO public
   managed API, NO `SafeHandle`, NO completion bridge, NO Kafka logic yet — all
@@ -38,14 +38,14 @@ bindings/dotnet/
 │           ├─ Native.cs                        ← internal static class Native: 8 classic
 │           │                                      [DllImport("confluent_kafka", Cdecl)] decls,
 │           │                                      full ABI symbol as EntryPoint, I1 on both bools
-│           └─ Utf8.cs                          ← internal static class Utf8: Pin (disposable
+│           └─ Utf8Marshal.cs                          ← internal static class Utf8Marshal: Pin (disposable
 │                                                  call-scoped pinned buffer) + PtrToString
 │                                                  (NUL-terminated form; null for IntPtr.Zero)
 └─ tests/
    └─ Confluent.Kafka.ShareConsumer.UnitTests/  ← TFMs net8.0;net10.0, unsafe-free
       ├─ TfmSentinelTests.cs                    ← M0/P0 TFM-sentinel smoke test
       └─ NativeLoadProbeTests.cs                ← M1/P1: 3 probe tests (smoke; non-ASCII put;
-                                                   Utf8 round-trip + PtrToString(Zero)==null)
+                                                   Utf8Marshal round-trip + PtrToString(Zero)==null)
 ```
 
 ## Verification state (M1/P1 DoD — Actor AND Critic ran independently, all green)
@@ -80,7 +80,7 @@ bindings/dotnet/
   unsafe-free; `unsafe` confined to `Internal/Interop/`.
 - **D3** — classic `[DllImport]`, uniform across all TFMs (netstandard2.0 floor
   forbids `[LibraryImport]`/`PtrToStringUTF8`/`LPUTF8Str`).
-- **D4** — `Utf8.Pin` = disposable call-scoped pin (`using`); `Utf8.PtrToString`
+- **D4** — `Utf8Marshal.Pin` = disposable call-scoped pin (`using`); `Utf8Marshal.PtrToString`
   = NUL-terminated form only (length-delimited receive-path form deferred).
 - **D5** — analyzer suppressions contingent; none fired, none added.
 
