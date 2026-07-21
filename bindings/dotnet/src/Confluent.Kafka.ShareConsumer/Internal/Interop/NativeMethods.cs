@@ -40,7 +40,7 @@ namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
 /// intentional (the shared error foundation later phases build on); their
 /// <c>EntryPoint</c>s are runtime-validated once a caller lands.
 /// </summary>
-internal static class Native
+internal static class NativeMethods
 {
     /// <summary>
     /// The bare DLL name. The runtime maps it per-OS to

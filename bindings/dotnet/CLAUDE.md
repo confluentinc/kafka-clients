@@ -14,7 +14,7 @@ them explicitly (never rely on nested auto-loading).
 **The one law:** the binding restores the Java **shape** in C# **idiom** and holds **no Kafka
 logic** — batching, partitioning, retries, offsets all live once, in the Rust
 core. So it's **not a 1:1 mirror** — expect host-only types with no Java/C-ABI
-counterpart: `Native`, `SafeHandle` subclasses, `IDisposable`, marshalling
+counterpart: `NativeMethods`, `SafeHandle` subclasses, `IDisposable`, marshalling
 helpers, the C-callback→delegate adapter, the `TaskCompletionSource` bridge.
 That's expected scaffolding — plumbing for the shape + safe resource management,
 never Kafka behavior. If you're writing Kafka behavior in C#, you're in the wrong
@@ -26,14 +26,14 @@ layer.
 
 **Four layers.** Java client (the shape) → Rust core (`src/…`, all logic) → C ABI
 (`src/ffi/*.rs` → generated `target/include/confluent_kafka.h`) → **.NET binding**
-(a `Native` P/Invoke class + `SafeHandle`s + managed types).
+(a `NativeMethods` P/Invoke class + `SafeHandle`s + managed types).
 
 **One call, end to end** (mechanics → ffi-marshalling.md):
 
 ```
 producer.SendAsync(record)  ──►  Task<RecordMetadata>
    validate args · pin key/value · make TaskCompletionSource
-        │  P/Invoke: Native.Producer_send(handle, …, out err) → future handle
+        │  P/Invoke: NativeMethods.Producer_send(handle, …, out err) → future handle
         │  completion pump blocks on get_all(), completes each TCS
         │    (Option A — pull-pump shown; the producer's completion model is
         │     OPEN, push is Option B — ffi §A7. The consumer is push-only, no pump.)
@@ -88,7 +88,7 @@ project's parent; the project root itself holds the public API.
   consumer's callback→`TaskCompletionSource` adapter; the producer's pull-pump
   *or* push adapter — open, ffi §A7), config → properties marshalling.
 - `Internal/Interop/` — the **P/Invoke boundary**
-  (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `Native` `[DllImport]`
+  (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `NativeMethods` `[DllImport]`
   class, `SafeHandle`s, `Utf8Marshal` helpers, callback delegates, and the blittable
   `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
   interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
@@ -305,16 +305,16 @@ This file (CLAUDE.md) never restates those; it references them by section.
 ```
 Is the feature already exposed at the C ABI (src/ffi)?
         │
-   yes ─┤→ MODE A · .NET-only    (Native decl + SafeHandle + managed wrapper)        → 6.2
+   yes ─┤→ MODE A · .NET-only    (NativeMethods decl + SafeHandle + managed wrapper)        → 6.2
         │
-   no ──┘→ MODE B · Full-stack   (src/ffi → header → Native → managed API)           → 6.3
+   no ──┘→ MODE B · Full-stack   (src/ffi → header → NativeMethods → managed API)           → 6.3
 ```
 
 ### 6.2 Mode A — .NET-only port
 
 The `kafka_*` function already exists in the header:
 
-1. **P/Invoke** — add the `[DllImport]` declaration to `Native` (ffi §0.1).
+1. **P/Invoke** — add the `[DllImport]` declaration to `NativeMethods` (ffi §0.1).
 2. **Ownership** — a `SafeHandle` subclass for any new long-lived handle
    (ffi §A2/§B2); transient handles are read-and-freed, not wrapped.
 3. **Managed API** — the Java-shaped method in the client class (`Producer.cs` /
@@ -340,7 +340,7 @@ personas; §8.1/§8.2). The `dotnet-actor` **depends on** them and owns **steps
    `cbindgen.toml` `[export].include`.
 4. **Regenerate** — `cargo build --features ffi`; confirm the symbols land in
    `target/include/confluent_kafka.h`.
-5. **Wrap in `Native`** — `[DllImport]` declarations + `SafeHandle`s.
+5. **Wrap in `NativeMethods`** — `[DllImport]` declarations + `SafeHandle`s.
 6. **Expose the managed API** — the Java-shaped surface in a new class.
 7. **Test & build** — Mock/parity tests → `dotnet build` → `dotnet test`.
 

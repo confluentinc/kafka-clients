@@ -6,7 +6,7 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 ## Current milestone/phase
 
 - **Milestone 1 / Phase 1 — "Interop scaffolding + native-load probe": DONE
-  (2026-07-20).** The client-agnostic interop FOUNDATION: the `Native` P/Invoke
+  (2026-07-20).** The client-agnostic interop FOUNDATION: the `NativeMethods` P/Invoke
   class (8 shared-foundation declarations), the `Utf8Marshal` marshalling helpers, the
   native-copy MSBuild target (un-defers M0/P0 decision D2), and a consumer-namespaced
   native-load probe. Mode A (C ABI already landed — no Rust authoring). NO public
@@ -35,7 +35,7 @@ bindings/dotnet/
 │     │                                           + <Error> guard if native absent)
 │     └─ Internal/
 │        └─ Interop/                            ← the P/Invoke boundary — `unsafe` lives ONLY here
-│           ├─ Native.cs                        ← internal static class Native: 8 classic
+│           ├─ NativeMethods.cs                        ← internal static class NativeMethods: 8 classic
 │           │                                      [DllImport("confluent_kafka", Cdecl)] decls,
 │           │                                      full ABI symbol as EntryPoint, I1 on both bools
 │           └─ Utf8Marshal.cs                          ← internal static class Utf8Marshal: Pin (disposable
@@ -134,7 +134,7 @@ now in place:
   `Consumer_t` / `Producer_t` (`new` → `close`/`destroy`), wired to
   `IAsyncDisposable`/`IDisposable` per ffi §A2/§B2.
 - The flat `KafkaException` + `KafkaException.FromHandle` (the 5 `KafkaError`
-  declarations already staged in `Native` become live callers — their
+  declarations already staged in `NativeMethods` become live callers — their
   `EntryPoint`s get their first runtime validation here) per ffi §A5/§B5.
 - Config marshalling (`ConsumerProperties`/`ProducerProperties_put` from an
   `IReadOnlyDictionary<string,string>`) per CLAUDE.md §4.

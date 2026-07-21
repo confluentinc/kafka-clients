@@ -34,7 +34,7 @@ section describes only that client's decisions.
 
 ## 0.1 P/Invoke declarations & type mapping
 
-**Decision:** One `internal static class Native` of classic `[DllImport(...,
+**Decision:** One `internal static class NativeMethods` of classic `[DllImport(...,
 Cdecl)]` declarations, uniform across `netstandard2.0` + `net8.0` + `net10.0`.
 netstandard2.0 is the floor (covers .NET Framework 4.6.2), so the modern interop
 APIs — `[LibraryImport]`, `delegate* unmanaged`, `[UnmanagedCallersOnly]`,
@@ -111,7 +111,7 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
   - A non-ASCII topic round-trips (guards manual UTF-8; catches `LPStr`).
   - Each `bool`-returning fn (`is_done`/`is_retriable`/`is_fatal`) is correct
     (guards a missing `I1`).
-  - `Native` loads on net462, net8.0, net10.0 (TFM smoke test).
+  - `NativeMethods` loads on net462, net8.0, net10.0 (TFM smoke test).
 
 ---
 
@@ -121,7 +121,7 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
 build --features ffi`). **No NuGet, ever** — the binding is consumed as a
 **project / source reference**, and an MSBuild step copies the native into the
 consuming app's output dir where default `[DllImport]` probing finds it. One
-`Native` class, one `DllName`, no hand-rolled loader.
+`NativeMethods` class, one `DllName`, no hand-rolled loader.
 
 **Rule:**
 
@@ -137,14 +137,14 @@ consuming app's output dir where default `[DllImport]` probing finds it. One
     selection happens at **build/publish** time (`dotnet publish -r <rid>` copies
     the matching native) or via `NativeLibrary.SetDllImportResolver` — never NuGet
     RID assets. musl/Alpine = the `linux-musl-x64` RID (build the musl-target
-    cdylib), **not** a second `Native` class or `/etc/os-release` detection.
+    cdylib), **not** a second `NativeMethods` class or `/etc/os-release` detection.
   - **Loading:** rely on default `[DllImport]` resolution — do **not** port
     confluent-kafka-dotnet's `Librdkafka.Initialize` (manual `dlopen`/`LoadLibraryEx`
     preload, reflection binding, distro/GSSAPI variant selection); none applies to
     one self-built cdylib. Custom probing → `NativeLibrary.SetDllImportResolver`
     (modern), never a reflection loader; on net462 keep the native in the app dir
     (a `LoadLibraryEx` preload is a last resort).
-  - **Single `Native` class**, one `DllName = "confluent_kafka"` — the equivalent
+  - **Single `NativeMethods` class**, one `DllName = "confluent_kafka"` — the equivalent
     of only their default `NativeMethods`; no `_Alpine`/`_Centos8` variants (our
     pure-Rust TLS/SASL has no GSSAPI system dep, and musl is a RID, not a filename).
   - **AOT:** not committed to, but kept open — direct `[DllImport]` (not a
@@ -164,7 +164,7 @@ required. Cargo's output names already match default P/Invoke resolution.
   - Hardcoding an absolute path or platform filename in `[DllImport]`.
   - Adding a NuGet packaging path, or assuming any `runtimes/{rid}/native/`
     auto-copy — the decision is **no NuGet**; the build copies the native.
-  - A second `Native` class / `DllName` for musl — musl is the `linux-musl-x64`
+  - A second `NativeMethods` class / `DllName` for musl — musl is the `linux-musl-x64`
     RID, same `DllName`.
 
 **Tests required:**
@@ -399,7 +399,7 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     A `fixed` over `null` yields a null pointer, so gate length on `null`:
     ```csharp
     fixed (byte* k = key)   // key null → k == null
-        future = Native.kafka_producer_Producer_send(handle, topicPtr, partition,
+        future = NativeMethods.kafka_producer_Producer_send(handle, topicPtr, partition,
             timestamp, (IntPtr)k, key is null ? -1 : key.Length, /* value… */ out err);
     ```
     **Note:** `fixed` also yields a null pointer for an **empty** (non-null)

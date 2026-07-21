@@ -22,7 +22,7 @@ namespace Confluent.Kafka.ShareConsumer.UnitTests.Interop;
 /// Native-load probe for the M1/P1 interop foundation. Proves the cdylib loads via
 /// default <c>[DllImport]</c> probing (the MSBuild native-copy target placed it in
 /// the test output), and the first ABI round-trip works over <c>Cdecl</c> and the
-/// ffi §0.1 type map — driving <see cref="Native"/> directly through the existing
+/// ffi §0.1 type map — driving <see cref="NativeMethods"/> directly through the existing
 /// <c>InternalsVisibleTo</c> grant (no public API exists yet). Every test here
 /// invokes a native <c>[DllImport]</c>; the managed-only <see cref="Utf8Marshal"/>
 /// codec coverage lives in <c>Utf8MarshalTests</c>.
@@ -38,18 +38,18 @@ public sealed class NativeLoadProbeTests
     [Fact]
     public void ConsumerProperties_NewPutDestroy_LoadsNativeAndRoundTrips()
     {
-        IntPtr props = Native.ConsumerPropertiesNew();
+        IntPtr props = NativeMethods.ConsumerPropertiesNew();
         try
         {
             Assert.NotEqual(IntPtr.Zero, props);
 
             using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("bootstrap.servers");
             using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("localhost:9092");
-            Native.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
+            NativeMethods.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
         }
         finally
         {
-            Native.ConsumerPropertiesDestroy(props);
+            NativeMethods.ConsumerPropertiesDestroy(props);
         }
     }
 
@@ -65,18 +65,18 @@ public sealed class NativeLoadProbeTests
     [Fact]
     public void ConsumerProperties_NonAsciiConfig_MarshalsWithoutCrashing()
     {
-        IntPtr props = Native.ConsumerPropertiesNew();
+        IntPtr props = NativeMethods.ConsumerPropertiesNew();
         try
         {
             Assert.NotEqual(IntPtr.Zero, props);
 
             using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("clï.ïd");
             using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("café-brøker-🎉");
-            Native.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
+            NativeMethods.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
         }
         finally
         {
-            Native.ConsumerPropertiesDestroy(props);
+            NativeMethods.ConsumerPropertiesDestroy(props);
         }
     }
 }
