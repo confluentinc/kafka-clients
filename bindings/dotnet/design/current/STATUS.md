@@ -43,9 +43,14 @@ bindings/dotnet/
 │                                                  (NUL-terminated form; null for IntPtr.Zero)
 └─ tests/
    └─ Confluent.Kafka.ShareConsumer.UnitTests/  ← TFMs net8.0;net10.0, unsafe-free
-      ├─ TfmSentinelTests.cs                    ← M0/P0 TFM-sentinel smoke test
-      └─ NativeLoadProbeTests.cs                ← M1/P1: 3 probe tests (smoke; non-ASCII put;
-                                                   Utf8Marshal round-trip + PtrToString(Zero)==null)
+      ├─ TfmSentinelTests.cs                    ← M0/P0 TFM-sentinel smoke test (root: harness-level)
+      └─ Interop/                               ← mirrors the library interop area (public test
+         │                                         classes; "Interop" not "Internal/Interop" — the
+         │                                         Internal visibility marker is library-only, §2)
+         ├─ NativeLoadProbeTests.cs             ← M1/P1: 2 tests, both invoke a native [DllImport]
+         │                                         (smoke new/put/destroy; non-ASCII put no-crash)
+         └─ Utf8MarshalTests.cs                 ← M1/P1: managed Utf8Marshal codec round-trip
+                                                   + PtrToString(Zero)==null (no native call)
 ```
 
 ## Verification state (M1/P1 DoD — Actor AND Critic ran independently, all green)
@@ -58,9 +63,9 @@ bindings/dotnet/
   `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` active. `/unsafe+` on the
   library triggered **no** analyzer warnings (CA5392 is opt-in; SYSLIB1054 is
   Info-severity) — so **no suppressions were needed** (M1/P1 decision D5).
-- `dotnet test -f net10.0` — **4 passed, 0 failed** (3 probe + the M0/P0
-  sentinel). The native loaded, the first `[DllImport]` round-tripped, and UTF-8
-  marshalled into native correctly.
+- `dotnet test -f net10.0` — **4 passed, 0 failed** (2 native-load probe + 1
+  `Utf8Marshal` codec + the M0/P0 sentinel). The native loaded, the first
+  `[DllImport]` round-tripped, and UTF-8 marshalled into native correctly.
 - `dotnet format --verify-no-changes` — clean.
 - **CI-only (not blocking this phase):** only the .NET 10 runtime is installed
   locally (`dotnet --list-runtimes` shows only Microsoft.NETCore.App 10.0.x).
