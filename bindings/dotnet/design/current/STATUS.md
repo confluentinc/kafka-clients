@@ -5,6 +5,20 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 ## Current milestone/phase
 
+- **Milestone 2 / Phase 2 — "SafeHandle marshaller-return hardening": DONE
+  (2026-07-22).** The three owned-handle constructors
+  (`ConsumerProperties_new` / `KafkaConsumer_new` / `MockConsumer_new`) now
+  return their `SafeHandle` subtype **directly** instead of a raw `IntPtr`, so the
+  interop marshaller creates-and-sets the handle atomically inside a constrained
+  region — closing the M2/P1 `new + SetHandle` allocation-gap window (an async
+  abort on net462, or OOM, between obtaining the pointer and `SetHandle` would
+  leak the native handle). A **hardening** change, not a bug fix (M2/P1 is correct
+  on net8/net10). Mode A (no ABI/Rust change; SafeHandle-return is a classic
+  `[DllImport]` feature supported on the netstandard2.0 floor incl. net462).
+  `SafeConsumerHandle.FromRaw` removed; `SafeConsumerPropertiesHandle.Create`
+  collapses to the marshaller return. NO new public API, NO completion bridge, NO
+  poll/subscribe/commit — unchanged from M2/P1 scope. Approved plan + closed
+  record: `design/history/M2/P2-safehandle-return-hardening/`.
 - **Milestone 2 / Phase 1 — "Error model + first SafeHandle (consumer client
   lifecycle)": DONE (2026-07-21).** The first PUBLIC type (`KafkaException`) plus
   the Category-1 owned-handle consumer lifecycle (create → close → destroy), kept
@@ -51,16 +65,22 @@ bindings/dotnet/
 │        │                                         config -> ConsumerProperties_put -> KafkaConsumer_new
 │        │                                         (FromHandle on out_error) -> SafeConsumerHandle;
 │        │                                         graceful Dispose (close_with_timeout -> destroy);
-│        │                                         preconditions -> ArgumentNullException/ArgumentException
+│        │                                         preconditions -> ArgumentNullException/ArgumentException.
+│        │                                         M2/P2: consumes the SafeHandle returns (dispose the
+│        │                                         IsInvalid handle on error; defensive IsInvalid guard)
 │        └─ Interop/                            ← the P/Invoke boundary — `unsafe` lives ONLY here
 │           ├─ NativeMethods.cs                        ← internal static class NativeMethods: M1/P1 (8
 │           │                                      shared decls) + M2/P1 consumer lifecycle
 │           │                                      (KafkaConsumer_new/MockConsumer_new/close/
-│           │                                      close_with_timeout/destroy) + group-metadata trio
+│           │                                      close_with_timeout/destroy) + group-metadata trio.
+│           │                                      M2/P2: the three constructors return their SafeHandle
+│           │                                      subtype directly (marshaller create-and-set)
 │           ├─ SafeHandleZeroIsInvalid.cs             ← M2/P1: shared base, IsInvalid => handle==Zero (D2)
-│           ├─ SafeConsumerPropertiesHandle.cs        ← M2/P1: config handle (-> ConsumerProperties_destroy)
+│           ├─ SafeConsumerPropertiesHandle.cs        ← M2/P1: config handle (-> ConsumerProperties_destroy);
+│           │                                            M2/P2: Create collapses to the marshaller return
 │           ├─ SafeConsumerHandle.cs                  ← M2/P1: client handle (-> Consumer_destroy, bare
-│           │                                            last-resort; graceful close is in NativeConsumer)
+│           │                                            last-resort; graceful close is in NativeConsumer).
+│           │                                            M2/P2: FromRaw removed (arrives marshaller-wrapped)
 │           └─ Utf8Marshal.cs                          ← internal static class Utf8Marshal: Pin (disposable
 │                                                  call-scoped pinned buffer) + PtrToString
 │                                                  (NUL-terminated form; null for IntPtr.Zero)
@@ -74,16 +94,56 @@ bindings/dotnet/
          │                                         classes; "Interop" not "Internal/Interop" — the
          │                                         Internal visibility marker is library-only, §2)
          ├─ NativeLoadProbeTests.cs             ← M1/P1: 2 tests, both invoke a native [DllImport]
-         │                                         (smoke new/put/destroy; non-ASCII put no-crash)
+         │                                         (smoke new/put/destroy; non-ASCII put no-crash).
+         │                                         M2/P2: props via `using SafeConsumerPropertiesHandle`
+         │                                         (Dispose frees; asserts !IsInvalid)
          ├─ Utf8MarshalTests.cs                 ← M1/P1: managed Utf8Marshal codec round-trip
          │                                           + PtrToString(Zero)==null (no native call)
          ├─ SafeConsumerHandleTests.cs          ← M2/P1: lifecycle (mock + real), double-Dispose,
-         │                                           use-after-Dispose, create/dispose many
+         │                                           use-after-Dispose, create/dispose many.
+         │                                           M2/P2: KEY regression — classic-protocol
+         │                                           KafkaConsumer_new -> IsInvalid handle + non-null
+         │                                           out_error; Dispose skips ReleaseHandle (no spurious
+         │                                           destroy); error round-trips via FromHandle
          ├─ ConsumerConfigMarshalTests.cs       ← M2/P1: config success + preconditions (null dict /
          │                                           null value / post-Dispose)
          └─ Utf8RoundTripTests.cs               ← M2/P1 (D5 CLOSED): non-ASCII group.id -> group_metadata
                                                    -> group_id readback == input (broker-free)
 ```
+
+## Verification state (M2/P2 DoD — Actor, all green)
+
+- `cargo build --features ffi` — native cdylib + header present (run FIRST).
+- `dotnet build` — **0 warnings, 0 errors** across all library TFMs
+  (netstandard2.0, net8.0, net10.0) and both test TFMs (net8.0, net10.0);
+  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` + CS1591 active. Removing the
+  now-unused `using System;` from the two SafeHandle files and `NativeLoadProbeTests`
+  kept IDE0005 from failing the build.
+- `dotnet test -f net10.0` — **20 passed, 0 failed** (19 M2/P1 carried + 1 new
+  M2/P2 failure-path regression); ~250 ms.
+- `dotnet format --verify-no-changes` — clean.
+- **CI-only (not blocking):** only the .NET 10 runtime is installed locally; the
+  net8.0 test *run* and net462 (via netstandard2.0) are CI-only. Both *build* legs
+  pass.
+
+## Decisions in force (M2/P2)
+
+- **SafeHandle-return over `new + SetHandle`** — the three owned-handle
+  constructors return their `SafeHandle` subtype directly; the marshaller invokes
+  the private parameterless ctor and sets the handle atomically. Classic
+  `[DllImport]` feature (no `[LibraryImport]`), supported on the netstandard2.0
+  floor incl. net462 — the TFM where the async-abort window actually exists.
+- **`FromRaw` removed entirely** — the handle now arrives marshaller-wrapped; no
+  call site needs a thin non-marshalling helper, so none was kept (PLAN §2).
+- **Defensive `IsInvalid`-without-error guard throws `KafkaException`** — the ABI
+  contract says a null `out_error` implies a non-null handle, so a `(null handle,
+  null error)` return is a core contract violation (not a caller programmer error),
+  surfaced on the operational `KafkaException` surface with a descriptive message.
+  Can't-happen per the header; the guard exists so an IsInvalid handle is never
+  stored (a later `Handle` read would hand back a null pointer).
+- **Unchanged from M2/P1** — `ReleaseHandle` bodies, `NativeConsumer.Dispose`
+  graceful close→destroy, the `put` loop, D6 (props stays a SafeHandle in-param),
+  the `KafkaError` five decls, `KafkaException.FromHandle`.
 
 ## Verification state (M2/P1 DoD — Actor + Critic, all green)
 
@@ -211,13 +271,16 @@ required (one Actor pass → one Critic pass → close).
 
 ## Governance pointers
 
-- Approved plans: `design/history/M2/P1-error-model-safehandle/PLAN.md` (current),
+- Approved plans: `design/history/M2/P2-safehandle-return-hardening/PLAN.md`
+  (current), `design/history/M2/P1-error-model-safehandle/PLAN.md`,
   `design/history/M1/P1-interop-scaffolding/PLAN.md`.
-- Closed review records: `design/history/M2/P1-error-model-safehandle/COMMENTS.DONE.3.md`
-  (current), `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`.
-- Personas: `dotnet-actor` (Actor N=3), `dotnet-critic` (Critic N=3). NEVER the
-  Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.3.md` is
-  gitignored; the archived record is `COMMENTS.DONE.3.md`.
+- Closed review records:
+  `design/history/M2/P2-safehandle-return-hardening/COMMENTS.DONE.4.md` (current),
+  `design/history/M2/P1-error-model-safehandle/COMMENTS.DONE.3.md`,
+  `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`.
+- Personas: `dotnet-actor` (Actor N=4), `dotnet-critic` (Critic N=4). NEVER the
+  Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.4.md` is
+  gitignored; the archived record is `COMMENTS.DONE.4.md`.
 
 ## Next up (not started)
 
