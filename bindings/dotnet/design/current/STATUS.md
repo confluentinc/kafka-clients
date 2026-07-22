@@ -313,3 +313,27 @@ the lifecycle foundation now in place:
 - Category 3/4 receive-path handles (poll-batch borrow-roots / views) and the
   copy-out `ConsumerRecord(s)` surface (CLAUDE.md §6.4).
 Sequence and exact scope to be set in the next PLAN (Manager, with approval).
+
+### Deferred hardening (N=5 — concurrent public client / DisposeAsync): teardown thread-safety
+
+Carry this as an explicit in-scope item when the N=5 PLAN is drafted.
+
+- The `NativeConsumer.Dispose` close path calls `Consumer_close_with_timeout` with
+  `_handle.DangerousGetHandle()` (raw `IntPtr`, no AddRef). This is safe under the
+  CURRENT single-threaded `NativeConsumer` lifecycle: `this` roots `_handle` for
+  the call (no finalizer race), and there is no concurrent managed `Dispose`. It
+  also MATCHES CKD's idiom (raw `IntPtr` for ~all operations incl.
+  `consumer_close`/`destroy`, ~71:1 vs SafeHandle params; no per-op AddRef) — it is
+  NOT a deviation or defect.
+- The current `_disposed` guard is a non-atomic bool — adequate for the
+  single-threaded internal wrapper; it doubles as a use-after-free guard against
+  double-`Dispose` (a second close would pass a freed pointer).
+- When the concurrent public client + `DisposeAsync` land (N=5), guard teardown the
+  CKD way: a THREAD-SAFE closed/disposed state check (e.g. the `SafeHandle`'s own
+  `IsClosed`, or an atomic flag) + the §B5 one-op-in-flight access guard. Do NOT
+  convert close/destroy to `SafeHandle` P/Invoke params or add manual AddRef — that
+  diverges from CKD and adds per-call cost on the hot ops (poll/commit).
+- Operations themselves stay single-threaded-with-rejection (Java parity; the
+  core's access guard rejects concurrent ops per §B5); only `wakeup()` is
+  cross-thread. This note is about safe TEARDOWN under misuse, not about supporting
+  concurrent operations.
