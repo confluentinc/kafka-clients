@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System;
-
 namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
 
 /// <summary>
@@ -33,15 +31,13 @@ internal sealed class SafeConsumerPropertiesHandle : SafeHandleZeroIsInvalid
 
     /// <summary>
     /// Allocates a new, empty properties handle via
-    /// <c>kafka_consumer_ConsumerProperties_new</c>.
+    /// <c>kafka_consumer_ConsumerProperties_new</c>. The interop marshaller invokes
+    /// the private parameterless ctor and sets the handle atomically on return
+    /// (M2/P2), so no raw pointer is ever exposed to managed code and there is no
+    /// create→<c>SetHandle</c> allocation-gap window in which the native handle could
+    /// leak on an async abort / OOM.
     /// </summary>
-    internal static SafeConsumerPropertiesHandle Create()
-    {
-        IntPtr raw = NativeMethods.ConsumerPropertiesNew();
-        var handle = new SafeConsumerPropertiesHandle();
-        handle.SetHandle(raw);
-        return handle;
-    }
+    internal static SafeConsumerPropertiesHandle Create() => NativeMethods.ConsumerPropertiesNew();
 
     /// <inheritdoc/>
     protected override bool ReleaseHandle()

@@ -101,7 +101,7 @@ internal sealed class NativeConsumer : IDisposable
             }
         }
 
-        IntPtr rawConsumer;
+        SafeConsumerHandle handle;
         IntPtr error;
 
         SafeConsumerPropertiesHandle props = SafeConsumerPropertiesHandle.Create();
@@ -116,7 +116,10 @@ internal sealed class NativeConsumer : IDisposable
 
             // D6: props is passed as the SafeHandle, so the marshaller keeps it
             // alive across the call; the ABI does not consume it (we free it below).
-            rawConsumer = NativeMethods.KafkaConsumerNew(props, out error);
+            // The consumer handle arrives ALREADY WRAPPED — the marshaller invokes
+            // SafeConsumerHandle's private ctor and sets the pointer atomically
+            // (M2/P2), closing the create→SetHandle allocation-gap window.
+            handle = NativeMethods.KafkaConsumerNew(props, out error);
         }
         finally
         {
@@ -129,10 +132,25 @@ internal sealed class NativeConsumer : IDisposable
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
         {
+            // On the null native return the marshaller handed back an IsInvalid
+            // SafeConsumerHandle; dispose it (ReleaseHandle is skipped for an
+            // IsInvalid handle, so NO spurious Consumer_destroy) before throwing.
+            handle.Dispose();
             throw failure;
         }
 
-        return new NativeConsumer(SafeConsumerHandle.FromRaw(rawConsumer));
+        // Defensive guard (ABI contract: a null out_error implies a non-null handle,
+        // per the header). Never store an IsInvalid handle — the Handle property
+        // would then hand back a null pointer to callers. A (null handle, null error)
+        // return would be a core contract violation, surfaced as a KafkaException.
+        if (handle.IsInvalid)
+        {
+            handle.Dispose();
+            throw new KafkaException(
+                "kafka_consumer_KafkaConsumer_new returned a null handle without an error.");
+        }
+
+        return new NativeConsumer(handle);
     }
 
     /// <summary>
@@ -145,18 +163,20 @@ internal sealed class NativeConsumer : IDisposable
     /// </param>
     internal static NativeConsumer CreateMock(string? autoOffsetReset = null)
     {
-        IntPtr rawConsumer;
+        // Non-fallible: MockConsumer_new always returns a valid owned handle,
+        // already wrapped by the marshaller (M2/P2). No out_error, no IsInvalid guard.
+        SafeConsumerHandle handle;
         if (autoOffsetReset is null)
         {
-            rawConsumer = NativeMethods.MockConsumerNew(IntPtr.Zero);
+            handle = NativeMethods.MockConsumerNew(IntPtr.Zero);
         }
         else
         {
             using Utf8Marshal.PinnedUtf8String strategy = Utf8Marshal.Pin(autoOffsetReset);
-            rawConsumer = NativeMethods.MockConsumerNew(strategy.Pointer);
+            handle = NativeMethods.MockConsumerNew(strategy.Pointer);
         }
 
-        return new NativeConsumer(SafeConsumerHandle.FromRaw(rawConsumer));
+        return new NativeConsumer(handle);
     }
 
     /// <summary>

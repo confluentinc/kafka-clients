@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System;
-
 namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
 
 /// <summary>
-/// Owned handle over a <c>kafka_consumer_Consumer_t</c> — the client handle from
-/// <c>kafka_consumer_KafkaConsumer_new</c> / <c>MockConsumer_new</c> (ffi §B2,
-/// Category 1).
+/// Owned handle over a <c>kafka_consumer_Consumer_t</c> — the client handle returned
+/// <b>directly</b> by <c>kafka_consumer_KafkaConsumer_new</c> / <c>MockConsumer_new</c>
+/// (ffi §B2, Category 1). The interop marshaller invokes the private parameterless
+/// ctor and sets the handle atomically on return (M2/P2), so the binding never wraps
+/// a raw pointer itself and there is no create→<c>SetHandle</c> allocation-gap window;
+/// a null native return simply yields an <c>IsInvalid</c> handle whose
+/// <see cref="ReleaseHandle"/> is skipped (no spurious <c>Consumer_destroy</c>).
 /// </summary>
 /// <remarks>
 /// <see cref="ReleaseHandle"/> is the <b>last-resort</b> bare
@@ -35,18 +37,6 @@ internal sealed class SafeConsumerHandle : SafeHandleZeroIsInvalid
 {
     private SafeConsumerHandle()
     {
-    }
-
-    /// <summary>
-    /// Wraps a raw consumer handle returned by a consumer constructor. The handle
-    /// must be non-<see cref="IntPtr.Zero"/> (the constructor's failure is surfaced
-    /// as a <see cref="KafkaException"/> before this is called).
-    /// </summary>
-    internal static SafeConsumerHandle FromRaw(IntPtr raw)
-    {
-        var handle = new SafeConsumerHandle();
-        handle.SetHandle(raw);
-        return handle;
     }
 
     /// <inheritdoc/>
