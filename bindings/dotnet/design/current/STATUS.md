@@ -111,7 +111,7 @@ bindings/dotnet/
                                                    -> group_id readback == input (broker-free)
 ```
 
-## Verification state (M2/P2 DoD — Actor, all green)
+## Verification state (M2/P2 DoD — Actor + Critic, all green)
 
 - `cargo build --features ffi` — native cdylib + header present (run FIRST).
 - `dotnet build` — **0 warnings, 0 errors** across all library TFMs
@@ -247,6 +247,24 @@ Deviations recorded during execution (see the archived review record under
   `dotnet build` 0/0 all TFMs, `dotnet test -f net10.0` 4/4, format clean. The
   archived `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md` is left
   unchanged as the phase-close snapshot.
+
+## Review outcome (M2/P2)
+
+Critic (N=4) review of commits `3359b70`, `6aa2f92` (via `git log`/`git show`):
+**0 genuine findings** — clean. Verified the hardening contract exactly: the three
+owned-handle constructors return their `SafeHandle` subtype directly (atomic
+marshaller create-and-set — the `new + SetHandle` / `FromRaw` two-step is gone,
+repo-wide sweep confirms no stale raw-`IntPtr`-return call site); both SafeHandle
+subtypes retain the private parameterless ctor (no `MissingMethodException`);
+`ownsHandle:true` + `IsInvalid => Zero` + both `ReleaseHandle` bodies unchanged;
+the fallible path disposes the IsInvalid handle (ReleaseHandle skipped — no
+spurious `Consumer_destroy`) then throws `FromHandle(outError)`; D6 + the graceful
+`Dispose` preserved; the new failure-path regression is sound (drives the real
+null-native-return 50× and asserts IsInvalid + non-null `out_error` + the
+`FromHandle` round-trip). The Critic **independently re-verified** the DoD on this
+machine (read-only): `dotnet build` 0/0 across all TFMs, `dotnet test -f net10.0`
+20 passed/0 failed. No fix cycle required (one Actor pass → one Critic pass →
+close).
 
 ## Review outcome (M2/P1)
 
