@@ -30,13 +30,20 @@ internal abstract class SafeHandleZeroIsInvalid : SafeHandle
     /// <summary>
     /// Initializes the base with a zero (invalid) handle. Ownership is always
     /// <see langword="true"/>: the binding owns every handle it wraps, so the
-    /// runtime calls <see cref="SafeHandle.ReleaseHandle"/> exactly once.
+    /// runtime is responsible for its release (the release contract is on
+    /// <see cref="IsInvalid"/>).
     /// </summary>
     protected SafeHandleZeroIsInvalid()
         : base(IntPtr.Zero, ownsHandle: true)
     {
     }
 
-    /// <summary>A handle is invalid iff it is <see cref="IntPtr.Zero"/>.</summary>
+    /// <summary>
+    /// A handle is invalid iff it is <see cref="IntPtr.Zero"/>. The CLR consults this to
+    /// gate release: per the documented <see cref="SafeHandle.ReleaseHandle"/> contract,
+    /// ReleaseHandle "is guaranteed to be called only once and only if the handle is
+    /// valid as defined by the IsInvalid property" — so a zero handle (e.g. a fallible
+    /// constructor's failure return) is inert and never freed.
+    /// </summary>
     public override bool IsInvalid => handle == IntPtr.Zero;
 }
