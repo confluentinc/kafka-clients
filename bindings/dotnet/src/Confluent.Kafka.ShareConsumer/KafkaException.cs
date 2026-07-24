@@ -44,7 +44,7 @@ namespace Confluent.Kafka.ShareConsumer;
 /// no timeline is implied.
 /// </para>
 /// </remarks>
-public sealed class KafkaException : Exception
+public class KafkaException : Exception
 {
     /// <summary>
     /// Initializes a new instance of the <see cref="KafkaException"/> class with a

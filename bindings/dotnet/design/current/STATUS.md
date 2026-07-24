@@ -190,6 +190,13 @@ bindings/dotnet/
 - **Dispose close-error handling** — `Dispose()` consumes the close error via
   `FromHandle` (freed exactly once) but does NOT rethrow (Dispose must not throw;
   surfacing close errors is the future `CloseAsync(TimeSpan)`'s job).
+- **Decision reversal (post-M2/P2, PR #134 review) — `KafkaException` un-sealed.**
+  `KafkaException` is now `public class` (not `public sealed class`), aligning with
+  CLAUDE.md §3's sketch (which already shows `public class KafkaException`) + the
+  flat-now/typed-later intent (§4 / ffi §A5) — reversing the M2/P1 PLAN's `sealed`
+  choice, per user direction during the PR #134 review. Non-breaking (source +
+  binary compatible). The archived M2/P1 PLAN + `COMMENTS.DONE.3` are left intact
+  as the historical record; this reversal lives here in current STATUS only.
 
 ## Verification state (M1/P1 DoD — Actor AND Critic ran independently, all green)
 
