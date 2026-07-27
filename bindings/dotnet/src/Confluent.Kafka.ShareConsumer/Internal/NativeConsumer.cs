@@ -14,6 +14,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.ShareConsumer.Internal.Interop;
 
@@ -21,53 +24,80 @@ namespace Confluent.Kafka.ShareConsumer.Internal;
 
 /// <summary>
 /// Internal lifecycle wrapper over an owned <c>kafka_consumer_Consumer_t</c>: it
-/// orchestrates config marshalling → construction → graceful close → destroy, and
-/// owns the <see cref="SafeConsumerHandle"/> (PLAN D4). It lives under
+/// orchestrates config marshalling → construction → async ops → graceful close →
+/// destroy, and owns the <see cref="SafeConsumerHandle"/> (PLAN D4). It lives under
 /// <c>Internal/</c> — not <c>Internal/Interop/</c> — because it uses only the safe
-/// managed <see cref="Utf8Marshal.Pin(string)"/> and <see cref="System.Runtime.InteropServices.SafeHandle"/>
-/// APIs, so it needs no <c>unsafe</c> (that stays quarantined to
-/// <c>Internal/Interop/</c>, CLAUDE.md §2).
+/// managed <see cref="Utf8Marshal.Pin(string)"/>, <see cref="GCHandle"/>, and
+/// <see cref="System.Runtime.InteropServices.SafeHandle"/> APIs, so it needs no
+/// <c>unsafe</c> (that stays quarantined to <c>Internal/Interop/</c>, CLAUDE.md §2).
 /// </summary>
 /// <remarks>
 /// <para>
 /// This is <b>not</b> the public client. The public <c>IConsumer</c> /
-/// <c>KafkaConsumer</c> / <c>MockConsumer</c> types land with poll/subscribe and
-/// the completion bridge; this wrapper exercises only the create → close → destroy
-/// lifecycle and the operational/precondition error surfaces.
+/// <c>KafkaConsumer</c> / <c>MockConsumer</c> types land later; this wrapper is the
+/// internal proving ground for the create → async op → close → destroy lifecycle,
+/// the completion bridge (<see cref="OperationCompletionSource"/>), and the
+/// operational / precondition / wakeup / concurrent error surfaces.
 /// </para>
 /// <para>
-/// Disposal is <b>synchronous only</b> this phase (<see cref="IDisposable"/>);
-/// <c>IAsyncDisposable</c> is deferred with the completion bridge (PLAN D3,
-/// a recorded deviation from CLAUDE.md §4's "both" default — the only close
-/// primitive in scope is the synchronous <c>Consumer_close_with_timeout</c>).
+/// The consumer is <b>one operation in flight</b> (ffi §B5): a
+/// <see cref="ConsumerAccessGuard"/> mirrors the core guard so concurrent misuse
+/// surfaces as the right .NET exception before the P/Invoke. Async ops
+/// (<see cref="SubscribeAsync"/> / <see cref="SeekAsync"/>) bridge the C completion
+/// callback to a <see cref="Task"/>; the completion fires on the core's foreign
+/// dispatcher thread (ffi §B6/§B7). <see cref="Wakeup"/> is the one cross-thread
+/// call — it bypasses the guard by design.
+/// </para>
+/// <para>
+/// Teardown is <b>synchronous</b> this commit (<see cref="IDisposable"/>);
+/// <c>IAsyncDisposable</c> — the primary, drain-first path — is added with the
+/// async-teardown step. Both are gated by a thread-safe closed flag (folds in the
+/// N=5-deferred teardown-thread-safety hardening).
 /// </para>
 /// </remarks>
 internal sealed class NativeConsumer : IDisposable
 {
     // Fixed graceful-close budget for the synchronous Dispose. A never-joined
     // consumer closes near-instantly; a user-supplied timeout arrives with the
-    // public CloseAsync(TimeSpan) once the completion bridge lands (PLAN D3).
+    // public CloseAsync(TimeSpan) once the public client lands.
     private const long DefaultCloseTimeoutMilliseconds = 5_000;
 
     private readonly SafeConsumerHandle _handle;
-    private bool _disposed;
+
+    // Mirrors the core's one-op-in-flight guard so concurrent misuse throws the
+    // right .NET exception type before the P/Invoke (ffi §B5).
+    private readonly ConsumerAccessGuard _guard = new ConsumerAccessGuard();
+
+    // Thread-safe closed flag (replaces the M2 non-atomic bool): 0 = open, 1 =
+    // closing/closed. Makes double / concurrent Dispose safe and gates
+    // use-after-dispose. Folds in the N=5-deferred teardown-thread-safety item.
+    private int _closed;
+
+    // The most recently submitted op's Task. Ops are serialized by the guard, so at
+    // most one is pending; teardown drains it (wakeup + await/wait) before destroy.
+    private Task? _inFlightOperation;
 
     private NativeConsumer(SafeConsumerHandle handle)
     {
         _handle = handle;
     }
 
+    /// <summary>The submit shape shared by every void-result async op.</summary>
+    private delegate void NativeSubmit(
+        IntPtr consumer,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
     /// <summary>
-    /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> after
-    /// <see cref="Dispose"/> (the use-after-dispose guard). Exposed for the interop
-    /// tests, which drive the raw ABI (e.g. the group-metadata round-trip) against
-    /// it; the public client will not expose the handle.
+    /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> once
+    /// closed (the use-after-dispose guard). Exposed for the interop tests, which
+    /// drive the raw ABI against it; the public client will not expose the handle.
     /// </summary>
     internal SafeConsumerHandle Handle
     {
         get
         {
-            ThrowIfDisposed();
+            ThrowIfClosed();
             return _handle;
         }
     }
@@ -180,18 +210,168 @@ internal sealed class NativeConsumer : IDisposable
     }
 
     /// <summary>
-    /// Graceful synchronous teardown: <c>Consumer_close_with_timeout</c> (joins the
-    /// background task) then releases the handle (→ <c>Consumer_destroy</c>).
-    /// Idempotent; safe to call more than once.
+    /// Subscribes to <paramref name="topics"/> (async). The returned
+    /// <see cref="Task"/> completes when the core resolves the op — successfully for
+    /// a <c>MockConsumer</c>, or faulted with a <see cref="KafkaException"/>.
     /// </summary>
-    public void Dispose()
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">Another operation is already in flight.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task SubscribeAsync(
+        IReadOnlyCollection<string> topics,
+        CancellationToken cancellationToken = default)
     {
-        if (_disposed)
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        // Snapshot + validate BEFORE the guard / native (ffi §B5 preconditions).
+        string[] topicArray = new string[topics.Count];
+        int index = 0;
+        foreach (string topic in topics)
+        {
+            if (topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(topics));
+            }
+
+            topicArray[index++] = topic;
+        }
+
+        return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+        {
+            // Call-scoped pins: subscribe_async reads the topic strings synchronously
+            // into an owned Vec<String> before spawning, so the buffers are freed
+            // once the native call returns (ffi §A4 call-scoped pin).
+            Utf8Marshal.PinnedUtf8String?[] pins = new Utf8Marshal.PinnedUtf8String?[topicArray.Length];
+            IntPtr[] pointers = new IntPtr[topicArray.Length];
+            try
+            {
+                for (int i = 0; i < topicArray.Length; i++)
+                {
+                    Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(topicArray[i]);
+                    pins[i] = pin;
+                    pointers[i] = pin.Pointer;
+                }
+
+                NativeMethods.ConsumerSubscribeAsync(consumer, pointers, topicArray.Length, callback, userData);
+            }
+            finally
+            {
+                for (int i = 0; i < pins.Length; i++)
+                {
+                    pins[i]?.Dispose();
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Seeks <c>(topic, partition)</c> to <paramref name="offset"/> (async). On a
+    /// <c>MockConsumer</c>, seeking an <b>unassigned</b> partition is a genuine
+    /// broker-free failure — the returned <see cref="Task"/> faults with a
+    /// <see cref="KafkaException"/> (the void bridge's error path).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">Another operation is already in flight.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task SeekAsync(
+        string topic,
+        int partition,
+        long offset,
+        CancellationToken cancellationToken = default)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+        {
+            using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+            NativeMethods.ConsumerSeekAsync(consumer, topicPin.Pointer, partition, offset, callback, userData);
+        });
+    }
+
+    /// <summary>
+    /// Interrupts the in-flight op (Java <c>wakeup()</c>). Sync and cross-thread —
+    /// it <b>bypasses</b> the access guard by design (ffi §B5 / consumer-threading
+    /// §11). Best-effort: a no-op once closing/closed (the handle may be about to be
+    /// destroyed); the thread-safe closed check is the teardown guard, not a
+    /// per-call <c>SafeHandle</c> AddRef (per the N=5-deferred guidance).
+    /// </summary>
+    internal void Wakeup()
+    {
+        if (Volatile.Read(ref _closed) != 0)
         {
             return;
         }
 
-        _disposed = true;
+        NativeMethods.ConsumerWakeup(_handle.DangerousGetHandle());
+    }
+
+    /// <summary>
+    /// Reads the configured consumer group id — a representative <b>synchronous state
+    /// read</b> that participates in the access guard: a concurrent op makes this
+    /// throw <see cref="InvalidOperationException"/> ("not safe for multi-threaded
+    /// access", ffi §B5). Marshals a Category-3 owned metadata handle and frees it
+    /// (§B2).
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">An operation is already in flight.</exception>
+    internal string? GroupId()
+    {
+        ThrowIfClosed();
+        _guard.EnterStateRead();
+        try
+        {
+            IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle());
+            if (metadata == IntPtr.Zero)
+            {
+                // The core's own guard rejected concurrent access (should not happen
+                // while the managed state-read guard is held; defensive).
+                return null;
+            }
+
+            try
+            {
+                return Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(metadata));
+            }
+            finally
+            {
+                NativeMethods.ConsumerGroupMetadataDestroy(metadata);
+            }
+        }
+        finally
+        {
+            _guard.Release();
+        }
+    }
+
+    /// <summary>
+    /// Graceful synchronous teardown: <c>Consumer_close_with_timeout</c> (joins the
+    /// background task) then releases the handle (→ <c>Consumer_destroy</c>).
+    /// Idempotent and safe under concurrent / double calls (the thread-safe closed
+    /// flag). The drain-first async teardown (<c>DisposeAsync</c>) is the primary
+    /// path; this blocking fallback is unchanged in shape.
+    /// </summary>
+    public void Dispose()
+    {
+        if (!TryBeginClose())
+        {
+            return;
+        }
 
         try
         {
@@ -199,8 +379,7 @@ internal sealed class NativeConsumer : IDisposable
             // The handle is not released until after this returns, so its raw value
             // is valid here. Dispose consumes the close error (freeing the handle
             // via FromHandle) but does NOT rethrow — Dispose must not throw, and a
-            // best-effort teardown has no caller to hand a failure to. Surfacing
-            // close errors is the future CloseAsync(TimeSpan)'s job (PLAN D3).
+            // best-effort teardown has no caller to hand a failure to.
             IntPtr error = NativeMethods.ConsumerCloseWithTimeout(
                 _handle.DangerousGetHandle(),
                 DefaultCloseTimeoutMilliseconds);
@@ -213,9 +392,53 @@ internal sealed class NativeConsumer : IDisposable
         }
     }
 
-    private void ThrowIfDisposed()
+    /// <summary>
+    /// Submits a void-result async op: enter the one-op guard, root the per-op
+    /// context via a <see cref="GCHandle"/>, wire cancellation, then run
+    /// <paramref name="submit"/> (which pins its args call-scoped and P/Invokes).
+    /// Ownership of the guard + <see cref="GCHandle"/> transfers to the completion
+    /// callback the moment native is entered; if <paramref name="submit"/> throws
+    /// before that, the context is abandoned (guard released, handle freed) here.
+    /// </summary>
+    private Task SubmitVoidOperation(CancellationToken cancellationToken, NativeSubmit submit)
     {
-        if (_disposed)
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Reject a concurrent async op with a KafkaException (ConcurrentModification)
+        // BEFORE allocating anything — no leak on rejection.
+        _guard.EnterOperation();
+
+        OperationCompletionSource context = new OperationCompletionSource(_guard);
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        try
+        {
+            context.RegisterCancellation(cancellationToken, Wakeup);
+            submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback will never fire → we own cleanup.
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        Task task = context.Task;
+        Volatile.Write(ref _inFlightOperation, task);
+        return task;
+    }
+
+    /// <summary>
+    /// Transitions from open to closing exactly once. Returns <see langword="true"/>
+    /// for the first caller (which performs teardown), <see langword="false"/> for
+    /// any concurrent or subsequent caller (a no-op).
+    /// </summary>
+    private bool TryBeginClose() => Interlocked.CompareExchange(ref _closed, 1, 0) == 0;
+
+    private void ThrowIfClosed()
+    {
+        if (Volatile.Read(ref _closed) != 0)
         {
             throw new ObjectDisposedException(nameof(NativeConsumer));
         }
