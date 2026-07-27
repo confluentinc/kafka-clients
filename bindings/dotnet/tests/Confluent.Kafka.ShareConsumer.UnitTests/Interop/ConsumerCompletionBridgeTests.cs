@@ -179,13 +179,14 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
-    public async Task FaultAndReclaim_FaultsTheTask()
+    public async Task FaultTaskOnly_FaultsTheTask()
     {
-        // The sync-Dispose reclaim primitive (ffi §B7 / Critic N=5 Finding 1): when a
+        // The sync-Dispose primitive (ffi §B7 / Critic N=5 Finding 3): when a
         // guard-rejected close cannot drain and destroy cancels the op's callback,
-        // Dispose reclaims the context here — faulting the awaiter so the Task cannot
-        // strand. (Freeing the rooting GCHandle is proved by the weak-ref test below;
-        // GCHandle is a struct, so a copy's IsAllocated is stale after Free.)
+        // Dispose faults the awaiter here so the Task cannot strand (the Finding-1
+        // strand fix). FaultTaskOnly does NOT free the rooting GCHandle — the callback
+        // is the sole owner (proved by the weak-ref test below); the callback never
+        // fired here, so this test frees the still-rooted handle itself.
         OperationCompletionSource context = new OperationCompletionSource(guard: null);
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         try
@@ -193,7 +194,7 @@ public sealed class ConsumerCompletionBridgeTests
             context.SetGcHandle(gcHandle);
 
             var expected = new ObjectDisposedException("consumer");
-            context.FaultAndReclaim(expected);
+            context.FaultTaskOnly(expected);
 
             ObjectDisposedException actual = await Assert.ThrowsAsync<ObjectDisposedException>(
                 () => TestTimeout.Run(() => context.Task, s_deadline));
@@ -201,101 +202,112 @@ public sealed class ConsumerCompletionBridgeTests
         }
         finally
         {
-            // FreeGcHandle already freed the underlying handle; the second free is the
-            // idempotent no-op (proves it does not double-free / throw).
+            // FaultTaskOnly did NOT free the handle (callback is the sole owner, and no
+            // callback fired here), so the test owns the free.
             context.FreeGcHandle();
         }
     }
 
     [Fact]
-    public async Task FaultAndReclaim_AfterCompletion_IsNoOp()
+    public async Task FaultTaskOnly_AfterCompletion_IsNoOp()
     {
-        // Race-safety: if the callback already completed the op before destroy, the
-        // reclaim must NOT re-complete or double-free. TrySetException no-ops on a
-        // completed Task and FreeGcHandle is Interlocked-idempotent.
+        // Race-safety: if the callback already completed the op before Dispose ran,
+        // FaultTaskOnly must NOT re-complete. TrySetException no-ops on a completed
+        // Task. The callback (driven through the real FromIntPtr path) is the sole
+        // owner of the GCHandle free, so no free happens here.
         OperationCompletionSource context = new OperationCompletionSource(guard: null);
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
-        try
-        {
-            context.SetGcHandle(gcHandle);
+        context.SetGcHandle(gcHandle);
 
-            context.Complete(IntPtr.Zero); // callback fired first: success + frees the handle
+        // Callback fired first through the real dispatcher path: success + frees the
+        // handle (sole owner).
+        ConsumerCallbacks.Operation(IntPtr.Zero, GCHandle.ToIntPtr(gcHandle));
 
-            // Reclaim after completion: harmless no-op — the result stands, no throw.
-            context.FaultAndReclaim(new ObjectDisposedException("consumer"));
+        // Dispose runs FaultTaskOnly afterward: harmless no-op — the result stands.
+        context.FaultTaskOnly(new ObjectDisposedException("consumer"));
 
-            await TestTimeout.Run(() => context.Task, s_deadline); // still RanToCompletion
-            Assert.Equal(TaskStatus.RanToCompletion, context.Task.Status);
-        }
-        finally
-        {
-            context.FreeGcHandle();
-        }
+        await TestTimeout.Run(() => context.Task, s_deadline); // still RanToCompletion
+        Assert.Equal(TaskStatus.RanToCompletion, context.Task.Status);
     }
 
     [Fact]
-    public async Task FaultAndReclaim_ThenCallbackFires_NoDoubleFreeOrDoubleComplete()
+    public async Task FaultTaskOnly_ThenCallbackFires_CaseB_IsSafe()
     {
-        // The reverse order (reclaim wins, then a straggler callback fires): the
-        // callback path (Complete + FreeGcHandle) must be a harmless no-op — the fault
-        // stands, no double-free, no crash. The callback still holds a strong ref to
-        // the recovered context, so freeing the GCHandle first does not invalidate it.
+        // Case B (Critic N=5 Finding 3): the completion job was queued before destroy,
+        // so the dispatcher runs it AFTER the sync Dispose faulted the Task. Because
+        // FaultTaskOnly does NOT free the GCHandle, the straggler callback recovers a
+        // LIVE context via GCHandle.FromIntPtr(userData).Target — the exact path
+        // Finding 3 flagged — so there is no use-after-free. It completes safely
+        // (TrySetResult no-ops on the faulted Task) and frees the handle exactly once.
         OperationCompletionSource context = new OperationCompletionSource(guard: null);
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
-        try
-        {
-            context.SetGcHandle(gcHandle);
+        context.SetGcHandle(gcHandle);
 
-            var expected = new ObjectDisposedException("consumer");
-            context.FaultAndReclaim(expected);
+        var expected = new ObjectDisposedException("consumer");
+        context.FaultTaskOnly(expected); // sync Dispose faults the awaiter, keeps the handle
 
-            // A straggler callback (success) after the reclaim: TrySetResult no-ops, the
-            // idempotent free no-ops.
-            context.Complete(IntPtr.Zero);
-            context.FreeGcHandle();
+        // The straggler callback fires through the REAL FromIntPtr recovery path: it
+        // must not crash, must not double-complete, and frees the handle (sole owner).
+        ConsumerCallbacks.Operation(IntPtr.Zero, GCHandle.ToIntPtr(gcHandle));
 
-            ObjectDisposedException actual = await Assert.ThrowsAsync<ObjectDisposedException>(
-                () => TestTimeout.Run(() => context.Task, s_deadline));
-            Assert.Same(expected, actual); // the fault stands
-        }
-        finally
-        {
-            context.FreeGcHandle();
-        }
+        ObjectDisposedException actual = await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => context.Task, s_deadline));
+        Assert.Same(expected, actual); // the fault stands
+
+        // The callback already freed the handle; a redundant free is the idempotent
+        // no-op (proves no double-free / throw).
+        context.FreeGcHandle();
     }
 
     [Fact]
-    public void FaultAndReclaim_FreesGcHandle_UnrootsTheContext()
+    public void FaultTaskOnly_DoesNotUnrootContext_TheCallbackDoes()
     {
-        // The true proof that the reclaim frees the rooting GCHandle (not just faults
-        // the Task): after FaultAndReclaim the context is no longer rooted by its
-        // Normal handle, so GC collects it. This is the inverse of
-        // InFlightOperation_SurvivesAggressiveGc — a leaked handle would keep it alive.
-        WeakReference weak = ReclaimAndReturnWeakRef();
+        // The inverse of the old reclaim proof: FaultTaskOnly (sync Dispose) must NOT
+        // free the rooting GCHandle — the completion callback is the sole owner of the
+        // free. So after FaultTaskOnly the context stays rooted (alive through GC);
+        // only the straggler callback (case B) unroots it, via the real FromIntPtr
+        // path (proving that path recovers a live handle, not a freed one).
+        (WeakReference weak, IntPtr userData) = FaultTaskOnlyAndReturnWeakRef();
 
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
 
+        // Still rooted by the un-freed GCHandle: FaultTaskOnly did not free it.
+        Assert.True(weak.IsAlive);
+
+        // The straggler callback fires (case B): recovers the live context via
+        // FromIntPtr (no use-after-free), completes as a no-op on the faulted Task,
+        // and frees the GCHandle exactly once.
+        ConsumerCallbacks.Operation(IntPtr.Zero, userData);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        // The callback freed the handle → the context is now unrooted and collected.
         Assert.False(weak.IsAlive);
     }
 
     // Kept out-of-line + non-inlined so the strong reference to the context genuinely
     // leaves scope before the caller forces GC (an inlined body could keep it rooted).
+    // Returns the user_data IntPtr so the caller can drive the real callback path.
     [System.Runtime.CompilerServices.MethodImpl(
         System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static WeakReference ReclaimAndReturnWeakRef()
+    private static (WeakReference, IntPtr) FaultTaskOnlyAndReturnWeakRef()
     {
         OperationCompletionSource context = new OperationCompletionSource(guard: null);
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
 
-        // Reclaim frees the GCHandle. Observe the faulted Task so its exception is not
-        // left unobserved, then drop every strong reference (the Task included).
-        context.FaultAndReclaim(new ObjectDisposedException("consumer"));
+        // FaultTaskOnly faults the Task but does NOT free the GCHandle (the callback
+        // is the sole owner). Observe the faulted Task so its exception is not left
+        // unobserved, then drop every managed strong reference — only the GCHandle
+        // keeps the context alive.
+        context.FaultTaskOnly(new ObjectDisposedException("consumer"));
         _ = context.Task.Exception;
 
-        return new WeakReference(context);
+        return (new WeakReference(context), GCHandle.ToIntPtr(gcHandle));
     }
 
     [Fact]

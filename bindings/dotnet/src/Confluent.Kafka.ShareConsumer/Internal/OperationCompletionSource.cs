@@ -44,11 +44,18 @@ namespace Confluent.Kafka.ShareConsumer.Internal;
 /// (ffi §B7). This is mandatory, not an optimization.
 /// </para>
 /// <para>
-/// <b>Free exactly once, every path.</b> <see cref="Complete"/> (from the
-/// callback) and <see cref="AbandonBeforeSubmit"/> (if the P/Invoke throws before
-/// native could ever fire the callback) both release the guard, dispose the
-/// cancellation registration, and free the <see cref="GCHandle"/>; the free is
-/// idempotent (<see cref="Interlocked"/>-guarded) so a double path is harmless.
+/// <b>Who frees the <see cref="GCHandle"/>.</b> The completion callback
+/// (<see cref="Complete"/>) is the <b>sole owner</b> of the free on the normal path,
+/// matching the in-repo Python and confluent-kafka-dotnet siblings (the callback
+/// frees; teardown drains — it never reclaims). <see cref="AbandonBeforeSubmit"/>
+/// frees it only when the submitting P/Invoke threw so native never ran and the
+/// callback can never fire. <see cref="FaultTaskOnly"/> (the synchronous
+/// <c>Dispose</c> path) faults the awaiter's <c>Task</c> so it cannot strand but
+/// deliberately does <b>not</b> free the <see cref="GCHandle"/> — a completion
+/// callback already queued before <c>Consumer_destroy</c> may still fire after it and
+/// must recover a live handle (no use-after-free). All three release the guard and
+/// dispose the cancellation registration idempotently; the free itself is
+/// <see cref="Interlocked"/>-guarded, so a straggler callback frees exactly once.
 /// </para>
 /// </remarks>
 internal sealed class OperationCompletionSource
@@ -170,32 +177,56 @@ internal sealed class OperationCompletionSource
     }
 
     /// <summary>
-    /// Deterministically reclaims this context from the <b>synchronous</b>
-    /// <c>Dispose</c> teardown path (ffi §B7). There, a <em>guarded</em>
-    /// <c>close_with_timeout</c> is rejected while this op still holds the core
-    /// access guard, so it does <b>not</b> drain the op; the following
-    /// <c>Consumer_destroy</c> then cancels the op's future, so its completion
-    /// callback can never fire — which would otherwise strand the awaiter's
-    /// <c>Task</c> and leak the rooting <see cref="GCHandle"/> (+ this context and
-    /// its <see cref="TaskCompletionSource{TResult}"/>). This faults the awaiter
-    /// with <paramref name="exception"/> and frees the <see cref="GCHandle"/>.
+    /// Faults the awaiter's <c>Task</c> from the <b>synchronous</b> <c>Dispose</c>
+    /// teardown path (ffi §B7) <b>without</b> freeing the rooting
+    /// <see cref="GCHandle"/>. There, a <em>guarded</em> <c>close_with_timeout</c> is
+    /// rejected while this op still holds the core access guard, so it does <b>not</b>
+    /// drain the op; the following <c>Consumer_destroy</c> cancels the op's future so
+    /// — in the common case — its completion callback never fires. Faulting the
+    /// <c>Task</c> with <paramref name="exception"/> here stops a fire-and-forget
+    /// awaiter from stranding (the Finding-1 strand fix).
     /// </summary>
     /// <remarks>
-    /// Call it <em>after</em> <c>Consumer_destroy</c> has cancelled the op, so the
-    /// callback will not fire afterwards. It is nonetheless race-safe if the
-    /// callback <em>did</em> fire first (an instant Mock op can complete before
-    /// destroy): it reuses the same idempotent primitives the callback uses —
+    /// <para>
+    /// <b>Frees nothing.</b> Unlike <see cref="Complete"/> /
+    /// <see cref="AbandonBeforeSubmit"/>, this does <b>not</b> free the
+    /// <see cref="GCHandle"/>. The completion callback is the sole owner of that free
+    /// (matching the in-repo Python + confluent-kafka-dotnet siblings). If the op's
+    /// completion job was already enqueued before <c>Consumer_destroy</c>, the
+    /// callback still fires <em>after</em> destroy (the ABI closes the completion
+    /// channel without joining the dispatcher, which drains any queued jobs); it then
+    /// recovers a <b>live</b> context via <c>GCHandle.FromIntPtr(userData).Target</c>
+    /// and frees the handle itself — so freeing it from here would be a
+    /// use-after-free (Critic N=5 Finding 3, case B).
+    /// </para>
+    /// <para>
+    /// <b>Accepted residual (case A).</b> If destroy cancels the op's future
+    /// <em>before</em> its completion job is enqueued, the callback never fires and
+    /// that one op's <see cref="GCHandle"/> (+ this context / its TCS) leaks — a rare,
+    /// one-time, teardown-only leak in a misuse case (an unawaited in-flight op +
+    /// synchronous <c>Dispose</c>). This mirrors the residual the Python (bare
+    /// <c>_destroy</c> after drain) and confluent-kafka-dotnet (unflushed-at-destroy)
+    /// siblings accept; steer users to <c>DisposeAsync</c>, which drains and has no
+    /// leak.
+    /// </para>
+    /// <para>
+    /// Race-safe:
     /// <see cref="TaskCompletionSource{TResult}.TrySetException(System.Exception)"/>
-    /// no-ops once the <c>Task</c> is completed and <see cref="FreeGcHandle"/> is
-    /// <see cref="Interlocked"/>-idempotent — so it introduces no new race and can
-    /// neither double-complete nor double-free.
+    /// no-ops once the <c>Task</c> is completed, and the guard release / registration
+    /// dispose are idempotent — so a callback that fired before <c>Dispose</c> makes
+    /// this a harmless no-op. Never sync-over-async: it does not wait on the op
+    /// <c>Task</c>.
+    /// </para>
     /// </remarks>
-    internal void FaultAndReclaim(Exception exception)
+    internal void FaultTaskOnly(Exception exception)
     {
         _registration.Dispose();
         _guard?.Release();
         _tcs.TrySetException(exception);
-        FreeGcHandle();
+
+        // Deliberately NOT FreeGcHandle: the completion callback is the sole owner of
+        // the free (see remarks — a straggler callback firing after Consumer_destroy
+        // must recover a live GCHandle, not a freed/recycled one).
     }
 
     /// <summary>
