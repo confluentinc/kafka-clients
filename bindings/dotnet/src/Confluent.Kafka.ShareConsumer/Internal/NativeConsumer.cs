@@ -49,13 +49,17 @@ namespace Confluent.Kafka.ShareConsumer.Internal;
 /// call — it bypasses the guard by design.
 /// </para>
 /// <para>
-/// Teardown is <b>synchronous</b> this commit (<see cref="IDisposable"/>);
-/// <c>IAsyncDisposable</c> — the primary, drain-first path — is added with the
-/// async-teardown step. Both are gated by a thread-safe closed flag (folds in the
-/// N=5-deferred teardown-thread-safety hardening).
+/// Teardown has two paths, both gated by a thread-safe closed flag (folds in the
+/// N=5-deferred teardown-thread-safety hardening):
+/// <see cref="DisposeAsync"/> is <b>primary</b> — it drains the in-flight op
+/// (wakeup + await) then closes <em>asynchronously</em> (joins the bg task) before
+/// destroy; <see cref="Dispose"/> is the blocking fallback (<c>close_with_timeout</c>
+/// → destroy). A bare <c>Consumer_destroy</c> before the in-flight callback fires
+/// would cancel it (the callback never fires → the <c>Task</c> hangs and the
+/// <c>GCHandle</c> leaks), which is why the async path drains first (ffi §B7).
 /// </para>
 /// </remarks>
-internal sealed class NativeConsumer : IDisposable
+internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 {
     // Fixed graceful-close budget for the synchronous Dispose. A never-joined
     // consumer closes near-instantly; a user-supplied timeout arrives with the
@@ -390,6 +394,86 @@ internal sealed class NativeConsumer : IDisposable
             // ReleaseHandle → Consumer_destroy, exactly once.
             _handle.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Graceful <b>async</b> teardown (the primary path): drain the in-flight op
+    /// (<c>wakeup</c> + <c>await</c>), then <c>Consumer_close_async</c> (joins the
+    /// background task) via the completion bridge, then release the handle
+    /// (→ <c>Consumer_destroy</c>). Draining first is essential — a bare destroy
+    /// while an op is in flight cancels its callback (the callback never fires, so
+    /// the <c>Task</c> would hang and the <c>GCHandle</c> would leak, ffi §B7).
+    /// Idempotent and safe under concurrent / double calls (the thread-safe closed
+    /// flag). Best-effort: it swallows the in-flight op's fault and the close error
+    /// (surfacing the latter is the future <c>CloseAsync(TimeSpan)</c>'s job).
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (!TryBeginClose())
+        {
+            return;
+        }
+
+        // Drain: wakeup (best-effort abort) + await the in-flight op so its callback
+        // fires (releasing the core guard + freeing its GCHandle) before we close.
+        // Call the native wakeup directly — the public Wakeup() no-ops once closed.
+        Task? pending = Volatile.Read(ref _inFlightOperation);
+        if (pending is not null)
+        {
+            NativeMethods.ConsumerWakeup(_handle.DangerousGetHandle());
+            try
+            {
+                await pending.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Drain: the op's own fault (e.g. a wakeup/seek error) is not the
+                // teardown's concern — it was already surfaced to that op's awaiter.
+            }
+        }
+
+        try
+        {
+            // Graceful async close (joins the bg task) via the same void bridge; no
+            // managed guard (the op is drained, so the core guard is free).
+            await CloseAsyncInternal().ConfigureAwait(false);
+        }
+        catch (KafkaException)
+        {
+            // Best-effort teardown — Dispose/DisposeAsync must not surface a close
+            // error; that is CloseAsync(TimeSpan)'s job.
+        }
+        finally
+        {
+            // ReleaseHandle → Consumer_destroy, exactly once.
+            _handle.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Bridges <c>Consumer_close_async</c> to a <see cref="Task"/> via the shared
+    /// completion callback, with <b>no</b> managed access guard (close is a
+    /// lifecycle op run after the in-flight op is drained). If the submitting
+    /// P/Invoke throws before native could fire the callback, the context is
+    /// abandoned (its <c>GCHandle</c> freed) here.
+    /// </summary>
+    private Task CloseAsyncInternal()
+    {
+        OperationCompletionSource context = new OperationCompletionSource(guard: null);
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        try
+        {
+            NativeMethods.ConsumerCloseAsync(
+                _handle.DangerousGetHandle(), ConsumerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
     }
 
     /// <summary>

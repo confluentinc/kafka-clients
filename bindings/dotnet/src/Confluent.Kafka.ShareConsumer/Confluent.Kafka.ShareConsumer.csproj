@@ -58,10 +58,14 @@
            Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` from the repo root first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
   </Target>
 
-  <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) is built in on net8.0+ but
-       needs the facade package on the netstandard2.0 leg only. -->
+  <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) and IAsyncDisposable /
+       ValueTask are built in on net8.0+ but need facade packages on the
+       netstandard2.0 leg only (net462 rides ns2.0). Microsoft.Bcl.AsyncInterfaces
+       supplies IAsyncDisposable (DisposeAsync — the primary drain-first teardown,
+       CLAUDE.md §4 / ffi §B7) and transitively brings the ValueTask async builder. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="System.Memory" Version="4.5.5" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
   </ItemGroup>
 
   <!-- Grant the unit-test assembly access to internals (Internal/ scaffolding).
