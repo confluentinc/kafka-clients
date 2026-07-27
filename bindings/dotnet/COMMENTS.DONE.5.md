@@ -1,13 +1,24 @@
 # COMMENTS.DONE.5 — resolved record for the Critic (N=5) review of M3/P1 "Completion bridge + first async op"
 
 Review target: commits `134dc0d..HEAD` (`285b04c`, `d6f3022`, `3d0245f`, `1243350`,
-`259d098`) on `prashah_dev_asyncbridge_scaffolding`. Both findings from `COMMENTS.5.md`
-are resolved and moved here — Finding 1 fixed in code; Finding 2 accepted and
-documented as deferred-by-design to N=6 (not a code change).
+`259d098`) on `prashah_dev_asyncbridge_scaffolding`, plus the Finding-1 fixup
+(`9f50ed2`) and its re-review. All three findings from `COMMENTS.5.md` are resolved and
+moved here — Finding 1 fixed in code (its GCHandle-free part then corrected by
+Finding 3); Finding 2 accepted and documented as deferred-by-design to N=6 (not a code
+change); Finding 3 fixed in code (callback becomes the sole owner of the `GCHandle`
+free).
 
 ---
 
 ## Finding 1 — [MEDIUM] Sync `Dispose` with an async op in flight leaks the per-op GCHandle + strands the op `Task` — **FIXED**
+
+> **Corrected in part by Finding 3 (below).** The fix recorded in this section
+> introduced `FaultAndReclaim`, which freed the `GCHandle` from `Dispose` — itself a
+> case-B use-after-free. The current code faults the `Task` only (`FaultTaskOnly`) and
+> leaves the free to the completion callback (the sole owner). This section is kept as
+> the historical record of the Finding-1 fix; read Finding 3 for the corrected shape,
+> the test names, and the accepted case-A residual. The strand fix (observe the op
+> `Task` to a terminal state) is unchanged and still in force.
 
 **Where:** `src/Confluent.Kafka.ShareConsumer/Internal/NativeConsumer.cs` (`Dispose`);
 `src/Confluent.Kafka.ShareConsumer/Internal/OperationCompletionSource.cs`;
@@ -95,3 +106,95 @@ item was carried: it states the hazard, why it is deferred, and the two resoluti
 consider when the public `IConsumer`/`KafkaConsumer` surface makes `Wakeup()` genuinely
 cross-thread ((a) per-call AddRef/Release on exactly those methods, or (b) document the
 no-concurrent-teardown precondition).
+
+---
+
+## Finding 3 — [LOW / latent, memory-safety] The Finding-1 fix's sync-`Dispose` reclaim freed the per-op `GCHandle` before a straggler completion callback could dereference it (case B) — **RESOLVED**
+
+**Where:** `src/Confluent.Kafka.ShareConsumer/Internal/OperationCompletionSource.cs`
+(`FaultAndReclaim` → now `FaultTaskOnly`);
+`src/Confluent.Kafka.ShareConsumer/Internal/NativeConsumer.cs` (`Dispose`);
+`src/Confluent.Kafka.ShareConsumer/Internal/Interop/ConsumerCallbacks.cs`
+(`OnOperation` — the sole `GCHandle` free);
+tests `tests/.../Interop/ConsumerCompletionBridgeTests.cs` (the four `FaultTaskOnly_*`
+tests) + `ConsumerAsyncTeardownTests.cs`.
+
+**Root cause (verified against the C ABI + both siblings).** The Finding-1 fix had the
+synchronous `Dispose` call `FaultAndReclaim`, which faulted the op `Task` **and** freed
+the per-op `GCHandle`. Freeing the `GCHandle` from `Dispose` is the bug. The managed
+side cannot distinguish two orderings that both present as "core guard held ⇒
+`close_with_timeout` rejected":
+
+- **case A** — the op's future is still running → `Consumer_destroy`'s
+  `shutdown_background` cancels it → the completion job is never created → the callback
+  never fires; and
+- **case B** — the op already completed and its completion job is **queued** but the
+  dispatcher has not yet run it (the guard is released *inside* that queued job). The
+  ABI's `Consumer_destroy` closes the completion channel and detaches the dispatcher
+  **without joining**, and the dispatcher loop drains any already-queued jobs before
+  exiting — so that queued job runs **after** `Consumer_destroy` returns and fires the
+  callback.
+
+In case B, if `Dispose`'s `FreeGcHandle()` won the race against the dispatcher, the
+straggler callback then executed `OnOperation` → `GCHandle.FromIntPtr(userData).Target`
+on a **freed** (potentially recycled) `GCHandle` — a use-after-free (best case a caught
+`NullReferenceException` + a leaked failure-op error handle; worst case the slot
+recycled to a live `OperationCompletionSource`, completing the wrong op's `Task` and
+freeing *its* rooting handle → cascading UAF). This violates ffi §B6 ("the `GCHandle`
+must stay alive from submit until the callback fires").
+
+**Verified pattern against BOTH siblings over the same/analogous core (callback is the
+SOLE owner; teardown drains, never reclaims):**
+
+- **In-repo Python** (`bindings/python`): `Py_INCREF(cb)` at submit, `Py_DECREF(cb)` in
+  the op trampoline (`_confluentkafka.c`, `consumer_op_trampoline`). The callback is the
+  sole owner of the context free; teardown never reclaims — `consumer.py` `close()`
+  drains (awaits the op) then a bare `_destroy()`. The async `_run_async` callback
+  tolerates a gone awaiter (frees the payload if the future is cancelled/done).
+- **confluent-kafka-dotnet** (librdkafka): `GCHandle.Alloc` at submit
+  (`Producer.cs:307`), `gch.Free()` in the delivery-report callback (`Producer.cs:221`)
+  — callback is the sole owner; `Dispose` never reclaims per-op handles, it drains
+  (`callbackTask.Wait()`, `Producer.cs:450`) then destroys.
+
+Our `FaultAndReclaim` (reclaim-from-`Dispose`) was the outlier; the fix aligns with both.
+
+**Fix.** `FaultAndReclaim` is replaced by `FaultTaskOnly(Exception)`, which faults the
+op `Task` (`TrySetException` — preserves Finding 1's strand fix so a fire-and-forget
+awaiter does not hang), releases the managed access guard, and disposes the cancellation
+registration — all idempotent — but does **not** free the `GCHandle` and does nothing
+that races the still-pending native callback. The completion callback
+(`ConsumerCallbacks.OnOperation` → `FreeGcHandle` in `finally`) remains the **sole
+owner** of the free, and stays safe when it fires **after** `Dispose`: `TrySet*` no-ops
+on a faulted `Task`, `FreeGcHandle` is `Interlocked`-idempotent, and the guard/registration
+releases are idempotent. `Dispose` now calls `FaultTaskOnly` after
+`TryBeginClose` + `close_with_timeout` + `Consumer_destroy`, and frees no `GCHandle`
+anywhere on any teardown path (grep-confirmed: `FreeGcHandle` is called only from the
+callback and from `AbandonBeforeSubmit`, the submit-threw path where native never ran).
+`DisposeAsync` is unchanged (it drains: wakeup + await the in-flight op → the callback
+frees the `GCHandle` normally → `close_async` → destroy).
+
+**Accepted residual (case A).** If `Consumer_destroy` cancels the op's future before its
+completion job is enqueued, the callback never fires, so that one op's `GCHandle` +
+context leaks — a rare, one-time, teardown-only leak in a misuse case (sync `Dispose`
+with an unawaited in-flight op). This is exactly the residual the Python (bare `_destroy`
+after drain) and CKD (unflushed-at-destroy) siblings accept; documented in STATUS (D4)
+with the steer to `DisposeAsync` (drains → no leak).
+
+**Test change (closing the Finding-3 coverage gap).** The prior
+`FaultAndReclaim_ThenCallbackFires_*` test drove `Complete` + `FreeGcHandle` directly on
+a **strong** reference, so it never exercised the `FromIntPtr`-after-free path the
+finding is about. The four `FaultTaskOnly_*` tests now:
+`_FaultsTheTask` (strand fix; handle not freed by `FaultTaskOnly`);
+`_AfterCompletion_IsNoOp` (callback via the real path first, then `FaultTaskOnly` is a
+no-op); `_ThenCallbackFires_CaseB_IsSafe` (the straggler callback runs through the real
+`ConsumerCallbacks.Operation` → `GCHandle.FromIntPtr` recovery path — proving it
+recovers a **live** handle, completes as a no-op on the faulted `Task`, and frees once);
+`_DoesNotUnrootContext_TheCallbackDoes` (weak-ref proof that `FaultTaskOnly` leaves the
+context rooted, and the callback — not `Dispose` — unroots it). The
+`Dispose_WithOpInFlight_*` teardown regressions still hold (op `Task` reaches a terminal
+state; no strand, no hang).
+
+**Verification (all green):** `cargo build --features ffi` OK; `dotnet build` 0/0 across
+netstandard2.0 / net8.0 / net10.0 (lib) + net8.0 / net10.0 (tests); `dotnet test -f
+net10.0` all pass (no hang, `TestTimeout` guards); `dotnet format --verify-no-changes`
+clean.

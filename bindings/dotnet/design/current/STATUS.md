@@ -169,9 +169,11 @@ bindings/dotnet/
   `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` + CS1591 active. No new public
   type → no new CS1591 surface. The ns2.0 leg resolves `IAsyncDisposable` /
   `ValueTask` via `Microsoft.Bcl.AsyncInterfaces` (M3/P1 D3).
-- `dotnet test -f net10.0` — **47 passed, 0 failed** (20 carried + 27 new: 5 access
-  guard, 8 completion bridge, 6 async op, 8 teardown); ~220 ms — every awaited op /
-  teardown under a `TestTimeout` hang guard, so a bridge/drain hang would fail fast.
+- `dotnet test -f net10.0` — **52 passed, 0 failed** (M3/P1 set incl. the N=5
+  Finding-1/Finding-3 fixups: 5 access guard, 12 completion bridge — the four
+  `FaultTaskOnly_*` among them, 6 async op, teardown, and the carried M0–M2 tests);
+  ~370 ms — every awaited op / teardown under a `TestTimeout` hang guard, so a
+  bridge/drain hang would fail fast.
 - `dotnet format --verify-no-changes` — clean.
 - **CI-only (not blocking):** only the .NET 10 runtime is installed locally; the
   net8.0 test *run* and net462 (via netstandard2.0) are CI-only. Both *build* legs
@@ -203,19 +205,30 @@ bindings/dotnet/
   netstandard2.0 floor (built-in on net8.0+) — the enabling dependency for the
   primary `DisposeAsync`. A standard facade, conditioned exactly like `System.Memory`
   (ns2.0-only); no NuGet packaging of the binding itself (ffi §0.2 unchanged).
-- **D4 — sync `Dispose` kept M2-shape (no drain) + a post-destroy reclaim.**
+- **D4 — sync `Dispose` kept M2-shape (no drain) + a post-destroy Task-fault.**
   `Dispose` stays `close_with_timeout` → destroy (thread-safe closed flag added),
   NOT sync-over-async; the drain-first path is `DisposeAsync` (primary, ffi §B7).
-  **Post-Critic (N=5) fix:** `close_with_timeout` is a *guarded* sync op, so while an
-  async op genuinely holds the core guard the close is rejected (ConcurrentModification)
-  and does **not** drain — the following `Consumer_destroy` then cancels the op's
-  callback, which (before the fix) stranded the op `Task` and leaked its `GCHandle` +
-  context. `Dispose` now, **after** destroy (once the callback can no longer fire),
-  reclaims any pending op: faults its `Task` (`ObjectDisposedException`) and frees its
-  `GCHandle` via the same idempotent primitives the callback uses
-  (`TrySetException` / Interlocked-idempotent `FreeGcHandle`) — race-safe against a
-  callback that fired before destroy, and still not sync-over-async (it never waits on
-  the op `Task`). So an op-in-flight sync `Dispose` no longer leaks or strands.
+  **Post-Critic (N=5) fix (Findings 1 + 3):** `close_with_timeout` is a *guarded* sync
+  op, so while an async op genuinely holds the core guard the close is rejected
+  (ConcurrentModification) and does **not** drain — the following `Consumer_destroy`
+  then cancels the op's callback, which (before the fix) stranded the op `Task`
+  (Finding 1). `Dispose` now, **after** destroy, faults any pending op's `Task`
+  (`OperationCompletionSource.FaultTaskOnly` → `ObjectDisposedException`) so a
+  fire-and-forget awaiter cannot strand — via idempotent primitives (`TrySetException`
+  no-ops if completed), race-safe against a callback that fired before destroy, and NOT
+  sync-over-async (it never waits on the op `Task`). Crucially it does **not** free the
+  `GCHandle`: the completion callback is the **sole owner** of that free (Finding 3),
+  aligning with the in-repo Python (`Py_DECREF` in the op trampoline; close drains then
+  bare `_destroy`) and confluent-kafka-dotnet (`gch.Free()` in the delivery-report
+  callback; `Dispose` drains via `callbackTask.Wait()` then destroys). Freeing it from
+  `Dispose` was the case-B use-after-free — a completion job queued before destroy fires
+  *after* it (the ABI drains queued dispatcher jobs without joining) and must recover a
+  live handle. **Accepted residual (case A):** if destroy cancels the op before its
+  callback is queued, that one op's `GCHandle` leaks — a rare, one-time, teardown-only
+  leak in a misuse case (unawaited in-flight op + sync `Dispose`); the Python/CKD
+  siblings accept the same residual, and `DisposeAsync` drains so it has no leak. So an
+  op-in-flight sync `Dispose` no longer strands the `Task`; users wanting no leak use
+  `DisposeAsync`.
 - **N=5 deferred hardening — DONE.** The non-atomic `_disposed` bool is replaced by a
   thread-safe closed flag (`Interlocked`, `TryBeginClose`) + the §B5 access guard, so
   double / concurrent / mixed `Dispose`/`DisposeAsync` are safe. Per the deferred
@@ -374,13 +387,25 @@ bridge (free-once, GCHandle keep-alive, `RunContinuationsAsynchronously`, no-thr
 boundary, `DisposeAsync` drain, marshalling, error classification, scope) had **no
 defects**. Two findings, both on the sync-teardown / handle-lifetime edges (not the
 async bridge):
-- **Finding 1 [MEDIUM] — FIXED.** Sync `Dispose` with an async op in flight leaked the
-  per-op `GCHandle` + context and stranded the op `Task`: the guarded
-  `close_with_timeout` is rejected (no drain) while the op holds the core guard, then
-  `Consumer_destroy` cancels the callback. Fixed by a post-destroy reclaim
-  (`OperationCompletionSource.FaultAndReclaim` — idempotent fault + free; see D4); the
+- **Finding 1 [MEDIUM] — FIXED (its GCHandle-free part corrected by Finding 3).** Sync
+  `Dispose` with an async op in flight stranded the op `Task` (and, originally, leaked
+  the per-op `GCHandle`): the guarded `close_with_timeout` is rejected (no drain) while
+  the op holds the core guard, then `Consumer_destroy` cancels the callback. Fixed by a
+  post-destroy Task-fault (`OperationCompletionSource.FaultTaskOnly`; see D4); the
   masking `Dispose_WithOpInFlight` test now observes the op `Task` to a terminal state
-  (+ a churn/GC variant). Not sync-over-async, race-safe (no new race).
+  (+ a churn/GC variant). Not sync-over-async, race-safe.
+- **Finding 3 [LOW/latent, memory-safety] — RESOLVED (re-review of the Finding-1 fixup).**
+  The Finding-1 fix originally freed the `GCHandle` from `Dispose` (`FaultAndReclaim`);
+  that is a case-B use-after-free — a completion job queued before `Consumer_destroy`
+  fires *after* it (the ABI drains queued dispatcher jobs without joining) and
+  dereferences the freed/recycled handle via `GCHandle.FromIntPtr(userData).Target`.
+  Resolved by making the completion callback the **sole owner** of the `GCHandle` free
+  (`FaultTaskOnly` faults the `Task` only), matching the in-repo Python +
+  confluent-kafka-dotnet callback-frees / teardown-drains-not-reclaims pattern. Accepted
+  case-A residual: a one-time teardown-only leak if destroy cancels the op before its
+  callback is queued (both siblings accept the same); `DisposeAsync` drains and has no
+  leak. New OCS component tests drive the straggler callback through the real
+  `GCHandle.FromIntPtr` recovery path (proving no UAF). See COMMENTS.DONE.5.
 - **Finding 2 [LOW/latent] — ACCEPTED, deferred to N=6 (documented, no code change).**
   Cross-thread `Wakeup()`/`GroupId()` TOCTOU vs teardown; plan-consistent
   (per-call AddRef deliberately declined) and not reachable while internal-only. Carried
@@ -465,10 +490,11 @@ safe and use-after-dispose throws. Guarded the CKD way (thread-safe closed check
 access guard) — NO per-call `SafeHandle` AddRef, NO close/destroy-as-SafeHandle
 param, matching the deferred note's guidance. `DisposeAsync` is the primary
 drain-first path (drain in-flight → `close_async` → destroy); `Dispose` stays the
-M2-shape blocking fallback — **now with a post-destroy reclaim** (Critic N=5 Finding 1,
-see D4) so an op-in-flight sync `Dispose` faults the op `Task` + frees its `GCHandle`
-instead of stranding/leaking (its guarded close cannot drain). Ops remain
-single-threaded-with-rejection; only `wakeup()` is cross-thread.
+M2-shape blocking fallback — **now with a post-destroy Task-fault** (Critic N=5
+Findings 1 + 3, see D4) so an op-in-flight sync `Dispose` faults the op `Task` (never
+freeing the `GCHandle` — the completion callback is the sole owner) instead of
+stranding, with an accepted one-time case-A teardown residual (`DisposeAsync` has no
+leak). Ops remain single-threaded-with-rejection; only `wakeup()` is cross-thread.
 
 ### Deferred hardening (N=6 — public client cross-thread wakeup): `Wakeup()`/`GroupId()` TOCTOU vs teardown
 
