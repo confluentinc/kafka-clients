@@ -170,6 +170,35 @@ internal sealed class OperationCompletionSource
     }
 
     /// <summary>
+    /// Deterministically reclaims this context from the <b>synchronous</b>
+    /// <c>Dispose</c> teardown path (ffi §B7). There, a <em>guarded</em>
+    /// <c>close_with_timeout</c> is rejected while this op still holds the core
+    /// access guard, so it does <b>not</b> drain the op; the following
+    /// <c>Consumer_destroy</c> then cancels the op's future, so its completion
+    /// callback can never fire — which would otherwise strand the awaiter's
+    /// <c>Task</c> and leak the rooting <see cref="GCHandle"/> (+ this context and
+    /// its <see cref="TaskCompletionSource{TResult}"/>). This faults the awaiter
+    /// with <paramref name="exception"/> and frees the <see cref="GCHandle"/>.
+    /// </summary>
+    /// <remarks>
+    /// Call it <em>after</em> <c>Consumer_destroy</c> has cancelled the op, so the
+    /// callback will not fire afterwards. It is nonetheless race-safe if the
+    /// callback <em>did</em> fire first (an instant Mock op can complete before
+    /// destroy): it reuses the same idempotent primitives the callback uses —
+    /// <see cref="TaskCompletionSource{TResult}.TrySetException(System.Exception)"/>
+    /// no-ops once the <c>Task</c> is completed and <see cref="FreeGcHandle"/> is
+    /// <see cref="Interlocked"/>-idempotent — so it introduces no new race and can
+    /// neither double-complete nor double-free.
+    /// </remarks>
+    internal void FaultAndReclaim(Exception exception)
+    {
+        _registration.Dispose();
+        _guard?.Release();
+        _tcs.TrySetException(exception);
+        FreeGcHandle();
+    }
+
+    /// <summary>
     /// Frees the rooting <see cref="GCHandle"/> exactly once, on every completion
     /// path (including the inline core-guard-rejection error path). Idempotent.
     /// </summary>

@@ -56,7 +56,10 @@ namespace Confluent.Kafka.ShareConsumer.Internal;
 /// destroy; <see cref="Dispose"/> is the blocking fallback (<c>close_with_timeout</c>
 /// → destroy). A bare <c>Consumer_destroy</c> before the in-flight callback fires
 /// would cancel it (the callback never fires → the <c>Task</c> hangs and the
-/// <c>GCHandle</c> leaks), which is why the async path drains first (ffi §B7).
+/// <c>GCHandle</c> leaks), which is why the async path drains first (ffi §B7). The
+/// sync path cannot drain (its guarded close is rejected while the op holds the core
+/// guard), so instead it <em>reclaims</em> the pending op after destroy — faulting
+/// its <c>Task</c> and freeing its <c>GCHandle</c> (idempotently, no new race).
 /// </para>
 /// </remarks>
 internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
@@ -80,6 +83,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // The most recently submitted op's Task. Ops are serialized by the guard, so at
     // most one is pending; teardown drains it (wakeup + await/wait) before destroy.
     private Task? _inFlightOperation;
+
+    // The most recently submitted op's completion context (its TCS + rooting
+    // GCHandle). Tracked so the SYNCHRONOUS Dispose can deterministically reclaim it:
+    // its guarded close_with_timeout is rejected (no drain) while the op holds the
+    // core guard, and the following destroy cancels the op's callback — so without
+    // this reclaim the Task strands and the GCHandle leaks (ffi §B7). DisposeAsync
+    // drains instead (the callback fires), so it does not use this field.
+    private OperationCompletionSource? _inFlightContext;
 
     private NativeConsumer(SafeConsumerHandle handle)
     {
@@ -364,18 +375,36 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Graceful synchronous teardown: <c>Consumer_close_with_timeout</c> (joins the
-    /// background task) then releases the handle (→ <c>Consumer_destroy</c>).
-    /// Idempotent and safe under concurrent / double calls (the thread-safe closed
-    /// flag). The drain-first async teardown (<c>DisposeAsync</c>) is the primary
-    /// path; this blocking fallback is unchanged in shape.
+    /// Graceful synchronous teardown (blocking fallback): <c>Consumer_close_with_timeout</c>
+    /// then releases the handle (→ <c>Consumer_destroy</c>), and finally reclaims any
+    /// pending in-flight op's managed resources. Idempotent and safe under concurrent
+    /// / double calls (the thread-safe closed flag). The drain-first async teardown
+    /// (<c>DisposeAsync</c>) is the primary path.
     /// </summary>
+    /// <remarks>
+    /// <c>close_with_timeout</c> is a <em>guarded</em> sync op: while an async op is
+    /// genuinely in flight it holds the core access guard, so the close is rejected
+    /// (ConcurrentModification) and does <b>not</b> drain the op — the following
+    /// <c>Consumer_destroy</c> then cancels the op's future, so its completion
+    /// callback can never fire. Without a reclaim, the awaiter's <c>Task</c> would
+    /// strand and the rooting <c>GCHandle</c> (+ its context / TCS) would leak
+    /// (ffi §B7). So, <em>after</em> destroy (once the callback can no longer fire),
+    /// this faults the op's <c>Task</c> and frees its <c>GCHandle</c> — via the same
+    /// idempotent primitives the callback uses, so a callback that fired before
+    /// destroy makes the reclaim a harmless no-op (no new race, not sync-over-async:
+    /// it never waits on the op <c>Task</c>). <c>DisposeAsync</c> instead drains
+    /// (wakeup + await) so the callback fires normally.
+    /// </remarks>
     public void Dispose()
     {
         if (!TryBeginClose())
         {
             return;
         }
+
+        // Snapshot any pending op's context BEFORE teardown so it can be reclaimed
+        // after destroy cancels its callback (see the reclaim below).
+        OperationCompletionSource? pending = Volatile.Read(ref _inFlightContext);
 
         try
         {
@@ -394,6 +423,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // ReleaseHandle → Consumer_destroy, exactly once.
             _handle.Dispose();
         }
+
+        // Reclaim the pending in-flight op deterministically (ffi §B7). Ordered
+        // AFTER destroy (the callback can no longer fire) and built on idempotent
+        // primitives (TrySetException no-ops if completed; FreeGcHandle is
+        // Interlocked-idempotent), so a callback that raced to fire before destroy
+        // makes this a no-op — race-safe, and NOT sync-over-async (no await/Wait on
+        // the op Task). Reclaiming a long-completed op is likewise a harmless no-op.
+        pending?.FaultAndReclaim(new ObjectDisposedException(nameof(NativeConsumer)));
     }
 
     /// <summary>
@@ -508,7 +545,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             throw;
         }
 
+        // Publish the context BEFORE the Task: a concurrent sync Dispose reads the
+        // context to reclaim it (fault + free), so it must see a non-null context
+        // whenever it could see the Task. Both are harmless to reclaim once the op
+        // has completed (idempotent — see OperationCompletionSource.FaultAndReclaim).
         Task task = context.Task;
+        Volatile.Write(ref _inFlightContext, context);
         Volatile.Write(ref _inFlightOperation, task);
         return task;
     }
