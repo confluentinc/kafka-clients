@@ -5,6 +5,23 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 ## Current milestone/phase
 
+- **Milestone 3 / Phase 1 — "Completion bridge + first async op (consumer,
+  proof-of-plumbing)": DONE (2026-07-27).** The foreign-thread completion callback
+  → `Task` bridge — the riskiest new machinery — de-risked BEFORE poll / the
+  receive path. Activates the `_async`/callback ABI for the first time (Mode A, no
+  Rust authored). Delivered: the void-result bridge (`OperationCompletionSource`,
+  `TaskCompletionSource` with `RunContinuationsAsynchronously`, GCHandle keep-alive
+  submit→fire, no-throw callback boundary, free-exactly-once); the managed
+  one-op-in-flight `ConsumerAccessGuard` (mirrors — does not replace — the core
+  guard); two thin proof ops on one bridge — `SubscribeAsync` (SUCCESS) and
+  `SeekAsync` unassigned (FAILURE); `Wakeup()` + `CancellationToken` mapping;
+  async-aware teardown (`IAsyncDisposable.DisposeAsync` drain→`close_async`→destroy,
+  un-defers M2/P1 D3) with the N=5-deferred teardown-thread-safety hardening folded
+  in (thread-safe closed flag). NO poll / receive path (Category 3/4 handles,
+  `ConsumerRecord(s)`, length-delimited `out_len` strings, copy-out), NO other async
+  ops, NO public client type (`KafkaException` remains the only public type) — all
+  deferred. Approved plan + closed record:
+  `design/history/M3/P1-completion-bridge/`.
 - **Milestone 2 / Phase 2 — "SafeHandle marshaller-return hardening": DONE
   (2026-07-22).** The three owned-handle constructors
   (`ConsumerProperties_new` / `KafkaConsumer_new` / `MockConsumer_new`) now
@@ -67,14 +84,31 @@ bindings/dotnet/
 │        │                                         graceful Dispose (close_with_timeout -> destroy);
 │        │                                         preconditions -> ArgumentNullException/ArgumentException.
 │        │                                         M2/P2: consumes the SafeHandle returns (dispose the
-│        │                                         IsInvalid handle on error; defensive IsInvalid guard)
+│        │                                         IsInvalid handle on error; defensive IsInvalid guard).
+│        │                                         M3/P1: proof async ops (SubscribeAsync/SeekAsync via a
+│        │                                         shared SubmitVoidOperation), Wakeup(), guarded GroupId()
+│        │                                         state read; thread-safe closed flag (folds N=5 deferred);
+│        │                                         IAsyncDisposable.DisposeAsync (drain->close_async->destroy)
+│        ├─ OperationCompletionSource.cs        ← M3/P1: per-op callback->TCS context; TCS built with
+│        │                                         RunContinuationsAsynchronously; guard release before Task
+│        │                                         completion; KafkaError->KafkaException (FromHandle);
+│        │                                         CancellationToken->wakeup + OperationCanceledException;
+│        │                                         idempotent GCHandle free (Complete/AbandonBeforeSubmit)
+│        ├─ ConsumerAccessGuard.cs              ← M3/P1: Interlocked one-op-in-flight guard (mirrors core):
+│        │                                         async op -> KafkaException; state read -> InvalidOperation
 │        └─ Interop/                            ← the P/Invoke boundary — `unsafe` lives ONLY here
 │           ├─ NativeMethods.cs                        ← internal static class NativeMethods: M1/P1 (8
 │           │                                      shared decls) + M2/P1 consumer lifecycle
 │           │                                      (KafkaConsumer_new/MockConsumer_new/close/
 │           │                                      close_with_timeout/destroy) + group-metadata trio.
 │           │                                      M2/P2: the three constructors return their SafeHandle
-│           │                                      subtype directly (marshaller create-and-set)
+│           │                                      subtype directly (marshaller create-and-set).
+│           │                                      M3/P1: 4 async decls — subscribe_async (topics as
+│           │                                      IntPtr[] = const char* const*) / seek_async / wakeup /
+│           │                                      close_async (op-callback as a kept-alive Cdecl delegate)
+│           ├─ ConsumerCallbacks.cs                   ← M3/P1: [UnmanagedFunctionPointer(Cdecl)]
+│           │                                      OperationCallback delegate type + one static readonly
+│           │                                      rooted instance + the no-throw callback body
 │           ├─ SafeHandleZeroIsInvalid.cs             ← M2/P1: shared base, IsInvalid => handle==Zero (D2)
 │           ├─ SafeConsumerPropertiesHandle.cs        ← M2/P1: config handle (-> ConsumerProperties_destroy);
 │           │                                            M2/P2: Create collapses to the marshaller return
@@ -89,7 +123,11 @@ bindings/dotnet/
       ├─ TfmSentinelTests.cs                    ← M0/P0 TFM-sentinel smoke test (root: harness-level)
       ├─ KafkaExceptionTests.cs                 ← M2/P1: public-type test (root): classic -> Code 35
       │                                            + I1 both-false + msg; café msg echo; FromHandle(Zero)
-      ├─ TestTimeout.cs                         ← M2/P1: fail-fast deadline helper (hang -> test failure)
+      ├─ ConsumerAccessGuardTests.cs            ← M3/P1: concurrency exception-type matrix (component,
+      │                                            deterministic): async op -> KafkaException; state read
+      │                                            -> InvalidOperationException; reusable after Release
+      ├─ TestTimeout.cs                         ← M2/P1: fail-fast deadline helper (hang -> test failure).
+      │                                            M3/P1: + async Run(Func<Task>) overload (bridge/drain guard)
       └─ Interop/                               ← mirrors the library interop area (public test
          │                                         classes; "Interop" not "Internal/Interop" — the
          │                                         Internal visibility marker is library-only, §2)
@@ -107,9 +145,72 @@ bindings/dotnet/
          │                                           destroy); error round-trips via FromHandle
          ├─ ConsumerConfigMarshalTests.cs       ← M2/P1: config success + preconditions (null dict /
          │                                           null value / post-Dispose)
-         └─ Utf8RoundTripTests.cs               ← M2/P1 (D5 CLOSED): non-ASCII group.id -> group_metadata
-                                                   -> group_id readback == input (broker-free)
+         ├─ Utf8RoundTripTests.cs               ← M2/P1 (D5 CLOSED): non-ASCII group.id -> group_metadata
+         │                                         -> group_id readback == input (broker-free)
+         ├─ ConsumerCompletionBridgeTests.cs    ← M3/P1: SUCCESS (subscribe, churned) + FAILURE (seek
+         │                                         unassigned -> KafkaException Code -1/flags/Message,
+         │                                         churned); no-throw boundary; GCHandle keep-alive under
+         │                                         GC; RunContinuationsAsynchronously (bridge driven
+         │                                         directly, off the completing thread); chained ops
+         ├─ ConsumerAsyncOperationTests.cs      ← M3/P1: wakeup (safe/reusable/during-op); cancellation
+         │                                         (pre-canceled -> OperationCanceledException); guarded
+         │                                         GroupId read round-trip (incl. non-ASCII)
+         └─ ConsumerAsyncTeardownTests.cs       ← M3/P1: DisposeAsync + Dispose with op in flight RETURN
+                                                   (drain/no-hang); double/mixed/concurrent teardown safe;
+                                                   use-after-dispose -> ObjectDisposedException
 ```
+
+## Verification state (M3/P1 DoD — Actor, all green)
+
+- `cargo build --features ffi` — native cdylib + regenerated header present (run
+  FIRST, CLAUDE.md §7.1).
+- `dotnet build` — **0 warnings, 0 errors** across all library TFMs
+  (netstandard2.0, net8.0, net10.0) and both test TFMs (net8.0, net10.0);
+  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` + CS1591 active. No new public
+  type → no new CS1591 surface. The ns2.0 leg resolves `IAsyncDisposable` /
+  `ValueTask` via `Microsoft.Bcl.AsyncInterfaces` (M3/P1 D3).
+- `dotnet test -f net10.0` — **47 passed, 0 failed** (20 carried + 27 new: 5 access
+  guard, 8 completion bridge, 6 async op, 8 teardown); ~220 ms — every awaited op /
+  teardown under a `TestTimeout` hang guard, so a bridge/drain hang would fail fast.
+- `dotnet format --verify-no-changes` — clean.
+- **CI-only (not blocking):** only the .NET 10 runtime is installed locally; the
+  net8.0 test *run* and net462 (via netstandard2.0) are CI-only. Both *build* legs
+  pass.
+
+## Decisions in force (M3/P1)
+
+- **D1 — wakeup-fault on the in-flight proof op is NOT reachable this phase
+  (source-verified deviation from the PLAN's literal wakeup test).** A
+  `MockConsumer` observes `wakeup()` **only** inside `poll()`
+  (`src/consumer/mock_consumer.rs` poll Step 4); `subscribe`/`seek` never check the
+  flag, and `acquire()` (`src/ffi/consumer.rs`) does not either — so the "in-flight
+  op faults with a Wakeup `KafkaException` once" assertion needs `poll` (out of
+  scope). The full wakeup + cancellation machinery is implemented (correct once poll
+  lands); the tested slices are the reachable ones: `Wakeup()` is safe / leaves the
+  consumer reusable, and a **pre-canceled** token maps to
+  `OperationCanceledException` deterministically. The in-flight-cancel → wakeup →
+  `OperationCanceledException` translation is wired (`RegisterCancellation`) but
+  only deterministically exercisable once a wakeup-observing op exists.
+- **D2 — the concurrency exception-type matrix is tested at the `ConsumerAccessGuard`
+  component level (deterministic), not via a forced native op overlap.** Instant
+  Mock ops make a genuine submit→callback overlap non-deterministic; the guard is a
+  pure managed mirror, so its rejection types (async op → `KafkaException`; state
+  read → `InvalidOperationException`) are fully proven as a component. The guard's
+  wiring into `NativeConsumer` is exercised by the op / group-metadata tests
+  (released between ops; a guarded `GroupId()` round-trips).
+- **D3 — `Microsoft.Bcl.AsyncInterfaces` (8.0.0) added for the ns2.0 leg only.** It
+  supplies `IAsyncDisposable` + the `ValueTask` async builder absent on the
+  netstandard2.0 floor (built-in on net8.0+) — the enabling dependency for the
+  primary `DisposeAsync`. A standard facade, conditioned exactly like `System.Memory`
+  (ns2.0-only); no NuGet packaging of the binding itself (ffi §0.2 unchanged).
+- **D4 — sync `Dispose` kept M2-shape (no drain).** `Dispose` stays
+  `close_with_timeout` → destroy (thread-safe closed flag added), NOT
+  sync-over-async; the drain-first path is `DisposeAsync` (primary, ffi §B7).
+- **N=5 deferred hardening — DONE.** The non-atomic `_disposed` bool is replaced by a
+  thread-safe closed flag (`Interlocked`, `TryBeginClose`) + the §B5 access guard, so
+  double / concurrent / mixed `Dispose`/`DisposeAsync` are safe. Per the deferred
+  note, teardown is guarded the CKD way (thread-safe closed check + access guard) —
+  NO per-call `SafeHandle` AddRef, NO close/destroy-as-SafeHandle-param.
 
 ## Verification state (M2/P2 DoD — Actor + Critic, all green)
 
@@ -296,51 +397,43 @@ required (one Actor pass → one Critic pass → close).
 
 ## Governance pointers
 
-- Approved plans: `design/history/M2/P2-safehandle-return-hardening/PLAN.md`
-  (current), `design/history/M2/P1-error-model-safehandle/PLAN.md`,
+- Approved plans: `design/history/M3/P1-completion-bridge/PLAN.md` (current),
+  `design/history/M2/P2-safehandle-return-hardening/PLAN.md`,
+  `design/history/M2/P1-error-model-safehandle/PLAN.md`,
   `design/history/M1/P1-interop-scaffolding/PLAN.md`.
 - Closed review records:
-  `design/history/M2/P2-safehandle-return-hardening/COMMENTS.DONE.4.md` (current),
+  `design/history/M2/P2-safehandle-return-hardening/COMMENTS.DONE.4.md`,
   `design/history/M2/P1-error-model-safehandle/COMMENTS.DONE.3.md`,
-  `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`.
-- Personas: `dotnet-actor` (Actor N=4), `dotnet-critic` (Critic N=4). NEVER the
-  Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.4.md` is
-  gitignored; the archived record is `COMMENTS.DONE.4.md`.
+  `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`. (M3/P1: no Critic
+  review yet — the archived record will be `COMMENTS.DONE.5.md`.)
+- Personas: `dotnet-actor` (Actor N=5), `dotnet-critic` (Critic N=5). NEVER the
+  Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.5.md` is
+  gitignored; the archived record is `COMMENTS.DONE.5.md`.
 
 ## Next up (not started)
 
-The **completion bridge + first public client operations** (still Mode A). From
-the lifecycle foundation now in place:
-- The consumer push completion bridge (callback → `TaskCompletionSource` with
-  `RunContinuationsAsynchronously`, ffi §B6/§B7), enabling `PollAsync` /
-  `CommitAsync` / `position` and the public `IConsumer` / `KafkaConsumer` /
-  `MockConsumer` types (the lifecycle wrapper folds into the public client).
-- `IAsyncDisposable.DisposeAsync()` (D3-deferred) lands with the bridge
-  (`Consumer_close_async`).
-- Category 3/4 receive-path handles (poll-batch borrow-roots / views) and the
-  copy-out `ConsumerRecord(s)` surface (CLAUDE.md §6.4).
+The **first public client operations + the receive path** (still Mode A). From the
+completion bridge now in place:
+- The public `IConsumer` / `KafkaConsumer` / `MockConsumer` types (the internal
+  `NativeConsumer` lifecycle + bridge fold into the public client), promoting the
+  proof ops to the real API surface (`SubscribeAsync` / `SeekAsync` public, then
+  `CommitAsync` / `position` on the same void/scalar bridges).
+- `PollAsync` and the entire receive path: Category 3/4 handles (poll-batch
+  borrow-roots / views), length-delimited `out_len` receive strings (§B3), the
+  copy-out `ConsumerRecord(s)` surface (§B4 / CLAUDE.md §6.4), and the per-record
+  allocation-budget test.
+- The wakeup-fault + in-flight-cancellation slices that need a wakeup-observing op
+  (poll) to be deterministically testable (M3/P1 D1).
 Sequence and exact scope to be set in the next PLAN (Manager, with approval).
 
-### Deferred hardening (N=5 — concurrent public client / DisposeAsync): teardown thread-safety
+### Deferred hardening (N=5) — teardown thread-safety: **DONE (M3/P1, 2026-07-27)**
 
-Carry this as an explicit in-scope item when the N=5 PLAN is drafted.
-
-- The `NativeConsumer.Dispose` close path calls `Consumer_close_with_timeout` with
-  `_handle.DangerousGetHandle()` (raw `IntPtr`, no AddRef). This is safe under the
-  CURRENT single-threaded `NativeConsumer` lifecycle: `this` roots `_handle` for
-  the call (no finalizer race), and there is no concurrent managed `Dispose`. It
-  also MATCHES CKD's idiom (raw `IntPtr` for ~all operations incl.
-  `consumer_close`/`destroy`, ~71:1 vs SafeHandle params; no per-op AddRef) — it is
-  NOT a deviation or defect.
-- The current `_disposed` guard is a non-atomic bool — adequate for the
-  single-threaded internal wrapper; it doubles as a use-after-free guard against
-  double-`Dispose` (a second close would pass a freed pointer).
-- When the concurrent public client + `DisposeAsync` land (N=5), guard teardown the
-  CKD way: a THREAD-SAFE closed/disposed state check (e.g. the `SafeHandle`'s own
-  `IsClosed`, or an atomic flag) + the §B5 one-op-in-flight access guard. Do NOT
-  convert close/destroy to `SafeHandle` P/Invoke params or add manual AddRef — that
-  diverges from CKD and adds per-call cost on the hot ops (poll/commit).
-- Operations themselves stay single-threaded-with-rejection (Java parity; the
-  core's access guard rejects concurrent ops per §B5); only `wakeup()` is
-  cross-thread. This note is about safe TEARDOWN under misuse, not about supporting
-  concurrent operations.
+Delivered this phase (see "Decisions in force (M3/P1)"): the non-atomic `_disposed`
+bool is replaced by a thread-safe closed flag (`Interlocked` + `TryBeginClose`) plus
+the §B5 access guard, so double / concurrent / mixed `Dispose`/`DisposeAsync` are
+safe and use-after-dispose throws. Guarded the CKD way (thread-safe closed check +
+access guard) — NO per-call `SafeHandle` AddRef, NO close/destroy-as-SafeHandle
+param, matching the deferred note's guidance. `DisposeAsync` is the primary
+drain-first path (drain in-flight → `close_async` → destroy); `Dispose` stays the
+M2-shape blocking fallback. Ops remain single-threaded-with-rejection; only
+`wakeup()` is cross-thread.
