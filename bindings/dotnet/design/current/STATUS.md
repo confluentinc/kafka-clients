@@ -203,9 +203,19 @@ bindings/dotnet/
   netstandard2.0 floor (built-in on net8.0+) — the enabling dependency for the
   primary `DisposeAsync`. A standard facade, conditioned exactly like `System.Memory`
   (ns2.0-only); no NuGet packaging of the binding itself (ffi §0.2 unchanged).
-- **D4 — sync `Dispose` kept M2-shape (no drain).** `Dispose` stays
-  `close_with_timeout` → destroy (thread-safe closed flag added), NOT
-  sync-over-async; the drain-first path is `DisposeAsync` (primary, ffi §B7).
+- **D4 — sync `Dispose` kept M2-shape (no drain) + a post-destroy reclaim.**
+  `Dispose` stays `close_with_timeout` → destroy (thread-safe closed flag added),
+  NOT sync-over-async; the drain-first path is `DisposeAsync` (primary, ffi §B7).
+  **Post-Critic (N=5) fix:** `close_with_timeout` is a *guarded* sync op, so while an
+  async op genuinely holds the core guard the close is rejected (ConcurrentModification)
+  and does **not** drain — the following `Consumer_destroy` then cancels the op's
+  callback, which (before the fix) stranded the op `Task` and leaked its `GCHandle` +
+  context. `Dispose` now, **after** destroy (once the callback can no longer fire),
+  reclaims any pending op: faults its `Task` (`ObjectDisposedException`) and frees its
+  `GCHandle` via the same idempotent primitives the callback uses
+  (`TrySetException` / Interlocked-idempotent `FreeGcHandle`) — race-safe against a
+  callback that fired before destroy, and still not sync-over-async (it never waits on
+  the op `Task`). So an op-in-flight sync `Dispose` no longer leaks or strands.
 - **N=5 deferred hardening — DONE.** The non-atomic `_disposed` bool is replaced by a
   thread-safe closed flag (`Interlocked`, `TryBeginClose`) + the §B5 access guard, so
   double / concurrent / mixed `Dispose`/`DisposeAsync` are safe. Per the deferred
@@ -356,6 +366,26 @@ Deviations recorded during execution (see the archived review record under
   archived `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md` is left
   unchanged as the phase-close snapshot.
 
+## Review outcome (M3/P1)
+
+Critic (N=5) review of `285b04c`/`d6f3022`/`3d0245f`/`1243350`/`259d098`: all four
+DoD gates independently re-verified green; deviations D1–D4 verified sound; the core
+bridge (free-once, GCHandle keep-alive, `RunContinuationsAsynchronously`, no-throw
+boundary, `DisposeAsync` drain, marshalling, error classification, scope) had **no
+defects**. Two findings, both on the sync-teardown / handle-lifetime edges (not the
+async bridge):
+- **Finding 1 [MEDIUM] — FIXED.** Sync `Dispose` with an async op in flight leaked the
+  per-op `GCHandle` + context and stranded the op `Task`: the guarded
+  `close_with_timeout` is rejected (no drain) while the op holds the core guard, then
+  `Consumer_destroy` cancels the callback. Fixed by a post-destroy reclaim
+  (`OperationCompletionSource.FaultAndReclaim` — idempotent fault + free; see D4); the
+  masking `Dispose_WithOpInFlight` test now observes the op `Task` to a terminal state
+  (+ a churn/GC variant). Not sync-over-async, race-safe (no new race).
+- **Finding 2 [LOW/latent] — ACCEPTED, deferred to N=6 (documented, no code change).**
+  Cross-thread `Wakeup()`/`GroupId()` TOCTOU vs teardown; plan-consistent
+  (per-call AddRef deliberately declined) and not reachable while internal-only. Carried
+  as a deferred-hardening item (see "Deferred hardening (N=6 …)" above).
+
 ## Review outcome (M2/P2)
 
 Critic (N=4) review of commits `3359b70`, `6aa2f92` (via `git log`/`git show`):
@@ -435,5 +465,38 @@ safe and use-after-dispose throws. Guarded the CKD way (thread-safe closed check
 access guard) — NO per-call `SafeHandle` AddRef, NO close/destroy-as-SafeHandle
 param, matching the deferred note's guidance. `DisposeAsync` is the primary
 drain-first path (drain in-flight → `close_async` → destroy); `Dispose` stays the
-M2-shape blocking fallback. Ops remain single-threaded-with-rejection; only
-`wakeup()` is cross-thread.
+M2-shape blocking fallback — **now with a post-destroy reclaim** (Critic N=5 Finding 1,
+see D4) so an op-in-flight sync `Dispose` faults the op `Task` + frees its `GCHandle`
+instead of stranding/leaking (its guarded close cannot drain). Ops remain
+single-threaded-with-rejection; only `wakeup()` is cross-thread.
+
+### Deferred hardening (N=6 — public client cross-thread wakeup): `Wakeup()`/`GroupId()` TOCTOU vs teardown
+
+**Hazard (Critic N=5 Finding 2, LOW/latent — accepted, not fixed this phase).**
+`Wakeup()` reads the thread-safe closed flag then dereferences
+`_handle.DangerousGetHandle()`; `GroupId()` has the same `ThrowIfClosed` →
+`DangerousGetHandle` shape. The closed-flag read and the handle deref are **not
+atomic**: a concurrent `Dispose`/`DisposeAsync` on another thread can run
+`TryBeginClose` → close → `_handle.Dispose()` (`Consumer_destroy`) in between, after
+which `DangerousGetHandle()` returns the freed pointer and the native call
+dereferences destroyed native memory (use-after-free). The thread-safe closed flag
+makes *double/concurrent Dispose* safe, but it does **not** make a concurrent
+*handle user* vs teardown safe — that is what `SafeHandle.DangerousAddRef/Release`
+exists for.
+
+**Why deferred (not a blocking defect now).** Plan-consistent: the PLAN (§Teardown)
+deliberately declined per-call `SafeHandle` AddRef ("guarded the CKD way — thread-safe
+closed check + access guard; NO per-call `SafeHandle` AddRef"), matching
+confluent-kafka-dotnet's own non-AddRef hot-path idiom. `Wakeup()`/`GroupId()` are
+**internal-only** this phase with no cross-thread wakeup-vs-dispose caller, so the race
+is **not reachable** now. The canonical `wakeup()` usage (thread A blocked in `poll`,
+thread B wakes it, thread A then disposes after `poll` returns) does not race wakeup
+against dispose.
+
+**Resolution to consider (when the public client wires cross-thread `Wakeup()`).**
+Either (a) take a per-call `SafeHandle.DangerousAddRef`/`DangerousRelease` around the
+native call in `Wakeup()`/`GroupId()` (revisiting the PLAN's declined-AddRef decision
+for exactly the cross-thread-callable methods), or (b) explicitly document the
+precondition that `Wakeup()`/`GroupId()` must not be called concurrently with teardown.
+Decide when the public `IConsumer`/`KafkaConsumer` surface makes `Wakeup()` genuinely
+cross-thread (the same trigger as the N=5 item).
