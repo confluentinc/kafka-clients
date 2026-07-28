@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::common::KafkaError;
+use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
 
 /// The broker id used for keys that have no cached mapping.
 ///
@@ -32,8 +33,7 @@ pub(crate) const UNKNOWN_BROKER_ID: i32 = -1;
 ///
 /// Corresponds to `AdminApiFuture<K, V>`. Kept a plain (non-`async`) trait per
 /// `.claude/rules/admin-client.md` §2 — the driver completes the futures on the
-/// background task. `SimpleAdminApiFuture` is not translated; the only future in
-/// scope is `PartitionLeaderStrategy::PartitionLeaderFuture`.
+/// background task.
 pub(crate) trait AdminApiFuture<K, V>: Send {
     /// The initial set of lookup keys.
     ///
@@ -73,4 +73,67 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
     ///
     /// Mirrors `completeExceptionally`.
     fn complete_exceptionally(&self, errors: HashMap<K, KafkaError>);
+}
+
+/// A simple [`AdminApiFuture`] that holds one completable future per key with no
+/// cached key→broker mapping.
+///
+/// Corresponds to `AdminApiFuture.SimpleAdminApiFuture` (created via
+/// `AdminApiFuture.forKeys(keys)`). Used by the group-describe handlers, which
+/// key their futures by [`CoordinatorKey`](super::coordinator_key::CoordinatorKey).
+#[allow(dead_code)] // wired by group-describe handlers later in this phase
+pub(crate) struct SimpleAdminApiFuture<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone + Send + Sync + 'static,
+{
+    futures: HashMap<K, KafkaFutureImpl<V>>,
+}
+
+#[allow(dead_code)] // wired by group-describe handlers later in this phase
+impl<K, V> SimpleAdminApiFuture<K, V>
+where
+    K: Clone + Eq + Hash + Send,
+    V: Clone + Send + Sync + 'static,
+{
+    /// Creates a future bundle with one empty future per key.
+    ///
+    /// Mirrors `AdminApiFuture.forKeys(Set<K> keys)`.
+    pub(crate) fn for_keys(keys: HashSet<K>) -> Self {
+        let futures = keys.into_iter().map(|k| (k, KafkaFutureImpl::new())).collect();
+        Self { futures }
+    }
+
+    /// Returns the per-key public futures.
+    ///
+    /// Mirrors `AdminApiFuture.all()`.
+    pub(crate) fn all(&self) -> HashMap<K, KafkaFuture<V>> {
+        self.futures.iter().map(|(k, v)| (k.clone(), v.future())).collect()
+    }
+}
+
+impl<K, V> AdminApiFuture<K, V> for SimpleAdminApiFuture<K, V>
+where
+    K: Clone + Eq + Hash + Send,
+    V: Clone + Send + Sync + 'static,
+{
+    fn lookup_keys(&self) -> HashSet<K> {
+        self.futures.keys().cloned().collect()
+    }
+
+    fn complete(&self, values: HashMap<K, V>) {
+        for (key, value) in values {
+            if let Some(future) = self.futures.get(&key) {
+                future.complete(value);
+            }
+        }
+    }
+
+    fn complete_exceptionally(&self, errors: HashMap<K, KafkaError>) {
+        for (key, error) in errors {
+            if let Some(future) = self.futures.get(&key) {
+                future.complete_exceptionally(error);
+            }
+        }
+    }
 }
