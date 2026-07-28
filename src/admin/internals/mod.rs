@@ -27,6 +27,8 @@ pub(crate) mod admin_metadata_manager;
 pub(crate) mod admin_utils;
 pub(crate) mod api_request_scope;
 pub(crate) mod call;
+pub(crate) mod coordinator_key;
+pub(crate) mod coordinator_strategy;
 pub(crate) mod delete_records_handler;
 pub(crate) mod list_offsets_handler;
 pub(crate) mod partition_leader_cache;
