@@ -29,6 +29,7 @@ use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
 use crate::create_partitions_request_data::CreatePartitionsRequestData;
 use crate::create_topics_request_data::CreateTopicsRequestData;
@@ -36,12 +37,14 @@ use crate::delete_records_request_data::DeleteRecordsRequestData;
 use crate::delete_topics_request_data::DeleteTopicsRequestData;
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::DescribeConfigsRequestData;
+use crate::describe_groups_request_data::DescribeGroupsRequestData;
 use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
 use crate::elect_leaders_request_data::ElectLeadersRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
 use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
+use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
@@ -56,6 +59,7 @@ use super::AlterPartitionReassignmentsRequest;
 use super::AlterReplicaLogDirsRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
+use super::ConsumerGroupDescribeRequest;
 use super::ConsumerGroupHeartbeatRequest;
 use super::CreatePartitionsRequest;
 use super::CreateTopicsRequest;
@@ -63,12 +67,14 @@ use super::DeleteRecordsRequest;
 use super::DeleteTopicsRequest;
 use super::DescribeClusterRequest;
 use super::DescribeConfigsRequest;
+use super::DescribeGroupsRequest;
 use super::DescribeLogDirsRequest;
 use super::ElectLeadersRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::IncrementalAlterConfigsRequest;
 use super::ListConfigResourcesRequest;
+use super::ListGroupsRequest;
 use super::ListOffsetsRequest;
 use super::ListPartitionReassignmentsRequest;
 use super::MetadataRequest;
@@ -136,6 +142,12 @@ pub enum ConcreteRequest {
     SaslAuthenticate(SaslAuthenticateRequest),
     /// A FindCoordinator request.
     FindCoordinator(FindCoordinatorRequest),
+    /// A ListGroups request.
+    ListGroups(ListGroupsRequest),
+    /// A DescribeGroups request.
+    DescribeGroups(DescribeGroupsRequest),
+    /// A ConsumerGroupDescribe request.
+    ConsumerGroupDescribe(ConsumerGroupDescribeRequest),
     /// A ListOffsets request.
     ListOffsets(ListOffsetsRequest),
     /// An OffsetsForLeaderEpoch request.
@@ -185,6 +197,9 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => r.version(),
             Self::SaslAuthenticate(r) => r.version(),
             Self::FindCoordinator(r) => r.version(),
+            Self::ListGroups(r) => r.version(),
+            Self::DescribeGroups(r) => r.version(),
+            Self::ConsumerGroupDescribe(r) => r.version(),
             Self::ListOffsets(r) => r.version(),
             Self::OffsetsForLeaderEpoch(r) => r.version(),
             Self::ConsumerGroupHeartbeat(r) => r.version(),
@@ -216,6 +231,9 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
             Self::FindCoordinator(r) => r.api_key(),
+            Self::ListGroups(r) => r.api_key(),
+            Self::DescribeGroups(r) => r.api_key(),
+            Self::ConsumerGroupDescribe(r) => r.api_key(),
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
@@ -253,6 +271,9 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::FindCoordinator(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListGroups(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeGroups(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ConsumerGroupDescribe(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListOffsets(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
@@ -324,6 +345,15 @@ impl ConcreteRequest {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::FindCoordinator(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ConsumerGroupDescribe(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListOffsets(r) => {
@@ -400,6 +430,9 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => Self::serialize_body(r.data_mut(), version),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data_mut(), version),
             Self::FindCoordinator(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ConsumerGroupDescribe(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListOffsets(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
@@ -449,6 +482,9 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::SaslAuthenticate(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::FindCoordinator(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListGroups(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeGroups(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ConsumerGroupDescribe(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
@@ -514,6 +550,21 @@ impl ConcreteRequest {
             ApiKeys::FIND_COORDINATOR => {
                 let data = FindCoordinatorRequestData::read(readable, api_version)?;
                 Ok(Self::FindCoordinator(FindCoordinatorRequest::new(data, api_version)))
+            },
+            ApiKeys::LIST_GROUPS => {
+                let data = ListGroupsRequestData::read(readable, api_version)?;
+                Ok(Self::ListGroups(ListGroupsRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_GROUPS => {
+                let data = DescribeGroupsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeGroups(DescribeGroupsRequest::new(data, api_version)))
+            },
+            ApiKeys::CONSUMER_GROUP_DESCRIBE => {
+                let data = ConsumerGroupDescribeRequestData::read(readable, api_version)?;
+                Ok(Self::ConsumerGroupDescribe(ConsumerGroupDescribeRequest::new(
+                    data,
+                    api_version,
+                )))
             },
             ApiKeys::LIST_OFFSETS => {
                 let data = ListOffsetsRequestData::read(readable, api_version)?;
@@ -620,6 +671,9 @@ impl std::fmt::Display for ConcreteRequest {
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
             Self::FindCoordinator(r) => write!(f, "{r}"),
+            Self::ListGroups(r) => write!(f, "{r}"),
+            Self::DescribeGroups(r) => write!(f, "{r}"),
+            Self::ConsumerGroupDescribe(r) => write!(f, "{r}"),
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
