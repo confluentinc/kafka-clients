@@ -34,8 +34,10 @@ pub mod create_topics_result;
 pub mod delete_records_result;
 pub mod delete_topics_result;
 pub mod deleted_records;
+pub mod describe_classic_groups_result;
 pub mod describe_cluster_result;
 pub mod describe_configs_result;
+pub mod describe_consumer_groups_result;
 pub mod describe_log_dirs_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
@@ -43,6 +45,8 @@ pub mod elect_leaders_result;
 pub mod group_listing;
 pub mod kafka_admin_client;
 pub mod list_config_resources_result;
+pub mod list_consumer_groups_result;
+pub mod list_groups_result;
 pub mod list_offsets_result;
 pub mod list_partition_reassignments_result;
 pub mod list_topics_result;
@@ -81,8 +85,10 @@ pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
 pub use delete_records_result::DeleteRecordsResult;
 pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
+pub use describe_classic_groups_result::DescribeClassicGroupsResult;
 pub use describe_cluster_result::DescribeClusterResult;
 pub use describe_configs_result::DescribeConfigsResult;
+pub use describe_consumer_groups_result::DescribeConsumerGroupsResult;
 pub use describe_log_dirs_result::DescribeLogDirsResult;
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
@@ -90,6 +96,9 @@ pub use elect_leaders_result::ElectLeadersResult;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_config_resources_result::ListConfigResourcesResult;
+#[allow(deprecated)]
+pub use list_consumer_groups_result::ListConsumerGroupsResult;
+pub use list_groups_result::ListGroupsResult;
 pub use list_offsets_result::{ListOffsetsResult, ListOffsetsResultInfo};
 pub use list_partition_reassignments_result::ListPartitionReassignmentsResult;
 pub use list_topics_result::ListTopicsResult;
@@ -101,11 +110,14 @@ pub use new_partition_reassignment::NewPartitionReassignment;
 pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
 pub use offset_spec::OffsetSpec;
+#[allow(deprecated)]
+pub use options::ListConsumerGroupsOptions;
 pub use options::{
     AlterConfigsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions,
-    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions,
-    ListConfigResourcesOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClassicGroupsOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
+    ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
