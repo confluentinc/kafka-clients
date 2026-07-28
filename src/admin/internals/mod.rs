@@ -30,6 +30,8 @@ pub(crate) mod call;
 pub(crate) mod coordinator_key;
 pub(crate) mod coordinator_strategy;
 pub(crate) mod delete_records_handler;
+pub(crate) mod describe_classic_groups_handler;
+pub(crate) mod describe_consumer_groups_handler;
 pub(crate) mod list_offsets_handler;
 pub(crate) mod partition_leader_cache;
 pub(crate) mod partition_leader_strategy;
