@@ -15,13 +15,17 @@
 //! Common types and utilities for Kafka (org.apache.kafka.common)
 
 pub mod acl;
+pub mod classic_group_state;
 pub mod cluster;
 pub mod cluster_resource;
 pub mod cluster_resource_listener;
 pub mod compress;
 pub mod config;
+pub mod consumer_group_state;
 pub mod election_type;
 pub mod feature;
+pub mod group_state;
+pub mod group_type;
 pub mod header;
 pub(crate) mod internals;
 pub mod isolation_level;
@@ -44,10 +48,15 @@ pub mod topic_partition_replica;
 pub mod utils;
 pub mod uuid;
 
+pub use classic_group_state::ClassicGroupState;
 pub use cluster::Cluster;
 pub use cluster_resource::ClusterResource;
 pub use cluster_resource_listener::ClusterResourceListener;
+#[allow(deprecated)]
+pub use consumer_group_state::ConsumerGroupState;
 pub use election_type::ElectionType;
+pub use group_state::GroupState;
+pub use group_type::GroupType;
 pub use isolation_level::IsolationLevel;
 pub use kafka_error::{KafkaError, KafkaGenericError};
 pub use kafka_future::KafkaFuture;
