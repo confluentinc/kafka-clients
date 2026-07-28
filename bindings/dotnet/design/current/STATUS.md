@@ -526,3 +526,38 @@ for exactly the cross-thread-callable methods), or (b) explicitly document the
 precondition that `Wakeup()`/`GroupId()` must not be called concurrently with teardown.
 Decide when the public `IConsumer`/`KafkaConsumer` surface makes `Wakeup()` genuinely
 cross-thread (the same trigger as the N=5 item).
+
+### Deferred hardening (N=6 — concurrent public client + teardown): op-submit vs concurrent teardown window
+
+**Hazard (post-merge review of PR #135, LOW/latent — accepted, not fixed this phase;
+same "concurrent public client + teardown thread-safety" bucket as the `Wakeup()` /
+`GroupId()` item above).** `SubmitVoidOperation` calls the native `*_async` op —
+which spawns the op and takes the *core* access guard — **before** it publishes
+`_inFlightContext` / `_inFlightOperation` (in `NativeConsumer.SubmitVoidOperation`
+the `submit(...)` call precedes the two `Volatile.Write`s). A concurrent
+`Dispose` / `DisposeAsync` on another thread that runs entirely inside that window
+reads a **null** `_inFlightContext` / `_inFlightOperation`, so it can neither drain
+(`DisposeAsync`) nor fault (`Dispose` → `FaultTaskOnly`) the op; the following
+`Consumer_destroy` then **cancels** the in-flight op, whose completion callback never
+fires — so the op `Task` **strands** and its `GCHandle` **leaks**. Unlike the
+`Wakeup()` / `GroupId()` TOCTOU (a use-after-free), this is a strand + leak, and it is
+a gap in an *intended-safe* path: "teardown while an op is in flight" is designed to
+be safe (drain in `DisposeAsync`, `FaultTaskOnly` in `Dispose`) and IS safe once the
+op is published — the hole is only the narrow pre-publish window. The existing
+`SubmitVoidOperation` comment orders `_inFlightContext` before the `Task`, but does
+not cover "teardown runs before *either* write while the op is already in flight from
+the native submit."
+
+**Why deferred (not a blocking defect now).** Internal-only this phase — no public
+surface lets a caller submit an op on one thread while disposing on another, so the
+race is **not reachable** now; the window is microseconds; single-threaded usage is
+unaffected. Same family as the `Wakeup()` / `GroupId()` item, so it lands with the
+same concurrent-public-client trigger.
+
+**Resolution to consider (when the public client makes submit + teardown genuinely
+concurrent).** Make op-submit and teardown **mutually exclusive** — e.g. a teardown
+lock around (submit + publish) vs. the `Dispose` / `DisposeAsync` body, or have
+teardown coordinate with the access guard — so teardown either observes the in-flight
+op or is serialized after its submit. A reorder alone is NOT sufficient: publishing the
+context *before* `submit(...)` would instead let a concurrent `destroy` race the native
+call (`DangerousGetHandle()` on a freed handle → use-after-free), which is worse.
