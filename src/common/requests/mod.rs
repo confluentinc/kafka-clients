@@ -26,6 +26,8 @@ pub mod alter_replica_log_dirs_request;
 pub mod alter_replica_log_dirs_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
+pub mod consumer_group_describe_request;
+pub mod consumer_group_describe_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
 pub mod create_partitions_request;
@@ -40,6 +42,8 @@ pub mod describe_cluster_request;
 pub mod describe_cluster_response;
 pub mod describe_configs_request;
 pub mod describe_configs_response;
+pub mod describe_groups_request;
+pub mod describe_groups_response;
 pub mod describe_log_dirs_request;
 pub mod describe_log_dirs_response;
 pub mod elect_leaders_request;
@@ -53,6 +57,8 @@ pub mod incremental_alter_configs_request;
 pub mod incremental_alter_configs_response;
 pub mod list_config_resources_request;
 pub mod list_config_resources_response;
+pub mod list_groups_request;
+pub mod list_groups_response;
 pub mod list_offsets_request;
 pub mod list_offsets_response;
 pub mod list_partition_reassignments_request;
@@ -88,6 +94,8 @@ pub use alter_replica_log_dirs_request::{AlterReplicaLogDirsRequest, AlterReplic
 pub use alter_replica_log_dirs_response::AlterReplicaLogDirsResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
+pub use consumer_group_describe_request::{ConsumerGroupDescribeRequest, ConsumerGroupDescribeRequestBuilder};
+pub use consumer_group_describe_response::ConsumerGroupDescribeResponse;
 pub use consumer_group_heartbeat_request::{
     CONSUMER_GENERATED_MEMBER_ID_REQUIRED_VERSION, ConsumerGroupHeartbeatRequest, ConsumerGroupHeartbeatRequestBuilder,
     JOIN_GROUP_MEMBER_EPOCH, LEAVE_GROUP_MEMBER_EPOCH, LEAVE_GROUP_STATIC_MEMBER_EPOCH,
@@ -110,6 +118,8 @@ pub use describe_cluster_request::{
 pub use describe_cluster_response::DescribeClusterResponse;
 pub use describe_configs_request::{DescribeConfigsRequest, DescribeConfigsRequestBuilder};
 pub use describe_configs_response::DescribeConfigsResponse;
+pub use describe_groups_request::{DescribeGroupsRequest, DescribeGroupsRequestBuilder};
+pub use describe_groups_response::DescribeGroupsResponse;
 pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsRequestBuilder};
 pub use describe_log_dirs_response::DescribeLogDirsResponse;
 pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
@@ -124,6 +134,8 @@ pub use incremental_alter_configs_request::{IncrementalAlterConfigsRequest, Incr
 pub use incremental_alter_configs_response::IncrementalAlterConfigsResponse;
 pub use list_config_resources_request::{ListConfigResourcesRequest, ListConfigResourcesRequestBuilder};
 pub use list_config_resources_response::ListConfigResourcesResponse;
+pub use list_groups_request::{ListGroupsRequest, ListGroupsRequestBuilder};
+pub use list_groups_response::ListGroupsResponse;
 pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
 pub use list_offsets_response::ListOffsetsResponse;
 pub use list_partition_reassignments_request::{

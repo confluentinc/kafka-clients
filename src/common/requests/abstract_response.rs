@@ -31,6 +31,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 use super::AlterPartitionReassignmentsResponse;
 use super::AlterReplicaLogDirsResponse;
 use super::ApiVersionsResponse;
+use super::ConsumerGroupDescribeResponse;
 use super::ConsumerGroupHeartbeatResponse;
 use super::CreatePartitionsResponse;
 use super::CreateTopicsResponse;
@@ -38,12 +39,14 @@ use super::DeleteRecordsResponse;
 use super::DeleteTopicsResponse;
 use super::DescribeClusterResponse;
 use super::DescribeConfigsResponse;
+use super::DescribeGroupsResponse;
 use super::DescribeLogDirsResponse;
 use super::ElectLeadersResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::IncrementalAlterConfigsResponse;
 use super::ListConfigResourcesResponse;
+use super::ListGroupsResponse;
 use super::ListOffsetsResponse;
 use super::ListPartitionReassignmentsResponse;
 use super::MetadataResponse;
@@ -82,6 +85,12 @@ pub enum ConcreteResponse {
     SaslAuthenticate(SaslAuthenticateResponse),
     /// A FindCoordinator response.
     FindCoordinator(FindCoordinatorResponse),
+    /// A ListGroups response.
+    ListGroups(ListGroupsResponse),
+    /// A DescribeGroups response.
+    DescribeGroups(DescribeGroupsResponse),
+    /// A ConsumerGroupDescribe response.
+    ConsumerGroupDescribe(ConsumerGroupDescribeResponse),
     /// A ListOffsets response.
     ListOffsets(ListOffsetsResponse),
     /// An OffsetsForLeaderEpoch response.
@@ -131,6 +140,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
             Self::FindCoordinator(r) => r.api_key(),
+            Self::ListGroups(r) => r.api_key(),
+            Self::DescribeGroups(r) => r.api_key(),
+            Self::ConsumerGroupDescribe(r) => r.api_key(),
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
@@ -168,6 +180,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::FindCoordinator(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ListGroups(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeGroups(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ConsumerGroupDescribe(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListOffsets(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -217,6 +232,15 @@ impl ConcreteResponse {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::FindCoordinator(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ConsumerGroupDescribe(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListOffsets(r) => {
@@ -292,6 +316,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => Self::serialize_body(r.data_mut(), version),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data_mut(), version),
             Self::FindCoordinator(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ConsumerGroupDescribe(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListOffsets(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
@@ -333,6 +360,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.error_counts(),
             Self::SaslAuthenticate(r) => r.error_counts(),
             Self::FindCoordinator(r) => r.error_counts(),
+            Self::ListGroups(r) => r.error_counts(),
+            Self::DescribeGroups(r) => r.error_counts(),
+            Self::ConsumerGroupDescribe(r) => r.error_counts(),
             Self::ListOffsets(r) => r.error_counts(),
             Self::OffsetsForLeaderEpoch(r) => r.error_counts(),
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
@@ -366,6 +396,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.throttle_time_ms(),
             Self::SaslAuthenticate(r) => r.throttle_time_ms(),
             Self::FindCoordinator(r) => r.throttle_time_ms(),
+            Self::ListGroups(r) => r.throttle_time_ms(),
+            Self::DescribeGroups(r) => r.throttle_time_ms(),
+            Self::ConsumerGroupDescribe(r) => r.throttle_time_ms(),
             Self::ListOffsets(r) => r.throttle_time_ms(),
             Self::OffsetsForLeaderEpoch(r) => r.throttle_time_ms(),
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
@@ -398,6 +431,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::SaslAuthenticate(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::FindCoordinator(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ListGroups(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeGroups(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ConsumerGroupDescribe(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListOffsets(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetsForLeaderEpoch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -429,6 +465,9 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.should_client_throttle(version),
             Self::SaslAuthenticate(r) => r.should_client_throttle(version),
             Self::FindCoordinator(r) => r.should_client_throttle(version),
+            Self::ListGroups(r) => r.should_client_throttle(version),
+            Self::DescribeGroups(r) => r.should_client_throttle(version),
+            Self::ConsumerGroupDescribe(r) => r.should_client_throttle(version),
             Self::ListOffsets(r) => r.should_client_throttle(version),
             Self::OffsetsForLeaderEpoch(r) => r.should_client_throttle(version),
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
@@ -523,6 +562,18 @@ impl ConcreteResponse {
                 let response = FindCoordinatorResponse::parse(readable, version)?;
                 Ok(Self::FindCoordinator(response))
             },
+            ApiKeys::LIST_GROUPS => {
+                let response = ListGroupsResponse::parse(readable, version)?;
+                Ok(Self::ListGroups(response))
+            },
+            ApiKeys::DESCRIBE_GROUPS => {
+                let response = DescribeGroupsResponse::parse(readable, version)?;
+                Ok(Self::DescribeGroups(response))
+            },
+            ApiKeys::CONSUMER_GROUP_DESCRIBE => {
+                let response = ConsumerGroupDescribeResponse::parse(readable, version)?;
+                Ok(Self::ConsumerGroupDescribe(response))
+            },
             ApiKeys::LIST_OFFSETS => {
                 let response = ListOffsetsResponse::parse(readable, version)?;
                 Ok(Self::ListOffsets(response))
@@ -613,6 +664,9 @@ impl std::fmt::Display for ConcreteResponse {
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
             Self::FindCoordinator(r) => write!(f, "{r}"),
+            Self::ListGroups(r) => write!(f, "{r}"),
+            Self::DescribeGroups(r) => write!(f, "{r}"),
+            Self::ConsumerGroupDescribe(r) => write!(f, "{r}"),
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
