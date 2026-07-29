@@ -43,10 +43,18 @@ producer.SendAsync(record)  ──►  Task<RecordMetadata>
    Rust   Producer::send(ProducerRecord) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
-**Status:** The C ABI exposes the **producer** and **consumer** (each with sync
-and `_async`/callback variants). Admin / transactions are **not** exposed yet. Source of truth for the
-surface = `src/ffi/*.rs` + `cbindgen.toml` (the header is generated, not checked
-in).
+**Status:** The C ABI exposes the **producer** and **consumer**. Blocking ops
+generally come in a sync form plus a callback-based `_async` form, but the
+pairing is not uniform: instantaneous ops are sync-only by design
+(`assignment`/`subscription`/`paused`/`client_id`/`group_metadata`/
+`current_lag`/`wakeup`/`enforce_rebalance`), and the parameterized variants
+`close_with_timeout` / `seek_with_metadata` have **no** `_async` form — so
+there is no timed *async* close (see §4 Disposal). ⚠ `Consumer_commit_async`
+is Java's `commitAsync` — a *sync* call returning `KafkaError*`, **not** a push
+variant (the push variant of `commitSync` is `commit_sync_async`);
+`poll_async` is the only `_async` fn taking a timeout. Admin / transactions are
+**not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+`cbindgen.toml` (the header is generated, not checked in).
 
 ---
 
