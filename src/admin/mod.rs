@@ -72,6 +72,7 @@ pub mod list_groups_result;
 pub mod list_offsets_result;
 pub mod list_partition_reassignments_result;
 pub mod list_topics_result;
+pub mod list_transactions_result;
 pub mod log_dir_description;
 pub mod member_assignment;
 pub mod member_description;
@@ -89,9 +90,11 @@ pub mod remove_members_from_consumer_group_result;
 pub mod renew_delegation_token_result;
 pub mod replica_info;
 pub mod supported_version_range;
+pub mod terminate_transaction_result;
 pub mod topic_description;
 pub mod topic_listing;
 pub mod transaction_description;
+pub mod transaction_listing;
 pub mod transaction_state;
 pub mod update_features_result;
 
@@ -154,6 +157,7 @@ pub use list_groups_result::ListGroupsResult;
 pub use list_offsets_result::{ListOffsetsResult, ListOffsetsResultInfo};
 pub use list_partition_reassignments_result::ListPartitionReassignmentsResult;
 pub use list_topics_result::ListTopicsResult;
+pub use list_transactions_result::ListTransactionsResult;
 pub use log_dir_description::LogDirDescription;
 pub use member_assignment::MemberAssignment;
 pub use member_description::MemberDescription;
@@ -175,7 +179,8 @@ pub use options::{
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
     ElectLeadersOptions, ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions,
     ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
-    ListTopicsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, UpdateFeaturesOptions,
+    ListTopicsOptions, ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    TerminateTransactionOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use producer_state::ProducerState;
@@ -184,9 +189,11 @@ pub use remove_members_from_consumer_group_result::RemoveMembersFromConsumerGrou
 pub use renew_delegation_token_result::RenewDelegationTokenResult;
 pub use replica_info::ReplicaInfo;
 pub use supported_version_range::SupportedVersionRange;
+pub use terminate_transaction_result::TerminateTransactionResult;
 pub use topic_description::TopicDescription;
 pub use topic_listing::TopicListing;
 pub use transaction_description::TransactionDescription;
+pub use transaction_listing::TransactionListing;
 pub use transaction_state::TransactionState;
 pub use update_features_result::UpdateFeaturesResult;
 
@@ -283,6 +290,20 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.fenceProducers(Collection<String>, FenceProducersOptions)`.
     fn fence_producers(&self, transactional_ids: &[String], options: FenceProducersOptions) -> FenceProducersResult;
+
+    /// List the transactions in the cluster (fans out to all brokers).
+    ///
+    /// Corresponds to `Admin.listTransactions(ListTransactionsOptions)`.
+    fn list_transactions(&self, options: ListTransactionsOptions) -> ListTransactionsResult;
+
+    /// Forcefully terminate an ongoing transaction for a given transactional id.
+    ///
+    /// Corresponds to `Admin.forceTerminateTransaction(String, TerminateTransactionOptions)`.
+    fn force_terminate_transaction(
+        &self,
+        transactional_id: &str,
+        options: TerminateTransactionOptions,
+    ) -> TerminateTransactionResult;
 
     /// Get information about the nodes in the cluster.
     ///

@@ -124,13 +124,15 @@ use super::internals::describe_transactions_handler::DescribeTransactionsHandler
 use super::internals::fence_producers_handler::FenceProducersHandler;
 use super::internals::list_consumer_group_offsets_handler::ListConsumerGroupOffsetsHandler;
 use super::internals::list_offsets_handler::ListOffsetsHandler;
+use super::internals::list_transactions_handler::ListTransactionsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::internals::remove_members_from_consumer_group_handler::RemoveMembersFromConsumerGroupHandler;
 use super::records_to_delete::RecordsToDelete;
 use super::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
     DescribeProducersResult, DescribeTransactionsOptions, DescribeTransactionsResult, FenceProducersOptions,
-    FenceProducersResult,
+    FenceProducersResult, ListTransactionsOptions, ListTransactionsResult, TerminateTransactionOptions,
+    TerminateTransactionResult,
 };
 use super::{
     Admin, AdminClientConfig, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions,
@@ -3042,6 +3044,44 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         FenceProducersResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn list_transactions(&self, options: ListTransactionsOptions) -> ListTransactionsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = ListTransactionsHandler::new_future();
+        let result_future = future.all();
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handler = ListTransactionsHandler::new(options, log_context.clone());
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        ListTransactionsResult::new(result_future)
+    }
+
+    fn force_terminate_transaction(
+        &self,
+        transactional_id: &str,
+        options: TerminateTransactionOptions,
+    ) -> TerminateTransactionResult {
+        // Simply leverage the existing fenceProducers implementation with a
+        // single transactional id (mirrors Java's forceTerminateTransaction).
+        let mut fence_options = FenceProducersOptions::new();
+        if options.timeout().is_some() {
+            fence_options = fence_options.timeout_ms(options.timeout());
+        }
+        let ids = vec![transactional_id.to_string()];
+        let fence_result = self.fence_producers(&ids, fence_options);
+
+        // Convert the result to a TerminateTransactionResult.
+        let future = fence_result
+            .fenced_producers()
+            .get(transactional_id)
+            .cloned()
+            .expect("the transactional id was included in the fenceProducers request");
+        TerminateTransactionResult::new(future)
     }
 
     fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
@@ -6623,6 +6663,130 @@ mod tests {
         let mock = MockAdminClient::create(1);
         let result = mock.fence_producers(&["t".to_string()], FenceProducersOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    // --- listTransactions / forceTerminateTransaction ------------------------
+
+    use crate::admin::{ListTransactionsOptions, TerminateTransactionOptions, TransactionListing};
+    use crate::list_transactions_response_data::{ListTransactionsResponseData, TransactionState as WireListTxnState};
+
+    fn list_transactions_resp(listing: &TransactionListing) -> ConcreteResponse {
+        let mut s = WireListTxnState::new();
+        s.set_transactional_id(listing.transactional_id().to_string());
+        s.set_producer_id(listing.producer_id());
+        s.set_transaction_state(listing.state().to_string());
+        let mut data = ListTransactionsResponseData::new();
+        data.set_error_code(Errors::None.code());
+        data.set_transaction_states(vec![s]);
+        ConcreteResponse::ListTransactions(crate::common::requests::ListTransactionsResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testListTransactions`.
+    #[tokio::test]
+    async fn test_list_transactions() {
+        let (admin, mut runnable, _time, nodes) = env();
+        // The all-brokers lookup returns every broker; then each broker answers
+        // its own `ListTransactions` request with one listing (indexed by id).
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, vec![]));
+
+        let expected = [
+            TransactionListing::new("foo", 12345, TransactionState::Ongoing),
+            TransactionListing::new("bar", 98765, TransactionState::PrepareAbort),
+            TransactionListing::new("baz", 13579, TransactionState::CompleteCommit),
+        ];
+        for node in &nodes {
+            runnable
+                .client_mut()
+                .prepare_response_for_node(list_transactions_resp(&expected[node.id() as usize]), node);
+        }
+
+        let result = admin.list_transactions(ListTransactionsOptions::new());
+        let all = result.all();
+        pump_until(&mut runnable, 60, |_r| all.is_done()).await;
+        assert_eq!(
+            all.get().await.unwrap().into_iter().collect::<HashSet<_>>(),
+            expected.into_iter().collect::<HashSet<_>>()
+        );
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testForceTerminateTransaction`.
+    #[tokio::test]
+    async fn test_force_terminate_transaction() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let transactional_id = "testForceTerminate";
+        let coordinator = &nodes[0];
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(init_producer_id_resp(Errors::None, 5678, 123), coordinator);
+
+        let result = admin.force_terminate_transaction(transactional_id, TerminateTransactionOptions::new());
+        let future = result.result();
+        pump_until(&mut runnable, 40, |_r| future.is_done()).await;
+        future.get().await.unwrap();
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testForceTerminateTransactionWithError`.
+    #[tokio::test]
+    async fn test_force_terminate_transaction_with_error() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let transactional_id = "testForceTerminateError";
+        let coordinator = &nodes[0];
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
+        runnable.client_mut().prepare_response_for_node(
+            init_producer_id_resp(Errors::TransactionalIdAuthorizationFailed, 0, 0),
+            coordinator,
+        );
+
+        let result = admin.force_terminate_transaction(transactional_id, TerminateTransactionOptions::new());
+        let future = result.result();
+        pump_until(&mut runnable, 40, |_r| future.is_done()).await;
+        assert_eq!(
+            future.get().await.unwrap_err().error(),
+            Errors::TransactionalIdAuthorizationFailed
+        );
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testForceTerminateTransactionWithCustomTimeout`.
+    #[tokio::test]
+    async fn test_force_terminate_transaction_with_custom_timeout() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let transactional_id = "testForceTerminateTimeout";
+        let coordinator = &nodes[0];
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(init_producer_id_resp(Errors::None, 9012, 456), coordinator);
+
+        let options = TerminateTransactionOptions::new().timeout_ms(Some(10000));
+        let result = admin.force_terminate_transaction(transactional_id, options);
+        let future = result.result();
+        pump_until(&mut runnable, 40, |_r| future.is_done()).await;
+        future.get().await.unwrap();
+    }
+
+    /// The mock's `list_transactions` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_list_transactions_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.list_transactions(ListTransactionsOptions::new());
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    /// The mock's `force_terminate_transaction` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_force_terminate_transaction_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.force_terminate_transaction("t", TerminateTransactionOptions::new());
+        assert_eq!(result.result().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
     // --- describeCluster -----------------------------------------------------
