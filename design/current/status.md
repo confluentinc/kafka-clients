@@ -350,3 +350,49 @@ engine and the multi-step `AdminApiDriver` + `PartitionLeaderStrategy` lookup→
 fulfillment engine. Next: **Tier 2 (consumer groups & offsets)**, starting with
 Phase 1 "Group listing & describe" (which lands the `ConsumerProtocol` /
 `consumer-threading.md` §20 amendment prerequisite).
+
+## Tier 2 Phase 1 — Group listing & describe ✓ (2026-07-29)
+
+Translated `list_groups`, `list_consumer_groups` (deprecated),
+`describe_consumer_groups` (dual-protocol), and `describe_classic_groups`,
+Rust core + unit tests + real-broker integration tests, all green. **First
+real use of `CoordinatorStrategy` and the shared broker-enumeration `Call`
+idiom.**
+
+- **`list_groups` / `list_consumer_groups`**: hand-rolled broker-enumeration —
+  `LeastLoadedNodeProvider` metadata fetch, then one `Call` per broker with
+  `ConstantNodeIdProvider` (NOT `AllBrokersStrategy`). Older-broker downgrade
+  of the states/types filters preserved (CLASSIC-only filter omitted vs.
+  CONSUMER/SHARE-only surfacing `UnsupportedVersion`).
+- **`describe_consumer_groups`**: `AdminApiDriver` + `CoordinatorStrategy(GROUP)`,
+  tries `ConsumerGroupDescribeRequest` (KIP-848) first and falls back per-group
+  to `DescribeGroupsRequest` on `UNSUPPORTED_VERSION`/`GROUP_ID_NOT_FOUND`,
+  preserving the more-informative CGD error message across the fallback.
+- **`describe_classic_groups`**: `AdminApiDriver` (Batched) +
+  `CoordinatorStrategy(GROUP)`, always `DescribeGroupsRequest`.
+- **Prerequisites landed**: `ConsumerProtocol`
+  (`src/consumer/internals/consumer_protocol.rs`, all public methods) +
+  `ConsumerPartitionAssignor.{Assignment,Subscription}` data holders (assignor
+  trait stays out of scope) — the documented `consumer-threading.md` §20
+  carve-out for Admin (PLAN finding #3). `common::{GroupState, GroupType,
+  ClassicGroupState, ConsumerGroupState}`.
+- **New types**: `admin::{GroupListing, ConsumerGroupListing,
+  ConsumerGroupDescription, ClassicGroupDescription, MemberDescription,
+  MemberAssignment}`, the four `*Options`/`*Result` pairs,
+  `internals::{CoordinatorKey, CoordinatorStrategy,
+  DescribeConsumerGroupsHandler, DescribeClassicGroupsHandler}`. Wire wrappers
+  (net new): `ListGroups`, `ConsumerGroupDescribe`, `DescribeGroups`
+  request+response.
+
+### Tests
+- **Rust lib suite: 2497 passing.**
+- **Integration**: `tests/integration/admin_groups_test.rs` — 3/3 green against
+  a real 4.2.0 broker using a live KIP-848 consumer fixture (list/list_consumer
+  surface the group as `Consumer`/`Stable`; describe reports the member owning
+  all partitions; describe-nonexistent-group).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A (Admin is
+  batch/administrative, no per-record hot path).
+- Critic: 3 issues on first pass (all DoD test/completeness gaps — classic-group
+  test coverage, list-groups filter/older-broker wiring, `ConsumerProtocol`
+  missing methods), all fixed and re-verified clean on the fix cycle. See
+  `design/history/Milestone-11/Tier2-Phase-1/COMMENTS.DONE.1.md`.

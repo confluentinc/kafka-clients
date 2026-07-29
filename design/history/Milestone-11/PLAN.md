@@ -28,15 +28,21 @@
 > Phase-{1,2,3,4,5}/` for each phase's archived review record, and
 > `design/current/status.md` for the current translated-surface summary.
 >
-> **Tier 2 and Tier 3 are explicitly PAUSED, by user request (2026-07-17),
-> before any code was written.** A Tier 2 Phase 1 ("Group listing &
-> describe") Actor was started and stopped mid-research — it had not yet
-> written any files, so there is zero partial/uncommitted Tier 2 work
-> anywhere in the tree. The full Tier 2 (3 phases) and Tier 3 (7 phases)
-> breakdowns below remain valid and ready to execute as-is — nothing about
-> the plan changed, only the timing. To resume: pick up at **Tier 2, Phase
-> 1** per the breakdown below, following the same Manager → Actor → Critic
-> cadence used throughout Tier 1.
+> **RESUMED 2026-07-29.** Tier 2 Phase 1 ("Group listing & describe") is now
+> COMPLETE: `list_groups`, `list_consumer_groups`, `describe_consumer_groups`
+> (dual-protocol), `describe_classic_groups` — Rust core + unit tests +
+> real-broker integration tests, Critic-clean after one fix cycle. First real
+> use of `CoordinatorStrategy`; landed the `ConsumerProtocol` /
+> `consumer-threading.md` §20 carve-out prerequisite. Review record archived at
+> `design/history/Milestone-11/Tier2-Phase-1/COMMENTS.DONE.1.md`;
+> `design/current/status.md` has the surface summary. **Next: Tier 2 Phase 2
+> "Group offsets".** The full Tier 2 (remaining 2 phases) and Tier 3 (7 phases)
+> breakdowns below remain valid and ready to execute as-is, following the same
+> Manager → Actor → Critic cadence.
+>
+> (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
+> work" — that was superseded; a prior Actor session had in fact landed
+> substantial Tier 2 Phase 1 work that was finished and committed on resume.)
 >
 > One thing to re-confirm at resume time, since it may have changed by
 > then: whether PR #116 (`dev/c_and_python_consumer_bindings`) has merged to
