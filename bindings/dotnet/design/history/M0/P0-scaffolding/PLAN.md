@@ -1,5 +1,13 @@
 # .NET binding — Milestone 0 / Phase 0: "Project scaffolding"
 
+> **Superseded in part — 2026-07-29.** This phase shipped under the
+> `Confluent.Kafka.ShareConsumer` identity; **M0/P1 renamed it to
+> `Confluent.Kafka`**. Everything below is preserved **verbatim** as the record
+> of what was approved and verified at the time — it is not retroactively
+> corrected. For the rename see
+> `design/history/M0/P1-rename-identity/PLAN.md`; for current truth see
+> `design/current/STATUS.md`.
+
 Status: APPROVED (plan pre-approved by user; execution began 2026-07-20)
 
 The .NET binding keeps its own milestone/phase numbering, independent of the
