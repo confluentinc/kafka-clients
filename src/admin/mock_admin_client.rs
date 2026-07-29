@@ -26,6 +26,10 @@ use async_trait::async_trait;
 
 use crate::admin::FilterResults;
 use crate::admin::{
+    AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
+    DescribeProducersResult, PartitionProducerState,
+};
+use crate::admin::{
     Admin, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
     AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions,
     AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription,
@@ -840,6 +844,40 @@ impl Admin for MockAdminClient {
             result.insert(topic_partition.clone(), handle.future());
         }
         DeleteRecordsResult::new(result)
+    }
+
+    fn describe_producers(
+        &self,
+        partitions: &[TopicPartition],
+        _options: DescribeProducersOptions,
+    ) -> DescribeProducersResult {
+        // Java's `MockAdminClient.describeProducers` (MockAdminClient.java:1368-1370)
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
+        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // translation of the Java behavior).
+        let mut result = HashMap::new();
+        for topic_partition in partitions {
+            let handle: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(topic_partition.clone(), handle.future());
+        }
+        DescribeProducersResult::new(result)
+    }
+
+    fn abort_transaction(
+        &self,
+        spec: AbortTransactionSpec,
+        _options: AbortTransactionOptions,
+    ) -> AbortTransactionResult {
+        // Java's `MockAdminClient.abortTransaction` (MockAdminClient.java:1378-1381)
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
+        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // translation of the Java behavior).
+        let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        AbortTransactionResult::new(HashMap::from([(spec.topic_partition().clone(), handle.future())]))
     }
 
     fn describe_cluster(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {

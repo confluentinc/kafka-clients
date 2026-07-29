@@ -18,6 +18,7 @@
 //! `Call` / `AdminClientRunnable` machinery inside `KafkaAdminClient`. All of it
 //! is `pub(crate)` per the `internal`-package naming rule.
 
+pub(crate) mod abort_transaction_handler;
 pub(crate) mod admin_api_driver;
 pub(crate) mod admin_api_future;
 pub(crate) mod admin_api_handler;
@@ -36,8 +37,10 @@ pub(crate) mod delete_groups_handler;
 pub(crate) mod delete_records_handler;
 pub(crate) mod describe_classic_groups_handler;
 pub(crate) mod describe_consumer_groups_handler;
+pub(crate) mod describe_producers_handler;
 pub(crate) mod list_consumer_group_offsets_handler;
 pub(crate) mod list_offsets_handler;
 pub(crate) mod partition_leader_cache;
 pub(crate) mod partition_leader_strategy;
 pub(crate) mod remove_members_from_consumer_group_handler;
+pub(crate) mod static_broker_strategy;

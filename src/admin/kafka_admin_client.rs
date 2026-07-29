@@ -104,6 +104,7 @@ use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 
+use super::internals::abort_transaction_handler::AbortTransactionHandler;
 use super::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
 use super::internals::admin_api_future::AdminApiFuture;
 use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSignal};
@@ -118,11 +119,16 @@ use super::internals::delete_groups_handler::DeleteGroupsHandler;
 use super::internals::delete_records_handler::DeleteRecordsHandler;
 use super::internals::describe_classic_groups_handler::DescribeClassicGroupsHandler;
 use super::internals::describe_consumer_groups_handler::DescribeConsumerGroupsHandler;
+use super::internals::describe_producers_handler::DescribeProducersHandler;
 use super::internals::list_consumer_group_offsets_handler::ListConsumerGroupOffsetsHandler;
 use super::internals::list_offsets_handler::ListOffsetsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::internals::remove_members_from_consumer_group_handler::RemoveMembersFromConsumerGroupHandler;
 use super::records_to_delete::RecordsToDelete;
+use super::{
+    AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
+    DescribeProducersResult,
+};
 use super::{
     Admin, AdminClientConfig, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions,
     AlterConfigsResult, AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult,
@@ -2953,6 +2959,48 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         DeleteRecordsResult::new(result_map)
+    }
+
+    fn describe_producers(
+        &self,
+        partitions: &[TopicPartition],
+        options: DescribeProducersOptions,
+    ) -> DescribeProducersResult {
+        let keys: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let future = DescribeProducersHandler::new_future(keys, Arc::clone(&self.shared.partition_leader_cache));
+        let result_map = future.all();
+
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let handler = DescribeProducersHandler::new(options.clone(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DescribeProducersResult::new(result_map)
+    }
+
+    fn abort_transaction(
+        &self,
+        spec: AbortTransactionSpec,
+        options: AbortTransactionOptions,
+    ) -> AbortTransactionResult {
+        let keys = std::collections::HashSet::from([spec.topic_partition().clone()]);
+        let future = AbortTransactionHandler::new_future(keys, Arc::clone(&self.shared.partition_leader_cache));
+        let result_map = future.all();
+
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let handler = AbortTransactionHandler::new(spec, log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        AbortTransactionResult::new(result_map)
     }
 
     fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
@@ -6125,6 +6173,227 @@ mod tests {
         let mock = MockAdminClient::create(1);
         let result = mock.delete_records(&HashMap::new(), DeleteRecordsOptions::new());
         assert!(result.low_watermarks().is_empty());
+    }
+
+    // --- describeProducers / abortTransaction --------------------------------
+
+    use crate::admin::producer_state::ProducerState;
+    use crate::admin::{AbortTransactionOptions, AbortTransactionSpec, DescribeProducersOptions};
+    use crate::common::requests::{DescribeProducersResponse, WriteTxnMarkersResponse};
+    use crate::describe_producers_response_data::{
+        DescribeProducersResponseData, PartitionResponse as DpPartitionResponse, ProducerState as WireProducerState,
+        TopicResponse as DpTopicResponse,
+    };
+    use crate::write_txn_markers_response_data::{
+        WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
+        WriteTxnMarkersResponseData,
+    };
+
+    /// Mirrors `KafkaAdminClientTest.buildDescribeProducersResponse`.
+    fn build_describe_producers_response(tp: &TopicPartition, states: &[ProducerState]) -> ConcreteResponse {
+        let wire: Vec<WireProducerState> = states
+            .iter()
+            .map(|s| {
+                let mut w = WireProducerState::new();
+                w.set_producer_id(s.producer_id());
+                w.set_producer_epoch(s.producer_epoch());
+                w.set_last_sequence(s.last_sequence());
+                w.set_last_timestamp(s.last_timestamp());
+                w.set_coordinator_epoch(s.coordinator_epoch().unwrap_or(-1));
+                w.set_current_txn_start_offset(s.current_transaction_start_offset().unwrap_or(-1));
+                w
+            })
+            .collect();
+        let mut partition_response = DpPartitionResponse::new();
+        partition_response.set_partition_index(tp.partition());
+        partition_response.set_error_code(Errors::None.code());
+        partition_response.set_active_producers(wire);
+        let mut topic_response = DpTopicResponse::new();
+        topic_response.set_name(tp.topic().to_string());
+        topic_response.set_partitions(vec![partition_response]);
+        let mut data = DescribeProducersResponseData::new();
+        data.set_topics(vec![topic_response]);
+        ConcreteResponse::DescribeProducers(DescribeProducersResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.writeTxnMarkersResponse`.
+    fn write_txn_markers_response(spec: &AbortTransactionSpec, error: Errors) -> ConcreteResponse {
+        let mut partition = WritableTxnMarkerPartitionResult::new();
+        partition.set_partition_index(spec.topic_partition().partition());
+        partition.set_error_code(error.code());
+        let mut topic = WritableTxnMarkerTopicResult::new();
+        topic.set_name(spec.topic_partition().topic().to_string());
+        topic.set_partitions(vec![partition]);
+        let mut marker = WritableTxnMarkerResult::new();
+        marker.set_producer_id(spec.producer_id());
+        marker.set_topics(vec![topic]);
+        let mut data = WriteTxnMarkersResponseData::new();
+        data.set_markers(vec![marker]);
+        ConcreteResponse::WriteTxnMarkers(WriteTxnMarkersResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeProducers`.
+    #[tokio::test]
+    async fn test_describe_producers() {
+        let (admin, mut runnable, time, nodes) = env();
+        let tp = TopicPartition::new("foo", 0);
+
+        // Metadata lookup maps foo-0 to node0 (the leader).
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
+
+        let expected = vec![
+            ProducerState::new(12345, 15, 30, time.provider()(), Some(99), None),
+            ProducerState::new(12345, 15, 30, time.provider()(), None, Some(23423)),
+        ];
+        runnable
+            .client_mut()
+            .prepare_response_for_node(build_describe_producers_response(&tp, &expected), &nodes[0]);
+
+        let result = admin.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
+        let partition_future = result.partition_result(&tp).unwrap();
+        pump_until(&mut runnable, 40, |_r| partition_future.is_done()).await;
+        let state = partition_future.get().await.unwrap();
+        assert_eq!(
+            state.active_producers().iter().cloned().collect::<HashSet<_>>(),
+            expected.into_iter().collect::<HashSet<_>>()
+        );
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeProducersTimeout(boolean)`
+    /// (`@ParameterizedTest` over `{true, false}` → loop).
+    #[tokio::test]
+    async fn test_describe_producers_timeout() {
+        for timeout_in_metadata_lookup in [true, false] {
+            let request_timeout_ms = 15000;
+            let (admin, mut runnable, time, nodes) = env();
+            let tp = TopicPartition::new("foo", 0);
+
+            if !timeout_in_metadata_lookup {
+                runnable
+                    .client_mut()
+                    .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
+            }
+
+            let options = DescribeProducersOptions::new().timeout_ms(Some(request_timeout_ms));
+            let result = admin.describe_producers(std::slice::from_ref(&tp), options);
+            let all = result.all();
+            // Drain whatever is prepared, then confirm the request has not
+            // completed before the timeout elapses.
+            pump(&mut runnable, 5).await;
+            assert!(
+                !all.is_done(),
+                "future completed before timeout (metadata_lookup={timeout_in_metadata_lookup})"
+            );
+
+            time.sleep(request_timeout_ms as i64 + 1);
+            drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+            assert!(matches!(all.get().await.unwrap_err(), KafkaError::Timeout(_)));
+        }
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeProducersRetryAfterDisconnect`.
+    #[tokio::test]
+    async fn test_describe_producers_retry_after_disconnect() {
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
+        let tp = TopicPartition::new("foo", 0);
+
+        // Lookup maps to node0; the fulfillment disconnects; a fresh lookup maps
+        // to node1; the retried fulfillment succeeds.
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
+
+        let expected = vec![
+            ProducerState::new(12345, 15, 30, time.provider()(), Some(99), None),
+            ProducerState::new(12345, 15, 30, time.provider()(), None, Some(23423)),
+        ];
+        runnable
+            .client_mut()
+            .prepare_response_disconnected(build_describe_producers_response(&tp, &expected), true);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 1)])]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(build_describe_producers_response(&tp, &expected), &nodes[1]);
+
+        let result = admin.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
+        let partition_future = result.partition_result(&tp).unwrap();
+        drive_until(&mut runnable, &time, 60, || partition_future.is_done()).await;
+        let state = partition_future.get().await.unwrap();
+        assert_eq!(
+            state.active_producers().iter().cloned().collect::<HashSet<_>>(),
+            expected.into_iter().collect::<HashSet<_>>()
+        );
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAbortTransaction`.
+    #[tokio::test]
+    async fn test_abort_transaction() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let tp = TopicPartition::new("foo", 13);
+        let spec = AbortTransactionSpec::new(tp.clone(), 12345, 15, 200);
+
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(13, 0)])]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(write_txn_markers_response(&spec, Errors::None), &nodes[0]);
+
+        let result = admin.abort_transaction(spec, AbortTransactionOptions::new());
+        let all = result.all();
+        pump_until(&mut runnable, 40, |_r| all.is_done()).await;
+        all.get().await.unwrap();
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testAbortTransactionFindLeaderAfterDisconnect`.
+    #[tokio::test]
+    async fn test_abort_transaction_find_leader_after_disconnect() {
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
+        let tp = TopicPartition::new("foo", 13);
+        let spec = AbortTransactionSpec::new(tp.clone(), 12345, 15, 200);
+
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(13, 0)])]));
+        runnable
+            .client_mut()
+            .prepare_response_disconnected(write_txn_markers_response(&spec, Errors::None), true);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(13, 1)])]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(write_txn_markers_response(&spec, Errors::None), &nodes[1]);
+
+        let result = admin.abort_transaction(spec, AbortTransactionOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 60, || all.is_done()).await;
+        all.get().await.unwrap();
+    }
+
+    /// The mock's `describe_producers` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_describe_producers_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let tp = TopicPartition::new("foo", 0);
+        let result = mock.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
+        let err = result.partition_result(&tp).unwrap().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    /// The mock's `abort_transaction` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_abort_transaction_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
+        let result = mock.abort_transaction(spec, AbortTransactionOptions::new());
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
     // --- describeCluster -----------------------------------------------------
