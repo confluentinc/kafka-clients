@@ -7247,4 +7247,575 @@ mod tests {
         let err = result.described_groups()["g1"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
+
+    // --- consumer group offsets (list / alter / delete) ---------------------
+
+    const GROUP_ID: &str = "group0";
+
+    /// Drives `run_once` (advancing the mock clock so retry-backoff-gated retries
+    /// fire) until `done` returns true or `max_iters` is reached.
+    async fn drive_until(
+        runnable: &mut AdminClientRunnable<MockClient>,
+        time: &MockTime,
+        max_iters: usize,
+        done: impl Fn() -> bool,
+    ) {
+        for _ in 0..max_iters {
+            if done() {
+                return;
+            }
+            runnable.run_once().await;
+            time.sleep(50);
+        }
+    }
+
+    /// Builds an environment whose driver retries essentially unbounded, so
+    /// multi-step retry chains complete (Java's default `retries` is high, but
+    /// the Rust `test_config` caps it at 2).
+    fn offsets_env(num_nodes: i32) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        env_nodes_with_props(num_nodes, &[("retries", "2147483647"), ("retry.backoff.ms", "10")])
+    }
+
+    fn offset_fetch_group_error(group: &str, error: Errors) -> ConcreteResponse {
+        let mut g = crate::offset_fetch_response_data::OffsetFetchResponseGroup::new();
+        g.set_group_id(group.to_string()).set_error_code(error.code());
+        let mut data = crate::offset_fetch_response_data::OffsetFetchResponseData::new();
+        data.set_groups(vec![g]);
+        ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
+            data,
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
+        ))
+    }
+
+    /// Builds a full (per-partition) `OffsetFetch` response for one group.
+    fn offset_fetch_full(group: &str, topic: &str, partitions: &[(i32, i64)]) -> ConcreteResponse {
+        use crate::offset_fetch_response_data::{
+            OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+        };
+        let wire_partitions: Vec<OffsetFetchResponsePartitions> = partitions
+            .iter()
+            .map(|(index, offset)| {
+                let mut p = OffsetFetchResponsePartitions::new();
+                p.set_partition_index(*index).set_committed_offset(*offset);
+                p
+            })
+            .collect();
+        let mut wire_topic = OffsetFetchResponseTopics::new();
+        wire_topic.set_name(topic.to_string()).set_partitions(wire_partitions);
+        let mut g = OffsetFetchResponseGroup::new();
+        g.set_group_id(group.to_string()).set_topics(vec![wire_topic]);
+        let mut data = OffsetFetchResponseData::new();
+        data.set_groups(vec![g]);
+        ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
+            data,
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
+        ))
+    }
+
+    fn offset_commit_resp(entries: &[(TopicPartition, Errors)]) -> ConcreteResponse {
+        let map: HashMap<TopicPartition, Errors> = entries.iter().cloned().collect();
+        ConcreteResponse::OffsetCommit(crate::common::requests::OffsetCommitResponse::from_response_data(0, &map))
+    }
+
+    fn offset_delete_top_level(error: Errors) -> ConcreteResponse {
+        let mut data = crate::offset_delete_response_data::OffsetDeleteResponseData::new();
+        data.set_error_code(error.code());
+        ConcreteResponse::OffsetDelete(crate::common::requests::OffsetDeleteResponse::new(data))
+    }
+
+    fn offset_delete_partition(topic: &str, partition: i32, error: Errors) -> ConcreteResponse {
+        use crate::offset_delete_response_data::{
+            OffsetDeleteResponseData, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
+        };
+        let mut p = OffsetDeleteResponsePartition::new();
+        p.set_partition_index(partition).set_error_code(error.code());
+        let mut t = OffsetDeleteResponseTopic::new();
+        t.set_name(topic.to_string()).set_partitions(vec![p]);
+        let mut data = OffsetDeleteResponseData::new();
+        data.set_error_code(Errors::None.code());
+        data.set_topics(vec![t]);
+        ConcreteResponse::OffsetDelete(crate::common::requests::OffsetDeleteResponse::new(data))
+    }
+
+    /// An old (v<=3) single-coordinator `FindCoordinator` response — the form a
+    /// non-batched `FindCoordinator` request receives. Mirrors Java's
+    /// `prepareOldFindCoordinatorResponse`; the empty coordinator key binds the
+    /// response to whichever single key requested it.
+    fn old_find_coordinator_resp(node: &Node) -> ConcreteResponse {
+        use crate::find_coordinator_response_data::FindCoordinatorResponseData;
+        let mut data = FindCoordinatorResponseData::new();
+        data.set_error_code(Errors::None.code())
+            .set_node_id(node.id())
+            .set_host(node.host().to_string())
+            .set_port(node.port());
+        ConcreteResponse::FindCoordinator(crate::common::requests::FindCoordinatorResponse::new(data))
+    }
+
+    fn single_spec(partitions: &[TopicPartition]) -> HashMap<String, ListConsumerGroupOffsetsSpec> {
+        HashMap::from([(
+            GROUP_ID.to_string(),
+            ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(partitions.to_vec())),
+        )])
+    }
+
+    /// Translated from `testListConsumerGroupOffsets`: retriable FindCoordinator
+    /// and OffsetFetch errors are retried, and the final response's negative
+    /// offset maps to `None`.
+    #[tokio::test]
+    async fn test_list_consumer_group_offsets() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let tp0 = TopicPartition::new("my_topic", 0);
+        let tp1 = TopicPartition::new("my_topic", 1);
+        let tp2 = TopicPartition::new("my_topic", 2);
+        let tp3 = TopicPartition::new("my_topic", 3);
+
+        // Retriable FindCoordinator error is retried.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::CoordinatorNotAvailable));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        // Retriable OffsetFetch error is retried.
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_group_error(GROUP_ID, Errors::CoordinatorLoadInProgress));
+        // NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE trigger a re-lookup.
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_group_error(GROUP_ID, Errors::NotCoordinator));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_group_error(GROUP_ID, Errors::CoordinatorNotAvailable));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(offset_fetch_full(
+            GROUP_ID,
+            "my_topic",
+            &[(0, 10), (1, 0), (2, 20), (3, -1)],
+        ));
+
+        let result = admin.list_consumer_group_offsets(
+            &single_spec(&[tp0.clone(), tp1.clone(), tp2.clone(), tp3.clone()]),
+            ListConsumerGroupOffsetsOptions::new(),
+        );
+        let future = result.partitions_to_offset_and_metadata().unwrap();
+        drive_until(&mut runnable, &time, 80, || future.is_done()).await;
+
+        let offsets = future.get().await.unwrap();
+        assert_eq!(offsets.len(), 4);
+        assert_eq!(offsets.get(&tp0).unwrap().as_ref().unwrap().offset(), 10);
+        assert_eq!(offsets.get(&tp1).unwrap().as_ref().unwrap().offset(), 0);
+        assert_eq!(offsets.get(&tp2).unwrap().as_ref().unwrap().offset(), 20);
+        assert!(offsets.contains_key(&tp3));
+        assert_eq!(offsets.get(&tp3).unwrap(), &None);
+    }
+
+    /// Translated from `testListConsumerGroupOffsetsNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_list_consumer_group_offsets_non_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        for error in [
+            Errors::GroupAuthorizationFailed,
+            Errors::InvalidGroupId,
+            Errors::GroupIdNotFound,
+            Errors::UnknownMemberId,
+            Errors::StaleMemberEpoch,
+        ] {
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            runnable
+                .client_mut()
+                .prepare_response(offset_fetch_group_error(GROUP_ID, error));
+
+            let result = admin.list_consumer_group_offsets(
+                &single_spec(&[TopicPartition::new("t", 0)]),
+                ListConsumerGroupOffsetsOptions::new(),
+            );
+            let future = result.partitions_to_offset_and_metadata().unwrap();
+            drive_until(&mut runnable, &time, 40, || future.is_done()).await;
+            assert_eq!(future.get().await.unwrap_err().error(), error);
+        }
+    }
+
+    fn batched_specs() -> HashMap<String, ListConsumerGroupOffsetsSpec> {
+        HashMap::from([
+            (
+                "groupA".to_string(),
+                ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![TopicPartition::new("A", 1)])),
+            ),
+            (
+                "groupB".to_string(),
+                ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![TopicPartition::new("B", 2)])),
+            ),
+        ])
+    }
+
+    fn offset_fetch_multi(groups: &[(&str, &str, i32)]) -> ConcreteResponse {
+        use crate::offset_fetch_response_data::{
+            OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+        };
+        let wire_groups: Vec<OffsetFetchResponseGroup> = groups
+            .iter()
+            .map(|(group, topic, partition)| {
+                let mut p = OffsetFetchResponsePartitions::new();
+                p.set_partition_index(*partition).set_committed_offset(10);
+                let mut t = OffsetFetchResponseTopics::new();
+                t.set_name((*topic).to_string()).set_partitions(vec![p]);
+                let mut g = OffsetFetchResponseGroup::new();
+                g.set_group_id((*group).to_string()).set_topics(vec![t]);
+                g
+            })
+            .collect();
+        let mut data = OffsetFetchResponseData::new();
+        data.set_groups(wire_groups);
+        ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
+            data,
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
+        ))
+    }
+
+    /// Translated from `testBatchedListConsumerGroupOffsets`: two groups behind a
+    /// single (batched) FindCoordinator and OffsetFetch.
+    #[tokio::test]
+    async fn test_batched_list_consumer_group_offsets() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("groupA", &nodes[0]), ("groupB", &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
+
+        let result = admin.list_consumer_group_offsets(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+
+        let map = all.get().await.unwrap();
+        assert_eq!(map.len(), 2);
+        // Each group's per-partition offsets match the requested spec.
+        for group in ["groupA", "groupB"] {
+            let future = result.partitions_to_offset_and_metadata_for_group(group).unwrap();
+            assert_eq!(future.get().await.unwrap().len(), 1);
+        }
+    }
+
+    /// Translated from `testBatchedListConsumerGroupOffsetsWithNoFindCoordinatorBatching`:
+    /// a `NoBatchedFindCoordinatorsException` disables batching, after which the
+    /// groups are looked up individually.
+    #[tokio::test]
+    async fn test_batched_list_consumer_group_offsets_with_no_find_coordinator_batching() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        // The batched FindCoordinator build fails (broker only supports v3) —
+        // mirror the version-mismatch the real NetworkClient produces for
+        // `NoBatchedFindCoordinatorsException`.
+        runnable.client_mut().prepare_version_mismatch_response(
+            "Cannot create a v3 FindCoordinator request because we require features supported only in 4 or later.",
+        );
+        // After disabling batching, each group is looked up individually with the
+        // old single-coordinator FindCoordinator form.
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
+
+        let result = admin.list_consumer_group_offsets(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 80, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap().len(), 2);
+    }
+
+    /// Translated from `testBatchedListConsumerGroupOffsetsWithNoOffsetFetchBatching`:
+    /// a `NoBatchedOffsetFetchRequestException` disables batching, after which
+    /// both FindCoordinator and OffsetFetch are re-sent per group.
+    #[tokio::test]
+    async fn test_batched_list_consumer_group_offsets_with_no_offset_fetch_batching() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        // Batched FindCoordinator succeeds, but the batched OffsetFetch build
+        // fails (broker only supports v7) — a `NoBatchedOffsetFetchRequestException`.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("groupA", &nodes[0]), ("groupB", &nodes[0])]));
+        runnable.client_mut().prepare_version_mismatch_response(
+            "Broker does not support batching groups for fetch offset request on version 7",
+        );
+        // After disabling batching, FindCoordinator (old single-coordinator form)
+        // + OffsetFetch are re-sent per group.
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
+
+        let result = admin.list_consumer_group_offsets(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 80, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap().len(), 2);
+    }
+
+    fn offsets_to_alter() -> HashMap<TopicPartition, OffsetAndMetadata> {
+        HashMap::from([
+            (TopicPartition::new("foo", 0), OffsetAndMetadata::new(123).unwrap()),
+            (TopicPartition::new("bar", 0), OffsetAndMetadata::new(456).unwrap()),
+        ])
+    }
+
+    /// Translated from `testAlterConsumerGroupOffsets` (happy path).
+    #[tokio::test]
+    async fn test_alter_consumer_group_offsets() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        let tp2 = TopicPartition::new("bar", 0);
+        let tp3 = TopicPartition::new("foobar", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_commit_resp(&[(tp1.clone(), Errors::None), (tp2.clone(), Errors::None)]));
+
+        let result =
+            admin.alter_consumer_group_offsets(GROUP_ID, &offsets_to_alter(), AlterConsumerGroupOffsetsOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+
+        assert_eq!(all.get().await.unwrap(), ());
+        assert_eq!(result.partition_result(&tp1).get().await.unwrap(), ());
+        assert_eq!(result.partition_result(&tp2).get().await.unwrap(), ());
+        // A partition not in the request fails with IllegalArgument.
+        assert!(matches!(
+            result.partition_result(&tp3).get().await.unwrap_err(),
+            KafkaError::IllegalArgument(_)
+        ));
+    }
+
+    /// Translated from `testOffsetCommitWithMultipleErrors`.
+    #[tokio::test]
+    async fn test_offset_commit_with_multiple_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let foo0 = TopicPartition::new("foo", 0);
+        let foo1 = TopicPartition::new("foo", 1);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(offset_commit_resp(&[
+            (foo0.clone(), Errors::None),
+            (foo1.clone(), Errors::UnknownTopicOrPartition),
+        ]));
+
+        let offsets = HashMap::from([
+            (foo0.clone(), OffsetAndMetadata::new(123).unwrap()),
+            (foo1.clone(), OffsetAndMetadata::new(456).unwrap()),
+        ]);
+        let result = admin.alter_consumer_group_offsets(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+
+        assert_eq!(result.partition_result(&foo0).get().await.unwrap(), ());
+        assert_eq!(
+            result.partition_result(&foo1).get().await.unwrap_err().error(),
+            Errors::UnknownTopicOrPartition
+        );
+        assert_eq!(all.get().await.unwrap_err().error(), Errors::UnknownTopicOrPartition);
+    }
+
+    /// Translated from `testAlterConsumerGroupOffsetsNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_alter_consumer_group_offsets_non_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        for error in [
+            Errors::GroupAuthorizationFailed,
+            Errors::InvalidGroupId,
+            Errors::GroupIdNotFound,
+            Errors::StaleMemberEpoch,
+        ] {
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            runnable
+                .client_mut()
+                .prepare_response(offset_commit_resp(&[(tp1.clone(), error)]));
+
+            let offsets = HashMap::from([(tp1.clone(), OffsetAndMetadata::new(123).unwrap())]);
+            let result =
+                admin.alter_consumer_group_offsets(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
+            let all = result.all();
+            drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+            assert_eq!(all.get().await.unwrap_err().error(), error);
+            assert_eq!(result.partition_result(&tp1).get().await.unwrap_err().error(), error);
+        }
+    }
+
+    /// Translated from `testAlterConsumerGroupOffsetsFindCoordinatorNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_alter_consumer_group_offsets_find_coordinator_non_retriable_errors() {
+        let (admin, mut runnable, time, _nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::GroupAuthorizationFailed));
+
+        let offsets = HashMap::from([(tp1.clone(), OffsetAndMetadata::new(123).unwrap())]);
+        let result = admin.alter_consumer_group_offsets(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap_err().error(), Errors::GroupAuthorizationFailed);
+        assert_eq!(
+            result.partition_result(&tp1).get().await.unwrap_err().error(),
+            Errors::GroupAuthorizationFailed
+        );
+    }
+
+    /// Translated from `testDeleteConsumerGroupOffsets` (happy path with one
+    /// partition-level `GROUP_SUBSCRIBED_TO_TOPIC`).
+    #[tokio::test]
+    async fn test_delete_consumer_group_offsets() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        let tp2 = TopicPartition::new("bar", 0);
+        let tp3 = TopicPartition::new("foobar", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        // Two topics: foo -> NONE, bar -> GROUP_SUBSCRIBED_TO_TOPIC.
+        {
+            use crate::offset_delete_response_data::{
+                OffsetDeleteResponseData, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
+            };
+            let mut foo_p = OffsetDeleteResponsePartition::new();
+            foo_p.set_partition_index(0).set_error_code(Errors::None.code());
+            let mut foo_t = OffsetDeleteResponseTopic::new();
+            foo_t.set_name("foo".to_string()).set_partitions(vec![foo_p]);
+            let mut bar_p = OffsetDeleteResponsePartition::new();
+            bar_p
+                .set_partition_index(0)
+                .set_error_code(Errors::GroupSubscribedToTopic.code());
+            let mut bar_t = OffsetDeleteResponseTopic::new();
+            bar_t.set_name("bar".to_string()).set_partitions(vec![bar_p]);
+            let mut data = OffsetDeleteResponseData::new();
+            data.set_topics(vec![foo_t, bar_t]);
+            runnable.client_mut().prepare_response(ConcreteResponse::OffsetDelete(
+                crate::common::requests::OffsetDeleteResponse::new(data),
+            ));
+        }
+
+        let result = admin.delete_consumer_group_offsets(
+            GROUP_ID,
+            &HashSet::from([tp1.clone(), tp2.clone()]),
+            DeleteConsumerGroupOffsetsOptions::new(),
+        );
+        let all = result.all();
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+
+        assert_eq!(result.partition_result(&tp1).unwrap().get().await.unwrap(), ());
+        assert_eq!(all.get().await.unwrap_err().error(), Errors::GroupSubscribedToTopic);
+        assert_eq!(
+            result.partition_result(&tp2).unwrap().get().await.unwrap_err().error(),
+            Errors::GroupSubscribedToTopic
+        );
+        // A partition not in the request fails synchronously with IllegalArgument.
+        assert!(matches!(result.partition_result(&tp3), Err(KafkaError::IllegalArgument(_))));
+    }
+
+    /// Translated from `testDeleteConsumerGroupOffsetsNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_delete_consumer_group_offsets_non_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        for error in [
+            Errors::GroupAuthorizationFailed,
+            Errors::InvalidGroupId,
+            Errors::GroupIdNotFound,
+        ] {
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            runnable.client_mut().prepare_response(offset_delete_top_level(error));
+
+            let result = admin.delete_consumer_group_offsets(
+                GROUP_ID,
+                &HashSet::from([tp1.clone()]),
+                DeleteConsumerGroupOffsetsOptions::new(),
+            );
+            let all = result.all();
+            drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+            assert_eq!(all.get().await.unwrap_err().error(), error);
+            assert_eq!(result.partition_result(&tp1).unwrap().get().await.unwrap_err().error(), error);
+        }
+    }
+
+    /// Translated from `testDeleteConsumerGroupOffsetsFindCoordinatorNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_delete_consumer_group_offsets_find_coordinator_non_retriable_errors() {
+        let (admin, mut runnable, time, _nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::GroupAuthorizationFailed));
+
+        let result = admin.delete_consumer_group_offsets(
+            GROUP_ID,
+            &HashSet::from([tp1.clone()]),
+            DeleteConsumerGroupOffsetsOptions::new(),
+        );
+        let all = result.all();
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap_err().error(), Errors::GroupAuthorizationFailed);
+        assert_eq!(
+            result.partition_result(&tp1).unwrap().get().await.unwrap_err().error(),
+            Errors::GroupAuthorizationFailed
+        );
+    }
+
+    /// Translated from `testDeleteConsumerGroupOffsetsRetriableErrors`: retriable
+    /// group errors are retried (with re-lookup for coordinator-moved errors).
+    #[tokio::test]
+    async fn test_delete_consumer_group_offsets_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let tp1 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_delete_top_level(Errors::CoordinatorLoadInProgress));
+        runnable
+            .client_mut()
+            .prepare_response(offset_delete_top_level(Errors::NotCoordinator));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_delete_top_level(Errors::CoordinatorNotAvailable));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_delete_partition("foo", 0, Errors::None));
+
+        let result = admin.delete_consumer_group_offsets(
+            GROUP_ID,
+            &HashSet::from([tp1.clone()]),
+            DeleteConsumerGroupOffsetsOptions::new(),
+        );
+        let all = result.all();
+        drive_until(&mut runnable, &time, 80, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap(), ());
+        assert_eq!(result.partition_result(&tp1).unwrap().get().await.unwrap(), ());
+    }
 }
