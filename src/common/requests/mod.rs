@@ -34,6 +34,8 @@ pub mod create_partitions_request;
 pub mod create_partitions_response;
 pub mod create_topics_request;
 pub mod create_topics_response;
+pub mod delete_groups_request;
+pub mod delete_groups_response;
 pub mod delete_records_request;
 pub mod delete_records_response;
 pub mod delete_topics_request;
@@ -55,6 +57,9 @@ pub mod find_coordinator_request;
 pub mod find_coordinator_response;
 pub mod incremental_alter_configs_request;
 pub mod incremental_alter_configs_response;
+pub mod join_group_request;
+pub mod leave_group_request;
+pub mod leave_group_response;
 pub mod list_config_resources_request;
 pub mod list_config_resources_response;
 pub mod list_groups_request;
@@ -110,6 +115,8 @@ pub use create_topics_request::{
     CreateTopicsRequest, CreateTopicsRequestBuilder, NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR,
 };
 pub use create_topics_response::CreateTopicsResponse;
+pub use delete_groups_request::{DeleteGroupsRequest, DeleteGroupsRequestBuilder};
+pub use delete_groups_response::DeleteGroupsResponse;
 pub use delete_records_request::{DeleteRecordsRequest, DeleteRecordsRequestBuilder};
 pub use delete_records_response::{DeleteRecordsResponse, INVALID_LOW_WATERMARK};
 pub use delete_topics_request::{DeleteTopicsRequest, DeleteTopicsRequestBuilder};
@@ -134,6 +141,9 @@ pub use find_coordinator_request::{
 pub use find_coordinator_response::FindCoordinatorResponse;
 pub use incremental_alter_configs_request::{IncrementalAlterConfigsRequest, IncrementalAlterConfigsRequestBuilder};
 pub use incremental_alter_configs_response::IncrementalAlterConfigsResponse;
+pub use join_group_request::{MAX_REASON_LENGTH, UNKNOWN_MEMBER_ID, maybe_truncate_reason};
+pub use leave_group_request::{LeaveGroupRequest, LeaveGroupRequestBuilder};
+pub use leave_group_response::LeaveGroupResponse;
 pub use list_config_resources_request::{ListConfigResourcesRequest, ListConfigResourcesRequestBuilder};
 pub use list_config_resources_response::ListConfigResourcesResponse;
 pub use list_groups_request::{ListGroupsRequest, ListGroupsRequestBuilder};
