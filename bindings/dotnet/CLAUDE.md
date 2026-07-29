@@ -500,6 +500,18 @@ logic**. The concrete checklist is the **Anti-patterns** blocks in
   is the forward-looking plan (scope / deliverables / decisions), while
   `COMMENTS.DONE.<N>.md` records decisions and deviations made *during*
   execution. Never commit `.DS_Store` here.
-- ⚠ **Nested-agent discovery is unverified** — if the harness does not
-  auto-register `bindings/dotnet/.claude/agents/*.md`, place copies under the
-  repo-root `.claude/agents/` or invoke with the persona files loaded explicitly.
+- ⚠ **Nested-agent discovery does NOT work** — the harness does **not**
+  auto-register `bindings/dotnet/.claude/agents/*.md`, so the personas are not
+  invocable from where they live. To use them, **copy both persona files to the
+  repo-root `.claude/agents/`** (or invoke with the persona files loaded
+  explicitly); without that copy nothing in §8.1–§8.3 is reachable. The root copy
+  is a snapshot, not a link — **re-copy after editing a persona**, and treat the
+  binding-local file as the one you edit.
+- **Persona tracking policy — two locations, opposite rules:**
+  - `bindings/dotnet/.claude/agents/dotnet-{actor,critic}.md` — the
+    **binding-local** personas and the **source of truth**. **Intentionally
+    tracked**: keep them as-is, do **NOT** untrack them.
+  - repo-root `.claude/agents/dotnet-{actor,critic}.md` — the **discovery
+    copies** created by the workaround above. These must **NEVER** be committed:
+    keep them untracked, never `git add` them, and never let them appear in a
+    commit or PR diff.
