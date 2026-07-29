@@ -58,7 +58,7 @@ use crate::alter_replica_log_dirs_request_data::{
     AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequestData,
 };
 use crate::client_utils;
-use crate::common::acl::AclOperation;
+use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::network::Selector;
@@ -66,11 +66,12 @@ use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
 use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
 use crate::common::requests::{
-    AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder,
-    DeleteTopicsRequestBuilder, DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder,
-    DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
-    IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder,
-    MetadataRequestBuilder, RequestBuilder,
+    AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder,
+    CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder,
+    DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse,
+    DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder, DescribeLogDirsRequestBuilder,
+    DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER, IncrementalAlterConfigsRequestBuilder,
+    ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder, MetadataRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
 use crate::common::utils::{ExponentialBackoff, LogContext};
@@ -79,10 +80,12 @@ use crate::common::{
 };
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
+use crate::create_acls_request_data::{AclCreation, CreateAclsRequestData};
 use crate::create_partitions_request_data::{
     CreatePartitionsAssignment, CreatePartitionsRequestData, CreatePartitionsTopic,
 };
 use crate::create_topics_request_data::{CreatableTopic, CreateTopicsRequestData};
+use crate::delete_acls_request_data::{DeleteAclsFilter, DeleteAclsRequestData};
 use crate::delete_topics_request_data::{DeleteTopicState, DeleteTopicsRequestData};
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::{DescribeConfigsRequestData, DescribeConfigsResource};
@@ -119,14 +122,15 @@ use super::{
     Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
     AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
     AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym,
-    ConfigType, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
-    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    ConfigType, CreateAclsOptions, CreateAclsResult, CreatePartitionsOptions, CreatePartitionsResult,
+    CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions,
+    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DescribeAclsOptions, DescribeAclsResult,
     DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions, DescribeClusterResult,
     DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult,
     DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult,
-    DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, GroupListing,
-    ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
+    DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, FilterResult, FilterResults,
+    GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
     ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult,
     ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic,
@@ -860,6 +864,199 @@ fn maybe_complete_quota_exceeded<K, T>(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ACLs (createAcls / describeAcls / deleteAcls)
+// ---------------------------------------------------------------------------
+
+/// Builds a `createAcls` [`Call`]. Translated from the anonymous `Call` in
+/// `KafkaAdminClient.createAcls`.
+fn get_create_acls_call(
+    mm: AdminMetadataManager,
+    futures: Arc<HashMap<AclBinding, KafkaFutureImpl<()>>>,
+    acl_creations: Vec<AclCreation>,
+    acl_bindings_sent: Vec<AclBinding>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = CreateAclsRequestData::new();
+        data.set_creations(acl_creations.clone());
+        Ok(Box::new(CreateAclsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_mm = mm.clone();
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::CreateAcls(create_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateAcls response"));
+        };
+        if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
+            return HandleResult::Retry(err);
+        }
+        let mut iter = create_response.results().iter();
+        for binding in &acl_bindings_sent {
+            let Some(future) = resp_futures.get(binding) else {
+                continue;
+            };
+            match iter.next() {
+                None => {
+                    future.complete_exceptionally(KafkaError::with_message(
+                        Errors::UnknownServerError,
+                        format!("The broker reported no creation result for the given ACL: {binding}"),
+                    ));
+                },
+                Some(creation) => {
+                    if Errors::for_code(creation.error_code) != Errors::None {
+                        future.complete_exceptionally(api_error(creation.error_code, &creation.error_message));
+                    } else {
+                        future.complete(());
+                    }
+                },
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "createAcls",
+        deadline,
+        NodeProvider::LeastLoadedBrokerOrActiveKController,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a `describeAcls` [`Call`]. Translated from the anonymous `Call` in
+/// `KafkaAdminClient.describeAcls`.
+fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<AclBinding>>, deadline: i64) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        Ok(Box::new(DescribeAclsRequestBuilder::from_filter(&filter)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeAcls(describe_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeAcls response"));
+        };
+        if Errors::for_code(describe_response.error_code()) != Errors::None {
+            resp_handle.complete_exceptionally(api_error(
+                describe_response.error_code(),
+                &describe_response.error_message().map(str::to_string),
+            ));
+        } else {
+            match DescribeAclsResponse::acl_bindings(describe_response.acls()) {
+                Ok(bindings) => {
+                    resp_handle.complete(bindings);
+                },
+                Err(e) => {
+                    resp_handle.complete_exceptionally(e);
+                },
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "describeAcls",
+        deadline,
+        NodeProvider::LeastLoadedBrokerOrActiveKController,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a `deleteAcls` [`Call`]. Translated from the anonymous `Call` in
+/// `KafkaAdminClient.deleteAcls`.
+fn get_delete_acls_call(
+    mm: AdminMetadataManager,
+    futures: Arc<HashMap<AclBindingFilter, KafkaFutureImpl<FilterResults>>>,
+    acl_binding_filters_sent: Vec<AclBindingFilter>,
+    delete_acls_filters: Vec<DeleteAclsFilter>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = DeleteAclsRequestData::new();
+        data.set_filters(delete_acls_filters.clone());
+        Ok(Box::new(DeleteAclsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_mm = mm.clone();
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DeleteAcls(delete_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteAcls response"));
+        };
+        if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
+            return HandleResult::Retry(err);
+        }
+        let mut iter = delete_response.filter_results().iter();
+        for binding_filter in &acl_binding_filters_sent {
+            let Some(future) = resp_futures.get(binding_filter) else {
+                continue;
+            };
+            match iter.next() {
+                None => {
+                    future.complete_exceptionally(KafkaError::with_message(
+                        Errors::UnknownServerError,
+                        "The broker reported no deletion result for the given filter.",
+                    ));
+                },
+                Some(filter_result) => {
+                    if Errors::for_code(filter_result.error_code) != Errors::None {
+                        future
+                            .complete_exceptionally(api_error(filter_result.error_code, &filter_result.error_message));
+                    } else {
+                        let mut results = Vec::new();
+                        for matching_acl in &filter_result.matching_acls {
+                            let binding = DeleteAclsResponse::acl_binding(matching_acl).ok();
+                            let exception = if Errors::for_code(matching_acl.error_code) != Errors::None {
+                                Some(api_error(matching_acl.error_code, &matching_acl.error_message))
+                            } else {
+                                None
+                            };
+                            results.push(FilterResult::new(binding, exception));
+                        }
+                        future.complete(FilterResults::new(results));
+                    }
+                },
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "deleteAcls",
+        deadline,
+        NodeProvider::LeastLoadedBrokerOrActiveKController,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
 }
 
 /// Checks a create/delete response for a controller-change error, mirroring
@@ -3296,6 +3493,95 @@ impl Admin for KafkaAdminClient {
         RemoveMembersFromConsumerGroupResult::new(group_future, options.members().clone())
     }
 
+    fn create_acls(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        let mut handles: HashMap<AclBinding, KafkaFutureImpl<()>> = HashMap::new();
+        let mut acl_creations: Vec<AclCreation> = Vec::new();
+        let mut acl_bindings_sent: Vec<AclBinding> = Vec::new();
+        for acl in acls {
+            if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(acl.clone()) {
+                let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+                entry.insert(future.clone());
+                match acl.to_filter().find_indefinite_field() {
+                    None => {
+                        acl_creations.push(CreateAclsRequest::acl_creation(acl));
+                        acl_bindings_sent.push(acl.clone());
+                    },
+                    Some(indefinite) => {
+                        future.complete_exceptionally(KafkaError::with_message(
+                            Errors::InvalidRequest,
+                            format!("Invalid ACL creation: {indefinite}"),
+                        ));
+                    },
+                }
+            }
+        }
+        let public: HashMap<AclBinding, KafkaFuture<()>> =
+            handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+
+        let call = get_create_acls_call(
+            self.shared.metadata_manager.clone(),
+            Arc::new(handles),
+            acl_creations,
+            acl_bindings_sent,
+            deadline,
+        );
+        self.submit(call);
+        CreateAclsResult::new(public)
+    }
+
+    fn describe_acls(&self, filter: &AclBindingFilter, options: DescribeAclsOptions) -> DescribeAclsResult {
+        // Short-circuit on an unknown filter, mirroring
+        // `KafkaAdminClient.describeAcls`: complete the future exceptionally
+        // with InvalidRequestException and enqueue no Call.
+        if filter.is_unknown() {
+            let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::with_message(
+                Errors::InvalidRequest,
+                "The AclBindingFilter must not contain UNKNOWN elements.",
+            ));
+            return DescribeAclsResult::new(handle.future());
+        }
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let call = get_describe_acls_call(filter.clone(), handle, deadline);
+        self.submit(call);
+        DescribeAclsResult::new(public)
+    }
+
+    fn delete_acls(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        let mut handles: HashMap<AclBindingFilter, KafkaFutureImpl<FilterResults>> = HashMap::new();
+        let mut acl_binding_filters_sent: Vec<AclBindingFilter> = Vec::new();
+        let mut delete_acls_filters: Vec<DeleteAclsFilter> = Vec::new();
+        for filter in filters {
+            if let std::collections::hash_map::Entry::Vacant(entry) = handles.entry(filter.clone()) {
+                acl_binding_filters_sent.push(filter.clone());
+                delete_acls_filters.push(DeleteAclsRequest::delete_acls_filter(filter));
+                entry.insert(KafkaFutureImpl::new());
+            }
+        }
+        let public: HashMap<AclBindingFilter, KafkaFuture<FilterResults>> =
+            handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+
+        let call = get_delete_acls_call(
+            self.shared.metadata_manager.clone(),
+            Arc::new(handles),
+            acl_binding_filters_sent,
+            delete_acls_filters,
+            deadline,
+        );
+        self.submit(call);
+        DeleteAclsResult::new(public)
+    }
+
     async fn close(&self, timeout: Duration) {
         let now = self.now();
         let deadline = now.saturating_add(timeout.as_millis() as i64);
@@ -3732,6 +4018,339 @@ mod tests {
             partition_metadata,
             authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
         }
+    }
+
+    // --- ACLs (createAcls / describeAcls / deleteAcls) -----------------------
+
+    use crate::common::acl::{AccessControlEntry, AccessControlEntryFilter, AclPermissionType};
+    use crate::common::protocol::ApiKeys;
+    use crate::common::requests::{CreateAclsResponse, DeleteAclsResponse, DescribeAclsResponse};
+    use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
+    use crate::create_acls_response_data::{AclCreationResult, CreateAclsResponseData};
+    use crate::delete_acls_response_data::{DeleteAclsFilterResult, DeleteAclsResponseData};
+    use crate::describe_acls_response_data::DescribeAclsResponseData;
+
+    fn acl1() -> AclBinding {
+        AclBinding::new(
+            ResourcePattern::new(ResourceType::Topic, "mytopic3", PatternType::Literal).unwrap(),
+            AccessControlEntry::new("User:ANONYMOUS", "*", AclOperation::Describe, AclPermissionType::Allow).unwrap(),
+        )
+    }
+
+    fn acl2() -> AclBinding {
+        AclBinding::new(
+            ResourcePattern::new(ResourceType::Topic, "mytopic4", PatternType::Literal).unwrap(),
+            AccessControlEntry::new("User:ANONYMOUS", "*", AclOperation::Describe, AclPermissionType::Deny).unwrap(),
+        )
+    }
+
+    fn filter1() -> AclBindingFilter {
+        AclBindingFilter::new(
+            ResourcePatternFilter::new(ResourceType::Any, None, PatternType::Literal),
+            AccessControlEntryFilter::new(
+                Some("User:ANONYMOUS".to_string()),
+                None,
+                AclOperation::Any,
+                AclPermissionType::Any,
+            ),
+        )
+    }
+
+    fn filter2() -> AclBindingFilter {
+        AclBindingFilter::new(
+            ResourcePatternFilter::new(ResourceType::Any, None, PatternType::Literal),
+            AccessControlEntryFilter::new(
+                Some("User:bob".to_string()),
+                None,
+                AclOperation::Any,
+                AclPermissionType::Any,
+            ),
+        )
+    }
+
+    fn unknown_filter() -> AclBindingFilter {
+        AclBindingFilter::new(
+            ResourcePatternFilter::new(ResourceType::Unknown, None, PatternType::Literal),
+            AccessControlEntryFilter::new(
+                Some("User:bob".to_string()),
+                None,
+                AclOperation::Any,
+                AclPermissionType::Any,
+            ),
+        )
+    }
+
+    fn create_acls_result_ok() -> AclCreationResult {
+        AclCreationResult::new()
+    }
+
+    fn create_acls_result_error(error: Errors, message: &str) -> AclCreationResult {
+        let mut r = AclCreationResult::new();
+        r.set_error_code(error.code());
+        r.set_error_message(Some(message.to_string()));
+        r
+    }
+
+    fn create_acls_response(results: Vec<AclCreationResult>) -> ConcreteResponse {
+        let mut data = CreateAclsResponseData::new();
+        data.set_results(results);
+        ConcreteResponse::CreateAcls(CreateAclsResponse::new(data))
+    }
+
+    fn describe_acls_response(resources_from: &[AclBinding]) -> ConcreteResponse {
+        let mut data = DescribeAclsResponseData::new();
+        data.set_resources(DescribeAclsResponse::acls_resources(resources_from));
+        ConcreteResponse::DescribeAcls(DescribeAclsResponse::new(data, ApiKeys::DESCRIBE_ACLS.latest_version()))
+    }
+
+    fn describe_acls_error_response(error: Errors, message: &str) -> ConcreteResponse {
+        let mut data = DescribeAclsResponseData::new();
+        data.set_error_code(error.code());
+        data.set_error_message(Some(message.to_string()));
+        ConcreteResponse::DescribeAcls(DescribeAclsResponse::new(data, ApiKeys::DESCRIBE_ACLS.latest_version()))
+    }
+
+    fn delete_acls_response(filter_results: Vec<DeleteAclsFilterResult>) -> ConcreteResponse {
+        let mut data = DeleteAclsResponseData::new();
+        data.set_throttle_time_ms(0);
+        data.set_filter_results(filter_results);
+        ConcreteResponse::DeleteAcls(DeleteAclsResponse::new(data, ApiKeys::DELETE_ACLS.latest_version()))
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDescribeAcls`.
+    #[tokio::test]
+    async fn test_describe_acls() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        // Test a call where we get back ACL1 and ACL2.
+        runnable
+            .client_mut()
+            .prepare_response(describe_acls_response(&[acl1(), acl2()]));
+        let result = admin.describe_acls(&filter1(), DescribeAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        let mut acls = result.values().get().await.unwrap();
+        acls.sort_by(|a, b| a.pattern().name().cmp(b.pattern().name()));
+        assert_eq!(acls, vec![acl1(), acl2()]);
+
+        // Test a call where we get back no results.
+        runnable.client_mut().prepare_response(describe_acls_response(&[]));
+        let result = admin.describe_acls(&filter2(), DescribeAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert!(result.values().get().await.unwrap().is_empty());
+
+        // Test a call where we get back an error.
+        runnable
+            .client_mut()
+            .prepare_response(describe_acls_error_response(Errors::SecurityDisabled, "Security is disabled"));
+        let result = admin.describe_acls(&filter2(), DescribeAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        let err = result.values().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::SecurityDisabled);
+
+        // Test a call where we supply an invalid filter: completes exceptionally
+        // with InvalidRequest and enqueues NO network call.
+        let before = runnable.client_mut().request_count();
+        let result = admin.describe_acls(&unknown_filter(), DescribeAclsOptions::new());
+        assert!(result.values().is_done());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            runnable.client_mut().request_count(),
+            before,
+            "unknown filter must not enqueue a Call"
+        );
+        let err = result.values().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testCreateAcls`.
+    #[tokio::test]
+    async fn test_create_acls() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        // Test a call where we successfully create two ACLs.
+        runnable
+            .client_mut()
+            .prepare_response(create_acls_response(vec![create_acls_result_ok(), create_acls_result_ok()]));
+        let results = admin.create_acls(&[acl1(), acl2()], CreateAclsOptions::new());
+        let keys: HashSet<AclBinding> = results.values().keys().cloned().collect();
+        assert_eq!(keys, HashSet::from([acl1(), acl2()]));
+        pump(&mut runnable, 5).await;
+        for future in results.values().values() {
+            future.get().await.unwrap();
+        }
+        results.all().get().await.unwrap();
+
+        // Test a call where we fail to create one ACL.
+        runnable.client_mut().prepare_response(create_acls_response(vec![
+            create_acls_result_error(Errors::SecurityDisabled, "Security is disabled"),
+            create_acls_result_ok(),
+        ]));
+        let results = admin.create_acls(&[acl1(), acl2()], CreateAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            results.values()[&acl1()].get().await.unwrap_err().error(),
+            Errors::SecurityDisabled
+        );
+        results.values()[&acl2()].get().await.unwrap();
+        assert_eq!(results.all().get().await.unwrap_err().error(), Errors::SecurityDisabled);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testCreateAclsToController`.
+    ///
+    /// Java sets `bootstrap.controllers`, which makes
+    /// `LeastLoadedBrokerOrActiveKController` route to the active controller and
+    /// refresh metadata via `DescribeCluster` between the NOT_CONTROLLER attempt
+    /// and the retry. On this branch `AdminMetadataManager` stubs
+    /// `using_bootstrap_controllers()` to `false`, so the provider behaves like
+    /// `LeastLoaded`: after clearing the controller it retries straight to a
+    /// least-loaded broker (no interposed metadata call). The observable
+    /// contract — retry after NOT_CONTROLLER, then success — is preserved.
+    #[tokio::test]
+    async fn test_create_acls_to_controller() {
+        let (admin, mut runnable, time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(create_acls_response(vec![create_acls_result_error(
+                Errors::NotController,
+                "not controller",
+            )]));
+        runnable
+            .client_mut()
+            .prepare_response(create_acls_response(vec![create_acls_result_ok()]));
+
+        let results = admin.create_acls(&[acl1()], CreateAclsOptions::new());
+        let keys: HashSet<AclBinding> = results.values().keys().cloned().collect();
+        assert_eq!(keys, HashSet::from([acl1()]));
+        for _ in 0..30 {
+            if results.values()[&acl1()].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        for future in results.values().values() {
+            future.get().await.unwrap();
+        }
+        results.all().get().await.unwrap();
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDeleteAcls`.
+    #[tokio::test]
+    async fn test_delete_acls() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        // Test a call where one filter has an error.
+        let mut filter1_result = DeleteAclsFilterResult::new();
+        filter1_result.set_matching_acls(vec![
+            DeleteAclsResponse::matching_acl(&acl1(), Errors::None, None),
+            DeleteAclsResponse::matching_acl(&acl2(), Errors::None, None),
+        ]);
+        let mut filter2_result = DeleteAclsFilterResult::new();
+        filter2_result.set_error_code(Errors::SecurityDisabled.code());
+        filter2_result.set_error_message(Some("No security".to_string()));
+        runnable
+            .client_mut()
+            .prepare_response(delete_acls_response(vec![filter1_result, filter2_result]));
+        let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        let filter1_results = results.values()[&filter1()].get().await.unwrap();
+        assert!(filter1_results.values()[0].exception().is_none());
+        assert_eq!(filter1_results.values()[0].binding(), Some(&acl1()));
+        assert!(filter1_results.values()[1].exception().is_none());
+        assert_eq!(filter1_results.values()[1].binding(), Some(&acl2()));
+        assert_eq!(
+            results.values()[&filter2()].get().await.unwrap_err().error(),
+            Errors::SecurityDisabled
+        );
+        assert_eq!(results.all().get().await.unwrap_err().error(), Errors::SecurityDisabled);
+
+        // Test a call where one deletion result has an error.
+        let mut err_matching = crate::delete_acls_response_data::DeleteAclsMatchingAcl::new();
+        err_matching
+            .set_error_code(Errors::SecurityDisabled.code())
+            .set_error_message(Some("No security".to_string()))
+            .set_permission_type(AclPermissionType::Allow.code())
+            .set_operation(AclOperation::Alter.code())
+            .set_resource_type(ResourceType::Cluster.code())
+            .set_pattern_type(filter2().pattern_filter().pattern_type().code());
+        let mut filter1_result = DeleteAclsFilterResult::new();
+        filter1_result.set_matching_acls(vec![
+            DeleteAclsResponse::matching_acl(&acl1(), Errors::None, None),
+            err_matching,
+        ]);
+        let filter2_result = DeleteAclsFilterResult::new();
+        runnable
+            .client_mut()
+            .prepare_response(delete_acls_response(vec![filter1_result, filter2_result]));
+        let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert!(results.values()[&filter2()].get().await.unwrap().values().is_empty());
+        assert_eq!(results.all().get().await.unwrap_err().error(), Errors::SecurityDisabled);
+
+        // Test a call where there are no errors.
+        let mut f1 = DeleteAclsFilterResult::new();
+        f1.set_matching_acls(vec![DeleteAclsResponse::matching_acl(&acl1(), Errors::None, None)]);
+        let mut f2 = DeleteAclsFilterResult::new();
+        f2.set_matching_acls(vec![DeleteAclsResponse::matching_acl(&acl2(), Errors::None, None)]);
+        runnable.client_mut().prepare_response(delete_acls_response(vec![f1, f2]));
+        let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        let mut deleted = results.all().get().await.unwrap();
+        deleted.sort_by(|a, b| a.pattern().name().cmp(b.pattern().name()));
+        assert_eq!(deleted, vec![acl1(), acl2()]);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDeleteAclsToController`.
+    ///
+    /// As with `test_create_acls_to_controller`, `bootstrap.controllers` is
+    /// stubbed off on this branch so the NOT_CONTROLLER retry goes straight to a
+    /// least-loaded broker without an interposed metadata refresh.
+    #[tokio::test]
+    async fn test_delete_acls_to_controller() {
+        let (admin, mut runnable, time, _nodes) = env();
+        let mut not_controller = DeleteAclsFilterResult::new();
+        not_controller.set_error_code(Errors::NotController.code());
+        not_controller.set_error_message(Some("not controller".to_string()));
+        runnable
+            .client_mut()
+            .prepare_response(delete_acls_response(vec![not_controller]));
+        let mut ok = DeleteAclsFilterResult::new();
+        ok.set_matching_acls(vec![DeleteAclsResponse::matching_acl(&acl1(), Errors::None, None)]);
+        runnable.client_mut().prepare_response(delete_acls_response(vec![ok]));
+
+        let results = admin.delete_acls(&[filter1()], DeleteAclsOptions::new());
+        for _ in 0..30 {
+            if results.values()[&filter1()].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        let deleted = results.all().get().await.unwrap();
+        assert_eq!(deleted, vec![acl1()]);
+    }
+
+    /// Behavior test: a binding with an indefinite (UNKNOWN) field fails only its
+    /// own future; other valid bindings in the same batch still succeed.
+    /// Mirrors `KafkaAdminClient.createAcls`' per-binding `findIndefiniteField`
+    /// rejection.
+    #[tokio::test]
+    async fn test_create_acls_rejects_indefinite_binding_per_binding() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let bad = AclBinding::new(
+            ResourcePattern::new(ResourceType::Topic, "mytopic3", PatternType::Literal).unwrap(),
+            AccessControlEntry::new("User:ANONYMOUS", "*", AclOperation::Unknown, AclPermissionType::Allow).unwrap(),
+        );
+        // Only the valid binding is sent, so a single-result response suffices.
+        runnable
+            .client_mut()
+            .prepare_response(create_acls_response(vec![create_acls_result_ok()]));
+        let results = admin.create_acls(&[acl1(), bad.clone()], CreateAclsOptions::new());
+        pump(&mut runnable, 5).await;
+        results.values()[&acl1()].get().await.unwrap();
+        let err = results.values()[&bad].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert!(err.message().contains("Invalid ACL creation"));
     }
 
     // --- createTopics --------------------------------------------------------

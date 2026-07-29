@@ -131,8 +131,7 @@ mod tests {
 
     #[test]
     fn is_unknown_for_unknown_operation() {
-        let entry =
-            AccessControlEntry::new("User:x", "host", AclOperation::Unknown, AclPermissionType::Allow).unwrap();
+        let entry = AccessControlEntry::new("User:x", "host", AclOperation::Unknown, AclPermissionType::Allow).unwrap();
         assert!(entry.is_unknown());
     }
 }

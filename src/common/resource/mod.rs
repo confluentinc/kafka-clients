@@ -17,6 +17,10 @@
 //! Corresponds to the `org.apache.kafka.common.resource` package.
 
 pub mod pattern_type;
+// The `Resource` class lives in its own `resource.rs` file per CLAUDE.md's
+// "one Java class per file" rule, nested under the `resource` module that
+// mirrors the `org.apache.kafka.common.resource` package.
+#[allow(clippy::module_inception)]
 pub mod resource;
 pub mod resource_pattern;
 pub mod resource_pattern_filter;

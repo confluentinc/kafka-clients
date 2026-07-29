@@ -28,6 +28,7 @@ mod admin_group_offsets_test;
 mod admin_groups_test;
 mod admin_log_dirs_test;
 mod admin_partitions_records_test;
+mod admin_smoke_test_manual;
 mod admin_topics_test;
 mod api_versions_test;
 mod connection_test;
@@ -37,7 +38,6 @@ mod metadata_test;
 #[cfg(feature = "multilanguage-tests")]
 mod multilanguage_consumer_test;
 mod plaintext_consumer_assign_test;
-mod admin_smoke_test_manual;
 mod plaintext_consumer_callback_test;
 mod plaintext_consumer_commit_test;
 mod plaintext_consumer_fetch_test;

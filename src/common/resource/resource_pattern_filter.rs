@@ -169,133 +169,223 @@ mod tests {
 
     #[test]
     fn should_not_match_if_different_resource_type() {
-        assert!(!filter(ResourceType::Topic, Some("Name"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Group, "Name", PatternType::Literal)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name"), PatternType::Literal).matches(&pattern(
+                ResourceType::Group,
+                "Name",
+                PatternType::Literal
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_if_different_name() {
-        assert!(!filter(ResourceType::Topic, Some("Different"), PatternType::Prefixed)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Different"), PatternType::Prefixed).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Prefixed
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_if_different_name_case() {
-        assert!(!filter(ResourceType::Topic, Some("NAME"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Literal)));
+        assert!(
+            !filter(ResourceType::Topic, Some("NAME"), PatternType::Literal).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Literal
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_if_different_pattern_type() {
-        assert!(!filter(ResourceType::Topic, Some("Name"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name"), PatternType::Literal).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Prefixed
+            ))
+        );
     }
 
     #[test]
     fn should_match_where_resource_type_is_any() {
-        assert!(filter(ResourceType::Any, Some("Name"), PatternType::Prefixed)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(filter(ResourceType::Any, Some("Name"), PatternType::Prefixed).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Prefixed
+        )));
     }
 
     #[test]
     fn should_match_where_resource_name_is_any() {
-        assert!(filter(ResourceType::Topic, None, PatternType::Prefixed)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(filter(ResourceType::Topic, None, PatternType::Prefixed).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Prefixed
+        )));
     }
 
     #[test]
     fn should_match_where_pattern_type_is_any() {
-        assert!(filter(ResourceType::Topic, None, PatternType::Any)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(filter(ResourceType::Topic, None, PatternType::Any).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Prefixed
+        )));
     }
 
     #[test]
     fn should_match_where_pattern_type_is_match() {
-        assert!(filter(ResourceType::Topic, None, PatternType::Match)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(filter(ResourceType::Topic, None, PatternType::Match).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Prefixed
+        )));
     }
 
     #[test]
     fn should_match_literal_if_exact_match() {
-        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Literal)));
+        assert!(
+            filter(ResourceType::Topic, Some("Name"), PatternType::Literal).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Literal
+            ))
+        );
     }
 
     #[test]
     fn should_match_literal_if_name_matches_and_filter_is_on_pattern_type_any() {
-        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Any)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Literal)));
+        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Any).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Literal
+        )));
     }
 
     #[test]
     fn should_match_literal_if_name_matches_and_filter_is_on_pattern_type_match() {
-        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Match)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Literal)));
+        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Match).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Literal
+        )));
     }
 
     #[test]
     fn should_not_match_literal_if_name_prefixed() {
-        assert!(!filter(ResourceType::Topic, Some("Name-something"), PatternType::Match)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Literal)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name-something"), PatternType::Match).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Literal
+            ))
+        );
     }
 
     #[test]
     fn should_match_literal_wildcard_if_exact_match() {
-        assert!(filter(ResourceType::Topic, Some("*"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Topic, "*", PatternType::Literal)));
+        assert!(filter(ResourceType::Topic, Some("*"), PatternType::Literal).matches(&pattern(
+            ResourceType::Topic,
+            "*",
+            PatternType::Literal
+        )));
     }
 
     #[test]
     fn should_not_match_literal_wildcard_against_other_name() {
-        assert!(!filter(ResourceType::Topic, Some("Name"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Topic, "*", PatternType::Literal)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name"), PatternType::Literal).matches(&pattern(
+                ResourceType::Topic,
+                "*",
+                PatternType::Literal
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_literal_wildcard_the_way_around() {
-        assert!(!filter(ResourceType::Topic, Some("*"), PatternType::Literal)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Literal)));
+        assert!(!filter(ResourceType::Topic, Some("*"), PatternType::Literal).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Literal
+        )));
     }
 
     #[test]
     fn should_not_match_literal_wildcard_if_filter_has_pattern_type_of_any() {
-        assert!(!filter(ResourceType::Topic, Some("Name"), PatternType::Any)
-            .matches(&pattern(ResourceType::Topic, "*", PatternType::Literal)));
+        assert!(!filter(ResourceType::Topic, Some("Name"), PatternType::Any).matches(&pattern(
+            ResourceType::Topic,
+            "*",
+            PatternType::Literal
+        )));
     }
 
     #[test]
     fn should_match_literal_wildcard_if_filter_has_pattern_type_of_match() {
-        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Match)
-            .matches(&pattern(ResourceType::Topic, "*", PatternType::Literal)));
+        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Match).matches(&pattern(
+            ResourceType::Topic,
+            "*",
+            PatternType::Literal
+        )));
     }
 
     #[test]
     fn should_match_prefixed_if_exact_match() {
-        assert!(filter(ResourceType::Topic, Some("Name"), PatternType::Prefixed)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(
+            filter(ResourceType::Topic, Some("Name"), PatternType::Prefixed).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Prefixed
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_if_both_prefixed_and_filter_is_prefix_of_resource() {
-        assert!(!filter(ResourceType::Topic, Some("Name"), PatternType::Prefixed)
-            .matches(&pattern(ResourceType::Topic, "Name-something", PatternType::Prefixed)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name"), PatternType::Prefixed).matches(&pattern(
+                ResourceType::Topic,
+                "Name-something",
+                PatternType::Prefixed
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_if_both_prefixed_and_resource_is_prefix_of_filter() {
-        assert!(!filter(ResourceType::Topic, Some("Name-something"), PatternType::Prefixed)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name-something"), PatternType::Prefixed).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Prefixed
+            ))
+        );
     }
 
     #[test]
     fn should_not_match_prefixed_if_name_prefixed_any_filter_type_is_any() {
-        assert!(!filter(ResourceType::Topic, Some("Name-something"), PatternType::Any)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(
+            !filter(ResourceType::Topic, Some("Name-something"), PatternType::Any).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Prefixed
+            ))
+        );
     }
 
     #[test]
     fn should_match_prefixed_if_name_prefixed_any_filter_type_is_match() {
-        assert!(filter(ResourceType::Topic, Some("Name-something"), PatternType::Match)
-            .matches(&pattern(ResourceType::Topic, "Name", PatternType::Prefixed)));
+        assert!(
+            filter(ResourceType::Topic, Some("Name-something"), PatternType::Match).matches(&pattern(
+                ResourceType::Topic,
+                "Name",
+                PatternType::Prefixed
+            ))
+        );
     }
 }

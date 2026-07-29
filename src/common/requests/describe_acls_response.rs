@@ -201,8 +201,20 @@ mod tests {
 
     #[test]
     fn acls_resources_round_trips_to_bindings() {
-        let acl1 = acl("mytopic3", "User:ANONYMOUS", "*", AclOperation::Describe, AclPermissionType::Allow);
-        let acl2 = acl("mytopic4", "User:ANONYMOUS", "*", AclOperation::Describe, AclPermissionType::Deny);
+        let acl1 = acl(
+            "mytopic3",
+            "User:ANONYMOUS",
+            "*",
+            AclOperation::Describe,
+            AclPermissionType::Allow,
+        );
+        let acl2 = acl(
+            "mytopic4",
+            "User:ANONYMOUS",
+            "*",
+            AclOperation::Describe,
+            AclPermissionType::Deny,
+        );
         let resources = DescribeAclsResponse::acls_resources(&[acl1.clone(), acl2.clone()]);
         let mut bindings = DescribeAclsResponse::acl_bindings(&resources).unwrap();
         bindings.sort_by(|a, b| a.pattern().name().cmp(b.pattern().name()));

@@ -141,8 +141,18 @@ mod tests {
         Info { resource_type: ResourceType::Topic, code: 2, name: "topic", unknown: false },
         Info { resource_type: ResourceType::Group, code: 3, name: "group", unknown: false },
         Info { resource_type: ResourceType::Cluster, code: 4, name: "cluster", unknown: false },
-        Info { resource_type: ResourceType::TransactionalId, code: 5, name: "transactional_id", unknown: false },
-        Info { resource_type: ResourceType::DelegationToken, code: 6, name: "delegation_token", unknown: false },
+        Info {
+            resource_type: ResourceType::TransactionalId,
+            code: 5,
+            name: "transactional_id",
+            unknown: false,
+        },
+        Info {
+            resource_type: ResourceType::DelegationToken,
+            code: 6,
+            name: "delegation_token",
+            unknown: false,
+        },
         Info { resource_type: ResourceType::User, code: 7, name: "user", unknown: false },
     ];
 
@@ -174,8 +184,8 @@ mod tests {
     #[test]
     fn test_exhaustive() {
         assert_eq!(INFOS.len(), ResourceType::VALUES.len());
-        for i in 0..INFOS.len() {
-            assert_eq!(INFOS[i].resource_type, ResourceType::VALUES[i]);
+        for (i, info) in INFOS.iter().enumerate() {
+            assert_eq!(info.resource_type, ResourceType::VALUES[i]);
         }
     }
 }
