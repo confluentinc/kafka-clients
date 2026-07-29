@@ -91,12 +91,30 @@
 > has real version-bounds validation (finding #9). Review record at
 > `design/history/Milestone-11/Tier3-Phase-5/COMMENTS.DONE.1.md`.
 >
-> **Next: Tier 3 Phase 6 "Producers & transactions"** (the largest remaining
-> phase — 6 RPCs, sub-sliced into 3 commits: describeProducers+abortTransaction;
-> describeTransactions+fenceProducers; listTransactions+forceTerminateTransaction;
-> introduces `StaticBrokerStrategy` + `AllBrokersStrategy` + `ProducerIdAndEpoch`).
-> Then Phase 7 (client metrics). SCRAM (Phase 3) revisited only on crate approval.
-> Tier 4 remains out of scope.
+> **Tier 3 Phase 6 "Producers & transactions" is COMPLETE (2026-07-29):**
+> `describe_producers`, `abort_transaction`, `describe_transactions`,
+> `fence_producers`, `list_transactions`, `force_terminate_transaction` —
+> Rust core + unit tests (byte-level wire vectors, parameterized→loops) +
+> real-broker integration, Critic-CLEAN on first pass (no fix cycle). First
+> real use of `StaticBrokerStrategy` and `AllBrokersStrategy` (dynamic key
+> discovery). **Design-gap verdict:** `AllBrokersStrategy` FITS the Tier-1
+> `AdminApiLookupStrategy`/`LookupResult`/`AdminApiDriver` cleanly with NO
+> foundation changes — dynamic per-broker keys flow via `completed_keys`
+> (sentinel) + `mapped_keys` (new broker ids). `CoordinatorStrategy` reused
+> generic over `CoordinatorType::Transaction` (not GROUP-hardcoded), confirmed
+> by Critic. 2984 lib tests pass. Documented skips (both Critic-confirmed
+> legitimate): `ListTransactionsHandlerTest.testBuildRequestWithDurationFilter`
+> case 3 (generator omits below-min-version fields rather than throwing
+> `UnsupportedVersion` — pre-existing generator-wide behavior, worth a separate
+> future ticket), and the ongoing-transaction integration scenarios (no
+> transactional producer API exists in the Rust `Producer` trait yet — kept as
+> compiling `#[ignore]` skeletons). Review record at
+> `design/history/Milestone-11/Tier3-Phase-6/`.
+>
+> **Next: Tier 3 Phase 7 "Client metrics"** (`listClientMetricsResources` —
+> small; reuses the Tier-1 `ListConfigResources` wire path filtered to
+> `CLIENT_METRICS`, zero new wire types). SCRAM (Phase 3) revisited only on an
+> explicit relayed crate approval. Tier 4 remains out of scope.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed

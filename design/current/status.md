@@ -655,3 +655,52 @@ other Tier 3 phases.
 - Critic: **CLEAN on first pass — no fix cycle needed** (Result-signature
   faithfulness and mock validation fidelity both verified). See
   `design/history/Milestone-11/Tier3-Phase-5/COMMENTS.DONE.1.md`.
+
+## Tier 3 Phase 6 — Producers & transactions ✓ (2026-07-29)
+
+RPCs: `describe_producers`, `abort_transaction`, `describe_transactions`,
+`fence_producers`, `list_transactions`, `force_terminate_transaction`. The
+largest remaining Tier-3 phase; Rust core sub-sliced into 3 commits
+(describeProducers+abortTransaction; describeTransactions+fenceProducers;
+listTransactions+forceTerminateTransaction).
+
+- New POJOs/results/options: `ProducerState`, `TransactionState`,
+  `TransactionDescription`, `TransactionListing`, `AbortTransactionSpec`, and the
+  `Describe{Producers,Transactions}`/`Abort/Terminate/Fence/ListTransactions`
+  `{Options,Result}` families.
+- New internals handlers: `Describe{Producers,Transactions}Handler`,
+  `AbortTransactionHandler`, `FenceProducersHandler`, `ListTransactionsHandler`.
+- New lookup strategies (first use anywhere): `StaticBrokerStrategy` (fallback
+  when `describeProducers` sets a broker id) and `AllBrokersStrategy` (fan-out to
+  all brokers via dynamic per-broker key discovery, backing `listTransactions`).
+- Reused: `CoordinatorStrategy` generic over `CoordinatorType::Transaction`
+  (describeTransactions/fenceProducers); `PartitionLeaderStrategy`
+  (describeProducers/abortTransaction). Wire prerequisites landed in `f03a133`.
+- `forceTerminateTransaction` delegates to `fenceProducers` (matches Java).
+
+### Design-gap verdict — AllBrokersStrategy FITS CLEANLY
+No Tier-1 foundation change was needed. Dynamically-discovered per-broker keys
+flow through `LookupResult` (`completed_keys` sentinel + one `mapped_keys` entry
+per broker); the `AdminApiDriver` already fulfills them. Proven end-to-end by the
+translated `AllBrokersStrategyTest` + `AllBrokersStrategyIntegrationTest`.
+
+### Tests
+- **Rust lib suite: 2984 passing, 0 failed.**
+- 1:1 `KafkaAdminClientTest` slices (`testDescribeProducers*` incl.
+  `Timeout(boolean)`→loop and `RetryAfterDisconnect`, `testDescribeTransactions*`,
+  `testAbortTransaction*`, `testForceTerminateTransaction*`, `testListTransactions`,
+  `testFenceProducers`), `ListTransactionsResultTest`, and all internals handler
+  tests. Byte-level wire vectors for the new request/response types.
+- **Integration**: `tests/integration/admin_transactions_test.rs` — 5 green
+  against a real 4.2.0 broker (list_transactions AllBrokersStrategy debut;
+  describe_producers; describe_transactions unknown-id error; fence_producers +
+  force_terminate PID allocation). Ongoing-transaction scenarios kept as one
+  `#[ignore]`d skeleton — no transactional producer API exists in the Rust
+  `Producer` trait yet.
+- Documented skip: `ListTransactionsHandlerTest.testBuildRequestWithDurationFilter`
+  case 3 — the message generator omits below-min-version fields rather than
+  throwing `UnsupportedVersion` (pre-existing generator-wide behavior; worth a
+  separate follow-up ticket). Critic-confirmed legitimate.
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A (not a hot path).
+- Critic: **CLEAN on first pass — no fix cycle needed.** See
+  `design/history/Milestone-11/Tier3-Phase-6/` (`REVIEW.md` + `COMMENTS.DONE.1.md`).
