@@ -19,6 +19,7 @@
 //! each options struct simply carries its own optional timeout plus operation
 //! specific fields.
 
+pub mod alter_client_quotas_options;
 pub mod alter_configs_options;
 pub mod alter_consumer_group_offsets_options;
 pub mod alter_partition_reassignments_options;
@@ -33,6 +34,7 @@ pub mod delete_records_options;
 pub mod delete_topics_options;
 pub mod describe_acls_options;
 pub mod describe_classic_groups_options;
+pub mod describe_client_quotas_options;
 pub mod describe_cluster_options;
 pub mod describe_configs_options;
 pub mod describe_consumer_groups_options;
@@ -49,6 +51,7 @@ pub mod list_partition_reassignments_options;
 pub mod list_topics_options;
 pub mod remove_members_from_consumer_group_options;
 
+pub use alter_client_quotas_options::AlterClientQuotasOptions;
 pub use alter_configs_options::AlterConfigsOptions;
 pub use alter_consumer_group_offsets_options::AlterConsumerGroupOffsetsOptions;
 pub use alter_partition_reassignments_options::AlterPartitionReassignmentsOptions;
@@ -63,6 +66,7 @@ pub use delete_records_options::DeleteRecordsOptions;
 pub use delete_topics_options::DeleteTopicsOptions;
 pub use describe_acls_options::DescribeAclsOptions;
 pub use describe_classic_groups_options::DescribeClassicGroupsOptions;
+pub use describe_client_quotas_options::DescribeClientQuotasOptions;
 pub use describe_cluster_options::DescribeClusterOptions;
 pub use describe_configs_options::DescribeConfigsOptions;
 pub use describe_consumer_groups_options::DescribeConsumerGroupsOptions;

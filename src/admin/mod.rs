@@ -20,6 +20,7 @@
 //! module.
 
 pub mod admin_client_config;
+pub mod alter_client_quotas_result;
 pub mod alter_config_op;
 pub mod alter_configs_result;
 pub mod alter_consumer_group_offsets_result;
@@ -41,6 +42,7 @@ pub mod delete_topics_result;
 pub mod deleted_records;
 pub mod describe_acls_result;
 pub mod describe_classic_groups_result;
+pub mod describe_client_quotas_result;
 pub mod describe_cluster_result;
 pub mod describe_configs_result;
 pub mod describe_consumer_groups_result;
@@ -78,6 +80,7 @@ pub mod topic_listing;
 pub(crate) mod internals;
 
 pub use admin_client_config::AdminClientConfig;
+pub use alter_client_quotas_result::AlterClientQuotasResult;
 pub use alter_config_op::{AlterConfigOp, OpType};
 pub use alter_configs_result::AlterConfigsResult;
 pub use alter_consumer_group_offsets_result::AlterConsumerGroupOffsetsResult;
@@ -102,6 +105,7 @@ pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
 pub use describe_acls_result::DescribeAclsResult;
 pub use describe_classic_groups_result::DescribeClassicGroupsResult;
+pub use describe_client_quotas_result::DescribeClientQuotasResult;
 pub use describe_cluster_result::DescribeClusterResult;
 pub use describe_configs_result::DescribeConfigsResult;
 pub use describe_consumer_groups_result::DescribeConsumerGroupsResult;
@@ -132,13 +136,14 @@ pub use offset_spec::OffsetSpec;
 #[allow(deprecated)]
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
-    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, CreateAclsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions,
-    DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    ElectLeadersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions,
-    ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
+    AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreateAclsOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions, DescribeClassicGroupsOptions,
+    DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
+    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
@@ -153,6 +158,7 @@ use async_trait::async_trait;
 
 use crate::common::acl::{AclBinding, AclBindingFilter};
 use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::quota::{ClientQuotaAlteration, ClientQuotaFilter};
 use crate::common::{ElectionType, KafkaError, TopicCollection, TopicPartition, TopicPartitionReplica};
 use crate::consumer::OffsetAndMetadata;
 
@@ -408,6 +414,26 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`.
     fn delete_acls(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult;
+
+    /// Describe the client quotas matching the provided filter.
+    ///
+    /// Corresponds to
+    /// `Admin.describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)`.
+    fn describe_client_quotas(
+        &self,
+        filter: &ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> DescribeClientQuotasResult;
+
+    /// Alter the client quotas of one or more quota entities.
+    ///
+    /// Corresponds to
+    /// `Admin.alterClientQuotas(Collection<ClientQuotaAlteration>, AlterClientQuotasOptions)`.
+    fn alter_client_quotas(
+        &self,
+        entries: &[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> AlterClientQuotasResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

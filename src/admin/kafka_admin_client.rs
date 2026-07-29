@@ -64,14 +64,16 @@ use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
+use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
 use crate::common::requests::{
-    AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder,
-    CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder,
-    DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse,
-    DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder, DescribeLogDirsRequestBuilder,
-    DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER, IncrementalAlterConfigsRequestBuilder,
-    ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder, MetadataRequestBuilder, RequestBuilder,
+    AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreateAclsRequest,
+    CreateAclsRequestBuilder, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest,
+    DeleteAclsRequestBuilder, DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder,
+    DescribeAclsResponse, DescribeClientQuotasRequestBuilder, DescribeClusterRequestBuilder,
+    DescribeConfigsRequestBuilder, DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER,
+    ENDPOINT_TYPE_CONTROLLER, IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder,
+    ListGroupsRequestBuilder, MetadataRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
 use crate::common::utils::{ExponentialBackoff, LogContext};
@@ -119,23 +121,25 @@ use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::internals::remove_members_from_consumer_group_handler::RemoveMembersFromConsumerGroupHandler;
 use super::records_to_delete::RecordsToDelete;
 use super::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
-    AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
-    AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym,
-    ConfigType, CreateAclsOptions, CreateAclsResult, CreatePartitionsOptions, CreatePartitionsResult,
-    CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions,
-    DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions,
-    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DescribeAclsOptions, DescribeAclsResult,
-    DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions, DescribeClusterResult,
-    DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult,
-    DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult,
-    DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, FilterResult, FilterResults,
-    GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
-    ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult,
-    ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic,
-    OffsetSpec, PartitionReassignment, RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult,
-    ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AdminClientConfig, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions,
+    AlterConfigsResult, AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult,
+    AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions,
+    AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym, ConfigType, CreateAclsOptions,
+    CreateAclsResult, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
+    DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult,
+    DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult,
+    DeleteTopicsOptions, DeleteTopicsResult, DescribeAclsOptions, DescribeAclsResult, DescribeClassicGroupsOptions,
+    DescribeClassicGroupsResult, DescribeClientQuotasOptions, DescribeClientQuotasResult, DescribeClusterOptions,
+    DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions,
+    DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
+    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
+    FilterResult, FilterResults, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions,
+    ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RemoveMembersFromConsumerGroupOptions,
+    RemoveMembersFromConsumerGroupResult, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing,
+    TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use super::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -975,6 +979,108 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
         "describeAcls",
         deadline,
         NodeProvider::LeastLoadedBrokerOrActiveKController,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a `describeClientQuotas` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.describeClientQuotas`.
+fn get_describe_client_quotas_call(
+    filter: ClientQuotaFilter,
+    handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        Ok(Box::new(DescribeClientQuotasRequestBuilder::from_filter(&filter)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeClientQuotas(describe_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeClientQuotas response"));
+        };
+        // Mirrors DescribeClientQuotasResponse.complete: error first, else the
+        // decoded entity map.
+        if Errors::for_code(describe_response.error_code()) != Errors::None {
+            resp_handle.complete_exceptionally(api_error(
+                describe_response.error_code(),
+                &describe_response.error_message().map(str::to_string),
+            ));
+        } else {
+            resp_handle.complete(describe_response.entities());
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "describeClientQuotas",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds an `alterClientQuotas` [`Call`]. Translated from the anonymous `Call`
+/// in `KafkaAdminClient.alterClientQuotas`.
+fn get_alter_client_quotas_call(
+    entries: Vec<ClientQuotaAlteration>,
+    validate_only: bool,
+    futures: Arc<HashMap<ClientQuotaEntity, KafkaFutureImpl<()>>>,
+    deadline: i64,
+) -> Call {
+    let request_entries = entries;
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        Ok(Box::new(AlterClientQuotasRequestBuilder::new(&request_entries, validate_only)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::AlterClientQuotas(alter_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterClientQuotas response"));
+        };
+        // Mirrors AlterClientQuotasResponse.complete: complete each entity's
+        // future by its result.
+        for (entity, outcome) in alter_response.results() {
+            let Some(future) = resp_futures.get(&entity) else {
+                // Java throws IllegalArgumentException if the future map lacks
+                // the entity; the broker only echoes requested entities, so an
+                // unknown entity is skipped rather than aborting the bg task.
+                continue;
+            };
+            match outcome {
+                Ok(()) => {
+                    future.complete(());
+                },
+                Err(e) => {
+                    future.complete_exceptionally(e);
+                },
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "alterClientQuotas",
+        deadline,
+        NodeProvider::LeastLoaded,
         create_request,
         handle_response,
         handle_failure,
@@ -3582,6 +3688,43 @@ impl Admin for KafkaAdminClient {
         DeleteAclsResult::new(public)
     }
 
+    fn describe_client_quotas(
+        &self,
+        filter: &ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> DescribeClientQuotasResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let call = get_describe_client_quotas_call(filter.clone(), handle, deadline);
+        self.submit(call);
+        DescribeClientQuotasResult::new(public)
+    }
+
+    fn alter_client_quotas(
+        &self,
+        entries: &[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> AlterClientQuotasResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        // Mirrors Java: one future per entity (later entries with the same
+        // entity share the single future for that entity).
+        let mut handles: HashMap<ClientQuotaEntity, KafkaFutureImpl<()>> = HashMap::new();
+        for entry in entries {
+            handles.entry(entry.entity().clone()).or_default();
+        }
+        let public: HashMap<ClientQuotaEntity, KafkaFuture<()>> =
+            handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
+
+        let call =
+            get_alter_client_quotas_call(entries.to_vec(), options.is_validate_only(), Arc::new(handles), deadline);
+        self.submit(call);
+        AlterClientQuotasResult::new(public)
+    }
+
     async fn close(&self, timeout: Duration) {
         let now = self.now();
         let deadline = now.saturating_add(timeout.as_millis() as i64);
@@ -4351,6 +4494,109 @@ mod tests {
         let err = results.values()[&bad].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
         assert!(err.message().contains("Invalid ACL creation"));
+    }
+
+    // --- client quotas (describeClientQuotas / alterClientQuotas) ------------
+
+    use crate::common::quota::client_quota_entity::{CLIENT_ID, USER};
+    use crate::common::quota::{ClientQuotaFilterComponent, Op};
+    use crate::common::requests::{AlterClientQuotasResponse, DescribeClientQuotasResponse};
+
+    /// Mirrors `KafkaAdminClientTest.newClientQuotaEntity(String...)`.
+    fn new_client_quota_entity(args: &[&str]) -> ClientQuotaEntity {
+        assert_eq!(args.len() % 2, 0);
+        let mut entity_map = HashMap::new();
+        let mut index = 0;
+        while index < args.len() {
+            entity_map.insert(args[index].to_string(), args[index + 1].to_string());
+            index += 2;
+        }
+        ClientQuotaEntity::new(entity_map)
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDescribeClientQuotas`.
+    #[tokio::test]
+    async fn test_describe_client_quotas() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let value = "value";
+        let entity1 = new_client_quota_entity(&[USER, "user-1", CLIENT_ID, value]);
+        let entity2 = new_client_quota_entity(&[USER, "user-2", CLIENT_ID, value]);
+        let mut response_data = HashMap::new();
+        response_data.insert(entity1.clone(), HashMap::from([("consumer_byte_rate".to_string(), 10000.0)]));
+        response_data.insert(entity2.clone(), HashMap::from([("producer_byte_rate".to_string(), 20000.0)]));
+
+        runnable.client_mut().prepare_response(ConcreteResponse::DescribeClientQuotas(
+            DescribeClientQuotasResponse::from_quota_entities(&response_data, 0),
+        ));
+
+        let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(USER, value)]);
+        let result = admin.describe_client_quotas(&filter, DescribeClientQuotasOptions::new());
+        pump(&mut runnable, 5).await;
+
+        let result_data = result.entities().get().await.unwrap();
+        assert_eq!(result_data.len(), 2);
+        assert!(result_data.contains_key(&entity1));
+        let config1 = &result_data[&entity1];
+        assert_eq!(config1.len(), 1);
+        assert!((config1["consumer_byte_rate"] - 10000.0).abs() < 1e-6);
+        assert!(result_data.contains_key(&entity2));
+        let config2 = &result_data[&entity2];
+        assert_eq!(config2.len(), 1);
+        assert!((config2["producer_byte_rate"] - 20000.0).abs() < 1e-6);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testAlterClientQuotas`.
+    #[tokio::test]
+    async fn test_alter_client_quotas() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let good_entity = new_client_quota_entity(&[USER, "user-1"]);
+        let unauthorized_entity = new_client_quota_entity(&[USER, "user-0"]);
+        let invalid_entity = new_client_quota_entity(&["", "user-0"]);
+
+        let response_data = vec![
+            (
+                good_entity.clone(),
+                Errors::ClusterAuthorizationFailed,
+                Some("Authorization failed".to_string()),
+            ),
+            (
+                unauthorized_entity.clone(),
+                Errors::ClusterAuthorizationFailed,
+                Some("Authorization failed".to_string()),
+            ),
+            (
+                invalid_entity.clone(),
+                Errors::InvalidRequest,
+                Some("Invalid quota entity".to_string()),
+            ),
+        ];
+        runnable.client_mut().prepare_response(ConcreteResponse::AlterClientQuotas(
+            AlterClientQuotasResponse::from_quota_entities(&response_data, 0),
+        ));
+
+        let entries = vec![
+            ClientQuotaAlteration::new(good_entity.clone(), vec![Op::new("consumer_byte_rate", Some(10000.0))]),
+            ClientQuotaAlteration::new(unauthorized_entity.clone(), vec![Op::new("producer_byte_rate", Some(10000.0))]),
+            ClientQuotaAlteration::new(invalid_entity.clone(), vec![Op::new("producer_byte_rate", Some(100.0))]),
+        ];
+        let result = admin.alter_client_quotas(&entries, AlterClientQuotasOptions::new());
+        pump(&mut runnable, 5).await;
+
+        // good_entity got CLUSTER_AUTHORIZATION_FAILED in this response fixture.
+        assert_eq!(
+            result.values()[&good_entity].get().await.unwrap_err().error(),
+            Errors::ClusterAuthorizationFailed
+        );
+        assert_eq!(
+            result.values()[&unauthorized_entity].get().await.unwrap_err().error(),
+            Errors::ClusterAuthorizationFailed
+        );
+        assert_eq!(
+            result.values()[&invalid_entity].get().await.unwrap_err().error(),
+            Errors::InvalidRequest
+        );
     }
 
     // --- createTopics --------------------------------------------------------
