@@ -37,8 +37,8 @@ use std::time::Duration;
 #[allow(deprecated)]
 use confluent_kafka::admin::ListConsumerGroupsOptions;
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreateTopicsOptions, DescribeConsumerGroupsOptions, ListGroupsOptions, NewTopic,
-    new_admin_client,
+    Admin, AdminClientConfig, CreateTopicsOptions, DeleteConsumerGroupsOptions, DescribeConsumerGroupsOptions,
+    ListGroupsOptions, MemberToRemove, NewTopic, RemoveMembersFromConsumerGroupOptions, new_admin_client,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
@@ -82,6 +82,22 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
+    ]);
+    ConsumerConfig::from_properties(&props).expect("invalid consumer test config")
+}
+
+/// Build a KIP-848 `ConsumerConfig` for a static member (with a
+/// `group.instance.id`), so it can be targeted by
+/// `remove_members_from_consumer_group`.
+fn static_consumer_config(bootstrap: &str, group_id: &str, instance_id: &str) -> ConsumerConfig {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("client.id".to_string(), format!("integration-test-consumer-{instance_id}")),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+        ("group.id".to_string(), group_id.to_string()),
+        ("group.instance.id".to_string(), instance_id.to_string()),
     ]);
     ConsumerConfig::from_properties(&props).expect("invalid consumer test config")
 }
@@ -262,5 +278,209 @@ async fn test_describe_consumer_groups_nonexistent_group() {
         },
     }
 
+    ctx.cleanup().await;
+}
+
+/// (a) An empty (member-less but retained) group can be deleted, and (b)
+/// deleting a group that still has an active member fails with a non-retriable
+/// `NON_EMPTY_GROUP` error.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_consumer_groups_empty_and_non_empty() {
+    let mut ctx = TestContext::new(kip848_3_broker(NUM_PARTITIONS as u16)).await;
+    let admin = admin_for(ctx.bootstrap_servers());
+    let topic = ctx.topic("admin_delete_groups");
+    let empty_group = ctx.group_id("g_delete_empty");
+    let live_group = ctx.group_id("g_delete_live");
+
+    admin
+        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("create topic");
+
+    // Bring a group up, commit an offset so it is retained, then close the
+    // consumer so the group becomes empty (member-less) but still exists.
+    {
+        let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+            consumer_config(ctx.bootstrap_servers(), &empty_group),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("new_consumer should succeed");
+        subscribe_and_join(&mut consumer, &topic).await;
+        let _ = consumer.poll(Duration::from_millis(500)).await;
+        consumer.commit_sync().await.expect("commit offsets");
+        consumer.close().await.expect("close consumer");
+    }
+
+    // (b) A group with an active member cannot be deleted (NON_EMPTY_GROUP).
+    let mut live_consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+        consumer_config(ctx.bootstrap_servers(), &live_group),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("new_consumer should succeed");
+    subscribe_and_join(&mut live_consumer, &topic).await;
+    let _ = live_consumer.poll(Duration::from_millis(200)).await;
+
+    let non_empty_err = admin
+        .delete_consumer_groups(std::slice::from_ref(&live_group), DeleteConsumerGroupsOptions::new())
+        .deleted_groups()[&live_group]
+        .clone()
+        .get()
+        .await
+        .expect_err("deleting a group with active members must fail");
+    assert_eq!(
+        non_empty_err.error(),
+        Errors::NonEmptyGroup,
+        "deleting a non-empty group should fail with NON_EMPTY_GROUP, got: {non_empty_err}"
+    );
+    assert!(!non_empty_err.is_retriable(), "NON_EMPTY_GROUP is a non-retriable error");
+
+    // (a) The empty group deletes successfully.
+    admin
+        .delete_consumer_groups(std::slice::from_ref(&empty_group), DeleteConsumerGroupsOptions::new())
+        .deleted_groups()[&empty_group]
+        .clone()
+        .get()
+        .await
+        .expect("deleting an empty group should succeed");
+
+    // ... and is gone afterwards.
+    let described = admin
+        .describe_consumer_groups(std::slice::from_ref(&empty_group), DescribeConsumerGroupsOptions::new())
+        .described_groups();
+    match described[&empty_group].clone().get().await {
+        Err(err) => assert_eq!(err.error(), Errors::GroupIdNotFound),
+        Ok(desc) => assert!(desc.members().is_empty(), "deleted group must have no members"),
+    }
+
+    drop(live_consumer);
+    ctx.cleanup().await;
+}
+
+/// (c) `remove_members_from_consumer_group` for a single static member removes
+/// it, and its partitions are reassigned to the other member.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remove_one_member_from_consumer_group() {
+    let mut ctx = TestContext::new(kip848_3_broker(NUM_PARTITIONS as u16)).await;
+    let admin = admin_for(ctx.bootstrap_servers());
+    let topic = ctx.topic("admin_remove_member");
+    let group_id = ctx.group_id("g_remove_one");
+
+    admin
+        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("create topic");
+
+    // Two static members share the topic's partitions.
+    let mut member_one = new_consumer::<Vec<u8>, Vec<u8>>(
+        static_consumer_config(ctx.bootstrap_servers(), &group_id, "instance-1"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("new_consumer should succeed");
+    let mut member_two = new_consumer::<Vec<u8>, Vec<u8>>(
+        static_consumer_config(ctx.bootstrap_servers(), &group_id, "instance-2"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("new_consumer should succeed");
+    member_one.subscribe(vec![topic.clone()]).await.expect("subscribe m1");
+    member_two.subscribe(vec![topic.clone()]).await.expect("subscribe m2");
+    // Drive both members until the group reconciles to two members.
+    for _ in 0..60 {
+        let _ = member_one.poll(Duration::from_millis(300)).await;
+        let _ = member_two.poll(Duration::from_millis(300)).await;
+        if !member_one.assignment().is_empty() && !member_two.assignment().is_empty() {
+            break;
+        }
+    }
+
+    // Remove instance-1 by its group.instance.id.
+    let options =
+        RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("instance-1")]).expect("non-empty members");
+    admin
+        .remove_members_from_consumer_group(&group_id, options)
+        .all()
+        .get()
+        .await
+        .expect("removing a static member should succeed");
+
+    // instance-2 should reconcile to owning all partitions after the removal.
+    let mut reassigned = false;
+    for _ in 0..60 {
+        let _ = member_two.poll(Duration::from_millis(300)).await;
+        if member_two.assignment().len() == NUM_PARTITIONS as usize {
+            reassigned = true;
+            break;
+        }
+    }
+    assert!(
+        reassigned,
+        "the remaining member should be reassigned all partitions after removal"
+    );
+
+    drop(member_one);
+    drop(member_two);
+    ctx.cleanup().await;
+}
+
+/// (d) `remove_members_from_consumer_group` with `removeAll` empties the group.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remove_all_members_from_consumer_group() {
+    let mut ctx = TestContext::new(kip848_3_broker(NUM_PARTITIONS as u16)).await;
+    let admin = admin_for(ctx.bootstrap_servers());
+    let topic = ctx.topic("admin_remove_all");
+    let group_id = ctx.group_id("g_remove_all");
+
+    admin
+        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("create topic");
+
+    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+        static_consumer_config(ctx.bootstrap_servers(), &group_id, "instance-1"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("new_consumer should succeed");
+    subscribe_and_join(&mut consumer, &topic).await;
+
+    // removeAll: no specific members provided.
+    admin
+        .remove_members_from_consumer_group(&group_id, RemoveMembersFromConsumerGroupOptions::default())
+        .all()
+        .get()
+        .await
+        .expect("removeAll should succeed");
+
+    // The group should have no active members afterwards.
+    let mut emptied = false;
+    for _ in 0..40 {
+        let described = admin
+            .describe_consumer_groups(std::slice::from_ref(&group_id), DescribeConsumerGroupsOptions::new())
+            .described_groups();
+        match described[&group_id].clone().get().await {
+            Ok(desc) if desc.members().is_empty() => {
+                emptied = true;
+                break;
+            },
+            Err(err) if err.error() == Errors::GroupIdNotFound => {
+                emptied = true;
+                break;
+            },
+            _ => {},
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(emptied, "removeAll should leave the group with no active members");
+
+    drop(consumer);
     ctx.cleanup().await;
 }
