@@ -5,10 +5,15 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 ## Current milestone/phase
 
-- **Milestone 0 / Phase 0 — "Project scaffolding": DONE (2026-07-20).**
-  Pure structural skeleton stood up. No P/Invoke, no `NativeMethods`, no
-  `SafeHandle`, no managed API, no Kafka logic yet — all deferred to later
-  phases by scope.
+Newest first.
+
+- **Milestone 1 / Phase 1 — "Interop scaffolding + native-load probe": DONE
+  (2026-07-20).** The client-agnostic interop FOUNDATION: the `NativeMethods` P/Invoke
+  class (8 shared-foundation declarations), the `Utf8Marshal` marshalling helpers, the
+  native-copy MSBuild target (un-defers M0/P0 decision D2), and a consumer-namespaced
+  native-load probe. Mode A (C ABI already landed — no Rust authoring). NO public
+  managed API, NO `SafeHandle`, NO completion bridge, NO Kafka logic yet — all
+  deferred to later phases by scope.
 - **Milestone 0 / Phase 1 — "Rename binding identity": DONE (2026-07-29).**
   The binding identity is `Confluent.Kafka` (was
   `Confluent.Kafka.ShareConsumer`): solution, strong-name key, both project
@@ -46,6 +51,8 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
   target anywhere), so nothing can trip the gate today. The decision — own SR
   integration, or diverge the id — is still owed **before any publish**, and
   un-defers by flipping that one line.
+- **Milestone 0 / Phase 0 — "Project scaffolding": DONE (2026-07-20).** Pure
+  structural skeleton (see `design/history/M0/P0-scaffolding/`).
 
 ## What exists now (structure)
 
@@ -54,38 +61,64 @@ bindings/dotnet/
 ├─ Confluent.Kafka.sln                       ← classic .sln, both projects + a "build" solution folder
 ├─ Directory.Build.props                     ← #nullable enable, LangVersion=latest,
 │                                              EnforceCodeStyleInBuild, TreatWarningsAsErrors,
-│                                              common metadata (Confluent Inc.), strong-name signing (shared .snk, both projects)
-├─ .editorconfig                             ← dotnet/runtime style (_camelCase/s_, PascalCase,
-│                                              Allman, System.* usings first, CA1715 I-prefix)
-├─ .gitignore                                ← bin/ obj/ .DS_Store *.user + test artifacts
+│                                              strong-name signing (shared .snk, both projects)
+│                                              — NO AllowUnsafeBlocks here (library-only, M1/P1 D2)
+├─ .editorconfig · .gitignore
 ├─ src/
 │  └─ Confluent.Kafka/
-│     ├─ Confluent.Kafka.csproj               ← TFMs netstandard2.0;net8.0;net10.0
-│     │                                         (net462 via ns2.0), System.Memory on ns2.0
-│     │                                         leg only, GenerateDocumentationFile, InternalsVisibleTo → UnitTests (public key)
-│     ├─ Internal/.gitkeep                    ← empty by design (D3), no types yet
-│     └─ Internal/Interop/.gitkeep            ← empty by design (D3), P/Invoke boundary later
+│     ├─ Confluent.Kafka.csproj                ← TFMs netstandard2.0;net8.0;net10.0
+│     │                                           (net462 via ns2.0), System.Memory on the ns2.0
+│     │                                           leg only, GenerateDocumentationFile,
+│     │                                           IsPackable=false (M0/P1 — holds §4's id gate shut),
+│     │                                           InternalsVisibleTo → UnitTests (public key);
+│     │                                           M1/P1: + <AllowUnsafeBlocks> (library only),
+│     │                                           + native-copy MSBuild target (per-OS filename via
+│     │                                           IsOSPlatform, profile from $(Configuration),
+│     │                                           repo root 4 levels up, <Content> transitive,
+│     │                                           + <Error> guard if native absent)
+│     └─ Internal/
+│        └─ Interop/                            ← the P/Invoke boundary — `unsafe` lives ONLY here
+│           ├─ NativeMethods.cs                 ← internal static class NativeMethods: 8 classic
+│           │                                      [DllImport("confluent_kafka", Cdecl)] decls,
+│           │                                      full ABI symbol as EntryPoint, I1 on both bools
+│           └─ Utf8Marshal.cs                   ← internal static class Utf8Marshal: Pin (disposable
+│                                                  call-scoped pinned buffer) + PtrToString
+│                                                  (NUL-terminated form; null for IntPtr.Zero)
 └─ tests/
-   └─ Confluent.Kafka.UnitTests/
-      ├─ Confluent.Kafka.UnitTests.csproj    ← TFMs net8.0;net10.0, xUnit +
-      │                                        Microsoft.NET.Test.Sdk, ProjectReference
-      └─ TfmSentinelTests.cs                 ← one trivial TFM-sentinel smoke test
+   └─ Confluent.Kafka.UnitTests/               ← TFMs net8.0;net10.0, unsafe-free
+      ├─ Confluent.Kafka.UnitTests.csproj      ← xUnit + Microsoft.NET.Test.Sdk, ProjectReference
+      ├─ TfmSentinelTests.cs                   ← M0/P0 TFM-sentinel smoke test (root: harness-level)
+      └─ Interop/                              ← mirrors the library interop area (public test
+         │                                         classes; "Interop" not "Internal/Interop" — the
+         │                                         Internal visibility marker is library-only, §2)
+         ├─ NativeLoadProbeTests.cs            ← M1/P1: 2 tests, both invoke a native [DllImport]
+         │                                         (smoke new/put/destroy; non-ASCII put no-crash)
+         └─ Utf8MarshalTests.cs                ← M1/P1: managed Utf8Marshal codec round-trip
+                                                   + PtrToString(Zero)==null (no native call)
 ```
 
-## Verification state (re-verified at branch HEAD after the M0/P1 rename)
+## Verification state (M1/P1 DoD — Actor AND Critic ran independently, all green; re-verified after the M0/P1 rename merge)
 
-- `dotnet restore` — clean.
-- `dotnet build` — 0 warnings, 0 errors across all library TFMs
+- `cargo build --features ffi` — cdylib `target/debug/libconfluent_kafka.dylib`
+  + generated header `target/include/confluent_kafka.h` produced (run FIRST,
+  CLAUDE.md §7.1).
+- `dotnet build` — **0 warnings, 0 errors** across all library TFMs
   (netstandard2.0, net8.0, net10.0) and both test TFMs (net8.0, net10.0), with
-  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` active.
-- `dotnet test -f net10.0` — 1 passed, 0 failed (TFM sentinel).
+  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` active. `/unsafe+` on the
+  library triggered **no** analyzer warnings (CA5392 is opt-in; SYSLIB1054 is
+  Info-severity) — so **no suppressions were needed** (M1/P1 decision D5).
+- `dotnet test -f net10.0` — **4 passed, 0 failed** (2 native-load probe + 1
+  `Utf8Marshal` codec + the M0/P0 sentinel). The native loaded, the first
+  `[DllImport]` round-tripped, and UTF-8 marshalled into native correctly.
 - `dotnet format --verify-no-changes` — clean.
-- Strong-naming — both assemblies signed with the shared key; matching
-  public-key token `a6a493010a30d243`.
-- **CI-only (not blocking this phase):** net8.0 test *run* requires the .NET 8
-  runtime (only .NET 10 installed locally — `dotnet --list-runtimes` shows only
-  Microsoft.NETCore.App 10.0.9); net462 test *run* requires Windows. Both build
-  legs succeed; only the *runs* are deferred to CI.
+- **CI-only (not blocking this phase):** only the .NET 10 runtime is installed
+  locally (`dotnet --list-runtimes` shows only Microsoft.NETCore.App 10.0.x).
+  The net8.0 test *run* needs the .NET 8 runtime and net462 needs Windows — both
+  are **CI-only**. Both *build* legs succeed; only the *runs* are deferred.
+- **Handled by the two-stage pipeline (CLAUDE.md §7.1):** the native-copy target
+  uses `<Content>` (not `<None>`) so the cdylib flows transitively to the
+  referencing TEST project's output dir, where the probe resolves it via default
+  `[DllImport]` probing.
 
 Additional gates specific to M0/P1 (the rename), all green:
 
@@ -118,22 +151,50 @@ Additional gates specific to M0/P1 (the rename), all green:
   was **not** regenerated (SDK 10 would emit `.slnx`; classic `.sln` is a
   standing M0/P0 deviation).
 
-## Decisions in force (from the approved plan)
+## Decisions in force (M1/P1)
+
+- **D1 (un-defers M0/P0 D2)** — native-copy MSBuild target landed; per-OS
+  filename via MSBuild, profile from `$(Configuration)`, repo root 4 levels up,
+  `<Content>` transitive, never a hardcoded path/filename (ffi §0.2 — the
+  **pre-publish** half of the two-phase delivery model).
+- **D2** — `<AllowUnsafeBlocks>` on the LIBRARY csproj only; test project stays
+  unsafe-free; `unsafe` confined to `Internal/Interop/`.
+- **D3** — classic `[DllImport]`, uniform across all TFMs (netstandard2.0 floor
+  forbids `[LibraryImport]`/`PtrToStringUTF8`/`LPUTF8Str`).
+- **D4** — `Utf8Marshal.Pin` = disposable call-scoped pin (`using`); `Utf8Marshal.PtrToString`
+  = NUL-terminated form only (length-delimited receive-path form deferred).
+- **D5** — analyzer suppressions contingent; none fired, none added.
+
+## Decisions in force (M0/P0)
 
 - **D1** — Library TFMs `netstandard2.0;net8.0;net10.0` (net462 via ns2.0).
-- **D2** — Native-copy MSBuild target + Rust build DEFERRED to the first
-  implementation phase — **M1/P0** (the skeleton has nothing to P/Invoke).
+- **D2** — Native-copy MSBuild target + Rust build deferred to the first
+  implementation phase — **un-deferred in M1/P1 D1 above**.
 - **D3** — Empty folders via `.gitkeep`, no placeholder types.
 - **D4** — Test framework = xUnit.
 
-Deviations recorded during initial scaffolding (see the archived review record
-under `design/history/M0/P0-scaffolding/`):
-- Solution regenerated as classic `.sln` (SDK 10 defaults to `.slnx`).
-- Test package versions pinned to offline-available builds: xunit 2.9.3,
-  xunit.runner.visualstudio 2.8.2, Microsoft.NET.Test.Sdk 17.14.1,
-  System.Memory 4.5.5.
+Deviations recorded during execution (see the archived review record under
+`design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`):
+- XML-comment MSB4025 fix in the csproj comment (literal `--` illegal in XML
+  comments — reworded).
+- `.gitkeep` deletion grouped into the csproj commit (commit-grouping only).
 
-## Post-plan additions (interactive, 2026-07-20)
+## Watch-item for future phases — RESOLVED post-close (`9ae31fa`)
+
+- `PinnedUtf8String` was a `readonly struct` holding a `GCHandle`; `Dispose()`
+  freed a compiler defensive copy. Correct under M1/P1's single-`using`
+  ownership, but a later phase that **stores or copies** a `PinnedUtf8String`
+  would have hit the false "idempotent for a single owner" claim (double-`Dispose`
+  / disposed by-value copy would double-free the runtime handle). Recorded in
+  `.claude/agent-memory/dotnet-critic/interop_review_patterns.md`.
+- **Resolved in `9ae31fa`:** `PinnedUtf8String` is now a `sealed class`, so
+  `Dispose()` mutates the real `GCHandle` field (no defensive copy) — the unpin
+  is genuinely idempotent and the value-copy double-free hazard is gone. Verified:
+  `dotnet build` 0/0 all TFMs, `dotnet test -f net10.0` 4/4, format clean. The
+  archived `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md` is left
+  unchanged as the phase-close snapshot.
+
+## Post-plan additions (M0/P0, interactive — 2026-07-20)
 
 Made after the Critic (N=1) close, in an interactive review pass — these are
 NOT part of the approved plan and were NOT put through a separate Critic cycle:
@@ -157,21 +218,34 @@ NOT part of the approved plan and were NOT put through a separate Critic cycle:
 
 ## Review outcome
 
+- **M1/P1** — Critic (N=2) review of commits `9441a4c`, `149e327`, `9423fa4`:
+  **0 genuine findings** — clean, independently build/test/format-verified. No fix
+  cycle required (one Actor pass → one Critic pass → close).
+- **M0/P1** — Critic (N=1): 3 review cycles, 4 items, **all closed**
+  (`COMMENTS.1.md` empty). The substantive one was the `IsPackable` default
+  inversion recorded above; items 2–4 were STATUS.md documentation-accuracy
+  defects.
 - **M0/P0** — Critic (N=1) review of commits `f1fb7fc`, `f93a4ef`, `c910fca`:
   **0 genuine findings** — clean skeleton, verified by an independent
-  build/test/format run. No fix cycle required.
-- **M0/P1** — Critic (N=1) review pending at the time of writing; the Actor's
-  own gates (above) are green.
+  build/test/format run.
 
 ## Governance pointers
 
-Current phase (**M0/P1**):
+Current phase (**M1/P1**):
+
+- Approved plan: `design/history/M1/P1-interop-scaffolding/PLAN.md`.
+- Closed review record: `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`.
+- Personas: `dotnet-actor` (Actor N=2), `dotnet-critic` (Critic N=2). NEVER the
+  Rust `actor-executor` / `kafka-critic`.
+- The next requirement takes **N=3** with a fresh (gitignored) working
+  `COMMENTS.3.md`; `COMMENTS.2.md` ends this phase with no open items.
+
+Previous phase (**M0/P1** — rename identity):
 
 - Approved plan: `design/history/M0/P1-rename-identity/PLAN.md`.
-- Closed review record: `design/history/M0/P1-rename-identity/COMMENTS.DONE.1.md`
-  (written when the Critic loop closes).
+- Closed review record: `design/history/M0/P1-rename-identity/COMMENTS.DONE.1.md`.
 
-Previous phase (**M0/P0**):
+Previous phase (**M0/P0** — scaffolding):
 
 - Approved plan: `design/history/M0/P0-scaffolding/PLAN.md`. Carries a dated
   supersession note: the phase shipped under the
@@ -183,13 +257,17 @@ Previous phase (**M0/P0**):
   historical verification claim describe an assembly name that did not exist
   when the check ran.
 
-Active review file for the next requirement: `bindings/dotnet/COMMENTS.1.md`
-(gitignored; reset — no open items).
-
 ## Next up (not started)
 
-First implementation phase — **M1/P0** (Mode A per CLAUDE.md §6.2): wire the
-`NativeMethods` P/Invoke class + a first `SafeHandle` + the native-copy MSBuild
-target (D2 un-defers here), against the already-landed producer/consumer C ABI.
-Requires `cargo build --features ffi` to produce the cdylib first
-(CLAUDE.md §7.1).
+The first **public managed API + `SafeHandle`** phase (still Mode A — the
+producer/consumer C ABI has landed). Candidates, from the interop foundation
+now in place:
+- The consumer or producer client lifecycle: a `SafeHandle` subclass over
+  `Consumer_t` / `Producer_t` (`new` → `close`/`destroy`), wired to
+  `IAsyncDisposable`/`IDisposable` per ffi §A2/§B2.
+- The flat `KafkaException` + `KafkaException.FromHandle` (the 5 `KafkaError`
+  declarations already staged in `NativeMethods` become live callers — their
+  `EntryPoint`s get their first runtime validation here) per ffi §A5/§B5.
+- Config marshalling (`ConsumerProperties`/`ProducerProperties_put` from an
+  `IReadOnlyDictionary<string,string>`) per CLAUDE.md §4.
+Sequence and exact scope to be set in the next PLAN (Manager, with approval).
