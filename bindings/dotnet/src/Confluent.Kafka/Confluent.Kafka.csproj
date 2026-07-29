@@ -15,6 +15,16 @@
     <RootNamespace>Confluent.Kafka</RootNamespace>
     <AssemblyName>Confluent.Kafka</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!--
+      Holds CLAUDE.md §4's ⚠ package-id gate shut. Microsoft.NET.Sdk defaults
+      IsPackable to true for a library and PackageId to $(AssemblyName), so
+      writing neither would leave a bare `dotnet pack` emitting a package id
+      byte-equal to confluent-kafka-dotnet's — the very collision that gate
+      defers. Reverses in one line once the gate is decided (own the
+      Schema-Registry integration, or diverge the id). Deliberately the only
+      packaging property here: no PackageId, no Version, no Pack* metadata.
+    -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) is built in on net8.0+ but

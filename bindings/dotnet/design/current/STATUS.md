@@ -31,10 +31,21 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
   ⚠ **CLAUDE.md §4's package-id pre-publish gate remains OPEN.** The binding now
   shares the `Confluent.Kafka` id with confluent-kafka-dotnet, meaning a project
   can hold ckd 2.x **or** this client, never both (so ckd's Schema-Registry /
-  OAuthBearer packages can't be mixed in). This phase makes the *name* collide
-  but publishes nothing: there is no `PackageId`, no `Pack*` metadata, and the
-  library sets no `IsPackable`. The decision — own SR integration, or diverge the
-  id — is still owed **before any publish**.
+  OAuthBearer packages can't be mixed in). This phase makes the *name* collide,
+  so the gate is now held shut **structurally** rather than by prose:
+  `Microsoft.NET.Sdk` defaults `IsPackable` to **true** for a library and
+  `PackageId` to **`$(AssemblyName)`**, so writing neither is the *packable*
+  state — a bare `dotnet pack` would emit a package id byte-equal to ckd's. The
+  library csproj therefore sets `<IsPackable>false</IsPackable>` explicitly (and
+  nothing else packaging-related). Check the **evaluated** property, never the
+  absence of an element: `dotnet msbuild <library>.csproj -getProperty:IsPackable`
+  → `false`. "No `Pack*` metadata" was never the right
+  test either — `Directory.Build.props`'s `<Authors>`/`<Company>`/`<Product>`/
+  `<Copyright>` flow into a nuspec on their own. There is also no publish
+  automation in the repo (no `.github/workflows`, no `dotnet pack` / `nuget push`
+  target anywhere), so nothing can trip the gate today. The decision — own SR
+  integration, or diverge the id — is still owed **before any publish**, and
+  un-defers by flipping that one line.
 
 ## What exists now (structure)
 
@@ -50,14 +61,14 @@ bindings/dotnet/
 ├─ src/
 │  └─ Confluent.Kafka/
 │     ├─ Confluent.Kafka.csproj               ← TFMs netstandard2.0;net8.0;net10.0
-│     │                                           (net462 via ns2.0), System.Memory on ns2.0
-│     │                                           leg only, GenerateDocumentationFile, InternalsVisibleTo → UnitTests (public key)
+│     │                                         (net462 via ns2.0), System.Memory on ns2.0
+│     │                                         leg only, GenerateDocumentationFile, InternalsVisibleTo → UnitTests (public key)
 │     ├─ Internal/.gitkeep                    ← empty by design (D3), no types yet
 │     └─ Internal/Interop/.gitkeep            ← empty by design (D3), P/Invoke boundary later
 └─ tests/
    └─ Confluent.Kafka.UnitTests/
       ├─ Confluent.Kafka.UnitTests.csproj    ← TFMs net8.0;net10.0, xUnit +
-      │                                                     Microsoft.NET.Test.Sdk, ProjectReference
+      │                                        Microsoft.NET.Test.Sdk, ProjectReference
       └─ TfmSentinelTests.cs                 ← one trivial TFM-sentinel smoke test
 ```
 
@@ -83,10 +94,20 @@ Additional gates specific to M0/P1 (the rename), all green:
   `git mv` relocates only tracked files and untracked build output would
   otherwise have kept the old directories alive with a stale assembly and a
   cached `project.assets.json` naming the old `AssemblyName`.
-- No tracked path carries the old identity (`git ls-files` is clean), and no
-  build or code file mentions it. Two documentation surfaces name it
-  deliberately: the archived M0/P0 record, and this file's transition narrative
-  above — see *Governance pointers*.
+- No tracked path carries the old identity, and no build or code file mentions
+  it. The exact invariant is **scoped to build and code**, and both halves are
+  checkable:
+  `grep -rIn "ShareConsumer" . --exclude-dir=design --exclude='COMMENTS*.md'` →
+  empty, and `git ls-files | grep -i shareconsumer` → empty. It is scoped rather
+  than absolute because **four** documentation surfaces under `design/` name the
+  old identity deliberately — the archived M0/P0 `PLAN.md` (6 occurrences,
+  including its dated supersession note), the archived M0/P0
+  `COMMENTS.DONE.1.md` (2), this phase's own
+  `design/history/M0/P1-rename-identity/PLAN.md` (18 — a rename plan must name
+  what it renames), and this file's transition narrative above (2). *Governance
+  pointers* below links the first three; the fourth is this file. The M0/P1
+  review record `COMMENTS.DONE.1.md` quotes them too, hence the second
+  exclusion.
 - `.snk` byte-identical across the move (SHA-256 `d33f5c98…8eb197`); the
   `InternalsVisibleTo` `Key=` blob still equals `sn -tp` on the key file, and
   `Include=` matches the test project's `<AssemblyName>`.
