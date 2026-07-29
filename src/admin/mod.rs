@@ -55,10 +55,12 @@ pub mod describe_log_dirs_result;
 pub mod describe_producers_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
+pub mod describe_transactions_result;
 pub mod elect_leaders_result;
 pub mod expire_delegation_token_result;
 pub mod feature_metadata;
 pub mod feature_update;
+pub mod fence_producers_result;
 pub mod finalized_version_range;
 pub mod group_listing;
 pub mod kafka_admin_client;
@@ -89,6 +91,8 @@ pub mod replica_info;
 pub mod supported_version_range;
 pub mod topic_description;
 pub mod topic_listing;
+pub mod transaction_description;
+pub mod transaction_state;
 pub mod update_features_result;
 
 pub(crate) mod internals;
@@ -132,10 +136,12 @@ pub use describe_log_dirs_result::DescribeLogDirsResult;
 pub use describe_producers_result::{DescribeProducersResult, PartitionProducerState};
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
+pub use describe_transactions_result::DescribeTransactionsResult;
 pub use elect_leaders_result::ElectLeadersResult;
 pub use expire_delegation_token_result::ExpireDelegationTokenResult;
 pub use feature_metadata::FeatureMetadata;
 pub use feature_update::{FeatureUpdate, UpgradeType};
+pub use fence_producers_result::FenceProducersResult;
 pub use finalized_version_range::FinalizedVersionRange;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
@@ -166,10 +172,10 @@ pub use options::{
     DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions,
     DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
-    DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions,
-    ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, UpdateFeaturesOptions,
+    DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
+    ElectLeadersOptions, ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
+    ListTopicsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use producer_state::ProducerState;
@@ -180,6 +186,8 @@ pub use replica_info::ReplicaInfo;
 pub use supported_version_range::SupportedVersionRange;
 pub use topic_description::TopicDescription;
 pub use topic_listing::TopicListing;
+pub use transaction_description::TransactionDescription;
+pub use transaction_state::TransactionState;
 pub use update_features_result::UpdateFeaturesResult;
 
 use std::time::Duration;
@@ -261,6 +269,20 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.abortTransaction(AbortTransactionSpec, AbortTransactionOptions)`.
     fn abort_transaction(&self, spec: AbortTransactionSpec, options: AbortTransactionOptions)
     -> AbortTransactionResult;
+
+    /// List the transaction states of the given transactional ids.
+    ///
+    /// Corresponds to `Admin.describeTransactions(Collection<String>, DescribeTransactionsOptions)`.
+    fn describe_transactions(
+        &self,
+        transactional_ids: &[String],
+        options: DescribeTransactionsOptions,
+    ) -> DescribeTransactionsResult;
+
+    /// Fence out all active producers that use any of the provided transactional ids.
+    ///
+    /// Corresponds to `Admin.fenceProducers(Collection<String>, FenceProducersOptions)`.
+    fn fence_producers(&self, transactional_ids: &[String], options: FenceProducersOptions) -> FenceProducersResult;
 
     /// Get information about the nodes in the cluster.
     ///

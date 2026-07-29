@@ -27,7 +27,8 @@ use async_trait::async_trait;
 use crate::admin::FilterResults;
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
-    DescribeProducersResult, PartitionProducerState,
+    DescribeProducersResult, DescribeTransactionsOptions, DescribeTransactionsResult, FenceProducersOptions,
+    FenceProducersResult, PartitionProducerState, TransactionDescription,
 };
 use crate::admin::{
     Admin, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
@@ -65,6 +66,7 @@ use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuota
 use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
+use crate::common::utils::ProducerIdAndEpoch;
 use crate::common::{GroupState, GroupType};
 use crate::common::{
     KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
@@ -878,6 +880,40 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
         handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
         AbortTransactionResult::new(HashMap::from([(spec.topic_partition().clone(), handle.future())]))
+    }
+
+    fn describe_transactions(
+        &self,
+        transactional_ids: &[String],
+        _options: DescribeTransactionsOptions,
+    ) -> DescribeTransactionsResult {
+        // Java's `MockAdminClient.describeTransactions` (MockAdminClient.java:1373-1375)
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
+        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // translation of the Java behavior).
+        let mut result = HashMap::new();
+        for id in transactional_ids {
+            let handle: KafkaFutureImpl<TransactionDescription> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(id.clone(), handle.future());
+        }
+        DescribeTransactionsResult::new(result)
+    }
+
+    fn fence_producers(&self, transactional_ids: &[String], _options: FenceProducersOptions) -> FenceProducersResult {
+        // Java's `MockAdminClient.fenceProducers` (MockAdminClient.java:1393-1395)
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
+        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // translation of the Java behavior).
+        let mut result = HashMap::new();
+        for id in transactional_ids {
+            let handle: KafkaFutureImpl<ProducerIdAndEpoch> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            result.insert(id.clone(), handle.future());
+        }
+        FenceProducersResult::new(result)
     }
 
     fn describe_cluster(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {
