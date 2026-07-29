@@ -64,19 +64,6 @@ impl CoordinatorStrategy {
         Self { log_context, coordinator_type, batch: AtomicBool::new(true) }
     }
 
-    /// Disables batched `FindCoordinator` lookups (each key gets its own
-    /// request). Mirrors `CoordinatorStrategy.disableBatch`.
-    ///
-    /// Invoked by the `AdminApiDriver` on a `NoBatchedFindCoordinatorsException`.
-    /// The Rust driver does not yet model that downgrade path (deferred to
-    /// Tier 2 Phase 2); this accessor is provided so the strategy is ready and
-    /// is exercised by the unit tests, hence the `allow(dead_code)` until the
-    /// driver wiring lands.
-    #[allow(dead_code)]
-    pub(crate) fn disable_batch(&self) {
-        self.batch.store(false, Ordering::Release);
-    }
-
     /// Whether batched lookups are enabled. Mirrors `CoordinatorStrategy.batch`.
     pub(crate) fn batch(&self) -> bool {
         self.batch.load(Ordering::Acquire)
@@ -238,6 +225,13 @@ impl CoordinatorStrategy {
 }
 
 impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
+    /// Disables batched lookups (each key gets its own request). Mirrors
+    /// `CoordinatorStrategy.disableBatch`; invoked by the `AdminApiDriver` when
+    /// the broker signals a `NoBatched*` condition.
+    fn disable_batch(&self) {
+        self.batch.store(false, Ordering::Release);
+    }
+
     fn lookup_scope(&self, key: &CoordinatorKey) -> ApiRequestScope {
         if self.batch() {
             ApiRequestScope::SingleLookup

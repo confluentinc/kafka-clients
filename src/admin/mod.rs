@@ -22,6 +22,7 @@
 pub mod admin_client_config;
 pub mod alter_config_op;
 pub mod alter_configs_result;
+pub mod alter_consumer_group_offsets_result;
 pub mod alter_partition_reassignments_result;
 pub mod alter_replica_log_dirs_result;
 pub mod classic_group_description;
@@ -31,6 +32,7 @@ pub mod consumer_group_description;
 pub mod consumer_group_listing;
 pub mod create_partitions_result;
 pub mod create_topics_result;
+pub mod delete_consumer_group_offsets_result;
 pub mod delete_records_result;
 pub mod delete_topics_result;
 pub mod deleted_records;
@@ -45,6 +47,8 @@ pub mod elect_leaders_result;
 pub mod group_listing;
 pub mod kafka_admin_client;
 pub mod list_config_resources_result;
+pub mod list_consumer_group_offsets_result;
+pub mod list_consumer_group_offsets_spec;
 pub mod list_consumer_groups_result;
 pub mod list_groups_result;
 pub mod list_offsets_result;
@@ -70,6 +74,7 @@ pub(crate) mod internals;
 pub use admin_client_config::AdminClientConfig;
 pub use alter_config_op::{AlterConfigOp, OpType};
 pub use alter_configs_result::AlterConfigsResult;
+pub use alter_consumer_group_offsets_result::AlterConsumerGroupOffsetsResult;
 pub use alter_partition_reassignments_result::AlterPartitionReassignmentsResult;
 pub use alter_replica_log_dirs_result::AlterReplicaLogDirsResult;
 pub use classic_group_description::ClassicGroupDescription;
@@ -82,6 +87,7 @@ use std::collections::HashMap;
 
 pub use create_partitions_result::CreatePartitionsResult;
 pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
+pub use delete_consumer_group_offsets_result::DeleteConsumerGroupOffsetsResult;
 pub use delete_records_result::DeleteRecordsResult;
 pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
@@ -96,6 +102,8 @@ pub use elect_leaders_result::ElectLeadersResult;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_config_resources_result::ListConfigResourcesResult;
+pub use list_consumer_group_offsets_result::{GroupOffsets, ListConsumerGroupOffsetsResult};
+pub use list_consumer_group_offsets_spec::ListConsumerGroupOffsetsSpec;
 #[allow(deprecated)]
 pub use list_consumer_groups_result::ListConsumerGroupsResult;
 pub use list_groups_result::ListGroupsResult;
@@ -113,10 +121,11 @@ pub use offset_spec::OffsetSpec;
 #[allow(deprecated)]
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
-    AlterConfigsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClassicGroupsOptions,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
+    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
+    AlterReplicaLogDirsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
+    DeleteRecordsOptions, DeleteTopicsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions,
+    DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
+    DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
     ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
@@ -131,6 +140,7 @@ use async_trait::async_trait;
 
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::{ElectionType, KafkaError, TopicCollection, TopicPartition, TopicPartitionReplica};
+use crate::consumer::OffsetAndMetadata;
 
 use std::collections::HashSet;
 
@@ -316,6 +326,39 @@ pub trait Admin: Send + Sync {
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
     ) -> DescribeClassicGroupsResult;
+
+    /// List the consumer group offsets available in the cluster for the given
+    /// group specifications.
+    ///
+    /// Corresponds to
+    /// `Admin.listConsumerGroupOffsets(Map<String, ListConsumerGroupOffsetsSpec>, ListConsumerGroupOffsetsOptions)`.
+    fn list_consumer_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult;
+
+    /// Alter offsets for a consumer group.
+    ///
+    /// Corresponds to
+    /// `Admin.alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
+    fn alter_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> AlterConsumerGroupOffsetsResult;
+
+    /// Delete offsets for a set of partitions in a consumer group.
+    ///
+    /// Corresponds to
+    /// `Admin.deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
+    fn delete_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: &HashSet<TopicPartition>,
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> DeleteConsumerGroupOffsetsResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.
