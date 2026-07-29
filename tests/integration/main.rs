@@ -24,6 +24,7 @@ mod common;
 
 mod admin_cluster_configs_test;
 mod admin_elections_reassignments_offsets_test;
+mod admin_group_offsets_test;
 mod admin_groups_test;
 mod admin_log_dirs_test;
 mod admin_partitions_records_test;
