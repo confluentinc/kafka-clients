@@ -87,3 +87,4 @@
 - [M11 Tier2 P2 group offsets](m11_tier2_phase2_notes.md) — OffsetDelete is dedicated RPC (not OffsetCommit -1 sentinel); disableBatch driver wiring; MockClient version-mismatch helper; old-form FC avoids flaky scope-crossing
 - [M11 Tier2 P3 group/member deletion](m11_tier2_phase3_notes.md) — DeleteGroups+LeaveGroup wire; abstract-base-via-composition; removeAll describe-chain via SimpleAdminApiFuture::handle; MockClient matches at send-time (late response hangs); reason trunc 255
 - [M11 Tier3 P1 ACLs](m11_tier3_phase1_acls_notes.md) — LeastLoaded retry (no metadata refresh) vs Controller; module_inception; DeleteAclsResult custom aggregate future; authorizer fixture can't gate ANONYMOUS super user
+- [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary

@@ -485,3 +485,49 @@ group/member deletion.** First real use of `CoordinatorStrategy(GROUP)` and the
 `AdminApiDriver` coordinator-lookup engine. Next: **Tier 3** (ACLs, quotas,
 SCRAM, delegation tokens, features, producers/transactions, client metrics),
 starting with Phase 1 "ACLs".
+
+## Tier 3 Phase 1 — ACLs ✓ (2026-07-29)
+
+Translated `create_acls`, `describe_acls`, `delete_acls`, Rust core + unit
+tests + real-broker integration tests, all green. All three are plain `Call`
+RPCs (`LeastLoadedBrokerOrActiveKController`), independent of the rest of Tier 3.
+
+- **ACL/resource primitives (net new)**: `common::acl::{AclBinding,
+  AclBindingFilter, AccessControlEntry, AccessControlEntryFilter,
+  AccessControlEntryData (pub(crate))}` and `common::resource::{Resource,
+  ResourcePattern, ResourcePatternFilter, PatternType, ResourceType}`. Reused
+  the Tier-2-landed `common::acl::{AclOperation, AclPermissionType}` (added only
+  `Display` impls) and `common::utils::from_32_bit_field` — no duplication.
+- **RPCs**: `describe_acls` short-circuits an unknown `AclBindingFilter` to an
+  `InvalidRequest` future with NO `Call` enqueued (Java `KafkaAdminClient.java:2559`);
+  `create_acls` rejects an indefinite binding per-binding (other valid bindings
+  in the batch still succeed); `create_acls`/`delete_acls` translate
+  `handleNotControllerError` (clear controller + request update + retry).
+- **New types**: `admin::{Create,Describe,Delete}Acls{Options,Result}` incl.
+  `DeleteAclsResult::{FilterResult, FilterResults}`. `MockAdminClient` returns
+  "Not implemented yet" per key (faithful to Java's mock throwing
+  `UnsupportedOperationException`). Wire wrappers (net new):
+  `common::requests::{Create,Describe,Delete}Acls{Request,Response}` with all
+  enum arms wired and hand-computed byte-level request vectors.
+- **New test fixture**: `cluster_config::authorizer_single_broker()`
+  (`StandardAuthorizer` + `KAFKA_SUPER_USERS=User:ANONYMOUS`) — the first
+  authorizer-enabled broker fixture (finding #11).
+
+### Tests
+- **Rust lib suite: 2709 passing.**
+- **Integration**: `tests/integration/admin_acls_test.rs` — 4/4 green against a
+  real 4.2.0 broker with the authorizer fixture (create→describe round-trip;
+  non-matching filter empty; delete→describe gone; DENY-rule authorizer
+  round-trip). Note: a live `TopicAuthorizationException` end-to-end assertion
+  isn't provocable because the only authenticatable principal (anonymous
+  PLAINTEXT) is a super user — documented fixture limitation, adjudicated
+  defensible.
+- Six dedicated primitive test files translated 1:1 (`AclBindingTest`,
+  `AclOperationTest`, `AclPermissionTypeTest`, `ResourcePatternFilterTest`,
+  `ResourcePatternTest`, `ResourceTypeTest`); `AclBindingFilterTest`/
+  `AccessControlEntry*Test`/`PatternTypeTest` don't exist in Java (not invented).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 1 LOW DoD #3 gap on first pass (`AclOperationTest`/`AclPermissionTypeTest`
+  reduced to spot-checks) fixed + re-verified clean (exhaustive `INFOS`-table
+  loops, all 16 ops + 4 perms pinned). See
+  `design/history/Milestone-11/Tier3-Phase-1/COMMENTS.DONE.1.md`.
