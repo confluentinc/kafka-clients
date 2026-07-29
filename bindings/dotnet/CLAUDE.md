@@ -68,15 +68,15 @@ the unsafe boundary is quarantined:
 
 ```
 bindings/dotnet/
-├─ Confluent.Kafka.ShareConsumer.sln    ← solution + shared config at the root
+├─ Confluent.Kafka.sln    ← solution + shared config at the root
 ├─ Directory.Build.props · .editorconfig · .gitignore
 ├─ src/
-│  └─ Confluent.Kafka.ShareConsumer/    ← the library project (named for the package id, §4)
+│  └─ Confluent.Kafka/    ← the library project (named for the package id, §4)
 │     ├─ <public API — flat at the root; topical folders (e.g. Admin/) as families grow>
 │     └─ Internal/                       ← internal scaffolding — the ONLY non-public folder
 │        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
 └─ tests/
-   └─ Confluent.Kafka.ShareConsumer.UnitTests/   ← Mock* unit tests
+   └─ Confluent.Kafka.UnitTests/   ← Mock* unit tests
 ```
 
 (Folders are organizational; C# accessibility is still the `internal` keyword +
@@ -94,26 +94,26 @@ correct; what is never allowed is a public type under `Internal/`. There is no
 inner `src/` inside the project: the outer top-level `src/` *is* the library
 project's parent.
 
-- **library project root** (`src/Confluent.Kafka.ShareConsumer/`) — **all public
-  API** (namespace `Confluent.Kafka.ShareConsumer`), whatever the C# kind: the
+- **library project root** (`src/Confluent.Kafka/`) — **all public
+  API** (namespace `Confluent.Kafka`), whatever the C# kind: the
   client types *and* supporting value types / enums (`ProducerRecord`,
   `RecordMetadata`, `Headers`, `TopicPartition`, later `ConsumerRecord` /
   `OffsetAndMetadata` / enums). If a user can name it, it lives here — flat while
   the surface is small, in a **topical** subfolder with the matching child
-  namespace (e.g. `Admin/` → `Confluent.Kafka.ShareConsumer.Admin`, ckd's
+  namespace (e.g. `Admin/` → `Confluent.Kafka.Admin`, ckd's
   precedent) once a family grows.
 - `Internal/` — **internal** managed scaffolding
-  (`Confluent.Kafka.ShareConsumer.Internal`): the async-completion bridge (the
+  (`Confluent.Kafka.Internal`): the async-completion bridge (the
   consumer's callback→`TaskCompletionSource` adapter; the producer's pull-pump
   *or* push adapter — open, ffi §A7), config → properties marshalling.
 - `Internal/Interop/` — the **P/Invoke boundary**
-  (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `NativeMethods`
+  (`Confluent.Kafka.Internal.Interop`): the `NativeMethods`
   `[DllImport]` class (`NativeMethods.cs` — the name CA1060 requires),
   `SafeHandle`s, `Utf8Marshal` helpers, callback delegates, and the blittable
   `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
   interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
   with `ffi-marshalling.md`.
-- `tests/Confluent.Kafka.ShareConsumer.UnitTests/` — `Mock*` unit tests
+- `tests/Confluent.Kafka.UnitTests/` — `Mock*` unit tests
   (`MockProducer`; `MockConsumer` as the consumer lands), a top-level sibling of
   `src/` in its own project directory **outside** the library tree — so default
   SDK compile globbing never pulls test files into the library assembly (no
@@ -127,7 +127,7 @@ Mirror the **Java** client in idiomatic C#. The producer surface we're building
 toward (bytes-only interim per the serializer decision in §4):
 
 ```csharp
-namespace Confluent.Kafka.ShareConsumer;   // interim id; folds into Confluent.Kafka later — §4
+namespace Confluent.Kafka;   // same id/assembly as ckd — revisit before publish, §4
 
 public sealed class ProducerRecord {
     public string Topic { get; }
@@ -269,7 +269,7 @@ comment).
 
 | Decision | Default | Why / when |
 |---|---|---|
-| **Namespace / package id** | **Now:** `Confluent.Kafka.ShareConsumer` — a **distinct** package id / assembly / namespace, so it coexists with ckd's `Confluent.Kafka` 2.x (NuGet resolves **one version per package id** and the CLR binds **one assembly per simple name** — a distinct id is the only way to run alongside 2.x; `extern alias` can't bypass either wall). **Later:** switch to the bare `Confluent.Kafka` (new major, e.g. 4.x) once this client is a full **superset that replaces** 2.x. | before any public type |
+| **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
 | **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `CloseAsync(TimeSpan)`. *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. | first client type |
 | **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
 | **Async naming** | `Async` suffix on `Task`-returning methods (`SendAsync`); ffi-marshalling assumes this. Deviation: strict-Java `Send`. | first async method |

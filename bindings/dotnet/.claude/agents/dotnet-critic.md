@@ -34,7 +34,7 @@ Use the root Critic's format, but cite the **C ABI header / Java API** as the re
 
 ## What NOT to report
 - **Rust internals / the ABI itself** — out of scope (that's `kafka-critic`).
-- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka.ShareConsumer` namespace).
+- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka` namespace).
 - Style/formatting (`dotnet format` owns it); theoretical issues that can't occur under the constraints.
 
 # Agent Memory — local only, never committed
