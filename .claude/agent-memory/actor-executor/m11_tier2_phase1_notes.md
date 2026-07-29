@@ -75,3 +75,37 @@ Final-pass findings (resumed a dead session with valuable uncommitted work):
 - The prior session's uncommitted kafka_admin_client.rs + mock_admin_client.rs were left
   UNFORMATTED (edition-2024 import sort). `tail -N` on format-check output hides earlier
   diffs — always pipe to `grep '^Diff in' | sed 's/:.*//' | sort -u` to see all files.
+
+FIX CYCLE (Critic round-1, 3 issues, all test/completeness gaps — landed 2026-07-29):
+- Asserting emitted wire-request contents with MockClient: DON'T prepare a future
+  response for the request under inspection → it stays queued in MockClient.requests.
+  Then `runnable.client_mut().requests_mut()[i].request_builder_mut().build()` returns
+  the ConcreteRequest (build_version clones self.data, so building is non-destructive —
+  you can build() AND build_version(4) AND then respond_from() on the same queued req).
+  Import ConcreteRequest locally in the test (`use super::*` only re-exports ConcreteResponse,
+  not ConcreteRequest). RequestBuilder trait is already in scope via the file's top imports.
+- MockClient does NOT negotiate API versions and NEVER calls build_version — so the
+  ListGroups older-broker downgrade (omit CLASSIC-only / throw SHARE|CONSUMER-only) has
+  no end-to-end code path through the mock. Model it two ways: omit path = build the queued
+  req at build_version(4) and assert types_filter dropped; reject path = 
+  prepare_unsupported_version_response() (== the version-mismatch ClientResponse the real
+  NetworkClient makes when the builder throws) then assert future surfaces UnsupportedVersion.
+  UnsupportedVersion is NOT is_retriable → per-broker ListGroups Call handle_unsupported_version_fn
+  is `|| false` → fail_call hits `!is_retriable` → handle_failure → error into ListGroupsResults
+  accumulator → result.all() throws. Documented deviation in COMMENTS.DONE.1.md.
+- Classic-describe full retry chain (testDescribeClassicGroups) works with the FIFO queue-based
+  mock: prepare responses in exact send order (FC-err, FC-err, FC-ok, DG-load, DG-notcoord, FC-ok,
+  DG-notavail, FC-ok, DG-good), loop run_once + time.sleep(50). Needs default retries (i32::MAX)
+  via env_with_props/env_nodes_with_props — env()'s test_config retries=2 is too few. Single
+  in-flight per coordinator key keeps FIFO intact across re-lookups.
+- metadata-failure slice: env_nodes_with_props(3, &[("retries","0")]) + metadata_resp(&[], _)
+  (empty broker list) → findAllBrokers Call fails terminally → handle_failure wraps
+  "Failed to find brokers to send list{Groups,ConsumerGroups}".
+- ConsumerProtocol overloads that Java overloads by type: Rust can't overload, so
+  serializeAssignment(ConsumerProtocolAssignment,short) → serialize_assignment_data (suffix).
+- New helpers added to the kafka_admin_client test module: env_nodes_with_props(n, extra),
+  pump_until_request_queued, listed_groups(&[(id,ptype,state,gtype)]), find_coordinator_error_resp,
+  described_member, describe_groups_full_resp.
+- COMMENTS.1.md is GITIGNORED; COMMENTS.DONE.1.md is untracked-by-convention (don't git add
+  either — they're local workflow artifacts). Fixup commits reference 9f4eae7 (ConsumerProtocol)
+  and 08885a3 (group RPC wiring). Lib test count 2484 → 2497 (+13).
