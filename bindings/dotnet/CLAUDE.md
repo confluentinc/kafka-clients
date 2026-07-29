@@ -72,25 +72,36 @@ bindings/dotnet/
 ├─ Directory.Build.props · .editorconfig · .gitignore
 ├─ src/
 │  └─ Confluent.Kafka.ShareConsumer/    ← the library project (named for the package id, §4)
-│     └─ Internal/                       ← internal scaffolding
+│     ├─ <public API — flat at the root; topical folders (e.g. Admin/) as families grow>
+│     └─ Internal/                       ← internal scaffolding — the ONLY non-public folder
 │        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
 └─ tests/
    └─ Confluent.Kafka.ShareConsumer.UnitTests/   ← Mock* unit tests
 ```
 
 (Folders are organizational; C# accessibility is still the `internal` keyword +
-the assembly.) **`Internal/` is the visibility marker:** every type under
-`Internal/` is explicitly `internal` (and `sealed` where practical), and
-everything at the library project root is `public` — wanting a type under
-`Internal/` to be `public` is the signal it belongs at the project root. There is
-no inner `src/` inside the project: the outer top-level `src/` *is* the library
-project's parent; the project root itself holds the public API.
+the assembly.) **`Internal/` is the visibility marker — the *only* folder that
+implies non-public:** every type under it is explicitly `internal` (and `sealed`
+where practical), and `Internal/Interop/` is the only place `unsafe` appears.
+Wanting a type under `Internal/` to be `public` is the signal it belongs in the
+public tree. Public API lives **at or below** the library project root: flat at
+the root while the surface is small, moving into **topical** folders (with the
+matching child namespace) once a family gets large — in .NET, folders
+conventionally mirror namespaces/topics, *not* accessibility, and a flat root
+does not scale (ckd needed `Admin/` for 107 public types, plus `Exceptions/`,
+and its root is still ~90 files). So a public `Admin/` folder is expected and
+correct; what is never allowed is a public type under `Internal/`. There is no
+inner `src/` inside the project: the outer top-level `src/` *is* the library
+project's parent.
 
 - **library project root** (`src/Confluent.Kafka.ShareConsumer/`) — **all public
   API** (namespace `Confluent.Kafka.ShareConsumer`), whatever the C# kind: the
   client types *and* supporting value types / enums (`ProducerRecord`,
   `RecordMetadata`, `Headers`, `TopicPartition`, later `ConsumerRecord` /
-  `OffsetAndMetadata` / enums). If a user can name it, it lives here.
+  `OffsetAndMetadata` / enums). If a user can name it, it lives here — flat while
+  the surface is small, in a **topical** subfolder with the matching child
+  namespace (e.g. `Admin/` → `Confluent.Kafka.ShareConsumer.Admin`, ckd's
+  precedent) once a family grows.
 - `Internal/` — **internal** managed scaffolding
   (`Confluent.Kafka.ShareConsumer.Internal`): the async-completion bridge (the
   consumer's callback→`TaskCompletionSource` adapter; the producer's pull-pump
