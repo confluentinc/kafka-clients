@@ -6349,6 +6349,50 @@ mod tests {
         ConcreteResponse::DescribeGroups(crate::common::requests::DescribeGroupsResponse::new(data))
     }
 
+    /// A `FindCoordinator` response carrying a single erroring coordinator for
+    /// `key` (mirrors Java's `prepareFindCoordinatorResponse(error, key, Node.noNode())`
+    /// for the retriable-error retry path).
+    fn find_coordinator_error_resp(key: &str, error: Errors) -> ConcreteResponse {
+        use crate::find_coordinator_response_data::{Coordinator, FindCoordinatorResponseData};
+        let mut c = Coordinator::new();
+        c.set_key(key.to_string())
+            .set_error_code(error.code())
+            .set_node_id(-1)
+            .set_host(String::new())
+            .set_port(-1);
+        let mut data = FindCoordinatorResponseData::new();
+        data.set_coordinators(vec![c]);
+        ConcreteResponse::FindCoordinator(crate::common::requests::FindCoordinatorResponse::new(data))
+    }
+
+    /// A `DescribeGroups` member for a classic group (mirrors
+    /// `DescribeGroupsResponseData.DescribedGroupMember`).
+    fn described_member(
+        member_id: &str,
+        group_instance_id: Option<&str>,
+        client_id: &str,
+        client_host: &str,
+        member_assignment: Vec<u8>,
+    ) -> crate::describe_groups_response_data::DescribedGroupMember {
+        let mut m = crate::describe_groups_response_data::DescribedGroupMember::new();
+        m.set_member_id(member_id.to_string())
+            .set_group_instance_id(group_instance_id.map(str::to_string))
+            .set_client_id(client_id.to_string())
+            .set_client_host(client_host.to_string())
+            .set_member_assignment(member_assignment);
+        m
+    }
+
+    /// A full (non-error) `DescribeGroups` response for the given groups.
+    fn describe_groups_full_resp(
+        groups: Vec<crate::describe_groups_response_data::DescribedGroup>,
+    ) -> ConcreteResponse {
+        use crate::describe_groups_response_data::DescribeGroupsResponseData;
+        let mut data = DescribeGroupsResponseData::new();
+        data.set_groups(groups);
+        ConcreteResponse::DescribeGroups(crate::common::requests::DescribeGroupsResponse::new(data))
+    }
+
     /// Broker enumeration: `list_groups` fans out one `ListGroups` per broker and
     /// unions the results.
     #[tokio::test]
@@ -6535,6 +6579,178 @@ mod tests {
 
         let err = future.get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDescribeClassicGroups`.
+    ///
+    /// Exercises the full classic-describe path: retriable `FindCoordinator`
+    /// errors are retried, retriable/coordinator-moved `DescribeGroups` errors
+    /// trigger a re-lookup, and the final response's two members have their
+    /// assignment bytes decoded via `ConsumerProtocol::deserialize_assignment`.
+    #[tokio::test]
+    async fn test_describe_classic_groups() {
+        use crate::common::ClassicGroupState;
+        use crate::consumer::consumer_partition_assignor::Assignment;
+        use crate::consumer::internals::consumer_protocol::ConsumerProtocol;
+        use crate::describe_groups_response_data::DescribedGroup;
+
+        // Default retries (i32::MAX) with a small backoff so the retry/re-lookup
+        // sequence completes; `env()`'s `retries=2` is too few for this chain.
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "10")]);
+        {
+            let c = runnable.client_mut();
+            // Retriable FindCoordinatorResponse errors should be retried.
+            c.prepare_response(find_coordinator_error_resp("group-0", Errors::CoordinatorNotAvailable));
+            c.prepare_response(find_coordinator_error_resp("group-0", Errors::CoordinatorLoadInProgress));
+            c.prepare_response(find_coordinator_resp(&[("group-0", &nodes[0])]));
+            // Retriable DescribeGroups error should be retried.
+            c.prepare_response(describe_groups_error_resp("group-0", Errors::CoordinatorLoadInProgress, None));
+            // NOT_COORDINATOR: the coordinator moved, so re-run the lookup.
+            c.prepare_response(describe_groups_error_resp("group-0", Errors::NotCoordinator, None));
+            c.prepare_response(find_coordinator_resp(&[("group-0", &nodes[0])]));
+            // COORDINATOR_NOT_AVAILABLE: same, re-run the lookup.
+            c.prepare_response(describe_groups_error_resp("group-0", Errors::CoordinatorNotAvailable, None));
+            c.prepare_response(find_coordinator_resp(&[("group-0", &nodes[0])]));
+
+            // Final good response: two members sharing one 3-partition assignment.
+            let topic_partitions = vec![
+                TopicPartition::new("my_topic", 0),
+                TopicPartition::new("my_topic", 1),
+                TopicPartition::new("my_topic", 2),
+            ];
+            let assignment_bytes =
+                ConsumerProtocol::serialize_assignment(&Assignment::with_partitions(topic_partitions)).unwrap();
+            let member_one = described_member("0", None, "clientId0", "clientHost", assignment_bytes.clone());
+            let member_two = described_member("1", Some("static"), "clientId1", "clientHost", assignment_bytes.clone());
+            let mut group = DescribedGroup::new();
+            group
+                .set_group_id("group-0".to_string())
+                .set_protocol_type(PROTOCOL_TYPE.to_string())
+                .set_group_state(ClassicGroupState::Stable.to_string())
+                .set_members(vec![member_one, member_two]);
+            c.prepare_response(describe_groups_full_resp(vec![group]));
+        }
+
+        let result = admin.describe_classic_groups(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
+        let future = result.described_groups()["group-0"].clone();
+        for _ in 0..300 {
+            if future.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(50);
+        }
+
+        let description = future.get().await.unwrap();
+        assert_eq!(result.described_groups().len(), 1);
+        assert_eq!(description.group_id(), "group-0");
+        assert_eq!(description.state(), ClassicGroupState::Stable);
+        assert_eq!(description.members().len(), 2);
+
+        let expected_partitions: HashSet<TopicPartition> = [
+            TopicPartition::new("my_topic", 0),
+            TopicPartition::new("my_topic", 1),
+            TopicPartition::new("my_topic", 2),
+        ]
+        .into_iter()
+        .collect();
+        for member in description.members() {
+            assert_eq!(member.assignment().topic_partitions(), &expected_partitions);
+        }
+        // The static member carries its group instance id.
+        let member_ids: Vec<&str> = description.members().iter().map(|m| m.consumer_id()).collect();
+        assert!(member_ids.contains(&"0"));
+        assert!(member_ids.contains(&"1"));
+        let static_member = description.members().iter().find(|m| m.consumer_id() == "1").unwrap();
+        assert_eq!(static_member.group_instance_id(), Some("static"));
+    }
+
+    /// Translated from
+    /// `KafkaAdminClientTest.testDescribeClassicGroupsWithAuthorizedOperationsOmitted`.
+    #[tokio::test]
+    async fn test_describe_classic_groups_with_authorized_operations_omitted() {
+        use crate::common::requests::metadata_response::AUTHORIZED_OPERATIONS_OMITTED;
+        use crate::describe_groups_response_data::DescribedGroup;
+
+        let (admin, mut runnable, _time, nodes) = env();
+        {
+            let c = runnable.client_mut();
+            c.prepare_response(find_coordinator_resp(&[("group-0", &nodes[0])]));
+            let mut group = DescribedGroup::new();
+            group
+                .set_group_id("group-0".to_string())
+                .set_protocol_type(String::new())
+                .set_authorized_operations(AUTHORIZED_OPERATIONS_OMITTED);
+            c.prepare_response_for_node(describe_groups_full_resp(vec![group]), &nodes[0]);
+        }
+
+        let result = admin.describe_classic_groups(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
+        let future = result.described_groups()["group-0"].clone();
+        pump_until(&mut runnable, 40, |_r| future.is_done()).await;
+
+        let description = future.get().await.unwrap();
+        // Omitted authorized operations decode to an empty set (Java returns null).
+        assert!(description.authorized_operations().is_empty());
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDescribeMultipleClassicGroups`.
+    #[tokio::test]
+    async fn test_describe_multiple_classic_groups() {
+        use crate::common::ClassicGroupState;
+        use crate::consumer::consumer_partition_assignor::Assignment;
+        use crate::consumer::internals::consumer_protocol::ConsumerProtocol;
+        use crate::describe_groups_response_data::DescribedGroup;
+
+        let (admin, mut runnable, _time, nodes) = env();
+        {
+            let c = runnable.client_mut();
+            // Both group ids resolve to the same coordinator.
+            c.prepare_response(find_coordinator_resp(&[("group-0", &nodes[0]), ("group-1", &nodes[0])]));
+
+            let topic_partitions = vec![
+                TopicPartition::new("my_topic", 0),
+                TopicPartition::new("my_topic", 1),
+                TopicPartition::new("my_topic", 2),
+            ];
+            let assignment_bytes =
+                ConsumerProtocol::serialize_assignment(&Assignment::with_partitions(topic_partitions)).unwrap();
+
+            let mut group0 = DescribedGroup::new();
+            group0
+                .set_group_id("group-0".to_string())
+                .set_protocol_type(PROTOCOL_TYPE.to_string())
+                .set_group_state(ClassicGroupState::Stable.to_string())
+                .set_members(vec![
+                    described_member("0", None, "clientId0", "clientHost", assignment_bytes.clone()),
+                    described_member("1", None, "clientId1", "clientHost", assignment_bytes.clone()),
+                ]);
+            let mut group1 = DescribedGroup::new();
+            group1
+                .set_group_id("group-1".to_string())
+                .set_protocol_type("other".to_string())
+                .set_group_state(ClassicGroupState::Stable.to_string())
+                .set_members(vec![
+                    described_member("0", None, "clientId0", "clientHost", Vec::new()),
+                    described_member("1", None, "clientId1", "clientHost", Vec::new()),
+                ]);
+            // Both groups map to one coordinator, so the batched handler sends a
+            // single DescribeGroups request for both ids.
+            c.prepare_response_for_node(describe_groups_full_resp(vec![group0, group1]), &nodes[0]);
+        }
+
+        let result = admin.describe_classic_groups(
+            &["group-0".to_string(), "group-1".to_string()],
+            DescribeClassicGroupsOptions::new(),
+        );
+        let g0 = result.described_groups()["group-0"].clone();
+        let g1 = result.described_groups()["group-1"].clone();
+        pump_until(&mut runnable, 60, |_r| g0.is_done() && g1.is_done()).await;
+
+        assert_eq!(result.described_groups().len(), 2);
+        let keys: HashSet<String> = result.described_groups().keys().cloned().collect();
+        assert_eq!(keys, HashSet::from(["group-0".to_string(), "group-1".to_string()]));
+        assert!(g0.get().await.is_ok());
+        assert!(g1.get().await.is_ok());
     }
 
     /// Seeds a group config in the mock (the only way Java's mock populates its
