@@ -147,6 +147,30 @@ impl AclOperation {
     }
 }
 
+impl std::fmt::Display for AclOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            AclOperation::Unknown => "UNKNOWN",
+            AclOperation::Any => "ANY",
+            AclOperation::All => "ALL",
+            AclOperation::Read => "READ",
+            AclOperation::Write => "WRITE",
+            AclOperation::Create => "CREATE",
+            AclOperation::Delete => "DELETE",
+            AclOperation::Alter => "ALTER",
+            AclOperation::Describe => "DESCRIBE",
+            AclOperation::ClusterAction => "CLUSTER_ACTION",
+            AclOperation::DescribeConfigs => "DESCRIBE_CONFIGS",
+            AclOperation::AlterConfigs => "ALTER_CONFIGS",
+            AclOperation::IdempotentWrite => "IDEMPOTENT_WRITE",
+            AclOperation::CreateTokens => "CREATE_TOKENS",
+            AclOperation::DescribeTokens => "DESCRIBE_TOKENS",
+            AclOperation::TwoPhaseCommit => "TWO_PHASE_COMMIT",
+        };
+        write!(f, "{name}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
