@@ -83,3 +83,4 @@
 - [M11 Phase 3 cluster & configs notes](m11_phase3_cluster_configs_notes.md) — describeCluster UV->Metadata failback + per-resource-type routing (node_for) + ConfigResource common type + LeastLoadedBrokerOrActiveKController
 - [M11 Phase 4 log dirs notes](m11_phase4_log_dirs_notes.md) — describeLogDirs/alterReplicaLogDirs/describeReplicaLogDirs per-broker ConstantNodeId fan-out; TopicPartitionReplica; describeReplicaLogDirs built on DescribeLogDirsRequest; multi-KAFKA_LOG_DIRS move testable
 - [M11 Phase 5 elections/reassignments/offsets](m11_phase5_elections_reassignments_offsets_notes.md) — final Tier 1; listOffsets on AdminApiDriver+ListOffsetsHandler (reused ListOffsets wire+builder); OffsetSpec closed enum; ElectionType; 3 new controller-Call wire wrappers; assertResponseCountMatch fail-all deviation
+- [M11 Tier2 Phase1 progress](m11_tier2_phase1_notes.md) — group listing/describe: layers done + remaining work, format gotcha, driver/list-Call patterns
