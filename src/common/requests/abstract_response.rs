@@ -33,11 +33,14 @@ use super::AlterReplicaLogDirsResponse;
 use super::ApiVersionsResponse;
 use super::ConsumerGroupDescribeResponse;
 use super::ConsumerGroupHeartbeatResponse;
+use super::CreateAclsResponse;
 use super::CreatePartitionsResponse;
 use super::CreateTopicsResponse;
+use super::DeleteAclsResponse;
 use super::DeleteGroupsResponse;
 use super::DeleteRecordsResponse;
 use super::DeleteTopicsResponse;
+use super::DescribeAclsResponse;
 use super::DescribeClusterResponse;
 use super::DescribeConfigsResponse;
 use super::DescribeGroupsResponse;
@@ -136,6 +139,12 @@ pub enum ConcreteResponse {
     AlterPartitionReassignments(AlterPartitionReassignmentsResponse),
     /// A ListPartitionReassignments response.
     ListPartitionReassignments(ListPartitionReassignmentsResponse),
+    /// A DescribeAcls response.
+    DescribeAcls(DescribeAclsResponse),
+    /// A CreateAcls response.
+    CreateAcls(CreateAclsResponse),
+    /// A DeleteAcls response.
+    DeleteAcls(DeleteAclsResponse),
 }
 
 impl ConcreteResponse {
@@ -173,6 +182,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => r.api_key(),
             Self::AlterPartitionReassignments(r) => r.api_key(),
             Self::ListPartitionReassignments(r) => r.api_key(),
+            Self::DescribeAcls(r) => r.api_key(),
+            Self::CreateAcls(r) => r.api_key(),
+            Self::DeleteAcls(r) => r.api_key(),
         }
     }
 
@@ -216,6 +228,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::AlterPartitionReassignments(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListPartitionReassignments(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::CreateAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DeleteAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -321,6 +336,15 @@ impl ConcreteResponse {
             Self::ListPartitionReassignments(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreateAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -364,6 +388,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -411,6 +438,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => r.error_counts(),
             Self::AlterPartitionReassignments(r) => r.error_counts(),
             Self::ListPartitionReassignments(r) => r.error_counts(),
+            Self::DescribeAcls(r) => r.error_counts(),
+            Self::CreateAcls(r) => r.error_counts(),
+            Self::DeleteAcls(r) => r.error_counts(),
         }
     }
 
@@ -450,6 +480,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => r.throttle_time_ms(),
             Self::AlterPartitionReassignments(r) => r.throttle_time_ms(),
             Self::ListPartitionReassignments(r) => r.throttle_time_ms(),
+            Self::DescribeAcls(r) => r.throttle_time_ms(),
+            Self::CreateAcls(r) => r.throttle_time_ms(),
+            Self::DeleteAcls(r) => r.throttle_time_ms(),
         }
     }
 
@@ -488,6 +521,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::AlterPartitionReassignments(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListPartitionReassignments(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::CreateAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DeleteAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -525,6 +561,9 @@ impl ConcreteResponse {
             Self::ElectLeaders(r) => r.should_client_throttle(version),
             Self::AlterPartitionReassignments(r) => r.should_client_throttle(version),
             Self::ListPartitionReassignments(r) => r.should_client_throttle(version),
+            Self::DescribeAcls(r) => r.should_client_throttle(version),
+            Self::CreateAcls(r) => r.should_client_throttle(version),
+            Self::DeleteAcls(r) => r.should_client_throttle(version),
         }
     }
 
@@ -697,6 +736,18 @@ impl ConcreteResponse {
                 let response = ListPartitionReassignmentsResponse::parse(readable, version)?;
                 Ok(Self::ListPartitionReassignments(response))
             },
+            ApiKeys::DESCRIBE_ACLS => {
+                let response = DescribeAclsResponse::parse(readable, version)?;
+                Ok(Self::DescribeAcls(response))
+            },
+            ApiKeys::CREATE_ACLS => {
+                let response = CreateAclsResponse::parse(readable, version)?;
+                Ok(Self::CreateAcls(response))
+            },
+            ApiKeys::DELETE_ACLS => {
+                let response = DeleteAclsResponse::parse(readable, version)?;
+                Ok(Self::DeleteAcls(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -739,6 +790,9 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ElectLeaders(r) => write!(f, "{r}"),
             Self::AlterPartitionReassignments(r) => write!(f, "{r}"),
             Self::ListPartitionReassignments(r) => write!(f, "{r}"),
+            Self::DescribeAcls(r) => write!(f, "{r}"),
+            Self::CreateAcls(r) => write!(f, "{r}"),
+            Self::DeleteAcls(r) => write!(f, "{r}"),
         }
     }
 }

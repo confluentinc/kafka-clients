@@ -31,11 +31,14 @@ use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+use crate::create_acls_request_data::CreateAclsRequestData;
 use crate::create_partitions_request_data::CreatePartitionsRequestData;
 use crate::create_topics_request_data::CreateTopicsRequestData;
+use crate::delete_acls_request_data::DeleteAclsRequestData;
 use crate::delete_groups_request_data::DeleteGroupsRequestData;
 use crate::delete_records_request_data::DeleteRecordsRequestData;
 use crate::delete_topics_request_data::DeleteTopicsRequestData;
+use crate::describe_acls_request_data::DescribeAclsRequestData;
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::DescribeConfigsRequestData;
 use crate::describe_groups_request_data::DescribeGroupsRequestData;
@@ -64,11 +67,14 @@ use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupDescribeRequest;
 use super::ConsumerGroupHeartbeatRequest;
+use super::CreateAclsRequest;
 use super::CreatePartitionsRequest;
 use super::CreateTopicsRequest;
+use super::DeleteAclsRequest;
 use super::DeleteGroupsRequest;
 use super::DeleteRecordsRequest;
 use super::DeleteTopicsRequest;
+use super::DescribeAclsRequest;
 use super::DescribeClusterRequest;
 use super::DescribeConfigsRequest;
 use super::DescribeGroupsRequest;
@@ -196,6 +202,12 @@ pub enum ConcreteRequest {
     AlterPartitionReassignments(AlterPartitionReassignmentsRequest),
     /// A ListPartitionReassignments request.
     ListPartitionReassignments(ListPartitionReassignmentsRequest),
+    /// A DescribeAcls request.
+    DescribeAcls(DescribeAclsRequest),
+    /// A CreateAcls request.
+    CreateAcls(CreateAclsRequest),
+    /// A DeleteAcls request.
+    DeleteAcls(DeleteAclsRequest),
 }
 
 impl ConcreteRequest {
@@ -233,6 +245,9 @@ impl ConcreteRequest {
             Self::ElectLeaders(r) => r.version(),
             Self::AlterPartitionReassignments(r) => r.version(),
             Self::ListPartitionReassignments(r) => r.version(),
+            Self::DescribeAcls(r) => r.version(),
+            Self::CreateAcls(r) => r.version(),
+            Self::DeleteAcls(r) => r.version(),
         }
     }
 
@@ -270,6 +285,9 @@ impl ConcreteRequest {
             Self::ElectLeaders(r) => r.api_key(),
             Self::AlterPartitionReassignments(r) => r.api_key(),
             Self::ListPartitionReassignments(r) => r.api_key(),
+            Self::DescribeAcls(r) => r.api_key(),
+            Self::CreateAcls(r) => r.api_key(),
+            Self::DeleteAcls(r) => r.api_key(),
         }
     }
 
@@ -313,6 +331,9 @@ impl ConcreteRequest {
             Self::ElectLeaders(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AlterPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -440,6 +461,15 @@ impl ConcreteRequest {
             Self::ListPartitionReassignments(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreateAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -484,6 +514,9 @@ impl ConcreteRequest {
             Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -539,6 +572,9 @@ impl ConcreteRequest {
             Self::ElectLeaders(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AlterPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -701,6 +737,18 @@ impl ConcreteRequest {
                     api_version,
                 )))
             },
+            ApiKeys::DESCRIBE_ACLS => {
+                let data = DescribeAclsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeAcls(DescribeAclsRequest::new(data, api_version)))
+            },
+            ApiKeys::CREATE_ACLS => {
+                let data = CreateAclsRequestData::read(readable, api_version)?;
+                Ok(Self::CreateAcls(CreateAclsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_ACLS => {
+                let data = DeleteAclsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteAcls(DeleteAclsRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -743,6 +791,9 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ElectLeaders(r) => write!(f, "{r}"),
             Self::AlterPartitionReassignments(r) => write!(f, "{r}"),
             Self::ListPartitionReassignments(r) => write!(f, "{r}"),
+            Self::DescribeAcls(r) => write!(f, "{r}"),
+            Self::CreateAcls(r) => write!(f, "{r}"),
+            Self::DeleteAcls(r) => write!(f, "{r}"),
         }
     }
 }

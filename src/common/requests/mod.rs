@@ -30,16 +30,22 @@ pub mod consumer_group_describe_request;
 pub mod consumer_group_describe_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
+pub mod create_acls_request;
+pub mod create_acls_response;
 pub mod create_partitions_request;
 pub mod create_partitions_response;
 pub mod create_topics_request;
 pub mod create_topics_response;
+pub mod delete_acls_request;
+pub mod delete_acls_response;
 pub mod delete_groups_request;
 pub mod delete_groups_response;
 pub mod delete_records_request;
 pub mod delete_records_response;
 pub mod delete_topics_request;
 pub mod delete_topics_response;
+pub mod describe_acls_request;
+pub mod describe_acls_response;
 pub mod describe_cluster_request;
 pub mod describe_cluster_response;
 pub mod describe_configs_request;
@@ -109,18 +115,24 @@ pub use consumer_group_heartbeat_request::{
     REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
 };
 pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use create_acls_request::{CreateAclsRequest, CreateAclsRequestBuilder};
+pub use create_acls_response::CreateAclsResponse;
 pub use create_partitions_request::{CreatePartitionsRequest, CreatePartitionsRequestBuilder};
 pub use create_partitions_response::CreatePartitionsResponse;
 pub use create_topics_request::{
     CreateTopicsRequest, CreateTopicsRequestBuilder, NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR,
 };
 pub use create_topics_response::CreateTopicsResponse;
+pub use delete_acls_request::{DeleteAclsRequest, DeleteAclsRequestBuilder};
+pub use delete_acls_response::DeleteAclsResponse;
 pub use delete_groups_request::{DeleteGroupsRequest, DeleteGroupsRequestBuilder};
 pub use delete_groups_response::DeleteGroupsResponse;
 pub use delete_records_request::{DeleteRecordsRequest, DeleteRecordsRequestBuilder};
 pub use delete_records_response::{DeleteRecordsResponse, INVALID_LOW_WATERMARK};
 pub use delete_topics_request::{DeleteTopicsRequest, DeleteTopicsRequestBuilder};
 pub use delete_topics_response::DeleteTopicsResponse;
+pub use describe_acls_request::{DescribeAclsRequest, DescribeAclsRequestBuilder};
+pub use describe_acls_response::DescribeAclsResponse;
 pub use describe_cluster_request::{
     DescribeClusterRequest, DescribeClusterRequestBuilder, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
 };
