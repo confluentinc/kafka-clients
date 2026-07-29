@@ -97,6 +97,7 @@ use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 
 use super::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
+use super::internals::admin_api_future::AdminApiFuture;
 use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSignal};
 use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
@@ -104,29 +105,33 @@ use super::internals::alter_consumer_group_offsets_handler::AlterConsumerGroupOf
 use super::internals::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 use super::internals::coordinator_key::CoordinatorKey;
 use super::internals::delete_consumer_group_offsets_handler::DeleteConsumerGroupOffsetsHandler;
+use super::internals::delete_consumer_groups_handler::DeleteConsumerGroupsHandler;
+use super::internals::delete_groups_handler::DeleteGroupsHandler;
 use super::internals::delete_records_handler::DeleteRecordsHandler;
 use super::internals::describe_classic_groups_handler::DescribeClassicGroupsHandler;
 use super::internals::describe_consumer_groups_handler::DescribeConsumerGroupsHandler;
 use super::internals::list_consumer_group_offsets_handler::ListConsumerGroupOffsetsHandler;
 use super::internals::list_offsets_handler::ListOffsetsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
+use super::internals::remove_members_from_consumer_group_handler::RemoveMembersFromConsumerGroupHandler;
 use super::records_to_delete::RecordsToDelete;
 use super::{
     Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
     AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
     AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym,
     ConfigType, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteRecordsOptions, DeleteRecordsResult,
-    DeleteTopicsOptions, DeleteTopicsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
-    DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
-    DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult,
-    DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
-    ElectLeadersOptions, ElectLeadersResult, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
-    ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions,
-    ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, ReplicaInfo, ReplicaLogDirInfo, TopicDescription,
-    TopicListing, TopicMetadataAndConfig,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
+    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions, DescribeClusterResult,
+    DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult,
+    DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult,
+    DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, GroupListing,
+    ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
+    ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult,
+    ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic,
+    OffsetSpec, PartitionReassignment, RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult,
+    ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use super::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -136,13 +141,19 @@ use crate::alter_partition_reassignments_request_data::{
 use crate::common::TopicPartitionReplica;
 use crate::common::requests::{
     AlterPartitionReassignmentsRequestBuilder, ElectLeadersRequestBuilder, ElectLeadersResponse,
-    ListPartitionReassignmentsRequestBuilder,
+    ListPartitionReassignmentsRequestBuilder, maybe_truncate_reason,
 };
 use crate::common::{ElectionType, Node};
+use crate::leave_group_request_data::MemberIdentity;
 use crate::list_partition_reassignments_request_data::{
     ListPartitionReassignmentsRequestData, ListPartitionReassignmentsTopics,
 };
 use std::collections::{BTreeSet, HashSet};
+
+/// The default reason sent in a `LeaveGroup` request when an admin removes a
+/// member without providing one. Mirrors
+/// `KafkaAdminClient.DEFAULT_LEAVE_GROUP_REASON`.
+const DEFAULT_LEAVE_GROUP_REASON: &str = "member was removed by an admin";
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
 const RETRY_BACKOFF_EXP_BASE: i32 = 2;
@@ -3146,6 +3157,123 @@ impl Admin for KafkaAdminClient {
             result_map.get(&key).expect("future exists for the group key").clone(),
             partitions.clone(),
         )
+    }
+
+    fn delete_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DeleteConsumerGroupsOptions,
+    ) -> DeleteConsumerGroupsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DeleteGroupsHandler::new_future(group_ids);
+        let result_map = future.all();
+        let handler = DeleteConsumerGroupsHandler::new(log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DeleteConsumerGroupsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn remove_members_from_consumer_group(
+        &self,
+        group_id: &str,
+        options: RemoveMembersFromConsumerGroupOptions,
+    ) -> RemoveMembersFromConsumerGroupResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let reason = match options.reason_value() {
+            None | Some("") => DEFAULT_LEAVE_GROUP_REASON.to_string(),
+            Some(r) => maybe_truncate_reason(r),
+        };
+
+        let admin_future = RemoveMembersFromConsumerGroupHandler::new_future(group_id);
+        let result_map = admin_future.all();
+        let key = CoordinatorKey::by_group_id(group_id);
+        let group_future = result_map.get(&key).expect("future exists for the group key").clone();
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let ctx = self.driver_context();
+
+        if options.remove_all() {
+            // Mirrors `getMembersFromGroup`: describe the group, then chain the
+            // `LeaveGroup` driver once the membership is known.
+            let describe_group_ids = vec![group_id.to_string()];
+            let describe_future = DescribeConsumerGroupsHandler::new_future(&describe_group_ids);
+            let describe_handle = describe_future.handle(&key).expect("describe future exists for the group key");
+            let describe_handler = DescribeConsumerGroupsHandler::new(false, log_context.clone());
+            let describe_driver = AdminApiDriver::new(
+                Box::new(describe_handler),
+                Box::new(describe_future),
+                deadline,
+                retry_backoff.clone(),
+                log_context.clone(),
+            );
+            invoke_driver(describe_driver, ctx.clone(), now);
+
+            let group_id_owned = group_id.to_string();
+            let key_for_cb = key.clone();
+            describe_handle.when_complete(move |result| match result {
+                Err(error) => {
+                    admin_future.complete_exceptionally(HashMap::from([(
+                        key_for_cb,
+                        KafkaError::with_message(
+                            error.error(),
+                            format!("Encounter exception when trying to get members from group: {group_id_owned}"),
+                        ),
+                    )]));
+                },
+                Ok(description) => {
+                    let members: Vec<MemberIdentity> = description
+                        .members()
+                        .iter()
+                        .map(|member| {
+                            let mut identity = MemberIdentity::new();
+                            match member.group_instance_id() {
+                                Some(instance_id) => {
+                                    identity.set_group_instance_id(Some(instance_id.to_string()));
+                                },
+                                None => {
+                                    identity.set_member_id(member.consumer_id().to_string());
+                                },
+                            }
+                            identity.set_reason(Some(reason.clone()));
+                            identity
+                        })
+                        .collect();
+                    let handler =
+                        RemoveMembersFromConsumerGroupHandler::new(&group_id_owned, members, log_context.clone());
+                    let driver = AdminApiDriver::new(
+                        Box::new(handler),
+                        Box::new(admin_future),
+                        deadline,
+                        retry_backoff.clone(),
+                        log_context.clone(),
+                    );
+                    invoke_driver(driver, ctx.clone(), now);
+                },
+            });
+        } else {
+            let members: Vec<MemberIdentity> = options
+                .members()
+                .iter()
+                .map(|member| {
+                    let mut identity = member.to_member_identity();
+                    identity.set_reason(Some(reason.clone()));
+                    identity
+                })
+                .collect();
+            let handler = RemoveMembersFromConsumerGroupHandler::new(group_id, members, log_context.clone());
+            let driver =
+                AdminApiDriver::new(Box::new(handler), Box::new(admin_future), deadline, retry_backoff, log_context);
+            invoke_driver(driver, ctx, now);
+        }
+
+        RemoveMembersFromConsumerGroupResult::new(group_future, options.members().clone())
     }
 
     async fn close(&self, timeout: Duration) {
