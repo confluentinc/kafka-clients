@@ -54,13 +54,20 @@
 > handling. Review record at
 > `design/history/Milestone-11/Tier2-Phase-3/COMMENTS.DONE.1.md`.
 >
-> **TIER 2 IS COMPLETE (all 3 phases).** **Next: Tier 3 Phase 1 "ACLs".** The
-> Tier 3 (7 phases) breakdown below remains valid and ready to execute as-is,
-> following the same Manager → Actor → Critic cadence. REMINDER: **Tier 3
-> Phase 3 (SCRAM) needs a new PBKDF2 crypto crate — HARD STOP there** to get
-> the crate decision approved before touching `Cargo.toml` (finding #4). Tier 3
-> Phase 1 (ACLs) integration tests need the authorizer-enabled broker fixture
-> (finding #11). Tier 4 remains out of scope.
+> **TIER 2 IS COMPLETE (all 3 phases).**
+>
+> **Tier 3 Phase 1 "ACLs" is COMPLETE (2026-07-29):** `create_acls`,
+> `describe_acls`, `delete_acls` + all `common.acl`/`common.resource`
+> primitives + the authorizer-enabled broker fixture (finding #11) — Rust core
+> + unit tests + real-broker integration tests, Critic-clean after one fix
+> cycle. Reused the Tier-2 `AclOperation`/`AclPermissionType`/`from_32_bit_field`.
+> Review record at `design/history/Milestone-11/Tier3-Phase-1/COMMENTS.DONE.1.md`.
+>
+> **Next: Tier 3 Phase 2 "Client quotas".** The Tier 3 breakdown below remains
+> valid and ready to execute as-is, following the same Manager → Actor → Critic
+> cadence. REMINDER: **Tier 3 Phase 3 (SCRAM) needs a new PBKDF2 crypto crate —
+> HARD STOP there** to get the crate decision approved before touching
+> `Cargo.toml` (finding #4). Tier 4 remains out of scope.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed
