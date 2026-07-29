@@ -224,6 +224,40 @@ mod tests {
         assert_eq!(response.error(), Errors::UnknownMemberId);
     }
 
+    /// Byte-level wire-decoding check for the v5 (flexible batched) response,
+    /// exercising the compact/nullable-string framing and member/top-level
+    /// tagged fields (`LeaveGroupResponse.json`: `flexibleVersions: "4+"`).
+    /// Hand-computed against the spec (flexible framing uses unsigned-varint
+    /// length prefixes of n+1):
+    ///   throttle_time_ms 0 -> 0x00 0x00 0x00 0x00
+    ///   error_code 0 -> 0x00 0x00
+    ///   members: compact array len 1 -> 0x02
+    ///     member_id "m": compact string len 1 -> 0x02, then 0x6D
+    ///     group_instance_id "i": compact (nullable) string len 1 -> 0x02, then 0x69
+    ///     error_code 25 (UNKNOWN_MEMBER_ID) -> 0x00 0x19
+    ///     member tagged fields: 0x00
+    ///   top-level tagged fields: 0x00
+    #[test]
+    fn parse_known_byte_vector_v5_flexible() {
+        let bytes = vec![
+            0x00, 0x00, 0x00, 0x00, // throttle_time_ms 0
+            0x00, 0x00, // error_code 0
+            0x02, // members compact array len 1 (=n+1)
+            0x02, 0x6D, // member_id "m" (compact string)
+            0x02, 0x69, // group_instance_id "i" (compact nullable string, non-null)
+            0x00, 0x19, // error_code 25
+            0x00, // member tagged fields
+            0x00, // top-level tagged fields
+        ];
+        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes);
+        let response = LeaveGroupResponse::parse(&mut readable, 5).unwrap();
+        assert_eq!(response.top_level_error(), Errors::None);
+        assert_eq!(response.member_responses().len(), 1);
+        assert_eq!(response.member_responses()[0].member_id, "m");
+        assert_eq!(response.member_responses()[0].group_instance_id.as_deref(), Some("i"));
+        assert_eq!(response.error(), Errors::UnknownMemberId);
+    }
+
     /// `should_client_throttle` returns false below v2 and true at v2+.
     #[test]
     fn should_client_throttle_by_version() {
