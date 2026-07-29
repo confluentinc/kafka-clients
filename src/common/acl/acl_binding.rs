@@ -72,8 +72,15 @@ mod tests {
     use crate::common::acl::{AccessControlEntryFilter, AclBindingFilter, AclOperation, AclPermissionType};
     use crate::common::resource::{PatternType, ResourcePatternFilter, ResourceType};
 
-    fn acl(rt: ResourceType, name: &str, pt: PatternType, principal: &str, host: &str, op: AclOperation,
-        perm: AclPermissionType) -> AclBinding {
+    fn acl(
+        rt: ResourceType,
+        name: &str,
+        pt: PatternType,
+        principal: &str,
+        host: &str,
+        op: AclOperation,
+        perm: AclPermissionType,
+    ) -> AclBinding {
         AclBinding::new(
             ResourcePattern::new(rt, name, pt).unwrap(),
             AccessControlEntry::new(principal, host, op, perm).unwrap(),
@@ -81,27 +88,59 @@ mod tests {
     }
 
     fn acl1() -> AclBinding {
-        acl(ResourceType::Topic, "mytopic", PatternType::Literal, "User:ANONYMOUS", "", AclOperation::All,
-            AclPermissionType::Allow)
+        acl(
+            ResourceType::Topic,
+            "mytopic",
+            PatternType::Literal,
+            "User:ANONYMOUS",
+            "",
+            AclOperation::All,
+            AclPermissionType::Allow,
+        )
     }
     fn acl2() -> AclBinding {
-        acl(ResourceType::Topic, "mytopic", PatternType::Literal, "User:*", "", AclOperation::Read,
-            AclPermissionType::Allow)
+        acl(
+            ResourceType::Topic,
+            "mytopic",
+            PatternType::Literal,
+            "User:*",
+            "",
+            AclOperation::Read,
+            AclPermissionType::Allow,
+        )
     }
     fn acl3() -> AclBinding {
-        acl(ResourceType::Topic, "mytopic2", PatternType::Literal, "User:ANONYMOUS", "127.0.0.1", AclOperation::Read,
-            AclPermissionType::Deny)
+        acl(
+            ResourceType::Topic,
+            "mytopic2",
+            PatternType::Literal,
+            "User:ANONYMOUS",
+            "127.0.0.1",
+            AclOperation::Read,
+            AclPermissionType::Deny,
+        )
     }
     fn unknown_acl() -> AclBinding {
-        acl(ResourceType::Topic, "mytopic2", PatternType::Literal, "User:ANONYMOUS", "127.0.0.1",
-            AclOperation::Unknown, AclPermissionType::Deny)
+        acl(
+            ResourceType::Topic,
+            "mytopic2",
+            PatternType::Literal,
+            "User:ANONYMOUS",
+            "127.0.0.1",
+            AclOperation::Unknown,
+            AclPermissionType::Deny,
+        )
     }
 
     fn any_anonymous() -> AclBindingFilter {
         AclBindingFilter::new(
             ResourcePatternFilter::any(),
-            AccessControlEntryFilter::new(Some("User:ANONYMOUS".to_string()), None, AclOperation::Any,
-                AclPermissionType::Any),
+            AccessControlEntryFilter::new(
+                Some("User:ANONYMOUS".to_string()),
+                None,
+                AclOperation::Any,
+                AclPermissionType::Any,
+            ),
         )
     }
     fn any_deny() -> AclBindingFilter {
@@ -120,8 +159,15 @@ mod tests {
     #[test]
     fn test_matching() {
         assert_eq!(acl1(), acl1());
-        let acl1_copy = acl(ResourceType::Topic, "mytopic", PatternType::Literal, "User:ANONYMOUS", "",
-            AclOperation::All, AclPermissionType::Allow);
+        let acl1_copy = acl(
+            ResourceType::Topic,
+            "mytopic",
+            PatternType::Literal,
+            "User:ANONYMOUS",
+            "",
+            AclOperation::All,
+            AclPermissionType::Allow,
+        );
         assert_eq!(acl1(), acl1_copy);
         assert_eq!(acl2(), acl2());
         assert_ne!(acl1(), acl2());

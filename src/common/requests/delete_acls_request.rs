@@ -194,8 +194,12 @@ mod tests {
     fn sample_filter() -> AclBindingFilter {
         AclBindingFilter::new(
             ResourcePatternFilter::new(ResourceType::Any, None, PatternType::Literal),
-            AccessControlEntryFilter::new(Some("User:ANONYMOUS".to_string()), None, AclOperation::Any,
-                AclPermissionType::Any),
+            AccessControlEntryFilter::new(
+                Some("User:ANONYMOUS".to_string()),
+                None,
+                AclOperation::Any,
+                AclPermissionType::Any,
+            ),
         )
     }
 

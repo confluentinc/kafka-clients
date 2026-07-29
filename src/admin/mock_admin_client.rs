@@ -24,14 +24,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::admin::FilterResults;
 use crate::admin::{
     Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
     AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
     AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription, Config, ConfigEntry,
-    ConsumerGroupDescription, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
-    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
-    DeletedRecords, DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions,
+    ConsumerGroupDescription, CreateAclsOptions, CreateAclsResult, CreatePartitionsOptions, CreatePartitionsResult,
+    CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions,
+    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeAclsOptions,
+    DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions,
     DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions,
     DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
     DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
@@ -46,7 +48,7 @@ use crate::admin::{
 #[allow(deprecated)]
 use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
 use crate::common::ElectionType;
-use crate::common::acl::AclOperation;
+use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
@@ -1320,6 +1322,45 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<HashMap<MemberIdentity, Errors>> = KafkaFutureImpl::new();
         handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
         RemoveMembersFromConsumerGroupResult::new(handle.future(), options.members().clone())
+    }
+
+    fn create_acls(&self, acls: &[AclBinding], _options: CreateAclsOptions) -> CreateAclsResult {
+        // Java's `MockAdminClient.createAcls` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:806-808). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future per binding rather than a
+        // panic.
+        let mut futures = HashMap::new();
+        for acl in acls {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            futures.insert(acl.clone(), handle.future());
+        }
+        CreateAclsResult::new(futures)
+    }
+
+    fn describe_acls(&self, _filter: &AclBindingFilter, _options: DescribeAclsOptions) -> DescribeAclsResult {
+        // Java's `MockAdminClient.describeAcls` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:811-813). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        DescribeAclsResult::new(handle.future())
+    }
+
+    fn delete_acls(&self, filters: &[AclBindingFilter], _options: DeleteAclsOptions) -> DeleteAclsResult {
+        // Java's `MockAdminClient.deleteAcls` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:816-818). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future per filter rather than a panic.
+        let mut futures = HashMap::new();
+        for filter in filters {
+            let handle: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            futures.insert(filter.clone(), handle.future());
+        }
+        DeleteAclsResult::new(futures)
     }
 
     async fn close(&self, _timeout: Duration) {

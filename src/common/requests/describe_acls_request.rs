@@ -167,7 +167,10 @@ impl RequestBuilder for DescribeAclsRequestBuilder {
                 format!("DescribeAclsRequest contains UNKNOWN elements: {:?}", self.data),
             ));
         }
-        Ok(ConcreteRequest::DescribeAcls(DescribeAclsRequest::new(self.data.clone(), version)))
+        Ok(ConcreteRequest::DescribeAcls(DescribeAclsRequest::new(
+            self.data.clone(),
+            version,
+        )))
     }
 }
 

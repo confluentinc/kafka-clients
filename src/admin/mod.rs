@@ -30,13 +30,16 @@ pub mod config;
 pub mod config_entry;
 pub mod consumer_group_description;
 pub mod consumer_group_listing;
+pub mod create_acls_result;
 pub mod create_partitions_result;
 pub mod create_topics_result;
+pub mod delete_acls_result;
 pub mod delete_consumer_group_offsets_result;
 pub mod delete_consumer_groups_result;
 pub mod delete_records_result;
 pub mod delete_topics_result;
 pub mod deleted_records;
+pub mod describe_acls_result;
 pub mod describe_classic_groups_result;
 pub mod describe_cluster_result;
 pub mod describe_configs_result;
@@ -88,13 +91,16 @@ pub use consumer_group_description::ConsumerGroupDescription;
 pub use consumer_group_listing::ConsumerGroupListing;
 use std::collections::HashMap;
 
+pub use create_acls_result::CreateAclsResult;
 pub use create_partitions_result::CreatePartitionsResult;
 pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
+pub use delete_acls_result::{DeleteAclsResult, FilterResult, FilterResults};
 pub use delete_consumer_group_offsets_result::DeleteConsumerGroupOffsetsResult;
 pub use delete_consumer_groups_result::DeleteConsumerGroupsResult;
 pub use delete_records_result::DeleteRecordsResult;
 pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
+pub use describe_acls_result::DescribeAclsResult;
 pub use describe_classic_groups_result::DescribeClassicGroupsResult;
 pub use describe_cluster_result::DescribeClusterResult;
 pub use describe_configs_result::DescribeConfigsResult;
@@ -127,12 +133,12 @@ pub use offset_spec::OffsetSpec;
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
-    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClassicGroupsOptions,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
-    ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
+    AlterReplicaLogDirsOptions, CreateAclsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
+    ElectLeadersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions,
+    ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
@@ -145,6 +151,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::common::acl::{AclBinding, AclBindingFilter};
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::{ElectionType, KafkaError, TopicCollection, TopicPartition, TopicPartitionReplica};
 use crate::consumer::OffsetAndMetadata;
@@ -386,6 +393,21 @@ pub trait Admin: Send + Sync {
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
     ) -> RemoveMembersFromConsumerGroupResult;
+
+    /// Create ACLs.
+    ///
+    /// Corresponds to `Admin.createAcls(Collection<AclBinding>, CreateAclsOptions)`.
+    fn create_acls(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult;
+
+    /// Describe ACLs matching the provided filter.
+    ///
+    /// Corresponds to `Admin.describeAcls(AclBindingFilter, DescribeAclsOptions)`.
+    fn describe_acls(&self, filter: &AclBindingFilter, options: DescribeAclsOptions) -> DescribeAclsResult;
+
+    /// Delete ACLs matching the provided filters.
+    ///
+    /// Corresponds to `Admin.deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`.
+    fn delete_acls(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

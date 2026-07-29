@@ -39,8 +39,8 @@ use confluent_kafka::admin::{
     AlterReplicaLogDirsOptions, ConfigEntry, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions,
     DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
-    ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, RecordsToDelete, new_admin_client,
+    ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions, NewPartitionReassignment, NewPartitions,
+    NewTopic, OffsetSpec, OpType, RecordsToDelete, new_admin_client,
 };
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use confluent_kafka::common::serialization::{Deserializer, StringSerializer};
@@ -108,7 +108,9 @@ async fn admin_smoke_test() {
     println!("########################################################");
 
     section("SETUP", "Starting a 3-broker Kafka 4.2.0 cluster via Docker (testcontainers)");
-    println!("Each broker gets 2 log dirs (/tmp/kafka-logs-0, /tmp/kafka-logs-1) so alterReplicaLogDirs is exercisable.");
+    println!(
+        "Each broker gets 2 log dirs (/tmp/kafka-logs-0, /tmp/kafka-logs-1) so alterReplicaLogDirs is exercisable."
+    );
     let mut cluster_cfg = ClusterConfig::with_brokers(3);
     cluster_cfg
         .server_properties
@@ -129,13 +131,25 @@ async fn admin_smoke_test() {
 
     // ---------------------------------------------------------------
     section("2/19", "Admin.listTopics — confirm it's visible");
-    let names = admin.list_topics(ListTopicsOptions::new()).names().get().await.expect("listTopics failed");
-    println!("OK: {} topic(s) visible cluster-wide; our topic present = {}", names.len(), names.contains(&topic));
+    let names = admin
+        .list_topics(ListTopicsOptions::new())
+        .names()
+        .get()
+        .await
+        .expect("listTopics failed");
+    println!(
+        "OK: {} topic(s) visible cluster-wide; our topic present = {}",
+        names.len(),
+        names.contains(&topic)
+    );
 
     // ---------------------------------------------------------------
     section("3/19", "Admin.describeTopics — inspect partition/replica layout");
     let described = admin
-        .describe_topics(TopicCollection::of_topic_names(vec![topic.clone()]), DescribeTopicsOptions::new())
+        .describe_topics(
+            TopicCollection::of_topic_names(vec![topic.clone()]),
+            DescribeTopicsOptions::new(),
+        )
         .all_topic_names()
         .expect("by name")
         .get()
@@ -145,14 +159,22 @@ async fn admin_smoke_test() {
     println!("OK: '{}' has {} partition(s):", desc.name(), desc.partitions().len());
     for p in desc.partitions() {
         let replicas: Vec<i32> = p.replicas().iter().map(|n| n.id()).collect();
-        println!("  partition {}: leader={:?} replicas={:?}", p.partition(), p.leader().map(|n| n.id()), replicas);
+        println!(
+            "  partition {}: leader={:?} replicas={:?}",
+            p.partition(),
+            p.leader().map(|n| n.id()),
+            replicas
+        );
     }
 
     // ---------------------------------------------------------------
     section("PRODUCE", "Producing 20 messages to partition 0 (real Producer, not Admin)");
-    let producer: KafkaProducer<String, String> =
-        KafkaProducer::from_config(producer_config(ctx.bootstrap_servers()), Box::new(StringSerializer), Box::new(StringSerializer))
-            .expect("build producer");
+    let producer: KafkaProducer<String, String> = KafkaProducer::from_config(
+        producer_config(ctx.bootstrap_servers()),
+        Box::new(StringSerializer),
+        Box::new(StringSerializer),
+    )
+    .expect("build producer");
     for i in 0..20 {
         let rec = ProducerRecord::with_partition(
             topic.clone(),
@@ -203,8 +225,16 @@ async fn admin_smoke_test() {
     section("4/19", "Admin.describeCluster — nodes, controller, cluster id");
     let cluster_result = admin.describe_cluster(DescribeClusterOptions::new());
     let nodes = cluster_result.nodes().get().await.expect("describe_cluster nodes failed");
-    let controller = cluster_result.controller().get().await.expect("describe_cluster controller failed");
-    let cluster_id = cluster_result.cluster_id().get().await.expect("describe_cluster cluster_id failed");
+    let controller = cluster_result
+        .controller()
+        .get()
+        .await
+        .expect("describe_cluster controller failed");
+    let cluster_id = cluster_result
+        .cluster_id()
+        .get()
+        .await
+        .expect("describe_cluster cluster_id failed");
     println!("OK: cluster_id={cluster_id}");
     println!("  nodes: {:?}", nodes.iter().map(|n| n.id()).collect::<Vec<_>>());
     println!("  controller: {:?}", controller.map(|n| n.id()));
@@ -214,7 +244,10 @@ async fn admin_smoke_test() {
     section("5/19", "Admin.describeConfigs — topic config (retention.ms etc.)");
     let topic_resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
     let describe_result = admin.describe_configs(&[topic_resource.clone()], DescribeConfigsOptions::new());
-    let config = describe_result.values()[&topic_resource].get().await.expect("describeConfigs failed");
+    let config = describe_result.values()[&topic_resource]
+        .get()
+        .await
+        .expect("describeConfigs failed");
     let entries: Vec<_> = config.entries().collect();
     println!("OK: topic '{}' has {} config entries; sample:", topic, entries.len());
     for e in entries.iter().take(3) {
@@ -222,8 +255,14 @@ async fn admin_smoke_test() {
     }
 
     // ---------------------------------------------------------------
-    section("6/19", "Admin.incrementalAlterConfigs — SET retention.ms=123456789, then verify");
-    let set_op = AlterConfigOp::new(ConfigEntry::new("retention.ms".to_string(), Some("123456789".to_string())), OpType::Set);
+    section(
+        "6/19",
+        "Admin.incrementalAlterConfigs — SET retention.ms=123456789, then verify",
+    );
+    let set_op = AlterConfigOp::new(
+        ConfigEntry::new("retention.ms".to_string(), Some("123456789".to_string())),
+        OpType::Set,
+    );
     let mut alter_configs = HashMap::new();
     alter_configs.insert(topic_resource.clone(), vec![set_op]);
     admin
@@ -238,7 +277,10 @@ async fn admin_smoke_test() {
         .get()
         .await
         .expect("describeConfigs (after alter) failed");
-    let retention = after.entries().find(|e| e.name() == "retention.ms").and_then(|e| e.value().map(|v| v.to_string()));
+    let retention = after
+        .entries()
+        .find(|e| e.name() == "retention.ms")
+        .and_then(|e| e.value().map(|v| v.to_string()));
     println!("OK: retention.ms is now {retention:?} (expected Some(\"123456789\"))");
 
     // ---------------------------------------------------------------
@@ -249,7 +291,11 @@ async fn admin_smoke_test() {
         .get()
         .await
         .expect("listConfigResources failed");
-    println!("OK: {} config resource(s), including our topic = {}", resources.len(), resources.contains(&topic_resource));
+    println!(
+        "OK: {} config resource(s), including our topic = {}",
+        resources.len(),
+        resources.contains(&topic_resource)
+    );
 
     // ---------------------------------------------------------------
     section("8/19", "Admin.createPartitions — increase partition count 3 -> 5");
@@ -262,19 +308,29 @@ async fn admin_smoke_test() {
         .await
         .expect("createPartitions failed");
     let after_desc = admin
-        .describe_topics(TopicCollection::of_topic_names(vec![topic.clone()]), DescribeTopicsOptions::new())
+        .describe_topics(
+            TopicCollection::of_topic_names(vec![topic.clone()]),
+            DescribeTopicsOptions::new(),
+        )
         .all_topic_names()
         .expect("by name")
         .get()
         .await
         .expect("describeTopics (after createPartitions) failed");
-    println!("OK: '{}' now has {} partitions (was 3)", topic, after_desc[&topic].partitions().len());
+    println!(
+        "OK: '{}' now has {} partitions (was 3)",
+        topic,
+        after_desc[&topic].partitions().len()
+    );
 
     // ---------------------------------------------------------------
     section("9/19", "Admin.listOffsets — earliest/latest for the produced partition");
     let tp = TopicPartition::new(topic.clone(), 0);
     let earliest = admin
-        .list_offsets(&HashMap::from([(tp.clone(), OffsetSpec::earliest())]), ListOffsetsOptions::new())
+        .list_offsets(
+            &HashMap::from([(tp.clone(), OffsetSpec::earliest())]),
+            ListOffsetsOptions::new(),
+        )
         .partition_result(&tp)
         .expect("earliest offset was attempted")
         .get()
@@ -287,19 +343,30 @@ async fn admin_smoke_test() {
         .get()
         .await
         .expect("listOffsets latest failed");
-    println!("OK: {}-0 earliest offset={} latest offset={} (expected 0 and 20)", topic, earliest.offset(), latest.offset());
+    println!(
+        "OK: {}-0 earliest offset={} latest offset={} (expected 0 and 20)",
+        topic,
+        earliest.offset(),
+        latest.offset()
+    );
 
     // ---------------------------------------------------------------
     section("10/19", "Admin.describeLogDirs — per-broker log directory contents");
     let log_dirs_result = admin.describe_log_dirs(&[broker_id], DescribeLogDirsOptions::new());
-    let dirs = log_dirs_result.descriptions()[&broker_id].get().await.expect("describeLogDirs failed");
+    let dirs = log_dirs_result.descriptions()[&broker_id]
+        .get()
+        .await
+        .expect("describeLogDirs failed");
     println!("OK: broker {broker_id} reports {} log dir(s)", dirs.len());
     for (path, d) in dirs.iter() {
         println!("  {path}: {} replica(s)", d.replica_infos().len());
     }
 
     // ---------------------------------------------------------------
-    section("11/19", "Admin.describeReplicaLogDirs — where partition 0's replica currently lives");
+    section(
+        "11/19",
+        "Admin.describeReplicaLogDirs — where partition 0's replica currently lives",
+    );
     let replica = TopicPartitionReplica::new(topic.clone(), 0, broker_id);
     let replica_info = admin
         .describe_replica_log_dirs(std::slice::from_ref(&replica), DescribeReplicaLogDirsOptions::new())
@@ -308,11 +375,18 @@ async fn admin_smoke_test() {
         .await
         .expect("describeReplicaLogDirs failed");
     let current_dir = replica_info.current_replica_log_dir().expect("current dir").to_string();
-    println!("OK: replica ({}, 0, broker {}) currently lives in {}", topic, broker_id, current_dir);
+    println!(
+        "OK: replica ({}, 0, broker {}) currently lives in {}",
+        topic, broker_id, current_dir
+    );
 
     // ---------------------------------------------------------------
     section("12/19", "Admin.alterReplicaLogDirs — move that replica to the other log dir");
-    let target_dir = if current_dir == "/tmp/kafka-logs-0" { "/tmp/kafka-logs-1" } else { "/tmp/kafka-logs-0" };
+    let target_dir = if current_dir == "/tmp/kafka-logs-0" {
+        "/tmp/kafka-logs-1"
+    } else {
+        "/tmp/kafka-logs-0"
+    };
     let assignment = HashMap::from([(replica.clone(), target_dir.to_string())]);
     admin
         .alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new())
@@ -336,10 +410,22 @@ async fn admin_smoke_test() {
     }
 
     // ---------------------------------------------------------------
-    section("13/19", "Admin.electLeaders — preferred-leader election (may be a no-op if already preferred)");
-    let elect_result = admin.elect_leaders(ElectionType::Preferred, Some(HashSet::from([tp.clone()])), ElectLeadersOptions::new());
+    section(
+        "13/19",
+        "Admin.electLeaders — preferred-leader election (may be a no-op if already preferred)",
+    );
+    let elect_result = admin.elect_leaders(
+        ElectionType::Preferred,
+        Some(HashSet::from([tp.clone()])),
+        ElectLeadersOptions::new(),
+    );
     let errors = elect_result.partitions().get().await.expect("electLeaders failed");
-    println!("OK: electLeaders returned {} result(s); error for {}-0 = {:?}", errors.len(), topic, errors.get(&tp));
+    println!(
+        "OK: electLeaders returned {} result(s); error for {}-0 = {:?}",
+        errors.len(),
+        topic,
+        errors.get(&tp)
+    );
 
     // ---------------------------------------------------------------
     section("14/19", "Admin.listPartitionReassignments — before (expect none in flight)");
@@ -352,7 +438,10 @@ async fn admin_smoke_test() {
     println!("OK: {} reassignment(s) currently in flight", before.len());
 
     // ---------------------------------------------------------------
-    section("15/19", "Admin.alterPartitionReassignments — move partition 0 to a different broker set");
+    section(
+        "15/19",
+        "Admin.alterPartitionReassignments — move partition 0 to a different broker set",
+    );
     // Rotate the 3 distinct broker ids so the new leader (first element)
     // differs from the current one, without repeating any broker.
     let mut rotated_ids: Vec<i32> = nodes.iter().map(|n| n.id()).collect();
@@ -383,7 +472,12 @@ async fn admin_smoke_test() {
             println!("  confirmed: reassignment completed (no longer in flight)");
             break;
         }
-        println!("  still in flight: {:?}", after.get(&tp).map(|r| (r.replicas(), r.adding_replicas(), r.removing_replicas())));
+        println!(
+            "  still in flight: {:?}",
+            after
+                .get(&tp)
+                .map(|r| (r.replicas(), r.adding_replicas(), r.removing_replicas()))
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
