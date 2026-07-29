@@ -64,6 +64,30 @@ fn txn_single_broker() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
+/// A transaction-capable single-broker cluster that is *isolated* from the one
+/// returned by [`txn_single_broker`].
+///
+/// The cluster pool ([`crate::common::cluster_pool`]) keys on `ClusterConfig`, so
+/// tests sharing an identical config share one container — and therefore share
+/// global transaction-coordinator state. Several sibling tests in this file
+/// register fresh transactional ids (e.g. `admin-fence-fresh-id`) that persist on
+/// the broker in the `Empty` state, which would break
+/// `test_list_transactions_returns_empty_when_none_active`'s assertion of *global*
+/// emptiness once those siblings run first (they sort earlier alphabetically).
+///
+/// Adding one extra distinguishing property gives this config a distinct pool
+/// key, so it lands on a dedicated container with no sibling-created
+/// transactions. The extra property restates the broker default for
+/// `transaction.state.log.num.partitions` (50), so it changes the pool key
+/// without changing any observable broker behavior.
+fn txn_single_broker_isolated() -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string());
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string());
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS".to_string(), "50".to_string());
+    ClusterConfig::with_properties(props)
+}
+
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
     let props = HashMap::from([
@@ -81,7 +105,10 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
 /// `AllBrokersStrategy` against a live broker.
 #[tokio::test]
 async fn test_list_transactions_returns_empty_when_none_active() {
-    let mut ctx = TestContext::new(txn_single_broker()).await;
+    // Use an isolated cluster so sibling tests' fresh transactional ids do not
+    // leak into this test's assertion of *global* emptiness (see
+    // `txn_single_broker_isolated`).
+    let mut ctx = TestContext::new(txn_single_broker_isolated()).await;
     let admin = admin_for(ctx.bootstrap_servers());
 
     let listings = admin
