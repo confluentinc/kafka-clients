@@ -691,12 +691,17 @@ translated `AllBrokersStrategyTest` + `AllBrokersStrategyIntegrationTest`.
   `testAbortTransaction*`, `testForceTerminateTransaction*`, `testListTransactions`,
   `testFenceProducers`), `ListTransactionsResultTest`, and all internals handler
   tests. Byte-level wire vectors for the new request/response types.
-- **Integration**: `tests/integration/admin_transactions_test.rs` — 5 green
-  against a real 4.2.0 broker (list_transactions AllBrokersStrategy debut;
-  describe_producers; describe_transactions unknown-id error; fence_producers +
-  force_terminate PID allocation). Ongoing-transaction scenarios kept as one
-  `#[ignore]`d skeleton — no transactional producer API exists in the Rust
-  `Producer` trait yet.
+- **Integration**: `tests/integration/admin_transactions_test.rs` — 5 green / 1
+  ignored against a real 4.2.0 broker, verified running the FULL file together at
+  both `--test-threads=1` and `--test-threads=2` (list_transactions
+  AllBrokersStrategy debut; describe_producers; describe_transactions unknown-id
+  error; fence_producers + force_terminate PID allocation). Ongoing-transaction
+  scenarios kept as one `#[ignore]`d skeleton — no transactional producer API
+  exists in the Rust `Producer` trait yet.
+  - Post-handoff fixup `2105176`: `test_list_transactions_returns_empty_when_none_active`
+    was non-hermetic (asserted GLOBAL emptiness while fence/force-terminate siblings
+    sharing the pooled broker left persistent `Empty`-state transactional IDs). Fixed
+    by giving it a dedicated isolated `ClusterConfig`. RPC was correct; test-only fix.
 - Documented skip: `ListTransactionsHandlerTest.testBuildRequestWithDurationFilter`
   case 3 — the message generator omits below-min-version fields rather than
   throwing `UnsupportedVersion` (pre-existing generator-wide behavior; worth a

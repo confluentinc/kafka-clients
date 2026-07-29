@@ -1,7 +1,30 @@
 # Tier 3 Phase 6 — Producers & transactions — Review record
 
-**Status: COMPLETE, Critic-CLEAN on first pass (no fix cycle).** Agent N=1.
-Date: 2026-07-29.
+**Status: COMPLETE.** Critic-CLEAN on the first code review; one post-handoff
+integration-test isolation fixup followed (see "Post-handoff fixup" below), then
+Critic-clean again. Agent N=1. Date: 2026-07-29.
+
+## Post-handoff fixup (`2105176`, autosquashes onto `3c7ceca`)
+The coordinator's independent re-verification caught a real, deterministic
+integration-test isolation defect that the first review missed:
+`test_list_transactions_returns_empty_when_none_active` asserted GLOBAL broker
+emptiness (`listings.is_empty()`), but all tests in `admin_transactions_test.rs`
+shared one `txn_single_broker()` `ClusterConfig` → one pooled broker. The
+fence/force-terminate sibling tests register persistent transactional IDs
+(`admin-fence-fresh-id`, `admin-force-terminate-fresh-id`) that linger in `Empty`
+state and sort alphabetically before "list", so the assertion failed reliably
+when the file ran as a whole (2/2 runs, both `--test-threads=1` and `=2`). The
+`list_transactions` RPC itself was correct — purely a non-hermetic test.
+**Fix:** a dedicated `txn_single_broker_isolated()` `ClusterConfig` (restates the
+broker default `KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS=50` as a distinguishing
+pool key → the pool hands this test its own container), so the emptiness assertion
+is legitimate again. Verified by running the FULL file both ways:
+`--test-threads=1` and `--test-threads=2` → 5 passed / 1 ignored each (Critic also
+ran `--include-ignored` → 6 passed). No production code changed.
+**Recurring hazard codified** (Critic memory): integration tests asserting on
+global broker state (empty listings, resource counts, "nothing exists") are
+non-hermetic under the shared cluster-pool; sibling tests sharing a `ClusterConfig`
+pollute it — use a dedicated `ClusterConfig` or a self-scoped assertion.
 
 ## RPCs translated
 `describeProducers`, `abortTransaction`, `describeTransactions`,
