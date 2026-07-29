@@ -241,6 +241,43 @@ blocks:
             - artifact pull workflow wheels-windows-${Env:ARCH} --destination wheelhouse --force
             - Get-ChildItem wheelhouse
             - python -m pip install pytest pytest-asyncio
-            - python -m pip install --no-index --find-links wheelhouse confluent-kafka-rust-python
+            - python -m pip install --no-index --find-links wheelhouse confluent-kafka4
             - "python -c \"import _confluentkafka; print('import OK')\""
+            - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
+
+  - name: "Build sdist"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install build
+            - python -m build -s --outdir sdist-out bindings/python
+            - ls -l sdist-out/
+            - artifact push workflow sdist-out --destination sdist --force
+
+  - name: "Verify sdist (from source)"
+    dependencies:
+      - "Build sdist"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      jobs:
+        - name: verify
+          commands:
+            - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            - source "$HOME/.cargo/env"
+            - sudo apt-get update -qq && sudo apt-get install -y -qq cmake nasm
+            - artifact pull workflow sdist --destination sdist-out --force
+            - ls -l sdist-out/
+            - python -m venv /tmp/sdistvenv
+            - . /tmp/sdistvenv/bin/activate
+            - python -m pip install --upgrade pip
+            - unset CONFLUENT_KAFKA_LIB_DIR
+            - python -m pip install -v sdist-out/*.tar.gz
+            - "python -c \"import _confluentkafka; print('import OK from-source sdist')\""
             - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""

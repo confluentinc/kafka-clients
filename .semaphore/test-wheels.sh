@@ -44,7 +44,7 @@ run_matrix() {
         echo "== Python $py =="
         uv venv --python "$py" "/tmp/v$py"
         vpy="/tmp/v$py/bin/python"
-        uv pip install --python "$vpy" --no-index --find-links "$base/$wheelhouse" confluent-kafka-rust-python
+        uv pip install --python "$vpy" --no-index --find-links "$base/$wheelhouse" confluent-kafka4
         uv pip install --python "$vpy" pytest pytest-asyncio
         "$vpy" -c "import _confluentkafka; print('import OK: Python $py')"
         # asyncio_mode=auto is set here rather than read from pyproject.toml,
