@@ -277,6 +277,36 @@ mod tests {
         assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
     }
 
+    /// Byte-level wire-encoding check for the v5 (flexible batched) request,
+    /// exercising the compact/nullable-string framing, member/top-level tagged
+    /// fields, and — the headline feature of this phase — the v5 `Reason` field
+    /// (KIP-800; `LeaveGroupRequest.json`: `Reason` `versions: "5+"`,
+    /// `flexibleVersions: "4+"`). Hand-computed against the spec.
+    /// Field-by-field (little-detail, flexible framing uses unsigned-varint
+    /// length prefixes of n+1):
+    ///   group_id "g": compact string len 1 -> 0x02, then 0x67
+    ///   members: compact array len 1 -> 0x02
+    ///     member_id "m": compact string len 1 -> 0x02, then 0x6D
+    ///     group_instance_id "i": compact (nullable) string len 1 -> 0x02, then 0x69
+    ///     reason "r": compact (nullable) string len 1 -> 0x02, then 0x72
+    ///     member tagged fields: 0x00
+    ///   top-level tagged fields: 0x00
+    #[test]
+    fn serialize_known_byte_vector_v5_flexible() {
+        let mut builder = LeaveGroupRequestBuilder::new("g".to_string(), vec![member("m", Some("i"), Some("r"))]);
+        let mut req = builder.build_version(5).unwrap();
+        let expected: &[u8] = &[
+            0x02, 0x67, // group_id "g" (compact string, len n+1 = 2)
+            0x02, // members compact array len 1 (=n+1)
+            0x02, 0x6D, // member_id "m" (compact string)
+            0x02, 0x69, // group_instance_id "i" (compact nullable string, non-null)
+            0x02, 0x72, // reason "r" (compact nullable string, non-null) -- v5 field
+            0x00, // member tagged fields
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
+
     /// `get_error_response` sets a top-level error code and (v1+) throttle time.
     #[test]
     fn get_error_response_sets_top_level_error() {
