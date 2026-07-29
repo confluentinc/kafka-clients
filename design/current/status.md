@@ -704,3 +704,41 @@ translated `AllBrokersStrategyTest` + `AllBrokersStrategyIntegrationTest`.
 - `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A (not a hot path).
 - Critic: **CLEAN on first pass — no fix cycle needed.** See
   `design/history/Milestone-11/Tier3-Phase-6/` (`REVIEW.md` + `COMMENTS.DONE.1.md`).
+
+## Tier 3 Phase 7 — Client metrics ✓ (2026-07-29)
+
+RPC: `listClientMetricsResources(ListClientMetricsResourcesOptions)`.
+
+- New: `ClientMetricsResourceListing` (name-only POJO, `Display` = Java
+  `toString`), `ListClientMetricsResourcesResult` (`all()` →
+  `KafkaFuture<Vec<ClientMetricsResourceListing>>`),
+  `ListClientMetricsResourcesOptions`.
+- Reuses the Tier-1 `ListConfigResourcesRequest.Builder` filtered to
+  `ConfigResourceType::ClientMetrics.id()` (id 16); response filtered to
+  CLIENT_METRICS and mapped `.name()` → listing. **Zero new wire types**
+  (matches `KafkaAdminClient.java` ~4922). Plain sync `fn` on the trait.
+- `MockAdminClient` got the real Java in-memory logic (finding #9, not a stub):
+  maps `client_metrics_configs.keys()` → listings, mirroring
+  `MockAdminClient.java` ~1431.
+
+### Tests
+- **Rust lib suite: 2993 passing, 0 failed.**
+- All three `KafkaAdminClientTest` methods 1:1 (`testListClientMetricsResources`,
+  `...Empty`, `...NotSupported` with exact `UnsupportedVersion` +
+  `"The version of API is not supported."` assertions). Not conflated with the
+  Tier-1 `testDescribeClientMetricsConfigs`.
+- **Integration**: `tests/integration/admin_cluster_configs_test.rs` — new test
+  creates a real KIP-714 client-metrics subscription, lists it, asserts, deletes;
+  green against apache/kafka:4.2.0.
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: **CLEAN on first pass — no fix cycle needed.** See
+  `design/history/Milestone-11/Tier3-Phase-7/` (`REVIEW.md` + `COMMENTS.DONE.1.md`).
+
+## Tier 3 — status: 6 of 7 in-scope phases COMPLETE; Phase 3 (SCRAM) DEFERRED
+
+Complete: Phase 1 (ACLs), Phase 2 (client quotas), Phase 4 (delegation tokens),
+Phase 5 (features), Phase 6 (producers & transactions), Phase 7 (client metrics).
+**Deferred: Phase 3 (SCRAM credentials)** — blocked on an unapproved crypto-crate
+dependency (`pbkdf2`/`hmac`/`sha2` or `ring` for `ScramFormatter.hi()` PBKDF2;
+CLAUDE.md §1.2, `Cargo.toml` change). Resumes only on explicit relayed approval.
+Tier 4 remains out of scope.

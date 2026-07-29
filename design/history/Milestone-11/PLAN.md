@@ -111,10 +111,20 @@
 > compiling `#[ignore]` skeletons). Review record at
 > `design/history/Milestone-11/Tier3-Phase-6/`.
 >
-> **Next: Tier 3 Phase 7 "Client metrics"** (`listClientMetricsResources` —
-> small; reuses the Tier-1 `ListConfigResources` wire path filtered to
-> `CLIENT_METRICS`, zero new wire types). SCRAM (Phase 3) revisited only on an
-> explicit relayed crate approval. Tier 4 remains out of scope.
+> **Tier 3 Phase 7 "Client metrics" is COMPLETE (2026-07-29):**
+> `listClientMetricsResources` — reuses the Tier-1 `ListConfigResources` wire
+> path filtered to `CLIENT_METRICS` (zero new wire types); `MockAdminClient` got
+> the real Java in-memory logic (finding #9, not a stub). Rust core + unit tests
+> (all three `KafkaAdminClientTest` methods 1:1, exact `UnsupportedVersion`
+> message on the NotSupported case) + real-broker integration (KIP-714
+> subscription create→list→assert→delete). Critic-CLEAN on first pass. 2993 lib
+> tests pass. Review record at `design/history/Milestone-11/Tier3-Phase-7/`.
+>
+> **Tier 3 in-scope phases are now COMPLETE except Phase 3 (SCRAM), which is
+> DEFERRED** pending an explicit relayed crate-dependency approval (`pbkdf2`/
+> `hmac`/`sha2` or `ring` — CLAUDE.md §1.2, `Cargo.toml` change). Do not touch
+> SCRAM until that approval arrives. Tier 4 remains out of scope. When SCRAM is
+> unblocked, resume with the Tier 3 Phase 3 spec (this PLAN, ~line 740).
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed
