@@ -26,6 +26,8 @@ org.apache.kafka.clients.admin.AdminClientConfig
 org.apache.kafka.clients.admin.AlterConfigOp
 org.apache.kafka.clients.admin.AlterConfigsOptions
 org.apache.kafka.clients.admin.AlterConfigsResult
+org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions
+org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult
 org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions
 org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult
 org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions
@@ -39,6 +41,8 @@ org.apache.kafka.clients.admin.CreatePartitionsOptions
 org.apache.kafka.clients.admin.CreatePartitionsResult
 org.apache.kafka.clients.admin.CreateTopicsOptions
 org.apache.kafka.clients.admin.CreateTopicsResult
+org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsOptions
+org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult
 org.apache.kafka.clients.admin.DeleteRecordsOptions
 org.apache.kafka.clients.admin.DeleteRecordsResult
 org.apache.kafka.clients.admin.DeleteTopicsOptions
@@ -64,6 +68,9 @@ org.apache.kafka.clients.admin.GroupListing
 org.apache.kafka.clients.admin.KafkaAdminClient
 org.apache.kafka.clients.admin.ListConfigResourcesOptions
 org.apache.kafka.clients.admin.ListConfigResourcesResult
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec
 org.apache.kafka.clients.admin.ListConsumerGroupsOptions
 org.apache.kafka.clients.admin.ListConsumerGroupsResult
 org.apache.kafka.clients.admin.ListGroupsOptions
@@ -90,11 +97,14 @@ org.apache.kafka.clients.admin.internals.AdminApiDriver
 org.apache.kafka.clients.admin.internals.AdminApiHandler
 org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy
 org.apache.kafka.clients.admin.internals.AdminMetadataManager
+org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler
 org.apache.kafka.clients.admin.internals.CoordinatorKey
 org.apache.kafka.clients.admin.internals.CoordinatorStrategy
+org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler
 org.apache.kafka.clients.admin.internals.DeleteRecordsHandler
 org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler
 org.apache.kafka.clients.admin.internals.DescribeConsumerGroupsHandler
+org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler
 org.apache.kafka.clients.admin.internals.ListOffsetsHandler
 org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy
 org.apache.kafka.clients.consumer.ConsumerPartitionAssignor
@@ -693,6 +703,8 @@ org.apache.kafka.common.requests.ListPartitionReassignmentsRequest
 org.apache.kafka.common.requests.ListPartitionReassignmentsResponse
 org.apache.kafka.common.requests.MetadataRequest
 org.apache.kafka.common.requests.MetadataResponse
+org.apache.kafka.common.requests.OffsetDeleteRequest
+org.apache.kafka.common.requests.OffsetDeleteResponse
 org.apache.kafka.common.requests.ProduceRequest
 org.apache.kafka.common.requests.ProduceResponse
 org.apache.kafka.common.requests.RequestAndSize

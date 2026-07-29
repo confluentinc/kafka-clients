@@ -35,10 +35,20 @@
 > use of `CoordinatorStrategy`; landed the `ConsumerProtocol` /
 > `consumer-threading.md` §20 carve-out prerequisite. Review record archived at
 > `design/history/Milestone-11/Tier2-Phase-1/COMMENTS.DONE.1.md`;
-> `design/current/status.md` has the surface summary. **Next: Tier 2 Phase 2
-> "Group offsets".** The full Tier 2 (remaining 2 phases) and Tier 3 (7 phases)
-> breakdowns below remain valid and ready to execute as-is, following the same
-> Manager → Actor → Critic cadence.
+> `design/current/status.md` has the surface summary.
+>
+> **Tier 2 Phase 2 "Group offsets" is now COMPLETE (2026-07-29):**
+> `list_consumer_group_offsets`, `alter_consumer_group_offsets`,
+> `delete_consumer_group_offsets` — Rust core + unit tests + real-broker
+> integration tests, Critic-clean after one fix cycle. Note: the PLAN's
+> `deleteConsumerGroupOffsets` "-1 OffsetCommit sentinel" claim was WRONG —
+> Kafka 4.2 uses a dedicated `OffsetDelete` RPC (apiKey 47, v0), which was
+> added as net-new wire work. Review record archived at
+> `design/history/Milestone-11/Tier2-Phase-2/COMMENTS.DONE.1.md`.
+>
+> **Next: Tier 2 Phase 3 "Group / member deletion".** The remaining Tier 2
+> Phase 3 and Tier 3 (7 phases) breakdowns below remain valid and ready to
+> execute as-is, following the same Manager → Actor → Critic cadence.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed

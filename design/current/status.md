@@ -396,3 +396,41 @@ idiom.**
   test coverage, list-groups filter/older-broker wiring, `ConsumerProtocol`
   missing methods), all fixed and re-verified clean on the fix cycle. See
   `design/history/Milestone-11/Tier2-Phase-1/COMMENTS.DONE.1.md`.
+
+## Tier 2 Phase 2 — Group offsets ✓ (2026-07-29)
+
+Translated `list_consumer_group_offsets`, `alter_consumer_group_offsets`,
+`delete_consumer_group_offsets`, Rust core + unit tests + real-broker
+integration tests, all green. All three are `CoordinatorStrategy(GROUP)`
+handlers on the `AdminApiDriver`.
+
+- **`list_consumer_group_offsets`**: batched multi-group `OffsetFetch` with
+  per-group fallback; the batching-downgrade path wires
+  `AdminApiLookupStrategy::disable_batch()` (defaulted trait method,
+  overridden by `CoordinatorStrategy`) into `AdminApiDriver.on_failure`,
+  triggered before the generic `UnsupportedVersion` branch on the
+  `NoBatchedOffsetFetch`/`NoBatchedFindCoordinators` messages.
+- **`alter_consumer_group_offsets`**: reuses `OffsetCommitRequest`.
+- **`delete_consumer_group_offsets`**: **PLAN correction** — Kafka 4.2 does
+  NOT use an `OffsetCommit` `-1` sentinel; it uses a dedicated `OffsetDelete`
+  RPC (`ApiKeys.OFFSET_DELETE`=47, v0-only, non-flexible). Net-new wire wrapper
+  `common::requests::OffsetDelete{Request,Response}` added with all
+  `ConcreteRequest`/`ConcreteResponse` enum arms wired and byte-level
+  known-vector tests.
+- **Reuse (DoD #6)**: `OffsetFetchRequest`/`Response` and
+  `OffsetCommitRequest`/`Response` reused from the Consumer side, not
+  duplicated. New: `admin::{ListConsumerGroupOffsetsSpec,
+  ListConsumerGroupOffsetsResult, AlterConsumerGroupOffsetsResult,
+  DeleteConsumerGroupOffsetsResult}`, the three `*Options`, and the three
+  `internals` handlers.
+
+### Tests
+- **Rust lib suite: 2562 passing.**
+- **Integration**: `tests/integration/admin_group_offsets_test.rs` — 4/4 green
+  against a real 4.2.0 broker (list matches committed; alter+restart resumes
+  from altered offset; delete on inactive group removes it; delete on active
+  group fails `GROUP_SUBSCRIBED_TO_TOPIC`).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 1 DoD #3 gap on first pass (`requireStable` option→wire propagation
+  untested) fixed + re-verified clean; retriable-test fold documented. See
+  `design/history/Milestone-11/Tier2-Phase-2/COMMENTS.DONE.1.md`.
