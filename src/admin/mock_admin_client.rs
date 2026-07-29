@@ -28,7 +28,8 @@ use crate::admin::FilterResults;
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
     DescribeProducersResult, DescribeTransactionsOptions, DescribeTransactionsResult, FenceProducersOptions,
-    FenceProducersResult, PartitionProducerState, TransactionDescription,
+    FenceProducersResult, ListTransactionsOptions, ListTransactionsResult, PartitionProducerState,
+    TerminateTransactionOptions, TerminateTransactionResult, TransactionDescription, TransactionListing,
 };
 use crate::admin::{
     Admin, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
@@ -58,6 +59,7 @@ use crate::admin::{
 #[allow(deprecated)]
 use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
 use crate::common::ElectionType;
+use crate::common::KafkaFuture;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
@@ -914,6 +916,39 @@ impl Admin for MockAdminClient {
             result.insert(id.clone(), handle.future());
         }
         FenceProducersResult::new(result)
+    }
+
+    fn list_transactions(&self, _options: ListTransactionsOptions) -> ListTransactionsResult {
+        // Java's `MockAdminClient.listTransactions` (MockAdminClient.java:1388-1390)
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // `.claude/rules/admin-client.md` §9 the Rust mock completes the
+        // top-level future exceptionally instead of panicking.
+        let handle: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        ListTransactionsResult::new(handle.future())
+    }
+
+    fn force_terminate_transaction(
+        &self,
+        transactional_id: &str,
+        options: TerminateTransactionOptions,
+    ) -> TerminateTransactionResult {
+        // Java's `MockAdminClient.forceTerminateTransaction` delegates to
+        // `fenceProducers`, which throws `UnsupportedOperationException`. The Rust
+        // mock mirrors that delegation, so the resulting future carries the
+        // "unsupported" error.
+        let mut fence_options = FenceProducersOptions::new();
+        if options.timeout().is_some() {
+            fence_options = fence_options.timeout_ms(options.timeout());
+        }
+        let ids = vec![transactional_id.to_string()];
+        let fence_result = self.fence_producers(&ids, fence_options);
+        let future = fence_result
+            .fenced_producers()
+            .get(transactional_id)
+            .cloned()
+            .expect("the transactional id was included in the fenceProducers request");
+        TerminateTransactionResult::new(future)
     }
 
     fn describe_cluster(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {
