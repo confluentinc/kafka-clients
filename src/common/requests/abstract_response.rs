@@ -51,6 +51,8 @@ use super::ListOffsetsResponse;
 use super::ListPartitionReassignmentsResponse;
 use super::MetadataResponse;
 use super::OffsetCommitResponse;
+use super::DeleteGroupsResponse;
+use super::LeaveGroupResponse;
 use super::OffsetDeleteResponse;
 use super::OffsetFetchResponse;
 use super::OffsetsForLeaderEpochResponse;
@@ -100,6 +102,10 @@ pub enum ConcreteResponse {
     ConsumerGroupHeartbeat(ConsumerGroupHeartbeatResponse),
     /// An OffsetCommit response.
     OffsetCommit(OffsetCommitResponse),
+    /// A DeleteGroups response.
+    DeleteGroups(DeleteGroupsResponse),
+    /// A LeaveGroup response.
+    LeaveGroup(LeaveGroupResponse),
     /// An OffsetDelete response.
     OffsetDelete(OffsetDeleteResponse),
     /// An OffsetFetch response.
@@ -150,6 +156,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
+            Self::DeleteGroups(r) => r.api_key(),
+            Self::LeaveGroup(r) => r.api_key(),
             Self::OffsetDelete(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
             Self::CreateTopics(r) => r.api_key(),
@@ -191,6 +199,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DeleteGroups(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::LeaveGroup(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetDelete(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::CreateTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -258,6 +268,12 @@ impl ConcreteResponse {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetCommit(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::LeaveGroup(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetDelete(r) => {
@@ -331,6 +347,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::LeaveGroup(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetDelete(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
@@ -376,6 +394,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => r.error_counts(),
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
             Self::OffsetCommit(r) => r.error_counts(),
+            Self::DeleteGroups(r) => r.error_counts(),
+            Self::LeaveGroup(r) => r.error_counts(),
             Self::OffsetDelete(r) => r.error_counts(),
             Self::OffsetFetch(r) => r.error_counts(),
             Self::CreateTopics(r) => r.error_counts(),
@@ -413,6 +433,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => r.throttle_time_ms(),
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
             Self::OffsetCommit(r) => r.throttle_time_ms(),
+            Self::DeleteGroups(r) => r.throttle_time_ms(),
+            Self::LeaveGroup(r) => r.throttle_time_ms(),
             Self::OffsetDelete(r) => r.throttle_time_ms(),
             Self::OffsetFetch(r) => r.throttle_time_ms(),
             Self::CreateTopics(r) => r.throttle_time_ms(),
@@ -449,6 +471,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DeleteGroups(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::LeaveGroup(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetDelete(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::CreateTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -484,6 +508,8 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => r.should_client_throttle(version),
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
             Self::OffsetCommit(r) => r.should_client_throttle(version),
+            Self::DeleteGroups(r) => r.should_client_throttle(version),
+            Self::LeaveGroup(r) => r.should_client_throttle(version),
             Self::OffsetDelete(r) => r.should_client_throttle(version),
             Self::OffsetFetch(r) => r.should_client_throttle(version),
             Self::CreateTopics(r) => r.should_client_throttle(version),
@@ -603,6 +629,14 @@ impl ConcreteResponse {
                 let response = OffsetCommitResponse::parse(readable, version)?;
                 Ok(Self::OffsetCommit(response))
             },
+            ApiKeys::DELETE_GROUPS => {
+                let response = DeleteGroupsResponse::parse(readable, version)?;
+                Ok(Self::DeleteGroups(response))
+            },
+            ApiKeys::LEAVE_GROUP => {
+                let response = LeaveGroupResponse::parse(readable, version)?;
+                Ok(Self::LeaveGroup(response))
+            },
             ApiKeys::OFFSET_DELETE => {
                 let response = OffsetDeleteResponse::parse(readable, version)?;
                 Ok(Self::OffsetDelete(response))
@@ -688,6 +722,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
+            Self::DeleteGroups(r) => write!(f, "{r}"),
+            Self::LeaveGroup(r) => write!(f, "{r}"),
             Self::OffsetDelete(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
             Self::CreateTopics(r) => write!(f, "{r}"),

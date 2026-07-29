@@ -49,6 +49,8 @@ use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
+use crate::delete_groups_request_data::DeleteGroupsRequestData;
+use crate::leave_group_request_data::LeaveGroupRequestData;
 use crate::offset_delete_request_data::OffsetDeleteRequestData;
 use crate::offset_fetch_request_data::OffsetFetchRequestData;
 use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
@@ -80,6 +82,8 @@ use super::ListOffsetsRequest;
 use super::ListPartitionReassignmentsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
+use super::DeleteGroupsRequest;
+use super::LeaveGroupRequest;
 use super::OffsetDeleteRequest;
 use super::OffsetFetchRequest;
 use super::OffsetsForLeaderEpochRequest;
@@ -158,6 +162,10 @@ pub enum ConcreteRequest {
     ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest),
     /// An OffsetCommit request.
     OffsetCommit(OffsetCommitRequest),
+    /// A DeleteGroups request.
+    DeleteGroups(DeleteGroupsRequest),
+    /// A LeaveGroup request.
+    LeaveGroup(LeaveGroupRequest),
     /// An OffsetDelete request.
     OffsetDelete(OffsetDeleteRequest),
     /// An OffsetFetch request.
@@ -208,6 +216,8 @@ impl ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => r.version(),
             Self::ConsumerGroupHeartbeat(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
+            Self::DeleteGroups(r) => r.version(),
+            Self::LeaveGroup(r) => r.version(),
             Self::OffsetDelete(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
             Self::CreateTopics(r) => r.version(),
@@ -243,6 +253,8 @@ impl ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
+            Self::DeleteGroups(r) => r.api_key(),
+            Self::LeaveGroup(r) => r.api_key(),
             Self::OffsetDelete(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
             Self::CreateTopics(r) => r.api_key(),
@@ -284,6 +296,8 @@ impl ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteGroups(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::LeaveGroup(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetDelete(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::CreateTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
@@ -375,6 +389,12 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DeleteGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::LeaveGroup(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::OffsetDelete(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -447,6 +467,8 @@ impl ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::LeaveGroup(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetDelete(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
@@ -500,6 +522,8 @@ impl ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteGroups(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::LeaveGroup(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetDelete(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::CreateTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
@@ -600,6 +624,14 @@ impl ConcreteRequest {
                 let data = OffsetCommitRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetCommit(OffsetCommitRequest::new(data, api_version)))
             },
+            ApiKeys::DELETE_GROUPS => {
+                let data = DeleteGroupsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteGroups(DeleteGroupsRequest::new(data, api_version)))
+            },
+            ApiKeys::LEAVE_GROUP => {
+                let data = LeaveGroupRequestData::read(readable, api_version)?;
+                Ok(Self::LeaveGroup(LeaveGroupRequest::new(data, api_version)))
+            },
             ApiKeys::OFFSET_DELETE => {
                 let data = OffsetDeleteRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetDelete(OffsetDeleteRequest::new(data, api_version)))
@@ -694,6 +726,8 @@ impl std::fmt::Display for ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
+            Self::DeleteGroups(r) => write!(f, "{r}"),
+            Self::LeaveGroup(r) => write!(f, "{r}"),
             Self::OffsetDelete(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
             Self::CreateTopics(r) => write!(f, "{r}"),
