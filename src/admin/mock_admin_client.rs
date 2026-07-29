@@ -26,18 +26,19 @@ use async_trait::async_trait;
 
 use crate::admin::FilterResults;
 use crate::admin::{
-    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
-    AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
-    AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription, Config, ConfigEntry,
-    ConsumerGroupDescription, CreateAclsOptions, CreateAclsResult, CreatePartitionsOptions, CreatePartitionsResult,
-    CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions,
-    DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions,
-    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeAclsOptions,
-    DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions,
-    DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions,
-    DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
-    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
-    GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
+    Admin, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
+    AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions,
+    AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription,
+    Config, ConfigEntry, ConsumerGroupDescription, CreateAclsOptions, CreateAclsResult, CreatePartitionsOptions,
+    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
+    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    DeletedRecords, DescribeAclsOptions, DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
+    DescribeClientQuotasOptions, DescribeClientQuotasResult, DescribeClusterOptions, DescribeClusterResult,
+    DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult,
+    DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult,
+    DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, GroupListing, GroupOffsets,
+    ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
     ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo, ListPartitionReassignmentsOptions,
     ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
@@ -52,6 +53,7 @@ use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
+use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
 use crate::common::{GroupState, GroupType};
 use crate::common::{
@@ -1361,6 +1363,38 @@ impl Admin for MockAdminClient {
             futures.insert(filter.clone(), handle.future());
         }
         DeleteAclsResult::new(futures)
+    }
+
+    fn describe_client_quotas(
+        &self,
+        _filter: &ClientQuotaFilter,
+        _options: DescribeClientQuotasOptions,
+    ) -> DescribeClientQuotasResult {
+        // Java's `MockAdminClient.describeClientQuotas` throws
+        // `UnsupportedOperationException("Not implement yet")`
+        // (MockAdminClient.java:1243-1245). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+        DescribeClientQuotasResult::new(handle.future())
+    }
+
+    fn alter_client_quotas(
+        &self,
+        entries: &[ClientQuotaAlteration],
+        _options: AlterClientQuotasOptions,
+    ) -> AlterClientQuotasResult {
+        // Java's `MockAdminClient.alterClientQuotas` throws
+        // `UnsupportedOperationException("Not implement yet")`
+        // (MockAdminClient.java:1248-1250). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future per entity rather than a panic.
+        let mut futures = HashMap::new();
+        for entry in entries {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+            futures.insert(entry.entity().clone(), handle.future());
+        }
+        AlterClientQuotasResult::new(futures)
     }
 
     async fn close(&self, _timeout: Duration) {
