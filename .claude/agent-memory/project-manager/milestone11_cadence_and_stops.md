@@ -27,3 +27,14 @@ round-trip latency; they independently re-verify every landed phase.
   the user. Nothing else pauses. See PLAN finding #4.
 - Scope is **Rust core + unit tests + real-broker integration tests only** — no
   C FFI, no Python bindings this milestone (see [[milestone11-scope-rust-only]]).
+
+**Guard: `tests/integration/admin_smoke_test_manual.rs` must stay UNTRACKED.**
+It is the user's developer-local manual smoke test, intentionally not
+version-controlled (its `mod` line in `tests/integration/main.rs` is a local
+uncommitted edit). Actors have accidentally `git add`-swept it into their
+commits (happened in Tier 3 Phase 1, commits 9fe737e/9114755 — fixed by
+untracking in a follow-up `chore:` commit). **After every Actor phase, before
+the handoff commit, verify `git ls-tree -r HEAD --name-only | grep
+admin_smoke_test_manual` returns nothing.** If it got committed, `git rm
+--cached` it + drop the committed `mod` line, then restore the `mod` line as a
+local uncommitted edit — never alter the file's contents.
