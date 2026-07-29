@@ -434,3 +434,54 @@ handlers on the `AdminApiDriver`.
 - Critic: 1 DoD #3 gap on first pass (`requireStable` option→wire propagation
   untested) fixed + re-verified clean; retriable-test fold documented. See
   `design/history/Milestone-11/Tier2-Phase-2/COMMENTS.DONE.1.md`.
+
+## Tier 2 Phase 3 — Group / member deletion ✓ (2026-07-29)
+
+Translated `delete_consumer_groups` and `remove_members_from_consumer_group`
+(specific members or `remove_all`), Rust core + unit tests + real-broker
+integration tests, all green. Both are `CoordinatorStrategy(GROUP)` handlers.
+**This completes Tier 2.**
+
+- **`delete_consumer_groups`**: `DeleteGroupsHandler` (base, real
+  `DeleteGroups` work + `api_name`/`display_name`) + `DeleteConsumerGroupsHandler`
+  thin-subclass factory — the Java abstract-base/subclass split modeled via
+  composition.
+- **`remove_members_from_consumer_group`**: `LeaveGroupRequest` keyed by
+  `MemberIdentity`; `remove_all` first describes the group to enumerate members,
+  then drives `LeaveGroup`. The describe step uses the client's default API
+  timeout and the `LeaveGroup` driver deadline is recomputed fresh inside the
+  describe-completion callback (matching Java's `whenComplete` → `invokeDriver`).
+- **New wire wrappers (net new)**: `common::requests::DeleteGroups{Request,Response}`
+  (apiKey 42), `LeaveGroup{Request,Response}` (apiKey 13, incl. `MemberIdentity`/
+  `MemberResponse`), with byte-level known-vector tests for both non-flexible and
+  flexible (v5, incl. the KIP-800 `Reason` field) framing. Reason truncation at
+  255 chars ported as `common::requests::join_group_request::maybe_truncate_reason`
+  (only that helper of `JoinGroupRequest` was needed; the full class is not yet
+  translated).
+- **New types**: `admin::{MemberToRemove, DeleteConsumerGroupsResult,
+  RemoveMembersFromConsumerGroupResult}`, the two `*Options`, the three
+  `internals` handlers. `MockAdminClient` returns "Not implemented yet"
+  (faithful to Java's mock, which throws `UnsupportedOperationException`).
+- `ExponentialBackoff` gained a `#[derive(Clone)]` (pure additive; reused across
+  the two chained `remove_all` drivers).
+
+### Tests
+- **Rust lib suite: 2625 passing.**
+- **Integration**: `tests/integration/admin_groups_test.rs` (extended) — green
+  against a real 4.2.0 broker: delete empty group; delete live group →
+  non-retriable `NON_EMPTY_GROUP`; remove one static member → reassignment;
+  `remove_all` empties the group. (Admin `LeaveGroup` removal of KIP-848 members
+  requires static members with `group.instance.id`.)
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 2 issues on first pass (removeAll deadline behavior mismatch;
+  LeaveGroup flexible-framing byte-test gap), both fixed + re-verified clean.
+  See `design/history/Milestone-11/Tier2-Phase-3/COMMENTS.DONE.1.md`.
+
+## Tier 2 — COMPLETE ✓ (Phases 1–3)
+
+All of Milestone 11 Tier 2 is implemented, tested (unit + real-broker
+integration), and Critic-clean: **group listing & describe; group offsets;
+group/member deletion.** First real use of `CoordinatorStrategy(GROUP)` and the
+`AdminApiDriver` coordinator-lookup engine. Next: **Tier 3** (ACLs, quotas,
+SCRAM, delegation tokens, features, producers/transactions, client metrics),
+starting with Phase 1 "ACLs".

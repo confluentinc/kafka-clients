@@ -46,9 +46,21 @@
 > added as net-new wire work. Review record archived at
 > `design/history/Milestone-11/Tier2-Phase-2/COMMENTS.DONE.1.md`.
 >
-> **Next: Tier 2 Phase 3 "Group / member deletion".** The remaining Tier 2
-> Phase 3 and Tier 3 (7 phases) breakdowns below remain valid and ready to
-> execute as-is, following the same Manager → Actor → Critic cadence.
+> **Tier 2 Phase 3 "Group / member deletion" is now COMPLETE (2026-07-29):**
+> `delete_consumer_groups`, `remove_members_from_consumer_group` (specific
+> members or `remove_all`) — Rust core + unit tests + real-broker integration
+> tests, Critic-clean after one fix cycle. Net-new `DeleteGroups`/`LeaveGroup`
+> wire wrappers; `remove_all` describes-then-leaves with Java-faithful deadline
+> handling. Review record at
+> `design/history/Milestone-11/Tier2-Phase-3/COMMENTS.DONE.1.md`.
+>
+> **TIER 2 IS COMPLETE (all 3 phases).** **Next: Tier 3 Phase 1 "ACLs".** The
+> Tier 3 (7 phases) breakdown below remains valid and ready to execute as-is,
+> following the same Manager → Actor → Critic cadence. REMINDER: **Tier 3
+> Phase 3 (SCRAM) needs a new PBKDF2 crypto crate — HARD STOP there** to get
+> the crate decision approved before touching `Cargo.toml` (finding #4). Tier 3
+> Phase 1 (ACLs) integration tests need the authorizer-enabled broker fixture
+> (finding #11). Tier 4 remains out of scope.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed
