@@ -612,3 +612,46 @@ independent of other Tier 3 phases.
 - Critic: **CLEAN on first pass — no fix cycle needed** (MockAdminClient fidelity
   and base64 encoder both verified). See
   `design/history/Milestone-11/Tier3-Phase-4/COMMENTS.DONE.1.md`.
+
+## Tier 3 Phase 5 — Features ✓ (2026-07-29)
+
+Translated `describe_features` and `update_features`, Rust core + unit tests +
+real-broker integration tests, all green. Both plain `Call` RPCs, independent of
+other Tier 3 phases.
+
+- **`describe_features`**: reuses the existing `ApiVersionsRequest`/`Response`
+  wrapper (zero new wire type; DoD #6). Node provider `ConstantNodeIdProvider`
+  when `options.node_id()` is set, else `LeastLoadedBrokerOrActiveKController`.
+  Decodes supported + finalized features + epoch into `FeatureMetadata`.
+- **`update_features`**: controller `Call` (`ControllerNodeProvider`, NOT_CONTROLLER
+  → clear-controller + refresh + retry); net-new `UpdateFeaturesRequest`/`Response`
+  wire wrapper (all enum arms wired; hand-computed byte vectors; v0 `allow_downgrade`
+  vs v1+ `upgrade_type`, v2 empty per-feature results). Returns
+  `Result<UpdateFeaturesResult, KafkaError>` — the one admin RPC with this shape,
+  because Java `updateFeatures` throws `IllegalArgumentException` SYNCHRONOUSLY
+  (pre-enqueue) for empty/blank inputs, and `FeatureUpdate::new` throws for the
+  deletion-without-downgrade-flag case (CLAUDE.md §10.2). Critic-confirmed faithful.
+- **New types**: `admin::{FeatureMetadata, FeatureUpdate (+ UpgradeType:
+  UPGRADE/SAFE_DOWNGRADE/UNSAFE_DOWNGRADE/UNKNOWN), FinalizedVersionRange,
+  SupportedVersionRange, Describe/UpdateFeatures{Options,Result}}`.
+- **`MockAdminClient`**: REAL upgrade/downgrade version-bounds validation
+  translated faithfully (finding #9 — the mock is NOT a stub here), seeded
+  feature-level maps, `InvalidRequestException`-wrapped errors.
+
+### Tests
+- **Rust lib suite: 2857 passing.**
+- Full 1:1 parity on all 10 Java `KafkaAdminClientTest` feature slices:
+  `testUpdateFeatures*` (`@ValueSource(shorts={1,2})` → loop over `[1,2]`;
+  Success/TopLevelError/HandleNotControllerException/ShouldFailForEmptyUpdates/
+  ForInvalidFeatureName/WhenDowngradeFlagNotSetDuringDeletion with exact
+  client-side messages) and `testDescribeFeatures{Success,Failure,WithNodeSuccess,
+  WithNodeFailure}`; plus POJO tests, byte-level `UpdateFeatures` vectors, and
+  mock validation tests.
+- **Integration**: `tests/integration/admin_features_test.rs` — 2/2 green against
+  a real 4.2.0 broker: (a) `describe_features` sane finalized/supported range;
+  (b) `update_features` beyond max rejected. A real upgrade case is out of scope
+  (feature levels are cluster-wide/persistent).
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: **CLEAN on first pass — no fix cycle needed** (Result-signature
+  faithfulness and mock validation fidelity both verified). See
+  `design/history/Milestone-11/Tier3-Phase-5/COMMENTS.DONE.1.md`.

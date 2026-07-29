@@ -84,8 +84,18 @@
 > deferred (admin client has no SASL support yet — a separate feature). Review
 > record at `design/history/Milestone-11/Tier3-Phase-4/COMMENTS.DONE.1.md`.
 >
-> **Next: Tier 3 Phase 5 "Features".** Then Phase 6 (producers/transactions),
-> Phase 7 (client metrics). SCRAM (Phase 3) revisited only on crate approval.
+> **Tier 3 Phase 5 "Features" is COMPLETE (2026-07-29):** `describe_features`
+> (reuses `ApiVersions`), `update_features` (net-new `UpdateFeatures` wire) +
+> `FeatureMetadata`/`FeatureUpdate`/version-range POJOs — Rust core + unit tests
+> (full 1:1 parity) + real-broker integration, Critic-CLEAN on first pass. Mock
+> has real version-bounds validation (finding #9). Review record at
+> `design/history/Milestone-11/Tier3-Phase-5/COMMENTS.DONE.1.md`.
+>
+> **Next: Tier 3 Phase 6 "Producers & transactions"** (the largest remaining
+> phase — 6 RPCs, sub-sliced into 3 commits: describeProducers+abortTransaction;
+> describeTransactions+fenceProducers; listTransactions+forceTerminateTransaction;
+> introduces `StaticBrokerStrategy` + `AllBrokersStrategy` + `ProducerIdAndEpoch`).
+> Then Phase 7 (client metrics). SCRAM (Phase 3) revisited only on crate approval.
 > Tier 4 remains out of scope.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
