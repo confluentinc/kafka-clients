@@ -72,6 +72,8 @@ org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions
 org.apache.kafka.clients.admin.DescribeConsumerGroupsResult
 org.apache.kafka.clients.admin.DescribeDelegationTokenOptions
 org.apache.kafka.clients.admin.DescribeDelegationTokenResult
+org.apache.kafka.clients.admin.DescribeFeaturesOptions
+org.apache.kafka.clients.admin.DescribeFeaturesResult
 org.apache.kafka.clients.admin.DescribeLogDirsOptions
 org.apache.kafka.clients.admin.DescribeLogDirsResult
 org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions
@@ -82,6 +84,9 @@ org.apache.kafka.clients.admin.ElectLeadersOptions
 org.apache.kafka.clients.admin.ElectLeadersResult
 org.apache.kafka.clients.admin.ExpireDelegationTokenOptions
 org.apache.kafka.clients.admin.ExpireDelegationTokenResult
+org.apache.kafka.clients.admin.FeatureMetadata
+org.apache.kafka.clients.admin.FeatureUpdate
+org.apache.kafka.clients.admin.FinalizedVersionRange
 org.apache.kafka.clients.admin.GroupListing
 org.apache.kafka.clients.admin.KafkaAdminClient
 org.apache.kafka.clients.admin.ListConfigResourcesOptions
@@ -114,8 +119,11 @@ org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions
 org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult
 org.apache.kafka.clients.admin.RenewDelegationTokenOptions
 org.apache.kafka.clients.admin.RenewDelegationTokenResult
+org.apache.kafka.clients.admin.SupportedVersionRange
 org.apache.kafka.clients.admin.TopicDescription
 org.apache.kafka.clients.admin.TopicListing
+org.apache.kafka.clients.admin.UpdateFeaturesOptions
+org.apache.kafka.clients.admin.UpdateFeaturesResult
 org.apache.kafka.clients.admin.internals.AdminApiDriver
 org.apache.kafka.clients.admin.internals.AdminApiHandler
 org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy
@@ -773,6 +781,8 @@ org.apache.kafka.common.requests.SaslAuthenticateRequest
 org.apache.kafka.common.requests.SaslAuthenticateResponse
 org.apache.kafka.common.requests.SaslHandshakeRequest
 org.apache.kafka.common.requests.SaslHandshakeResponse
+org.apache.kafka.common.requests.UpdateFeaturesRequest
+org.apache.kafka.common.requests.UpdateFeaturesResponse
 org.apache.kafka.common.resource.PatternType
 org.apache.kafka.common.resource.Resource
 org.apache.kafka.common.resource.ResourcePattern
