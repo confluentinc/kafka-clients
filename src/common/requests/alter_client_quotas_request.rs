@@ -73,10 +73,9 @@ impl AlterClientQuotasRequest {
         for entry_data in &self.data.entries {
             let mut entity = HashMap::with_capacity(entry_data.entity.len());
             for entity_data in &entry_data.entity {
-                entity.insert(
-                    entity_data.entity_type.clone(),
-                    entity_data.entity_name.clone().unwrap_or_default(),
-                );
+                // A wire-null name (`None`) is the built-in default entity;
+                // preserve it verbatim rather than coercing to `""`.
+                entity.insert(entity_data.entity_type.clone(), entity_data.entity_name.clone());
             }
             let mut ops = Vec::with_capacity(entry_data.ops.len());
             for op_data in &entry_data.ops {
@@ -162,8 +161,11 @@ impl AlterClientQuotasRequestBuilder {
             let mut entity_data = Vec::with_capacity(entry.entity().entries().len());
             for (entity_type, entity_name) in entry.entity().entries() {
                 let mut ed = EntityData::new();
-                ed.set_entity_type(entity_type.clone())
-                    .set_entity_name(Some(entity_name.clone()));
+                // `None` (the default entity) maps to a wire-null name; a
+                // concrete `Some(name)` maps to the (possibly empty) non-null
+                // string. Mirrors `AlterClientQuotasRequest.Builder` sending the
+                // raw, possibly-null value via `setEntityName(...)`.
+                ed.set_entity_type(entity_type.clone()).set_entity_name(entity_name.clone());
                 entity_data.push(ed);
             }
             let mut op_data = Vec::with_capacity(entry.ops().len());
@@ -215,7 +217,12 @@ mod tests {
     use crate::common::quota::client_quota_entity::USER;
 
     fn entity(name: &str) -> ClientQuotaEntity {
-        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), name.to_string())]))
+        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), Some(name.to_string()))]))
+    }
+
+    /// The built-in default entity: a `None` (wire-null) name.
+    fn default_entity() -> ClientQuotaEntity {
+        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]))
     }
 
     #[test]
@@ -305,5 +312,86 @@ mod tests {
             0x00, // request tagged fields
         ];
         assert_eq!(bytes.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn known_wire_vector_default_entity_null_name() {
+        // v1 (flexible): one entry, DEFAULT entity {user: null} (i.e.
+        // `--entity-type users --entity-default`), one remove op
+        // "producer_byte_rate", validate_only=false. Asserts the entity name is
+        // a wire-NULL compact-nullable string (0x00) — distinct from an
+        // empty-string name, which would be a NON-null zero-length string
+        // (0x01). Hand-computed known vector; has teeth against the old
+        // `HashMap<String, String>` shape, which could not represent a null
+        // name and always emitted 0x01 (empty non-null string) instead.
+        let alterations = vec![ClientQuotaAlteration::new(
+            default_entity(),
+            vec![Op::new("producer_byte_rate", None)],
+        )];
+        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut request = builder.build_version(1).unwrap();
+        let bytes = request.serialize().unwrap().into_buffer();
+        let expected: Vec<u8> = vec![
+            0x02, // entries: compact array length (1 + 1)
+            0x02, // entity: compact array length (1 + 1)
+            0x05, b'u', b's', b'e', b'r', // entity_type = "user"
+            0x00, // entity_name = null (compact-nullable string, null marker)
+            0x00, // entity tagged fields
+            0x02, // ops: compact array length (1 + 1)
+            0x13, b'p', b'r', b'o', b'd', b'u', b'c', b'e', b'r', b'_', b'b', b'y', b't', b'e', b'_', b'r', b'a', b't',
+            b'e', // key = "producer_byte_rate" (len 18 + 1 = 0x13)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // value = 0.0 (f64 big-endian)
+            0x01, // remove = true
+            0x00, // op tagged fields
+            0x00, // entry tagged fields
+            0x00, // validate_only = false
+            0x00, // request tagged fields
+        ];
+        assert_eq!(bytes.as_slice(), expected.as_slice());
+
+        // Contrast: an entity literally named "" encodes the name as a NON-null
+        // zero-length compact string (0x01), NOT the null marker (0x00). This
+        // is the byte position (index 7) that distinguishes default from "".
+        let empty_named = vec![ClientQuotaAlteration::new(
+            entity(""),
+            vec![Op::new("producer_byte_rate", None)],
+        )];
+        let mut builder = AlterClientQuotasRequestBuilder::new(&empty_named, false);
+        let mut request = builder.build_version(1).unwrap();
+        let empty_bytes = request.serialize().unwrap().into_buffer();
+        assert_eq!(bytes.as_slice()[7], 0x00, "default entity name must be wire-null");
+        assert_eq!(
+            empty_bytes.as_slice()[7],
+            0x01,
+            "empty-string name must be non-null zero-length"
+        );
+    }
+
+    #[test]
+    fn default_entity_and_empty_name_survive_round_trip_distinctly() {
+        // A `None` (default) entity and a `Some("")` (empty-named) entity must
+        // both survive encode -> serialize -> parse -> decode, and stay
+        // distinct: `None` stays `None`, `Some("")` stays `Some("")`. The
+        // pre-fix code coerced null -> "" on decode, collapsing the two.
+        let alterations = vec![
+            ClientQuotaAlteration::new(default_entity(), vec![Op::new("consumer_byte_rate", Some(1.0))]),
+            ClientQuotaAlteration::new(entity(""), vec![Op::new("consumer_byte_rate", Some(2.0))]),
+        ];
+        let version = ApiKeys::ALTER_CLIENT_QUOTAS.latest_version();
+        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut request = builder.build().unwrap();
+        let bytes = request.serialize().unwrap();
+        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
+        let decoded = parsed.entries();
+        assert_eq!(decoded.len(), 2);
+
+        let default_decoded = decoded.iter().find(|a| a.entity() == &default_entity()).unwrap();
+        assert_eq!(default_decoded.entity().entries().get(USER), Some(&None));
+        let empty_decoded = decoded.iter().find(|a| a.entity() == &entity("")).unwrap();
+        assert_eq!(empty_decoded.entity().entries().get(USER), Some(&Some(String::new())));
+
+        // The two entities must remain distinct after the round trip.
+        assert_ne!(default_decoded.entity(), empty_decoded.entity());
     }
 }

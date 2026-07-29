@@ -47,7 +47,7 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
 
 /// Constructs a client-id quota entity.
 fn client_id_entity(name: &str) -> ClientQuotaEntity {
-    ClientQuotaEntity::new(HashMap::from([(CLIENT_ID.to_string(), name.to_string())]))
+    ClientQuotaEntity::new(HashMap::from([(CLIENT_ID.to_string(), Some(name.to_string()))]))
 }
 
 #[tokio::test]

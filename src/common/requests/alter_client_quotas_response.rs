@@ -79,10 +79,9 @@ impl AlterClientQuotasResponse {
         for entry_data in &self.data.entries {
             let mut entity_entries = HashMap::with_capacity(entry_data.entity.len());
             for entity_data in &entry_data.entity {
-                entity_entries.insert(
-                    entity_data.entity_type.clone(),
-                    entity_data.entity_name.clone().unwrap_or_default(),
-                );
+                // A wire-null name (`None`) is the built-in default entity;
+                // preserve it verbatim rather than coercing to `""`.
+                entity_entries.insert(entity_data.entity_type.clone(), entity_data.entity_name.clone());
             }
             let entity = ClientQuotaEntity::new(entity_entries);
             let error = Errors::for_code(entry_data.error_code);
@@ -140,8 +139,9 @@ impl AlterClientQuotasResponse {
             let mut entity_data = Vec::with_capacity(entity.entries().len());
             for (entity_type, entity_name) in entity.entries() {
                 let mut ed = EntityData::new();
-                ed.set_entity_type(entity_type.clone())
-                    .set_entity_name(Some(entity_name.clone()));
+                // `None` (default entity) -> wire-null name; `Some(name)` -> the
+                // (possibly empty) non-null string.
+                ed.set_entity_type(entity_type.clone()).set_entity_name(entity_name.clone());
                 entity_data.push(ed);
             }
             let mut entry = EntryData::new();
@@ -169,7 +169,12 @@ mod tests {
     use crate::common::quota::client_quota_entity::USER;
 
     fn entity(name: &str) -> ClientQuotaEntity {
-        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), name.to_string())]))
+        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), Some(name.to_string()))]))
+    }
+
+    /// The built-in default entity: a `None` (wire-null) name.
+    fn default_entity() -> ClientQuotaEntity {
+        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]))
     }
 
     #[test]
@@ -191,6 +196,25 @@ mod tests {
         assert!(good.1.is_ok());
         let bad = results.iter().find(|(e, _)| *e == entity("user-0")).unwrap();
         assert_eq!(bad.1.as_ref().unwrap_err().error(), Errors::ClusterAuthorizationFailed);
+    }
+
+    #[test]
+    fn results_preserve_default_entity_null_name() {
+        // A default entity (`None` name) and an empty-named entity (`Some("")`)
+        // must decode back distinctly: null stays `None`, "" stays `Some("")`.
+        // The pre-fix `unwrap_or_default()` collapsed both to `""`.
+        let response = AlterClientQuotasResponse::from_quota_entities(
+            &[(default_entity(), Errors::None, None), (entity(""), Errors::None, None)],
+            0,
+        );
+        let results = response.results();
+        assert_eq!(results.len(), 2);
+        let default_res = results.iter().find(|(e, _)| *e == default_entity()).unwrap();
+        assert_eq!(default_res.0.entries().get(USER), Some(&None));
+        assert!(default_res.1.is_ok());
+        let empty_res = results.iter().find(|(e, _)| *e == entity("")).unwrap();
+        assert_eq!(empty_res.0.entries().get(USER), Some(&Some(String::new())));
+        assert_ne!(default_res.0, empty_res.0);
     }
 
     #[test]

@@ -4508,7 +4508,7 @@ mod tests {
         let mut entity_map = HashMap::new();
         let mut index = 0;
         while index < args.len() {
-            entity_map.insert(args[index].to_string(), args[index + 1].to_string());
+            entity_map.insert(args[index].to_string(), Some(args[index + 1].to_string()));
             index += 2;
         }
         ClientQuotaEntity::new(entity_map)

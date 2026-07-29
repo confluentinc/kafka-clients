@@ -416,3 +416,128 @@ production-code bug was reported. Fixed by the Actor (N=1) in the fix cycle.
     0x00]` (throttle, error, compact members array, compact member id / nullable
     group_instance_id, member error 25, member + top-level tagged fields).
   - Commit `fixup! Milestone 11 Tier 2 Phase 3: LeaveGroup/DeleteGroups wire types` referencing `9ed0648`.
+
+---
+
+# Tier 3 Phase 1 (ACLs)
+
+## RESOLVED — `AclOperationTest` / `AclPermissionTypeTest` not translated 1:1 (exhaustive `testName`/`testIsUnknown` loops reduced to spot-checks) (DoD #3, LOW)
+- **File**: `src/common/acl/acl_operation.rs` (`#[cfg(test)] mod tests`),
+  `src/common/acl/acl_permission_type.rs` (`#[cfg(test)] mod tests`)
+- **Java Reference**: `AclOperationTest.java` (`testIsUnknown`, `testCode`,
+  `testName`, `testExhaustive`) and `AclPermissionTypeTest.java` (same four
+  methods).
+- **Fix**: Both test modules rewritten to mirror the faithfully-translated
+  `ResourceTypeTest` (`src/common/resource/resource_type.rs`). Each now builds
+  an `INFOS`-style table `(operation/ty, code, lowercase_name, unknown)` for
+  ALL 16 `AclOperation` variants and ALL 4 `AclPermissionType` variants (in
+  declaration/code order, transcribed 1:1 from the Java `INFOS[]` arrays), plus
+  a test-local `VALUES` array mirroring Java's `values()` (a test-only fixture;
+  no production `VALUES` const added, so production code is untouched). Four
+  loop-driven tests per file replace the prior spot-checks, matching Java
+  method-for-method:
+  - `test_is_unknown` (Java `testIsUnknown`) — loops every variant asserting
+    `is_unknown()` matches the table.
+  - `test_code` (Java `testCode`) — asserts `VALUES.len() == INFOS.len()`,
+    loops asserting `code()` and `from_code(code)` round-trip for every variant,
+    and `from_code(120) == Unknown`.
+  - `test_name` (Java `testName`) — loops every variant asserting
+    `from_string(lowercase_name) == variant` (all 16 ops / 4 perms), plus
+    `from_string("something") == Unknown`. This is the arm that pins every
+    `from_string` match arm.
+  - `test_exhaustive` (Java `testExhaustive`) — asserts `INFOS` and `VALUES`
+    agree element-for-element in order.
+  The three prior Rust-added spot-check tests (`code_round_trips_for_all_variants`,
+  `code_values_match_java_wire_values`, `unknown_code_maps_to_unknown`) are
+  subsumed by the exhaustive `test_code`; the `from_string_*` / `is_unknown`
+  spot-checks are subsumed by `test_name` / `test_is_unknown`. No coverage lost;
+  13 previously-unchecked `from_string` arms on `AclOperation` and 1 on
+  `AclPermissionType` are now pinned.
+  - **Teeth verified**: temporarily corrupting the `"IDEMPOTENT_WRITE" =>
+    AclOperation::IdempotentWrite` arm to `=> AclOperation::Unknown` makes
+    `test_name` fail (`from_string(idempotent_write) was supposed to be
+    IDEMPOTENT_WRITE`); reverted to the correct arm it passes.
+  - `cargo test --lib` count: 2710 → 2709 (net −1; the four exhaustive tests
+    per file replace five/four spot-check tests while strictly widening
+    coverage). Lint clean, format-check clean.
+  - Commit `fixup! Milestone 11 Phase 1: review-only Admin API skeleton`
+    referencing `9fe737e`.
+
+---
+
+## [RESOLVED] Tier 3 Phase 2 — `ClientQuotaEntity` map value type cannot represent a null entity name (default quota entity) — wire-incompatible with Java
+
+**Original issue** (from `COMMENTS.1.md`, Severity: Behavior Mismatch / latent
+wire-compat bug):
+
+> Java's `ClientQuotaEntity` is a `Map<String, String>` whose values may be
+> `null`, and a `null` entity name is the protocol representation of the
+> *default* client-quota entity (e.g. `--entity-type users --entity-default`).
+> The Rust translation modeled the map as `HashMap<String, String>`, which
+> cannot hold a null value. Consequences: (1) cannot express a default entity
+> for an alteration; (2) encode always emits a non-null empty string (`0x01`)
+> instead of wire-null (`0x00`), so default-quota `alterClientQuotas` targets an
+> entity literally named `""`, not the default — wire-incompatible with Java;
+> (3) both response decoders coerce null → `""` via `unwrap_or_default()`,
+> collapsing Java's null (default) and an empty-named entity into one key.
+
+**Java references:** `org/apache/kafka/common/quota/ClientQuotaEntity.java:28,49`
+(`Map<String, String> entries`, javadoc "If a name is null, then it is mapped to
+the built-in default entity name"); `AlterClientQuotasRequest.java:50-51`
+(`setEntityName(...)` sends the raw, possibly-null value);
+`DescribeClientQuotasResponse.java:53` / `AlterClientQuotasResponse.java:46`
+(store null names verbatim); wire specs `AlterClientQuotasRequest.json:31`,
+`DescribeClientQuotasResponse.json:35` (`EntityName` `"nullableVersions": "0+"`).
+
+**Fix applied:**
+- `src/common/quota/client_quota_entity.rs`: `entries` field changed from
+  `HashMap<String, String>` to `HashMap<String, Option<String>>` (`None` = the
+  built-in default entity, the faithful Rust representation of Java's nullable
+  map value). Constructor and `entries()` accessor updated to the new value
+  type; rustdoc documents the Java `Map<String,String>`-nullable ↔ Rust
+  `Option<String>` correspondence and the `None` vs `Some("")` distinction.
+  The `USER` / `CLIENT_ID` / `IP` constants and `is_valid_entity_type` are
+  unchanged (Java's `ClientQuotaEntity` has no `TYPES` set — only these three).
+- **Encode** (3 sites) now maps `None` → `set_entity_name(None)` (wire-null,
+  `0x00`) and `Some(name)` → `set_entity_name(Some(name))` (non-null, possibly
+  empty): `alter_client_quotas_request.rs` builder,
+  `alter_client_quotas_response.rs::from_quota_entities`,
+  `describe_client_quotas_response.rs::from_quota_entities`.
+- **Decode** (3 sites) drops `unwrap_or_default()` and stores the wire
+  `Option<String>` verbatim (null → `None`, non-null → `Some(name)`):
+  `alter_client_quotas_request.rs::entries`,
+  `alter_client_quotas_response.rs::results`,
+  `describe_client_quotas_response.rs::entities`. (The `get_error_response` site
+  already echoed the raw `Option<String>` name verbatim — unchanged.)
+- Callers updated to the new value type: `kafka_admin_client.rs`
+  `new_client_quota_entity` test helper, `client_quota_alteration.rs` test
+  helper, all per-file `entity(...)` test helpers, and the
+  `tests/integration/admin_quotas_test.rs` `client_id_entity` helper (all wrap
+  concrete names in `Some(...)`, faithful to Java's `newClientQuotaEntity`).
+
+**Public API faithfulness:** Java exposes `Map<String, String>` with nullable
+values; Rust cannot express a null `String`, so `HashMap<String, Option<String>>`
+is the faithful translation. Documented in the type's rustdoc.
+
+**Tests added (DoD #3):**
+- `known_wire_vector_default_entity_null_name` (alter request): hand-computed
+  byte vector asserting a default entity (`None`) encodes the entity name as a
+  wire-NULL compact-nullable string (`0x00`), and directly contrasts an
+  empty-string name (`Some("")`) encoding to non-null zero-length (`0x01`) at
+  the same byte offset. **Teeth:** the pre-fix `HashMap<String,String>` cannot
+  even construct a `None`-named entity; the closest proxy (`Some("")`) encodes
+  to `0x01`, so the `bytes[7] == 0x00` assertion fails against pre-fix behavior.
+- `default_entity_and_empty_name_survive_round_trip_distinctly` (alter request):
+  encode→serialize→parse→decode; `None` stays `None`, `Some("")` stays
+  `Some("")`, and the two entities remain distinct.
+- `results_preserve_default_entity_null_name` (alter response) and
+  `entities_preserve_default_entity_null_name` (describe response): default
+  (`None`) and empty-named (`Some("")`) entities decode back distinctly through
+  each response path (pre-fix `unwrap_or_default()` collapsed both to `""`).
+- `default_entity_none_distinct_from_empty_name` (entity unit test): `None` and
+  `Some("")` are representable and unequal.
+
+**Verification:** `cargo build` clean; `cargo test --lib` 2742 → 2747 (+5 new
+tests, 0 failures); `cargo xtask lint` clean; `cargo xtask format-check` clean.
+Commit `fixup! Milestone 11 Phase 1: review-only Admin API skeleton` referencing
+POJO commit `60f7977` (wire encode/decode noted against `c6c7a31`).

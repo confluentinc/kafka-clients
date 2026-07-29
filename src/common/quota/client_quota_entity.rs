@@ -30,9 +30,17 @@ pub const IP: &str = "ip";
 /// names.
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaEntity`.
+///
+/// Java models the mapping as a `Map<String, String>` whose *values may be
+/// null*: "If a name is null, then it is mapped to the built-in default entity
+/// name" (e.g. `--entity-type users --entity-default`). Rust cannot store a
+/// null `String`, so the faithful representation of Java's nullable map value
+/// is `Option<String>`: `None` is the built-in default entity (wire-null entity
+/// name), and `Some(name)` is a concretely-named entity (`Some(String::new())`
+/// is the entity literally named `""`, which is distinct from the default).
 #[derive(Clone, Debug, Eq)]
 pub struct ClientQuotaEntity {
-    entries: HashMap<String, String>,
+    entries: HashMap<String, Option<String>>,
 }
 
 impl ClientQuotaEntity {
@@ -44,17 +52,19 @@ impl ClientQuotaEntity {
     }
 
     /// Constructs a quota entity for the given types and names. If a name is
-    /// null, then it is mapped to the built-in default entity name.
+    /// `None` (Java `null`), then it is mapped to the built-in default entity
+    /// name.
     ///
     /// Mirrors `ClientQuotaEntity(Map<String, String>)`.
-    pub fn new(entries: HashMap<String, String>) -> Self {
+    pub fn new(entries: HashMap<String, Option<String>>) -> Self {
         Self { entries }
     }
 
-    /// Returns the map of entity type to its name.
+    /// Returns the map of entity type to its name. A `None` value denotes the
+    /// built-in default entity (Java's `null` name).
     ///
     /// Mirrors `ClientQuotaEntity.entries()`.
-    pub fn entries(&self) -> &HashMap<String, String> {
+    pub fn entries(&self) -> &HashMap<String, Option<String>> {
         &self.entries
     }
 }
@@ -92,7 +102,7 @@ mod tests {
     use super::*;
 
     fn entity(pairs: &[(&str, &str)]) -> ClientQuotaEntity {
-        ClientQuotaEntity::new(pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect())
+        ClientQuotaEntity::new(pairs.iter().map(|(k, v)| ((*k).to_string(), Some((*v).to_string()))).collect())
     }
 
     // New test, no Java original: the four `common/quota` classes have no
@@ -128,6 +138,18 @@ mod tests {
     #[test]
     fn entries_accessor_round_trips() {
         let e = entity(&[(USER, "u1")]);
-        assert_eq!(e.entries().get(USER).map(String::as_str), Some("u1"));
+        assert_eq!(e.entries().get(USER), Some(&Some("u1".to_string())));
+    }
+
+    // New test, no Java original: a `None` name (the built-in default entity,
+    // e.g. `--entity-type users --entity-default`) is representable and stays
+    // distinct from an entity literally named "" (`Some("")`).
+    #[test]
+    fn default_entity_none_distinct_from_empty_name() {
+        let default_user = ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]));
+        let empty_named_user = ClientQuotaEntity::new(HashMap::from([(USER.to_string(), Some(String::new()))]));
+        assert_eq!(default_user.entries().get(USER), Some(&None));
+        assert_eq!(empty_named_user.entries().get(USER), Some(&Some(String::new())));
+        assert_ne!(default_user, empty_named_user);
     }
 }

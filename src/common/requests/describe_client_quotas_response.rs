@@ -88,10 +88,9 @@ impl DescribeClientQuotasResponse {
             for entry in entries {
                 let mut entity = HashMap::with_capacity(entry.entity.len());
                 for entity_data in &entry.entity {
-                    entity.insert(
-                        entity_data.entity_type.clone(),
-                        entity_data.entity_name.clone().unwrap_or_default(),
-                    );
+                    // A wire-null name (`None`) is the built-in default entity;
+                    // preserve it verbatim rather than coercing to `""`.
+                    entity.insert(entity_data.entity_type.clone(), entity_data.entity_name.clone());
                 }
                 let mut values = HashMap::with_capacity(entry.values.len());
                 for value_data in &entry.values {
@@ -141,8 +140,9 @@ impl DescribeClientQuotasResponse {
             let mut entity_data = Vec::with_capacity(quota_entity.entries().len());
             for (entity_type, entity_name) in quota_entity.entries() {
                 let mut ed = EntityData::new();
-                ed.set_entity_type(entity_type.clone())
-                    .set_entity_name(Some(entity_name.clone()));
+                // `None` (default entity) -> wire-null name; `Some(name)` -> the
+                // (possibly empty) non-null string.
+                ed.set_entity_type(entity_type.clone()).set_entity_name(entity_name.clone());
                 entity_data.push(ed);
             }
             let mut value_data = Vec::with_capacity(quota_values.len());
@@ -176,7 +176,12 @@ mod tests {
     use crate::common::quota::client_quota_entity::{CLIENT_ID, USER};
 
     fn entity(pairs: &[(&str, &str)]) -> ClientQuotaEntity {
-        ClientQuotaEntity::new(pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect())
+        ClientQuotaEntity::new(pairs.iter().map(|(k, v)| ((*k).to_string(), Some((*v).to_string()))).collect())
+    }
+
+    /// The built-in default entity: a `None` (wire-null) name.
+    fn default_entity() -> ClientQuotaEntity {
+        ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]))
     }
 
     #[test]
@@ -192,6 +197,29 @@ mod tests {
         assert_eq!(entities.len(), 2);
         assert_eq!(entities[&e1].get("consumer_byte_rate"), Some(&10000.0));
         assert_eq!(entities[&e2].get("producer_byte_rate"), Some(&20000.0));
+    }
+
+    #[test]
+    fn entities_preserve_default_entity_null_name() {
+        // A default entity (`None` name) and an empty-named entity (`Some("")`)
+        // must decode back distinctly through describe: null stays `None`, ""
+        // stays `Some("")`. The pre-fix `unwrap_or_default()` collapsed both to
+        // `""`, merging them into one map key.
+        let mut data = HashMap::new();
+        data.insert(default_entity(), HashMap::from([("consumer_byte_rate".to_string(), 10000.0)]));
+        data.insert(
+            entity(&[(USER, "")]),
+            HashMap::from([("producer_byte_rate".to_string(), 20000.0)]),
+        );
+
+        let response = DescribeClientQuotasResponse::from_quota_entities(&data, 0);
+        let entities = response.entities();
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[&default_entity()].get("consumer_byte_rate"), Some(&10000.0));
+        assert_eq!(entities[&entity(&[(USER, "")])].get("producer_byte_rate"), Some(&20000.0));
+        // The default entity's name decodes to `None`, distinct from `Some("")`.
+        assert!(entities.contains_key(&default_entity()));
+        assert_ne!(default_entity(), entity(&[(USER, "")]));
     }
 
     #[test]
