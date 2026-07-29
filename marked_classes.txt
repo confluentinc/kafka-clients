@@ -38,6 +38,7 @@ org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult
 org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions
 org.apache.kafka.clients.admin.AlterReplicaLogDirsResult
 org.apache.kafka.clients.admin.ClassicGroupDescription
+org.apache.kafka.clients.admin.ClientMetricsResourceListing
 org.apache.kafka.clients.admin.Config
 org.apache.kafka.clients.admin.ConfigEntry
 org.apache.kafka.clients.admin.ConsumerGroupDescription
@@ -98,6 +99,8 @@ org.apache.kafka.clients.admin.FenceProducersResult
 org.apache.kafka.clients.admin.FinalizedVersionRange
 org.apache.kafka.clients.admin.GroupListing
 org.apache.kafka.clients.admin.KafkaAdminClient
+org.apache.kafka.clients.admin.ListClientMetricsResourcesOptions
+org.apache.kafka.clients.admin.ListClientMetricsResourcesResult
 org.apache.kafka.clients.admin.ListConfigResourcesOptions
 org.apache.kafka.clients.admin.ListConfigResourcesResult
 org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions
