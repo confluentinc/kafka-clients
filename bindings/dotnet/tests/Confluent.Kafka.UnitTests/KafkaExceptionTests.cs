@@ -15,11 +15,11 @@
 using System;
 using System.Collections.Generic;
 
-using Confluent.Kafka.ShareConsumer.Internal;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests;
+namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The public <see cref="KafkaException"/> error model: operational errors from

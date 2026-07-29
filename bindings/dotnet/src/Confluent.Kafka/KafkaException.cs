@@ -14,9 +14,9 @@
 
 using System;
 
-using Confluent.Kafka.ShareConsumer.Internal.Interop;
+using Confluent.Kafka.Internal.Interop;
 
-namespace Confluent.Kafka.ShareConsumer;
+namespace Confluent.Kafka;
 
 /// <summary>
 /// The exception raised for an <b>operational</b> Kafka error surfaced by the

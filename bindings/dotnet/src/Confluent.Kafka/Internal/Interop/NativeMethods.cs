@@ -15,7 +15,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
+namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// The single P/Invoke boundary over the Rust core's C ABI

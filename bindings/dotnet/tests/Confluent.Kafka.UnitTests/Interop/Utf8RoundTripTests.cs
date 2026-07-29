@@ -15,12 +15,12 @@
 using System;
 using System.Collections.Generic;
 
-using Confluent.Kafka.ShareConsumer.Internal;
-using Confluent.Kafka.ShareConsumer.Internal.Interop;
+using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests.Interop;
+namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// D5 — round-trips a non-ASCII <c>group.id</c> config value out through

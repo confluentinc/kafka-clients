@@ -15,7 +15,7 @@
 using System;
 using System.Threading.Tasks;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests;
+namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Runs a blocking action under a hard deadline so a native call that hangs (e.g.

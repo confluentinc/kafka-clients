@@ -15,11 +15,11 @@
 using System;
 using System.Collections.Generic;
 
-using Confluent.Kafka.ShareConsumer.Internal;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests.Interop;
+namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Config-map → <c>ConsumerProperties</c> marshalling and the precondition surface

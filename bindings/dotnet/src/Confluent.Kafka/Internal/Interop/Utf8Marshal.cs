@@ -16,7 +16,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
+namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// Hand-rolled UTF-8 marshalling across the C ABI. The netstandard2.0 floor lacks

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using Confluent.Kafka.ShareConsumer.Internal.Interop;
+using Confluent.Kafka.Internal.Interop;
 using Xunit;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests.Interop;
+namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Native-load probe for the M1/P1 interop foundation. Proves the cdylib loads via

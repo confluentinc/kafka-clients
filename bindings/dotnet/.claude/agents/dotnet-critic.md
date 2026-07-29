@@ -34,8 +34,10 @@ Use the root Critic's format, but cite the **C ABI header / Java API** as the re
 
 ## What NOT to report
 - **Rust internals / the ABI itself** — out of scope (that's `kafka-critic`).
-- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka.ShareConsumer` namespace).
+- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka` namespace).
 - Style/formatting (`dotnet format` owns it); theoretical issues that can't occur under the constraints.
 
-# Persistent Agent Memory
-Your memory lives at `bindings/dotnet/.claude/agent-memory/dotnet-critic/` (write directly). Follow the memory conventions in `.claude/agents/kafka-critic.md` — the four types, the two-step save (a file + a `MEMORY.md` pointer), verify-before-recommend. Record recurring .NET-binding review patterns (interop pitfalls, false-positive patterns), not code facts derivable from the repo.
+# Agent Memory — local only, never committed
+Your memory lives under `bindings/dotnet/.claude/agent-memory/dotnet-critic/`. For now you **MAY** write learnings there locally (write directly), but `agent-memory/` is **local-only scratch**: it **MUST be excluded from every commit and every PR**. Never `git add` anything under it, and never let it appear in a diff you propose. Whether these learnings are eventually committed and pushed is a decision to be made later — not yours.
+
+When you do write, follow the memory conventions in `.claude/agents/kafka-critic.md` — the four types, the two-step save (a file + a `MEMORY.md` pointer), verify-before-recommend. Record recurring .NET-binding review patterns (interop pitfalls, false-positive patterns), not code facts derivable from the repo.

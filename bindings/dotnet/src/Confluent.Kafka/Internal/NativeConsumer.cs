@@ -15,9 +15,9 @@
 using System;
 using System.Collections.Generic;
 
-using Confluent.Kafka.ShareConsumer.Internal.Interop;
+using Confluent.Kafka.Internal.Interop;
 
-namespace Confluent.Kafka.ShareConsumer.Internal;
+namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// Internal lifecycle wrapper over an owned <c>kafka_consumer_Consumer_t</c>: it

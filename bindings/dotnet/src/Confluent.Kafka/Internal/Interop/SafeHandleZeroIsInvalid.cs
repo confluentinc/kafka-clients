@@ -15,7 +15,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
+namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// Shared base for the binding's owned opaque handles: a <see cref="SafeHandle"/>

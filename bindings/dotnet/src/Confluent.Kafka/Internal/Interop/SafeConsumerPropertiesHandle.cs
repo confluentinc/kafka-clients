@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-namespace Confluent.Kafka.ShareConsumer.Internal.Interop;
+namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// Owned handle over a <c>kafka_consumer_ConsumerProperties_t</c> — the
