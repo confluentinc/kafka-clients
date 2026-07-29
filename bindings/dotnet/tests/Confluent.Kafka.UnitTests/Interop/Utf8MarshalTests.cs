@@ -13,10 +13,10 @@
 // limitations under the License.
 
 using System;
-using Confluent.Kafka.ShareConsumer.Internal.Interop;
+using Confluent.Kafka.Internal.Interop;
 using Xunit;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests.Interop;
+namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Managed unit tests for <see cref="Utf8Marshal"/> — the hand-rolled UTF-8

@@ -1,10 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The Confluent.Kafka.ShareConsumer library — the P/Invoke binding over the
-    Rust core's C ABI. M1/P1 lands the interop FOUNDATION: the NativeMethods [DllImport]
-    class + the Utf8Marshal helpers under Internal/Interop/ (no SafeHandles,
-    no completion bridge, no public managed API yet — see design/history/M1).
+    The Confluent.Kafka library — the P/Invoke binding over the Rust core's C ABI.
+    M1/P1 lands the interop FOUNDATION: the NativeMethods [DllImport] class + the
+    Utf8Marshal helpers under Internal/Interop/ (no SafeHandles, no completion
+    bridge, no public managed API yet — see design/history/M1).
 
     TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): netstandard2.0 is the floor
     and satisfies net462 as well — no separate net462 target, because the binding
@@ -13,17 +13,32 @@
 
   <PropertyGroup>
     <TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
-    <RootNamespace>Confluent.Kafka.ShareConsumer</RootNamespace>
-    <AssemblyName>Confluent.Kafka.ShareConsumer</AssemblyName>
+    <RootNamespace>Confluent.Kafka</RootNamespace>
+    <AssemblyName>Confluent.Kafka</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Utf8Marshal pins and walks raw byte buffers (ffi §A3/§B3); `unsafe` is
+         confined to Internal/Interop/ per CLAUDE.md §2. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!--
+      Holds CLAUDE.md §4's ⚠ package-id gate shut. Microsoft.NET.Sdk defaults
+      IsPackable to true for a library and PackageId to $(AssemblyName), so
+      writing neither would leave a bare `dotnet pack` emitting a package id
+      byte-equal to confluent-kafka-dotnet's — the very collision that gate
+      defers. Reverses in one line once the gate is decided (own the
+      Schema-Registry integration, or diverge the id). Deliberately the only
+      packaging property here: no PackageId, no Version, no Pack* metadata.
+    -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <!--
     Native-copy (PLAN D1, un-defers M0/P0 D2 / ffi §0.2). The binding P/Invokes our
-    own Rust cdylib (the `cargo build` ffi step, CLAUDE.md §7.1 — Rust FIRST). No
-    NuGet, no runtimes/{rid}/native/: an MSBuild Content item copies the native
-    into $(OutDir) where default [DllImport] probing resolves it. <Content> (not
+    own Rust cdylib (the `cargo build` ffi step, CLAUDE.md §7.1 — Rust FIRST).
+    This is ffi §0.2's **pre-publish** half: no NuGet, no runtimes/{rid}/native/ —
+    an MSBuild Content item copies the native into $(OutDir) where default
+    [DllImport] probing resolves it. (At publish, §0.2 switches delivery to
+    same-package RID assets; the loading path is unchanged.) <Content> (not
     <None>) is deliberate so it flows TRANSITIVELY to the referencing test project's
     output, where the native-load probe finds it at runtime. Path/filename are
     COMPUTED (never hardcoded, ffi §0.2): the per-OS filename Cargo emits and the
@@ -42,7 +57,7 @@
     <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release</CargoProfileDir>
 
     <!-- Repo root is 4 dir levels up from this project
-         (src/Confluent.Kafka.ShareConsumer -> src -> dotnet -> bindings -> repo). -->
+         (src/Confluent.Kafka -> src -> dotnet -> bindings -> repo). -->
     <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../../target/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
   </PropertyGroup>
 
@@ -68,7 +83,7 @@
        Both assemblies are strong-named (shared key, Directory.Build.props), so
        the friend grant must carry the test assembly's full public key. -->
   <ItemGroup>
-    <InternalsVisibleTo Include="Confluent.Kafka.ShareConsumer.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+    <InternalsVisibleTo Include="Confluent.Kafka.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
   </ItemGroup>
 
 </Project>

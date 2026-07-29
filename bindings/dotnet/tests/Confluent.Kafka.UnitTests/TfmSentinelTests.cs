@@ -16,7 +16,7 @@ using System.Runtime.InteropServices;
 using Xunit;
 using Xunit.Abstractions;
 
-namespace Confluent.Kafka.ShareConsumer.UnitTests;
+namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// TFM-sentinel smoke test. Proves the xUnit harness runs and that the test
