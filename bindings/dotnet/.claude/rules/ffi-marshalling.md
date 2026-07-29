@@ -34,7 +34,8 @@ section describes only that client's decisions.
 
 ## 0.1 P/Invoke declarations & type mapping
 
-**Decision:** One `internal static class Native` of classic `[DllImport(...,
+**Decision:** One `internal static class NativeMethods` (in `NativeMethods.cs`,
+the name analyzer CA1060 requires) of classic `[DllImport(...,
 Cdecl)]` declarations, uniform across `netstandard2.0` + `net8.0` + `net10.0`.
 netstandard2.0 is the floor (covers .NET Framework 4.6.2), so the modern interop
 APIs — `[LibraryImport]`, `delegate* unmanaged`, `[UnmanagedCallersOnly]`,
@@ -65,7 +66,7 @@ only if that friction bites — cheap and non-breaking.
 | `bool` | `[MarshalAs(UnmanagedType.I1)] bool` | C `bool` is 1 byte; default marshals a 4-byte Win32 `BOOL`. |
 | opaque `*_t *` | `IntPtr` → `SafeHandle` above (§A2/§B2) | Never a C# struct mirroring `_private[0]`. |
 | `const char *` in | `IntPtr` to a pinned NUL-terminated UTF-8 buffer (§A3/§B3) | No `LPStr` (ANSI), no `LPUTF8Str`. |
-| `const char *` out (callee-owned) | `IntPtr` → `Utf8.PtrToString` (§A3/§B3) | Never a `string` return — the marshaller would free it. |
+| `const char *` out (callee-owned) | `IntPtr` → `Utf8Marshal.PtrToString` (§A3/§B3) | Never a `string` return — the marshaller would free it. |
 | `const uint8_t *` + `int32_t len` | `IntPtr` (pinned `byte[]`) + `int` (§A4/§B4) | Zero-copy, call-scoped pin (send) or borrow (receive). |
 | `T **` out-param / array | `out IntPtr` / `IntPtr[]` | e.g. `out_error`; `get_all` arrays. |
 | `ProducerRecord_t` | `[StructLayout(LayoutKind.Sequential)] struct`, array `[]` | Fixed-width ⇒ identical layout. |
@@ -111,7 +112,7 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
   - A non-ASCII topic round-trips (guards manual UTF-8; catches `LPStr`).
   - Each `bool`-returning fn (`is_done`/`is_retriable`/`is_fatal`) is correct
     (guards a missing `I1`).
-  - `Native` loads on net462, net8.0, net10.0 (TFM smoke test).
+  - `NativeMethods` loads on net462, net8.0, net10.0 (TFM smoke test).
 
 ---
 
@@ -121,7 +122,7 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
 build --features ffi`). **No NuGet, ever** — the binding is consumed as a
 **project / source reference**, and an MSBuild step copies the native into the
 consuming app's output dir where default `[DllImport]` probing finds it. One
-`Native` class, one `DllName`, no hand-rolled loader.
+`NativeMethods` class, one `DllName`, no hand-rolled loader.
 
 **Rule:**
 
@@ -137,14 +138,14 @@ consuming app's output dir where default `[DllImport]` probing finds it. One
     selection happens at **build/publish** time (`dotnet publish -r <rid>` copies
     the matching native) or via `NativeLibrary.SetDllImportResolver` — never NuGet
     RID assets. musl/Alpine = the `linux-musl-x64` RID (build the musl-target
-    cdylib), **not** a second `Native` class or `/etc/os-release` detection.
+    cdylib), **not** a second `NativeMethods` class or `/etc/os-release` detection.
   - **Loading:** rely on default `[DllImport]` resolution — do **not** port
     confluent-kafka-dotnet's `Librdkafka.Initialize` (manual `dlopen`/`LoadLibraryEx`
     preload, reflection binding, distro/GSSAPI variant selection); none applies to
     one self-built cdylib. Custom probing → `NativeLibrary.SetDllImportResolver`
     (modern), never a reflection loader; on net462 keep the native in the app dir
     (a `LoadLibraryEx` preload is a last resort).
-  - **Single `Native` class**, one `DllName = "confluent_kafka"` — the equivalent
+  - **Single `NativeMethods` class**, one `DllName = "confluent_kafka"` — the equivalent
     of only their default `NativeMethods`; no `_Alpine`/`_Centos8` variants (our
     pure-Rust TLS/SASL has no GSSAPI system dep, and musl is a RID, not a filename).
   - **AOT:** not committed to, but kept open — direct `[DllImport]` (not a
@@ -164,7 +165,7 @@ required. Cargo's output names already match default P/Invoke resolution.
   - Hardcoding an absolute path or platform filename in `[DllImport]`.
   - Adding a NuGet packaging path, or assuming any `runtimes/{rid}/native/`
     auto-copy — the decision is **no NuGet**; the build copies the native.
-  - A second `Native` class / `DllName` for musl — musl is the `linux-musl-x64`
+  - A second `NativeMethods` class / `DllName` for musl — musl is the `linux-musl-x64`
     RID, same `DllName`.
 
 **Tests required:**
@@ -323,15 +324,15 @@ blocks (it drops the runtime and waits for the Sender), so the producer closes v
 ## A3 String marshalling (UTF-8)
 
 **Decision:** Every boundary string is UTF-8, marshalled by hand (the floor lacks
-`LPUTF8Str` / `Marshal.PtrToStringUTF8`, §0.1): input via `Utf8.Pin` (encode + NUL
-+ pin); output via `Utf8.PtrToString` on a **NUL-terminated** callee-owned
+`LPUTF8Str` / `Marshal.PtrToStringUTF8`, §0.1): input via `Utf8Marshal.Pin` (encode + NUL
++ pin); output via `Utf8Marshal.PtrToString` on a **NUL-terminated** callee-owned
 `const char*` (NUL-scan + `GetString`), copied before the owning handle is freed.
 
 | Direction | Sites | Helper |
 |---|---|---|
-| In | topic, config key/value, `error_next` message | `Utf8.Pin` |
-| Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `RecordMetadata_topic`, other getters | `Utf8.PtrToString(ptr)` — NUL-scan |
-| Out — valid only during the callback | `RecordMetadata_copy` `topic` | `Utf8.PtrToString`, inside the callback |
+| In | topic, config key/value, `error_next` message | `Utf8Marshal.Pin` |
+| Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `RecordMetadata_topic`, other getters | `Utf8Marshal.PtrToString(ptr)` — NUL-scan |
+| Out — valid only during the callback | `RecordMetadata_copy` `topic` | `Utf8Marshal.PtrToString`, inside the callback |
 
 **All output pointers are borrowed** — .NET copies (`GetString`) before the owning
 handle is freed (or, for the callback, before it returns); it never owns the raw
@@ -346,7 +347,7 @@ pointer.
   - Output — copy into a managed `string` (needs `unsafe`; a
     `#if NET6_0_OR_GREATER` span fast path is an internal optimization):
     **NUL-terminated** callee-owned `const char*` (no `out_len`) →
-    `Utf8.PtrToString(ptr)`, scan to NUL. Valid until `_destroy`. **Copy before
+    `Utf8Marshal.PtrToString(ptr)`, scan to NUL. Valid until `_destroy`. **Copy before
     free / before the callback returns** — the pointer dies with the handle;
     never store the raw pointer.
   - Never `[MarshalAs(LPStr)]` (ANSI) or `LPWStr` (UTF-16); never `LPUTF8Str` /
@@ -370,8 +371,8 @@ strings living in the handle's cached `CString`.
 
   - A non-ASCII value round-trips through topic (in → out), a config value, and an
     error message.
-  - `PtrToStringUTF8(IntPtr.Zero)` → `null`; a multi-byte char at the buffer
-    boundary marshals correctly.
+  - `Utf8Marshal.PtrToString(IntPtr.Zero)` → `null`; a multi-byte char at the
+    buffer boundary marshals correctly.
 
 ---
 
@@ -399,7 +400,7 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     A `fixed` over `null` yields a null pointer, so gate length on `null`:
     ```csharp
     fixed (byte* k = key)   // key null → k == null
-        future = Native.kafka_producer_Producer_send(handle, topicPtr, partition,
+        future = NativeMethods.kafka_producer_Producer_send(handle, topicPtr, partition,
             timestamp, (IntPtr)k, key is null ? -1 : key.Length, /* value… */ out err);
     ```
     **Note:** `fixed` also yields a null pointer for an **empty** (non-null)
@@ -446,7 +447,7 @@ standard .NET exceptions — never `KafkaException`.
 | `KafkaError_*` accessor | → C# |
 |---|---|
 | `_code` (i32) | `int Code` |
-| `_message` (UTF-8, handle-owned) | `Message` via `Utf8.PtrToString` (§A3) |
+| `_message` (UTF-8, handle-owned) | `Message` via `Utf8Marshal.PtrToString` (§A3) |
 | `_is_retriable` / `_is_fatal` | `IsRetriable` / `IsFatal` |
 | `_destroy` | free after reading |
 
@@ -525,7 +526,7 @@ call** (the core frees the handle right after — §A3):
 
   - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
     blittable params (`long`/`int`/`IntPtr`/`IntPtr`). Take `topic` as `IntPtr`
-    and `Utf8.PtrToString` it *inside* the callback (§A3) — never `string`. Hold
+    and `Utf8Marshal.PtrToString` it *inside* the callback (§A3) — never `string`. Hold
     the delegate in a `static readonly` field so the GC can't collect it while
     native holds the thunk.
   - The body is a **no-throw boundary**: `try/catch` it all (a managed exception
@@ -816,17 +817,17 @@ callback is cancelled and its `Task` never completes.
 ## B3 String marshalling (UTF-8)
 
 **Decision:** Every boundary string is UTF-8, marshalled by hand (the floor lacks
-`LPUTF8Str` / `Marshal.PtrToStringUTF8`, §0.1): input via `Utf8.Pin` (encode + NUL
-+ pin); output via `Utf8.PtrToString` in **two forms** — a NUL-terminated
+`LPUTF8Str` / `Marshal.PtrToStringUTF8`, §0.1): input via `Utf8Marshal.Pin` (encode + NUL
++ pin); output via `Utf8Marshal.PtrToString` in **two forms** — a NUL-terminated
 callee-owned `const char*` (NUL-scan + `GetString`), or a **length-delimited**
 `const char* + int32_t out_len` that **borrows into the fetch batch** (use the
 length, **never** NUL-scan).
 
 | Direction | Sites | Helper |
 |---|---|---|
-| In | topic, config key/value, `subscribe`/`seek` args | `Utf8.Pin` |
-| Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `ConsumerGroupMetadata_group_id` / `_member_id`, other getters | `Utf8.PtrToString(ptr)` — NUL-scan |
-| Out — length-delimited, borrowed from the batch, valid until `ConsumerRecords_destroy` | `ConsumerRecord_topic` / `_header_key`, `Node_host` / `_rack` | `Utf8.PtrToString(ptr, len)` — use `out_len`, **no scan** |
+| In | topic, config key/value, `subscribe`/`seek` args | `Utf8Marshal.Pin` |
+| Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `ConsumerGroupMetadata_group_id` / `_member_id`, other getters | `Utf8Marshal.PtrToString(ptr)` — NUL-scan |
+| Out — length-delimited, borrowed from the batch, valid until `ConsumerRecords_destroy` | `ConsumerRecord_topic` / `_header_key`, `Node_host` / `_rack` | `Utf8Marshal.PtrToString(ptr, len)` — use `out_len`, **no scan** |
 
 **All output pointers are borrowed** — .NET copies (`GetString`) before the owning
 handle is freed; it never owns the raw pointer. The two output rows differ only in
@@ -842,9 +843,9 @@ handle is freed; it never owns the raw pointer. The two output rows differ only 
   - Output — two forms, both copy into a managed `string` (needs `unsafe`; a
     `#if NET6_0_OR_GREATER` span fast path is an internal optimization):
     - **NUL-terminated** callee-owned `const char*` (no `out_len`) →
-      `Utf8.PtrToString(ptr)`, scan to NUL. Valid until the value's `_destroy`.
+      `Utf8Marshal.PtrToString(ptr)`, scan to NUL. Valid until the value's `_destroy`.
     - **Length-delimited** `const char* + int32_t out_len` (the receive path) →
-      `Utf8.PtrToString(ptr, out_len)` using the length — **never NUL-scan**: the
+      `Utf8Marshal.PtrToString(ptr, out_len)` using the length — **never NUL-scan**: the
       slice borrows into the batch with no terminator, so a scan over-reads into
       the next field. Valid until `ConsumerRecords_destroy` (CLAUDE.md §6.4).
     In both cases **copy before free** — the pointer dies with the handle; never
@@ -879,7 +880,7 @@ they take the NUL-terminated form.
   - A `ConsumerRecord.topic` / header key with a non-ASCII, non-NUL-terminated
     value round-trips via `out_len` (not a scan); a multi-byte char at the slice
     boundary marshals correctly.
-  - `PtrToStringUTF8(IntPtr.Zero)` → `null`.
+  - `Utf8Marshal.PtrToString(IntPtr.Zero)` → `null`.
 
 ---
 
@@ -943,7 +944,7 @@ shapes: **wakeup** and **concurrent use**.
 | `KafkaError_*` accessor | → C# |
 |---|---|
 | `_code` (i32) | `int Code` |
-| `_message` (UTF-8, handle-owned) | `Message` via `Utf8.PtrToString` (§B3) |
+| `_message` (UTF-8, handle-owned) | `Message` via `Utf8Marshal.PtrToString` (§B3) |
 | `_is_retriable` / `_is_fatal` | `IsRetriable` / `IsFatal` |
 | `_destroy` | free after reading |
 
