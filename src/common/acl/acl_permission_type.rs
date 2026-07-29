@@ -91,36 +91,88 @@ impl std::fmt::Display for AclPermissionType {
 mod tests {
     use super::*;
 
+    // Mirrors `AclPermissionTypeTest.AclPermissionTypeTestInfo` in the Java client.
+    struct Info {
+        ty: AclPermissionType,
+        code: i8,
+        name: &'static str,
+        unknown: bool,
+    }
+
+    // Mirrors `AclPermissionTypeTest.INFOS` in the Java client, in declaration order.
+    const INFOS: [Info; 4] = [
+        Info { ty: AclPermissionType::Unknown, code: 0, name: "unknown", unknown: true },
+        Info { ty: AclPermissionType::Any, code: 1, name: "any", unknown: false },
+        Info { ty: AclPermissionType::Deny, code: 2, name: "deny", unknown: false },
+        Info { ty: AclPermissionType::Allow, code: 3, name: "allow", unknown: false },
+    ];
+
+    // Test-local mirror of Java's `AclPermissionType.values()` (declaration order).
+    const VALUES: [AclPermissionType; 4] = [
+        AclPermissionType::Unknown,
+        AclPermissionType::Any,
+        AclPermissionType::Deny,
+        AclPermissionType::Allow,
+    ];
+
+    /// Mirrors `AclPermissionTypeTest.testIsUnknown`.
     #[test]
-    fn code_round_trips_for_all_variants() {
-        for pt in [
-            AclPermissionType::Unknown,
-            AclPermissionType::Any,
-            AclPermissionType::Deny,
-            AclPermissionType::Allow,
-        ] {
-            assert_eq!(AclPermissionType::from_code(pt.code()), pt);
+    fn test_is_unknown() {
+        for info in &INFOS {
+            assert_eq!(
+                info.unknown,
+                info.ty.is_unknown(),
+                "{} was supposed to have unknown == {}",
+                info.ty,
+                info.unknown
+            );
         }
     }
 
+    /// Mirrors `AclPermissionTypeTest.testCode`.
     #[test]
-    fn code_values_match_java_wire_values() {
-        assert_eq!(AclPermissionType::Unknown.code(), 0);
-        assert_eq!(AclPermissionType::Any.code(), 1);
-        assert_eq!(AclPermissionType::Deny.code(), 2);
-        assert_eq!(AclPermissionType::Allow.code(), 3);
+    fn test_code() {
+        assert_eq!(VALUES.len(), INFOS.len());
+        for info in &INFOS {
+            assert_eq!(
+                info.code,
+                info.ty.code(),
+                "{} was supposed to have code == {}",
+                info.ty,
+                info.code
+            );
+            assert_eq!(
+                info.ty,
+                AclPermissionType::from_code(info.code),
+                "AclPermissionType::from_code({}) was supposed to be {}",
+                info.code,
+                info.ty
+            );
+        }
+        assert_eq!(AclPermissionType::Unknown, AclPermissionType::from_code(120));
     }
 
+    /// Mirrors `AclPermissionTypeTest.testName`.
     #[test]
-    fn from_string_is_case_insensitive_and_defaults_to_unknown() {
-        assert_eq!(AclPermissionType::from_string("allow"), AclPermissionType::Allow);
-        assert_eq!(AclPermissionType::from_string("DENY"), AclPermissionType::Deny);
-        assert_eq!(AclPermissionType::from_string("bogus"), AclPermissionType::Unknown);
+    fn test_name() {
+        for info in &INFOS {
+            assert_eq!(
+                info.ty,
+                AclPermissionType::from_string(info.name),
+                "AclPermissionType::from_string({}) was supposed to be {}",
+                info.name,
+                info.ty
+            );
+        }
+        assert_eq!(AclPermissionType::Unknown, AclPermissionType::from_string("something"));
     }
 
+    /// Mirrors `AclPermissionTypeTest.testExhaustive`.
     #[test]
-    fn is_unknown() {
-        assert!(AclPermissionType::Unknown.is_unknown());
-        assert!(!AclPermissionType::Allow.is_unknown());
+    fn test_exhaustive() {
+        assert_eq!(INFOS.len(), VALUES.len());
+        for (i, info) in INFOS.iter().enumerate() {
+            assert_eq!(info.ty, VALUES[i]);
+        }
     }
 }
