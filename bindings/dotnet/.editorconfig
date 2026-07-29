@@ -1,4 +1,4 @@
-# EditorConfig for the Confluent.Kafka.ShareConsumer .NET binding.
+# EditorConfig for the Confluent.Kafka .NET binding.
 # Coding style tracks the dotnet/runtime conventions (CLAUDE.md §7.2):
 #   _camelCase instance fields, s_ static fields, PascalCase members,
 #   Allman braces, System.* usings sorted first, I-prefix on interfaces (CA1715).

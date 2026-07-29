@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Unit tests for the Confluent.Kafka.ShareConsumer binding (xUnit; CLAUDE.md §4 D4).
+    Unit tests for the Confluent.Kafka binding (xUnit; CLAUDE.md §4 D4).
     Runs the Mock* tests, no broker (CLAUDE.md §7.3/§7.4). In M0/P0 this holds only
     a TFM-sentinel smoke test that proves the harness runs and InternalsVisibleTo
     compiles.
@@ -13,8 +13,8 @@
 
   <PropertyGroup>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
-    <RootNamespace>Confluent.Kafka.ShareConsumer.UnitTests</RootNamespace>
-    <AssemblyName>Confluent.Kafka.ShareConsumer.UnitTests</AssemblyName>
+    <RootNamespace>Confluent.Kafka.UnitTests</RootNamespace>
+    <AssemblyName>Confluent.Kafka.UnitTests</AssemblyName>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
@@ -29,7 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Confluent.Kafka.ShareConsumer\Confluent.Kafka.ShareConsumer.csproj" />
+    <ProjectReference Include="..\..\src\Confluent.Kafka\Confluent.Kafka.csproj" />
   </ItemGroup>
 
 </Project>

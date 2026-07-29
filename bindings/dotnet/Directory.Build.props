@@ -1,7 +1,7 @@
 <Project>
 
   <!--
-    Shared MSBuild properties for every project in the Confluent.Kafka.ShareConsumer
+    Shared MSBuild properties for every project in the Confluent.Kafka
     .NET binding. Applied to the library and the unit-test project alike.
     See bindings/dotnet/CLAUDE.md §4 (decisions) and §7.2 (build/style).
   -->
@@ -22,7 +22,7 @@
   <PropertyGroup>
     <Authors>Confluent Inc.</Authors>
     <Company>Confluent Inc.</Company>
-    <Product>Confluent.Kafka.ShareConsumer</Product>
+    <Product>Confluent.Kafka</Product>
     <Copyright>Copyright 2025 Confluent Inc.</Copyright>
     <NeutralLanguage>en-US</NeutralLanguage>
   </PropertyGroup>
@@ -37,7 +37,7 @@
        a security secret (publisher trust is NuGet/Authenticode signing). -->
   <PropertyGroup>
     <SignAssembly>true</SignAssembly>
-    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)Confluent.Kafka.ShareConsumer.snk</AssemblyOriginatorKeyFile>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)Confluent.Kafka.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
 
 </Project>
