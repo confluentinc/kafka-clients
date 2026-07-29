@@ -3202,6 +3202,17 @@ impl Admin for KafkaAdminClient {
         if options.remove_all() {
             // Mirrors `getMembersFromGroup`: describe the group, then chain the
             // `LeaveGroup` driver once the membership is known.
+            //
+            // The describe step is issued via `describeConsumerGroups(
+            // Collections.singleton(groupId))` with a *default*
+            // `DescribeConsumerGroupsOptions` (Java `KafkaAdminClient.java:4172`),
+            // whose `timeoutMs` is `null`. Its deadline is therefore
+            // `now + defaultApiTimeoutMs`, independent of the removeMembers
+            // request's `options.timeout()`.
+            let default_api_timeout_ms = self.shared.default_api_timeout_ms;
+            let options_timeout = options.timeout();
+            let describe_deadline = calc_deadline_ms(now, None, default_api_timeout_ms);
+
             let describe_group_ids = vec![group_id.to_string()];
             let describe_future = DescribeConsumerGroupsHandler::new_future(&describe_group_ids);
             let describe_handle = describe_future.handle(&key).expect("describe future exists for the group key");
@@ -3209,7 +3220,7 @@ impl Admin for KafkaAdminClient {
             let describe_driver = AdminApiDriver::new(
                 Box::new(describe_handler),
                 Box::new(describe_future),
-                deadline,
+                describe_deadline,
                 retry_backoff.clone(),
                 log_context.clone(),
             );
@@ -3247,14 +3258,23 @@ impl Admin for KafkaAdminClient {
                         .collect();
                     let handler =
                         RemoveMembersFromConsumerGroupHandler::new(&group_id_owned, members, log_context.clone());
+                    // Recompute the `LeaveGroup` deadline from the *current* time,
+                    // now that the describe future has resolved. This mirrors Java's
+                    // `memFuture.whenComplete(...)` (`KafkaAdminClient.java:4224-4230`)
+                    // calling `invokeDriver(handler, adminFuture, options.timeoutMs())`,
+                    // whose `calcDeadlineMs(time.milliseconds(), timeoutMs)` runs at
+                    // this later moment — giving `LeaveGroup` a fresh full timeout
+                    // window rather than the (already partially consumed) describe one.
+                    let leave_now = (ctx.time_provider)();
+                    let leave_deadline = calc_deadline_ms(leave_now, options_timeout, default_api_timeout_ms);
                     let driver = AdminApiDriver::new(
                         Box::new(handler),
                         Box::new(admin_future),
-                        deadline,
+                        leave_deadline,
                         retry_backoff.clone(),
                         log_context.clone(),
                     );
-                    invoke_driver(driver, ctx.clone(), now);
+                    invoke_driver(driver, ctx.clone(), leave_now);
                 },
             });
         } else {
@@ -8388,6 +8408,121 @@ mod tests {
         let success_all = success_result.all();
         drive_until(&mut runnable, &time, 80, || success_all.is_done()).await;
         assert_eq!(success_all.get().await.unwrap(), ());
+    }
+
+    /// Regression test for the `removeAll` describe step's timeout source.
+    ///
+    /// Java issues the describe via `describeConsumerGroups(Collections
+    /// .singleton(groupId))` with a *default* `DescribeConsumerGroupsOptions`
+    /// (its `timeoutMs` is `null`), so the describe driver's deadline is
+    /// `now + defaultApiTimeoutMs` — INDEPENDENT of the removeMembers request's
+    /// `options.timeout()` (`KafkaAdminClient.java:4172`). This asserts the first
+    /// describe request (the coordinator lookup) carries the default-API-timeout
+    /// budget, not the small `options.timeout()` budget, and so fails against
+    /// code that ties the describe deadline to `options.timeout()`.
+    #[tokio::test]
+    async fn test_remove_all_describe_uses_default_api_timeout() {
+        use crate::common::protocol::ApiKeys;
+        // request.timeout.ms (30000) > default.api.timeout.ms (20000) so the
+        // describe budget is observable uncapped; options.timeout (5000) is
+        // smaller still, so the buggy and fixed budgets are distinguishable.
+        let (admin, mut runnable, _time, _nodes) = env_with_props(&[
+            ("request.timeout.ms", "30000"),
+            ("default.api.timeout.ms", "20000"),
+            ("retries", "2147483647"),
+            ("retry.backoff.ms", "10"),
+        ]);
+        // No responses prepared: the describe coordinator-lookup request is sent
+        // but stays queued (unanswered), ready for inspection.
+        let options = RemoveMembersFromConsumerGroupOptions::default().timeout_ms(Some(5000));
+        assert!(options.remove_all());
+        let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
+
+        pump_until(&mut runnable, 40, |r| r.client_mut().request_count() >= 1).await;
+
+        let requests = runnable.client_mut().requests();
+        assert_eq!(requests.len(), 1, "only the describe coordinator lookup should be queued");
+        let describe_lookup = &requests[0];
+        assert_eq!(describe_lookup.api_key(), &ApiKeys::FIND_COORDINATOR);
+        // now == 1000, describe deadline == now + default.api.timeout.ms == 21000,
+        // budget == min(request.timeout.ms=30000, 21000-1000) == 20000. The buggy
+        // code (describe deadline tied to options.timeout=5000) would instead
+        // yield min(30000, 5000) == 5000.
+        assert_eq!(
+            describe_lookup.request_timeout_ms(),
+            20000,
+            "describe step must use default.api.timeout.ms (20000), not options.timeout (5000)"
+        );
+    }
+
+    /// Regression test for the `removeAll` `LeaveGroup` deadline recomputation.
+    ///
+    /// Java computes the `LeaveGroup` driver's deadline INSIDE
+    /// `memFuture.whenComplete(...)`, after the describe future resolves
+    /// (`KafkaAdminClient.java:4224-4230` → `invokeDriver(..., options.timeoutMs())`
+    /// → `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a
+    /// fresh full timeout window starting when describe completes. Here the mock
+    /// clock is advanced past the ORIGINAL (call-time) `options.timeout` window
+    /// before describe completes: the fix recomputes the LeaveGroup deadline from
+    /// the post-describe time (so its coordinator lookup is issued with a fresh
+    /// 5000ms budget), whereas code that baked the pre-describe deadline would
+    /// have the LeaveGroup window already expired and issue no request at all.
+    #[tokio::test]
+    async fn test_remove_all_leave_group_deadline_computed_after_describe() {
+        use crate::common::protocol::ApiKeys;
+        // default.api.timeout.ms is large so the describe step survives the clock
+        // advance (the describe-timeout fix is a prerequisite); options.timeout
+        // (5000) is smaller than request.timeout.ms so the LeaveGroup budget is
+        // observable uncapped.
+        let (admin, mut runnable, time, nodes) = env_with_props(&[
+            ("request.timeout.ms", "30000"),
+            ("default.api.timeout.ms", "60000"),
+            ("retries", "2147483647"),
+            ("retry.backoff.ms", "10"),
+        ]);
+        // Answer the describe (coordinator lookup + ConsumerGroupDescribe). Do NOT
+        // prepare the LeaveGroup coordinator lookup, so it stays queued for
+        // inspection.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(consumer_group_describe_members_resp(GROUP_ID, &["instance-1"]));
+
+        let options = RemoveMembersFromConsumerGroupOptions::default().timeout_ms(Some(5000));
+        assert!(options.remove_all());
+        let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
+
+        // Advance the clock to 10000 — past the pre-describe LeaveGroup deadline
+        // (call-time 1000 + options.timeout 5000 == 6000) — before describe is
+        // driven. With the fix, the LeaveGroup deadline is recomputed from the
+        // post-describe time (10000 + 5000 == 15000). Without it, the baked-in
+        // window is already expired, describe/LeaveGroup time out, and no
+        // LeaveGroup coordinator lookup is ever issued.
+        time.sleep(9000);
+
+        pump_until(&mut runnable, 40, |r| {
+            r.client_mut()
+                .requests()
+                .iter()
+                .any(|req| req.api_key() == &ApiKeys::FIND_COORDINATOR)
+        })
+        .await;
+
+        let leave_lookup = runnable
+            .client_mut()
+            .requests()
+            .iter()
+            .find(|req| req.api_key() == &ApiKeys::FIND_COORDINATOR)
+            .expect("the LeaveGroup coordinator lookup should be queued with a fresh deadline");
+        // now == 10000, fresh LeaveGroup deadline == 10000 + options.timeout 5000
+        // == 15000, budget == min(request.timeout.ms=30000, 15000-10000) == 5000.
+        assert_eq!(
+            leave_lookup.request_timeout_ms(),
+            5000,
+            "LeaveGroup deadline must be recomputed fresh after describe completes"
+        );
     }
 
     /// Drives one `removeMembersFromConsumerGroup` with the given `reason`,

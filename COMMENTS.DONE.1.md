@@ -354,3 +354,65 @@ production-code bug was reported. Fixed by the Actor (N=1) in the fix cycle.
   `static {}` LOWEST/HIGHEST cross-schema invariant check is intentionally not
   ported (harmless compile-time-constant assertion). Commit
   `fixup! ...translate ConsumerProtocol...`.
+
+---
+
+# Tier 2 Phase 3 (Group / member deletion)
+
+## RESOLVED — `removeMembersFromConsumerGroup` (removeAll) reused one up-front deadline for both the describe and LeaveGroup drivers (Behavior Mismatch)
+- **File**: `src/admin/kafka_admin_client.rs` (`remove_members_from_consumer_group`, removeAll branch)
+- **Java Reference**: `KafkaAdminClient.java:4169-4187` (`getMembersFromGroup` →
+  `describeConsumerGroups(Collections.singleton(groupId))`, DEFAULT options) and
+  `:4224-4230` (`memFuture.whenComplete` → `invokeDriver(handler, adminFuture,
+  options.timeoutMs())` → `invokeDriver` computes
+  `calcDeadlineMs(time.milliseconds(), timeoutMs)` at that later moment).
+- **Fix**: Both divergences corrected faithfully to Java's control flow.
+  1. **Describe step timeout source.** The describe driver's deadline is now
+     `calc_deadline_ms(now, None, default_api_timeout_ms)` (i.e.
+     `now + defaultApiTimeoutMs`), independent of the removeMembers request's
+     `options.timeout()` — matching Java issuing the describe with a default
+     `DescribeConsumerGroupsOptions` (`timeoutMs == null`). Previously the
+     describe deadline was tied to `options.timeout()`.
+  2. **LeaveGroup deadline recomputation.** The `LeaveGroup` driver's deadline is
+     now recomputed INSIDE the describe-completion callback from the current
+     time: `let leave_now = (ctx.time_provider)();
+     let leave_deadline = calc_deadline_ms(leave_now, options_timeout,
+     default_api_timeout_ms);`, and `invoke_driver(driver, ctx, leave_now)` uses
+     that fresh `now`. This gives LeaveGroup a fresh full timeout window starting
+     when describe completes (Java `calcDeadlineMs(time.milliseconds(), ...)` at
+     `whenComplete` time), instead of baking the pre-describe `deadline`/`now`.
+  - **Regression tests added** (both fail against the pre-fix code, verified by
+    temporarily reverting the two deadline lines):
+    - `test_remove_all_describe_uses_default_api_timeout`: with
+      `request.timeout.ms=30000`, `default.api.timeout.ms=20000`,
+      `options.timeout_ms(Some(5000))`, asserts the describe coordinator-lookup
+      request carries `request_timeout_ms == 20000` (default-API budget), not the
+      buggy `5000` (options budget).
+    - `test_remove_all_leave_group_deadline_computed_after_describe`: advances the
+      mock clock to `10000` (past the pre-describe LeaveGroup window
+      `1000 + 5000 = 6000`) before describe is driven; asserts the LeaveGroup
+      coordinator lookup is issued with a fresh `request_timeout_ms == 5000`
+      (deadline `10000 + 5000`). Against the buggy code the baked window is
+      expired and no LeaveGroup request is ever queued (operation times out).
+  - Commit `fixup! Milestone 11 Tier 2 Phase 3: group/member deletion` referencing `6bb701c`.
+
+## RESOLVED — `LeaveGroup` wire type had no flexible-framing byte-level known-vector test (DoD #3)
+- **File**: `src/common/requests/leave_group_request.rs`,
+  `src/common/requests/leave_group_response.rs`
+- **Java Reference**: `generator/messages/LeaveGroupRequest.json`
+  (`flexibleVersions: "4+"`, `Reason` field `versions: "5+"`) and
+  `LeaveGroupResponse.json` (`flexibleVersions: "4+"`).
+- **Fix**: Added hand-computed flexible (v5) known-vector tests, derived from the
+  spec (not by pasting serializer output):
+  - `serialize_known_byte_vector_v5_flexible` (request): builds a v5
+    `LeaveGroupRequest` with a member carrying a NON-NULL `Reason` and asserts the
+    exact body bytes
+    `[0x02,0x67, 0x02, 0x02,0x6D, 0x02,0x69, 0x02,0x72, 0x00, 0x00]` — compact
+    `group_id`, compact `[]MemberIdentity` array, compact member id / nullable
+    group_instance_id / nullable `Reason` "r" (0x02 0x72, the v5 headline field),
+    plus member-level and top-level tagged-field bytes.
+  - `parse_known_byte_vector_v5_flexible` (response): the symmetric v5 vector
+    `[0x00,0x00,0x00,0x00, 0x00,0x00, 0x02, 0x02,0x6D, 0x02,0x69, 0x00,0x19, 0x00,
+    0x00]` (throttle, error, compact members array, compact member id / nullable
+    group_instance_id, member error 25, member + top-level tagged fields).
+  - Commit `fixup! Milestone 11 Tier 2 Phase 3: LeaveGroup/DeleteGroups wire types` referencing `9ed0648`.
