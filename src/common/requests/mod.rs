@@ -20,6 +20,8 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod alter_client_quotas_request;
+pub mod alter_client_quotas_response;
 pub mod alter_partition_reassignments_request;
 pub mod alter_partition_reassignments_response;
 pub mod alter_replica_log_dirs_request;
@@ -46,6 +48,8 @@ pub mod delete_topics_request;
 pub mod delete_topics_response;
 pub mod describe_acls_request;
 pub mod describe_acls_response;
+pub mod describe_client_quotas_request;
+pub mod describe_client_quotas_response;
 pub mod describe_cluster_request;
 pub mod describe_cluster_response;
 pub mod describe_configs_request;
@@ -99,6 +103,8 @@ pub mod send_builder;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use alter_client_quotas_request::{AlterClientQuotasRequest, AlterClientQuotasRequestBuilder};
+pub use alter_client_quotas_response::AlterClientQuotasResponse;
 pub use alter_partition_reassignments_request::{
     AlterPartitionReassignmentsRequest, AlterPartitionReassignmentsRequestBuilder,
 };
@@ -133,6 +139,11 @@ pub use delete_topics_request::{DeleteTopicsRequest, DeleteTopicsRequestBuilder}
 pub use delete_topics_response::DeleteTopicsResponse;
 pub use describe_acls_request::{DescribeAclsRequest, DescribeAclsRequestBuilder};
 pub use describe_acls_response::DescribeAclsResponse;
+pub use describe_client_quotas_request::{
+    DescribeClientQuotasRequest, DescribeClientQuotasRequestBuilder, MATCH_TYPE_DEFAULT, MATCH_TYPE_EXACT,
+    MATCH_TYPE_SPECIFIED,
+};
+pub use describe_client_quotas_response::DescribeClientQuotasResponse;
 pub use describe_cluster_request::{
     DescribeClusterRequest, DescribeClusterRequestBuilder, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
 };
