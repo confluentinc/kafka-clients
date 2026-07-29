@@ -108,6 +108,16 @@ where
     pub(crate) fn all(&self) -> HashMap<K, KafkaFuture<V>> {
         self.futures.iter().map(|(k, v)| (k.clone(), v.future())).collect()
     }
+
+    /// Returns a clone of the completable handle for `key`, if present. Used to
+    /// register a completion callback (Java's `whenComplete`) on a single key's
+    /// future when chaining a follow-up admin call (e.g.
+    /// `removeMembersFromConsumerGroup`'s `removeAll` path chains on
+    /// `describeConsumerGroups`). The returned handle shares state with the
+    /// future the driver completes.
+    pub(crate) fn handle(&self, key: &K) -> Option<KafkaFutureImpl<V>> {
+        self.futures.get(key).cloned()
+    }
 }
 
 impl<K, V> AdminApiFuture<K, V> for SimpleAdminApiFuture<K, V>

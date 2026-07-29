@@ -33,6 +33,7 @@ pub mod consumer_group_listing;
 pub mod create_partitions_result;
 pub mod create_topics_result;
 pub mod delete_consumer_group_offsets_result;
+pub mod delete_consumer_groups_result;
 pub mod delete_records_result;
 pub mod delete_topics_result;
 pub mod deleted_records;
@@ -57,6 +58,7 @@ pub mod list_topics_result;
 pub mod log_dir_description;
 pub mod member_assignment;
 pub mod member_description;
+pub mod member_to_remove;
 pub mod mock_admin_client;
 pub mod new_partition_reassignment;
 pub mod new_partitions;
@@ -65,6 +67,7 @@ pub mod offset_spec;
 pub mod options;
 pub mod partition_reassignment;
 pub mod records_to_delete;
+pub mod remove_members_from_consumer_group_result;
 pub mod replica_info;
 pub mod topic_description;
 pub mod topic_listing;
@@ -88,6 +91,7 @@ use std::collections::HashMap;
 pub use create_partitions_result::CreatePartitionsResult;
 pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
 pub use delete_consumer_group_offsets_result::DeleteConsumerGroupOffsetsResult;
+pub use delete_consumer_groups_result::DeleteConsumerGroupsResult;
 pub use delete_records_result::DeleteRecordsResult;
 pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
@@ -113,6 +117,7 @@ pub use list_topics_result::ListTopicsResult;
 pub use log_dir_description::LogDirDescription;
 pub use member_assignment::MemberAssignment;
 pub use member_description::MemberDescription;
+pub use member_to_remove::MemberToRemove;
 pub use mock_admin_client::MockAdminClient;
 pub use new_partition_reassignment::NewPartitionReassignment;
 pub use new_partitions::NewPartitions;
@@ -123,13 +128,15 @@ pub use options::ListConsumerGroupsOptions;
 pub use options::{
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
     AlterReplicaLogDirsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
-    DeleteRecordsOptions, DeleteTopicsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions,
-    DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClassicGroupsOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
+    ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
+pub use remove_members_from_consumer_group_result::RemoveMembersFromConsumerGroupResult;
 pub use replica_info::ReplicaInfo;
 pub use topic_description::TopicDescription;
 pub use topic_listing::TopicListing;
@@ -359,6 +366,26 @@ pub trait Admin: Send + Sync {
         partitions: &HashSet<TopicPartition>,
         options: DeleteConsumerGroupOffsetsOptions,
     ) -> DeleteConsumerGroupOffsetsResult;
+
+    /// Delete consumer groups from the cluster.
+    ///
+    /// Corresponds to
+    /// `Admin.deleteConsumerGroups(Collection<String>, DeleteConsumerGroupsOptions)`.
+    fn delete_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DeleteConsumerGroupsOptions,
+    ) -> DeleteConsumerGroupsResult;
+
+    /// Remove members from a consumer group by given member identities.
+    ///
+    /// Corresponds to
+    /// `Admin.removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)`.
+    fn remove_members_from_consumer_group(
+        &self,
+        group_id: &str,
+        options: RemoveMembersFromConsumerGroupOptions,
+    ) -> RemoveMembersFromConsumerGroupResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

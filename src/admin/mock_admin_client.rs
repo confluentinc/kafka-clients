@@ -29,18 +29,19 @@ use crate::admin::{
     AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
     AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription, Config, ConfigEntry,
     ConsumerGroupDescription, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteRecordsOptions, DeleteRecordsResult,
-    DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
-    DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
-    DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult,
-    DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
-    ElectLeadersOptions, ElectLeadersResult, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConfigResourcesResult, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions,
-    ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
-    PartitionReassignment, RecordsToDelete, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing,
-    TopicMetadataAndConfig,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
+    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    DeletedRecords, DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClusterOptions,
+    DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions,
+    DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
+    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
+    GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
+    ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo, ListPartitionReassignmentsOptions,
+    ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult, ReplicaInfo, ReplicaLogDirInfo,
+    TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -56,6 +57,7 @@ use crate::common::{
 };
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
+use crate::leave_group_request_data::MemberIdentity;
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -1286,6 +1288,38 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
         handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
         DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions.clone())
+    }
+
+    fn delete_consumer_groups(
+        &self,
+        group_ids: &[String],
+        _options: DeleteConsumerGroupsOptions,
+    ) -> DeleteConsumerGroupsResult {
+        // Java's `MockAdminClient.deleteConsumerGroups` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:773-775). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future per group rather than a panic.
+        let mut futures = HashMap::new();
+        for group_id in group_ids {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            futures.insert(group_id.clone(), handle.future());
+        }
+        DeleteConsumerGroupsResult::new(futures)
+    }
+
+    fn remove_members_from_consumer_group(
+        &self,
+        _group_id: &str,
+        options: RemoveMembersFromConsumerGroupOptions,
+    ) -> RemoveMembersFromConsumerGroupResult {
+        // Java's `MockAdminClient.removeMembersFromConsumerGroup` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:801-803). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let handle: KafkaFutureImpl<HashMap<MemberIdentity, Errors>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        RemoveMembersFromConsumerGroupResult::new(handle.future(), options.members().clone())
     }
 
     async fn close(&self, _timeout: Duration) {
