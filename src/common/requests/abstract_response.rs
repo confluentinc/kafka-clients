@@ -35,6 +35,7 @@ use super::ApiVersionsResponse;
 use super::ConsumerGroupDescribeResponse;
 use super::ConsumerGroupHeartbeatResponse;
 use super::CreateAclsResponse;
+use super::CreateDelegationTokenResponse;
 use super::CreatePartitionsResponse;
 use super::CreateTopicsResponse;
 use super::DeleteAclsResponse;
@@ -45,9 +46,11 @@ use super::DescribeAclsResponse;
 use super::DescribeClientQuotasResponse;
 use super::DescribeClusterResponse;
 use super::DescribeConfigsResponse;
+use super::DescribeDelegationTokenResponse;
 use super::DescribeGroupsResponse;
 use super::DescribeLogDirsResponse;
 use super::ElectLeadersResponse;
+use super::ExpireDelegationTokenResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::IncrementalAlterConfigsResponse;
@@ -62,6 +65,7 @@ use super::OffsetDeleteResponse;
 use super::OffsetFetchResponse;
 use super::OffsetsForLeaderEpochResponse;
 use super::ProduceResponse;
+use super::RenewDelegationTokenResponse;
 use super::RequestHeader;
 use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
@@ -151,6 +155,14 @@ pub enum ConcreteResponse {
     DescribeClientQuotas(DescribeClientQuotasResponse),
     /// An AlterClientQuotas response.
     AlterClientQuotas(AlterClientQuotasResponse),
+    /// A CreateDelegationToken response.
+    CreateDelegationToken(CreateDelegationTokenResponse),
+    /// A RenewDelegationToken response.
+    RenewDelegationToken(RenewDelegationTokenResponse),
+    /// An ExpireDelegationToken response.
+    ExpireDelegationToken(ExpireDelegationTokenResponse),
+    /// A DescribeDelegationToken response.
+    DescribeDelegationToken(DescribeDelegationTokenResponse),
 }
 
 impl ConcreteResponse {
@@ -193,6 +205,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.api_key(),
             Self::DescribeClientQuotas(r) => r.api_key(),
             Self::AlterClientQuotas(r) => r.api_key(),
+            Self::CreateDelegationToken(r) => r.api_key(),
+            Self::RenewDelegationToken(r) => r.api_key(),
+            Self::ExpireDelegationToken(r) => r.api_key(),
+            Self::DescribeDelegationToken(r) => r.api_key(),
         }
     }
 
@@ -241,6 +257,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeClientQuotas(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::AlterClientQuotas(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::CreateDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::RenewDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ExpireDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -361,6 +381,18 @@ impl ConcreteResponse {
             Self::AlterClientQuotas(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::CreateDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::RenewDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ExpireDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -409,6 +441,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::RenewDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -461,6 +497,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.error_counts(),
             Self::DescribeClientQuotas(r) => r.error_counts(),
             Self::AlterClientQuotas(r) => r.error_counts(),
+            Self::CreateDelegationToken(r) => r.error_counts(),
+            Self::RenewDelegationToken(r) => r.error_counts(),
+            Self::ExpireDelegationToken(r) => r.error_counts(),
+            Self::DescribeDelegationToken(r) => r.error_counts(),
         }
     }
 
@@ -505,6 +545,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.throttle_time_ms(),
             Self::DescribeClientQuotas(r) => r.throttle_time_ms(),
             Self::AlterClientQuotas(r) => r.throttle_time_ms(),
+            Self::CreateDelegationToken(r) => r.throttle_time_ms(),
+            Self::RenewDelegationToken(r) => r.throttle_time_ms(),
+            Self::ExpireDelegationToken(r) => r.throttle_time_ms(),
+            Self::DescribeDelegationToken(r) => r.throttle_time_ms(),
         }
     }
 
@@ -548,6 +592,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeClientQuotas(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::AlterClientQuotas(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::CreateDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::RenewDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ExpireDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -590,6 +638,10 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.should_client_throttle(version),
             Self::DescribeClientQuotas(r) => r.should_client_throttle(version),
             Self::AlterClientQuotas(r) => r.should_client_throttle(version),
+            Self::CreateDelegationToken(r) => r.should_client_throttle(version),
+            Self::RenewDelegationToken(r) => r.should_client_throttle(version),
+            Self::ExpireDelegationToken(r) => r.should_client_throttle(version),
+            Self::DescribeDelegationToken(r) => r.should_client_throttle(version),
         }
     }
 
@@ -782,6 +834,22 @@ impl ConcreteResponse {
                 let response = AlterClientQuotasResponse::parse(readable, version)?;
                 Ok(Self::AlterClientQuotas(response))
             },
+            ApiKeys::CREATE_DELEGATION_TOKEN => {
+                let response = CreateDelegationTokenResponse::parse(readable, version)?;
+                Ok(Self::CreateDelegationToken(response))
+            },
+            ApiKeys::RENEW_DELEGATION_TOKEN => {
+                let response = RenewDelegationTokenResponse::parse(readable, version)?;
+                Ok(Self::RenewDelegationToken(response))
+            },
+            ApiKeys::EXPIRE_DELEGATION_TOKEN => {
+                let response = ExpireDelegationTokenResponse::parse(readable, version)?;
+                Ok(Self::ExpireDelegationToken(response))
+            },
+            ApiKeys::DESCRIBE_DELEGATION_TOKEN => {
+                let response = DescribeDelegationTokenResponse::parse(readable, version)?;
+                Ok(Self::DescribeDelegationToken(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -829,6 +897,10 @@ impl std::fmt::Display for ConcreteResponse {
             Self::DeleteAcls(r) => write!(f, "{r}"),
             Self::DescribeClientQuotas(r) => write!(f, "{r}"),
             Self::AlterClientQuotas(r) => write!(f, "{r}"),
+            Self::CreateDelegationToken(r) => write!(f, "{r}"),
+            Self::RenewDelegationToken(r) => write!(f, "{r}"),
+            Self::ExpireDelegationToken(r) => write!(f, "{r}"),
+            Self::DescribeDelegationToken(r) => write!(f, "{r}"),
         }
     }
 }

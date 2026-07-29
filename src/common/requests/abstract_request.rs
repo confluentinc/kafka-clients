@@ -33,6 +33,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
 use crate::create_acls_request_data::CreateAclsRequestData;
+use crate::create_delegation_token_request_data::CreateDelegationTokenRequestData;
 use crate::create_partitions_request_data::CreatePartitionsRequestData;
 use crate::create_topics_request_data::CreateTopicsRequestData;
 use crate::delete_acls_request_data::DeleteAclsRequestData;
@@ -43,9 +44,11 @@ use crate::describe_acls_request_data::DescribeAclsRequestData;
 use crate::describe_client_quotas_request_data::DescribeClientQuotasRequestData;
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::DescribeConfigsRequestData;
+use crate::describe_delegation_token_request_data::DescribeDelegationTokenRequestData;
 use crate::describe_groups_request_data::DescribeGroupsRequestData;
 use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
 use crate::elect_leaders_request_data::ElectLeadersRequestData;
+use crate::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
@@ -60,6 +63,7 @@ use crate::offset_delete_request_data::OffsetDeleteRequestData;
 use crate::offset_fetch_request_data::OffsetFetchRequestData;
 use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
 use crate::produce_request_data::ProduceRequestData;
+use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
@@ -71,6 +75,7 @@ use super::ConcreteResponse;
 use super::ConsumerGroupDescribeRequest;
 use super::ConsumerGroupHeartbeatRequest;
 use super::CreateAclsRequest;
+use super::CreateDelegationTokenRequest;
 use super::CreatePartitionsRequest;
 use super::CreateTopicsRequest;
 use super::DeleteAclsRequest;
@@ -81,9 +86,11 @@ use super::DescribeAclsRequest;
 use super::DescribeClientQuotasRequest;
 use super::DescribeClusterRequest;
 use super::DescribeConfigsRequest;
+use super::DescribeDelegationTokenRequest;
 use super::DescribeGroupsRequest;
 use super::DescribeLogDirsRequest;
 use super::ElectLeadersRequest;
+use super::ExpireDelegationTokenRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::IncrementalAlterConfigsRequest;
@@ -98,6 +105,7 @@ use super::OffsetDeleteRequest;
 use super::OffsetFetchRequest;
 use super::OffsetsForLeaderEpochRequest;
 use super::ProduceRequest;
+use super::RenewDelegationTokenRequest;
 use super::RequestAndSize;
 use super::RequestHeader;
 use super::SaslAuthenticateRequest;
@@ -216,6 +224,14 @@ pub enum ConcreteRequest {
     DescribeClientQuotas(DescribeClientQuotasRequest),
     /// An AlterClientQuotas request.
     AlterClientQuotas(AlterClientQuotasRequest),
+    /// A CreateDelegationToken request.
+    CreateDelegationToken(CreateDelegationTokenRequest),
+    /// A RenewDelegationToken request.
+    RenewDelegationToken(RenewDelegationTokenRequest),
+    /// An ExpireDelegationToken request.
+    ExpireDelegationToken(ExpireDelegationTokenRequest),
+    /// A DescribeDelegationToken request.
+    DescribeDelegationToken(DescribeDelegationTokenRequest),
 }
 
 impl ConcreteRequest {
@@ -258,6 +274,10 @@ impl ConcreteRequest {
             Self::DeleteAcls(r) => r.version(),
             Self::DescribeClientQuotas(r) => r.version(),
             Self::AlterClientQuotas(r) => r.version(),
+            Self::CreateDelegationToken(r) => r.version(),
+            Self::RenewDelegationToken(r) => r.version(),
+            Self::ExpireDelegationToken(r) => r.version(),
+            Self::DescribeDelegationToken(r) => r.version(),
         }
     }
 
@@ -300,6 +320,10 @@ impl ConcreteRequest {
             Self::DeleteAcls(r) => r.api_key(),
             Self::DescribeClientQuotas(r) => r.api_key(),
             Self::AlterClientQuotas(r) => r.api_key(),
+            Self::CreateDelegationToken(r) => r.api_key(),
+            Self::RenewDelegationToken(r) => r.api_key(),
+            Self::ExpireDelegationToken(r) => r.api_key(),
+            Self::DescribeDelegationToken(r) => r.api_key(),
         }
     }
 
@@ -348,6 +372,10 @@ impl ConcreteRequest {
             Self::DeleteAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeClientQuotas(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AlterClientQuotas(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::RenewDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ExpireDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -490,6 +518,18 @@ impl ConcreteRequest {
             Self::AlterClientQuotas(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::CreateDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::RenewDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ExpireDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -539,6 +579,10 @@ impl ConcreteRequest {
             Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::RenewDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -599,6 +643,10 @@ impl ConcreteRequest {
             Self::DeleteAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeClientQuotas(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AlterClientQuotas(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::RenewDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ExpireDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -781,6 +829,31 @@ impl ConcreteRequest {
                 let data = AlterClientQuotasRequestData::read(readable, api_version)?;
                 Ok(Self::AlterClientQuotas(AlterClientQuotasRequest::new(data, api_version)))
             },
+            ApiKeys::CREATE_DELEGATION_TOKEN => {
+                let data = CreateDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::CreateDelegationToken(CreateDelegationTokenRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::RENEW_DELEGATION_TOKEN => {
+                let data = RenewDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::RenewDelegationToken(RenewDelegationTokenRequest::new(data, api_version)))
+            },
+            ApiKeys::EXPIRE_DELEGATION_TOKEN => {
+                let data = ExpireDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::ExpireDelegationToken(ExpireDelegationTokenRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::DESCRIBE_DELEGATION_TOKEN => {
+                let data = DescribeDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeDelegationToken(DescribeDelegationTokenRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -828,6 +901,10 @@ impl std::fmt::Display for ConcreteRequest {
             Self::DeleteAcls(r) => write!(f, "{r}"),
             Self::DescribeClientQuotas(r) => write!(f, "{r}"),
             Self::AlterClientQuotas(r) => write!(f, "{r}"),
+            Self::CreateDelegationToken(r) => write!(f, "{r}"),
+            Self::RenewDelegationToken(r) => write!(f, "{r}"),
+            Self::ExpireDelegationToken(r) => write!(f, "{r}"),
+            Self::DescribeDelegationToken(r) => write!(f, "{r}"),
         }
     }
 }
