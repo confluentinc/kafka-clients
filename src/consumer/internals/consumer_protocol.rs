@@ -27,10 +27,10 @@
 //! [`KafkaError::serialization`](crate::common::KafkaError::serialization) — a
 //! non-retriable parse error, matching `SchemaException`'s nature.
 
-use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
-use crate::common::protocol::{ByteBufferAccessor, Readable};
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
+use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
+use crate::common::protocol::{ByteBufferAccessor, Readable};
 use crate::consumer::consumer_partition_assignor::{Assignment, Subscription};
 use crate::consumer_protocol_assignment_data::{
     ConsumerProtocolAssignmentData, TopicPartition as AssignmentTopicPartition,

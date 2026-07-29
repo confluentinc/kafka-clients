@@ -36,7 +36,6 @@ use super::coordinator_key::CoordinatorKey;
 
 /// The uppercase Java enum name for a coordinator type (used in error
 /// messages to mirror Java's `CoordinatorType.toString`).
-#[allow(dead_code)] // wired by handlers later in this phase
 fn type_name(coordinator_type: CoordinatorType) -> &'static str {
     match coordinator_type {
         CoordinatorType::Group => "GROUP",
@@ -50,7 +49,6 @@ fn type_name(coordinator_type: CoordinatorType) -> &'static str {
 ///
 /// Corresponds to `CoordinatorStrategy`. Generic over coordinator type
 /// (`GROUP` now; `TRANSACTION` reused in Tier 3).
-#[allow(dead_code)] // wired by handlers later in this phase
 pub(crate) struct CoordinatorStrategy {
     log_context: LogContext,
     coordinator_type: CoordinatorType,
@@ -60,7 +58,6 @@ pub(crate) struct CoordinatorStrategy {
     batch: AtomicBool,
 }
 
-#[allow(dead_code)] // wired by handlers later in this phase
 impl CoordinatorStrategy {
     /// Creates a strategy for the given coordinator type.
     pub(crate) fn new(coordinator_type: CoordinatorType, log_context: LogContext) -> Self {
@@ -72,7 +69,10 @@ impl CoordinatorStrategy {
     ///
     /// Invoked by the `AdminApiDriver` on a `NoBatchedFindCoordinatorsException`.
     /// The Rust driver does not yet model that downgrade path (deferred to
-    /// Tier 2 Phase 2); this accessor is provided so the strategy is ready.
+    /// Tier 2 Phase 2); this accessor is provided so the strategy is ready and
+    /// is exercised by the unit tests, hence the `allow(dead_code)` until the
+    /// driver wiring lands.
+    #[allow(dead_code)]
     pub(crate) fn disable_batch(&self) {
         self.batch.store(false, Ordering::Release);
     }

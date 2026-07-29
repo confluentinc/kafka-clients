@@ -33,7 +33,6 @@ pub(crate) struct CoordinatorKey {
     pub(crate) coordinator_type: CoordinatorType,
 }
 
-#[allow(dead_code)] // by_group_id/by_transactional_id wired by handlers later in this phase
 impl CoordinatorKey {
     /// Creates a coordinator key for a consumer group id.
     ///

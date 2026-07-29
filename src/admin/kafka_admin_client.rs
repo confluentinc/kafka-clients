@@ -69,11 +69,15 @@ use crate::common::requests::{
     AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder,
     DeleteTopicsRequestBuilder, DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder,
     DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
-    IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, MetadataRequestBuilder, RequestBuilder,
+    IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder,
+    MetadataRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
 use crate::common::utils::{ExponentialBackoff, LogContext};
-use crate::common::{Cluster, KafkaError, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
+use crate::common::{
+    Cluster, GroupState, GroupType, KafkaError, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
+};
+use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
 use crate::create_partitions_request_data::{
     CreatePartitionsAssignment, CreatePartitionsRequestData, CreatePartitionsTopic,
 };
@@ -87,6 +91,7 @@ use crate::incremental_alter_configs_request_data::{
 };
 use crate::kafka_client::KafkaClient;
 use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
+use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 
@@ -95,7 +100,10 @@ use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSigna
 use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
 use super::internals::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
+use super::internals::coordinator_key::CoordinatorKey;
 use super::internals::delete_records_handler::DeleteRecordsHandler;
+use super::internals::describe_classic_groups_handler::DescribeClassicGroupsHandler;
+use super::internals::describe_consumer_groups_handler::DescribeConsumerGroupsHandler;
 use super::internals::list_offsets_handler::ListOffsetsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::records_to_delete::RecordsToDelete;
@@ -104,14 +112,18 @@ use super::{
     AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions,
     AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym, ConfigType, CreatePartitionsOptions,
     CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
-    DeleteTopicsOptions, DeleteTopicsResult, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
-    DescribeConfigsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
-    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
-    ListConfigResourcesOptions, ListConfigResourcesResult, ListOffsetsOptions, ListOffsetsResult,
-    ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult,
-    LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment,
-    ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    DeleteTopicsOptions, DeleteTopicsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
+    DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
+    DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult,
+    DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
+    ElectLeadersOptions, ElectLeadersResult, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
+    ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions,
+    ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, ReplicaInfo, ReplicaLogDirInfo, TopicDescription,
+    TopicListing, TopicMetadataAndConfig,
 };
+#[allow(deprecated)]
+use super::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
 use crate::alter_partition_reassignments_request_data::{
     AlterPartitionReassignmentsRequestData, ReassignablePartition, ReassignableTopic,
 };
@@ -328,6 +340,154 @@ impl KafkaAdminClient {
             wakeup: Arc::clone(&self.shared.wakeup),
             time_provider: Arc::clone(&self.shared.time_provider),
         }
+    }
+
+    /// Builds the exponential retry backoff used by `AdminApiDriver`-backed RPCs.
+    fn retry_backoff(&self) -> ExponentialBackoff {
+        ExponentialBackoff::new(
+            self.shared.retry_backoff_ms,
+            RETRY_BACKOFF_EXP_BASE,
+            self.shared.retry_backoff_max_ms,
+            RETRY_BACKOFF_JITTER,
+        )
+        .expect("ExponentialBackoff::new only fails on invalid jitter")
+    }
+
+    /// Drives a `listGroups` / `listConsumerGroups` broker-enumeration RPC: a
+    /// `findAllBrokers` metadata call whose response fans out one per-broker
+    /// `ListGroups` call, all feeding a shared [`ListGroupsResults`] accumulator.
+    ///
+    /// `maybe_add` maps a wire `ListedGroup` to an optional keyed listing
+    /// (returning `None` filters the group out). Mirrors the shared structure of
+    /// `KafkaAdminClient.listGroups` / `listConsumerGroups`.
+    fn submit_list_groups<L, F>(
+        &self,
+        call_name: &'static str,
+        deadline: i64,
+        states_filter: Vec<String>,
+        types_filter: Vec<String>,
+        maybe_add: F,
+    ) -> KafkaFuture<Vec<Result<L, KafkaError>>>
+    where
+        L: Clone + Send + Sync + 'static,
+        F: Fn(&crate::list_groups_response_data::ListedGroup) -> Option<(String, L)> + Clone + Send + Sync + 'static,
+    {
+        let all: KafkaFutureImpl<Vec<Result<L, KafkaError>>> = KafkaFutureImpl::new();
+        let public = all.future();
+        let ctx = self.driver_context();
+
+        let fail_all = all.clone();
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            // Mirrors Java: wrap in a KafkaException("Failed to find brokers ...").
+            let wrapped = KafkaError::with_message(
+                error.error(),
+                format!("Failed to find brokers to send {call_name}: {}", error.message()),
+            );
+            fail_all.complete(vec![Err(wrapped)]);
+        });
+
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            // Empty topic list (just the broker list), matching Java's
+            // MetadataRequest with setTopics(emptyList).setAllowAutoTopicCreation(true).
+            Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
+        });
+
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::Metadata(metadata_response) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+            };
+            let nodes: Vec<Node> = metadata_response.brokers().to_vec();
+            if nodes.is_empty() {
+                // Java throws StaleMetadataException (retriable) so the metadata
+                // fetch is retried; there is no dedicated StaleMetadata error code
+                // in Rust, so we surface a retriable metadata error to trigger the
+                // same retry.
+                return HandleResult::Retry(KafkaError::with_message(
+                    Errors::LeaderNotAvailable,
+                    "Metadata fetch failed due to missing broker list",
+                ));
+            }
+
+            let node_ids: HashSet<i32> = nodes.iter().map(Node::id).collect();
+            let results = ListGroupsResults::new(node_ids, all.clone());
+
+            for node in nodes {
+                let node_id = node.id();
+                let states = states_filter.clone();
+                let types = types_filter.clone();
+                let node_create = node.clone();
+                let create_list_request = Box::new(move |_timeout_ms: i32| {
+                    let mut data = ListGroupsRequestData::new();
+                    data.set_states_filter(states.clone());
+                    data.set_types_filter(types.clone());
+                    let _ = &node_create;
+                    Ok(Box::new(ListGroupsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+                });
+
+                let resp_results = Arc::clone(&results);
+                let resp_node = node.clone();
+                let resp_add = maybe_add.clone();
+                let handle_list_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+                    let ConcreteResponse::ListGroups(list_response) = response else {
+                        return HandleResult::Retry(KafkaError::illegal_state("Expected a ListGroups response"));
+                    };
+                    let error = Errors::for_code(list_response.data().error_code);
+                    if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
+                        // Retriable at the broker level: retry this per-broker call.
+                        return HandleResult::Retry(KafkaError::new(error));
+                    }
+                    let mut results = resp_results.lock().unwrap();
+                    if error != Errors::None {
+                        results.add_error(&KafkaError::new(error), &resp_node);
+                    } else {
+                        for group in &list_response.data().groups {
+                            if let Some((group_id, listing)) = resp_add(group) {
+                                results.add_listing(group_id, listing);
+                            }
+                        }
+                    }
+                    results.complete_node(node_id);
+                    HandleResult::Done
+                });
+
+                let fail_results = Arc::clone(&results);
+                let fail_node = node.clone();
+                let handle_list_failure = Box::new(move |error: &KafkaError| {
+                    let mut results = fail_results.lock().unwrap();
+                    results.add_error(error, &fail_node);
+                    results.complete_node(node_id);
+                });
+
+                let list_call = Call::new(
+                    call_name,
+                    deadline,
+                    NodeProvider::ConstantNodeId(node_id),
+                    create_list_request,
+                    handle_list_response,
+                    handle_list_failure,
+                    Box::new(|| false),
+                );
+                match ctx.tx.send(list_call) {
+                    Ok(()) => ctx.wakeup.notify_one(),
+                    Err(mpsc::error::SendError(mut call)) => {
+                        call.handle_failure(&KafkaError::illegal_state("The AdminClient task has exited."));
+                    },
+                }
+            }
+            HandleResult::Done
+        });
+
+        let call = Call::new(
+            "findAllBrokers",
+            deadline,
+            NodeProvider::LeastLoaded,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        public
     }
 
     /// Submits one `incrementalAlterConfigs` [`Call`] for the given `resources`
@@ -559,6 +719,72 @@ where
 /// `KafkaAdminClient.calcDeadlineMs`.
 fn calc_deadline_ms(now: i64, option_timeout: Option<i32>, default_api_timeout_ms: i32) -> i64 {
     now + option_timeout.unwrap_or(default_api_timeout_ms) as i64
+}
+
+/// Re-keys a `CoordinatorKey`-keyed future map by the coordinator key's id
+/// value (the group id), mirroring Java's
+/// `future.all().entrySet().stream().collect(toMap(e -> e.getKey().idValue, ...))`.
+fn coordinator_keyed_by_id<V: Send + 'static>(
+    map: HashMap<CoordinatorKey, KafkaFuture<V>>,
+) -> HashMap<String, KafkaFuture<V>> {
+    map.into_iter().map(|(key, future)| (key.id_value, future)).collect()
+}
+
+/// Accumulates the per-broker results of a `listGroups` / `listConsumerGroups`
+/// broker-enumeration RPC, completing the combined future once every broker has
+/// reported. Mirrors `KafkaAdminClient.ListGroupsResults` /
+/// `ListConsumerGroupsResults` (generic over the listing type `L`).
+struct ListGroupsResults<L: Clone + Send + Sync + 'static> {
+    errors: Vec<KafkaError>,
+    listings: HashMap<String, L>,
+    remaining: HashSet<i32>,
+    future: KafkaFutureImpl<Vec<Result<L, KafkaError>>>,
+}
+
+impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
+    /// Creates the accumulator for the given broker node ids, completing the
+    /// future immediately if there are no brokers.
+    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<L, KafkaError>>>) -> Arc<Mutex<Self>> {
+        let results = Arc::new(Mutex::new(Self {
+            errors: Vec::new(),
+            listings: HashMap::new(),
+            remaining: node_ids,
+            future,
+        }));
+        results.lock().unwrap().try_complete();
+        results
+    }
+
+    /// Records an error for a broker, wrapping it with the broker context
+    /// (mirrors Java's `ApiError.fromThrowable` + "Error listing groups on N").
+    fn add_error(&mut self, error: &KafkaError, node: &Node) {
+        let message = error.message();
+        let wrapped = if message.is_empty() {
+            KafkaError::with_message(error.error(), format!("Error listing groups on {node}"))
+        } else {
+            KafkaError::with_message(error.error(), format!("Error listing groups on {node}: {message}"))
+        };
+        self.errors.push(wrapped);
+    }
+
+    /// Records a listing keyed by group id.
+    fn add_listing(&mut self, group_id: String, listing: L) {
+        self.listings.insert(group_id, listing);
+    }
+
+    /// Marks a broker done and completes the future if it was the last one.
+    fn complete_node(&mut self, node_id: i32) {
+        self.remaining.remove(&node_id);
+        self.try_complete();
+    }
+
+    fn try_complete(&mut self) {
+        if self.remaining.is_empty() {
+            let mut results: Vec<Result<L, KafkaError>> = self.listings.values().cloned().map(Ok).collect();
+            results.extend(self.errors.iter().cloned().map(Err));
+            self.future.complete(results);
+        }
+    }
 }
 
 /// Builds a `KafkaError` from a wire error code and optional message, mirroring
@@ -2742,6 +2968,109 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         ListOffsetsResult::new(result_map)
+    }
+
+    fn list_groups(&self, options: ListGroupsOptions) -> ListGroupsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
+        let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
+        let protocol_types: HashSet<String> = options.protocol_types().clone();
+
+        let future = self.submit_list_groups("listGroups", deadline, states, types, move |group| {
+            if !protocol_types.is_empty() && !protocol_types.contains(&group.protocol_type) {
+                return None;
+            }
+            let group_type = if group.group_type.is_empty() {
+                None
+            } else {
+                Some(GroupType::parse(&group.group_type))
+            };
+            let group_state = if group.group_state.is_empty() {
+                None
+            } else {
+                Some(GroupState::parse(&group.group_state))
+            };
+            Some((
+                group.group_id.clone(),
+                GroupListing::new(group.group_id.clone(), group_type, group.protocol_type.clone(), group_state),
+            ))
+        });
+        ListGroupsResult::new(future)
+    }
+
+    #[allow(deprecated)]
+    fn list_consumer_groups(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
+        let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
+
+        let future = self.submit_list_groups("listConsumerGroups", deadline, states, types, move |group| {
+            if group.protocol_type != PROTOCOL_TYPE && !group.protocol_type.is_empty() {
+                return None;
+            }
+            let group_state = if group.group_state.is_empty() {
+                None
+            } else {
+                Some(GroupState::parse(&group.group_state))
+            };
+            let group_type = if group.group_type.is_empty() {
+                None
+            } else {
+                Some(GroupType::parse(&group.group_type))
+            };
+            Some((
+                group.group_id.clone(),
+                ConsumerGroupListing::new(
+                    group.group_id.clone(),
+                    group_state,
+                    group_type,
+                    group.protocol_type.is_empty(),
+                ),
+            ))
+        });
+        ListConsumerGroupsResult::new(future)
+    }
+
+    fn describe_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeConsumerGroupsOptions,
+    ) -> DescribeConsumerGroupsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DescribeConsumerGroupsHandler::new_future(group_ids);
+        let result_map = future.all();
+        let handler =
+            DescribeConsumerGroupsHandler::new(options.should_include_authorized_operations(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DescribeConsumerGroupsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn describe_classic_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeClassicGroupsOptions,
+    ) -> DescribeClassicGroupsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DescribeClassicGroupsHandler::new_future(group_ids);
+        let result_map = future.all();
+        let handler =
+            DescribeClassicGroupsHandler::new(options.should_include_authorized_operations(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DescribeClassicGroupsResult::new(coordinator_keyed_by_id(result_map))
     }
 
     async fn close(&self, timeout: Duration) {
@@ -5941,6 +6270,340 @@ mod tests {
         let mock = MockAdminClient::create(1);
         let result = mock.elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new());
         let err = result.partitions().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    // ---- Group listing / describe (Tier 2 Phase 1) ----
+
+    fn listed_group(group_id: &str, protocol_type: &str, state: &str, group_type: &str) -> ConcreteResponse {
+        use crate::list_groups_response_data::{ListGroupsResponseData, ListedGroup};
+        let mut g = ListedGroup::new();
+        g.set_group_id(group_id.to_string())
+            .set_protocol_type(protocol_type.to_string())
+            .set_group_state(state.to_string())
+            .set_group_type(group_type.to_string());
+        let mut data = ListGroupsResponseData::new();
+        data.set_groups(vec![g]);
+        ConcreteResponse::ListGroups(crate::common::requests::ListGroupsResponse::new(data))
+    }
+
+    fn empty_list_groups_resp() -> ConcreteResponse {
+        use crate::list_groups_response_data::ListGroupsResponseData;
+        ConcreteResponse::ListGroups(crate::common::requests::ListGroupsResponse::new(ListGroupsResponseData::new()))
+    }
+
+    fn find_coordinator_resp(entries: &[(&str, &Node)]) -> ConcreteResponse {
+        use crate::find_coordinator_response_data::{Coordinator, FindCoordinatorResponseData};
+        let coordinators: Vec<Coordinator> = entries
+            .iter()
+            .map(|(key, node)| {
+                let mut c = Coordinator::new();
+                c.set_key(key.to_string())
+                    .set_error_code(Errors::None.code())
+                    .set_node_id(node.id())
+                    .set_host(node.host().to_string())
+                    .set_port(node.port());
+                c
+            })
+            .collect();
+        let mut data = FindCoordinatorResponseData::new();
+        data.set_coordinators(coordinators);
+        ConcreteResponse::FindCoordinator(crate::common::requests::FindCoordinatorResponse::new(data))
+    }
+
+    fn consumer_group_describe_resp(group_id: &str) -> ConcreteResponse {
+        use crate::consumer_group_describe_response_data::{ConsumerGroupDescribeResponseData, DescribedGroup};
+        let mut group = DescribedGroup::new();
+        group
+            .set_group_id(group_id.to_string())
+            .set_group_state("Stable".to_string())
+            .set_group_epoch(5)
+            .set_assignment_epoch(5)
+            .set_assignor_name("uniform".to_string());
+        let mut data = ConsumerGroupDescribeResponseData::new();
+        data.set_groups(vec![group]);
+        ConcreteResponse::ConsumerGroupDescribe(crate::common::requests::ConsumerGroupDescribeResponse::new(data))
+    }
+
+    fn consumer_group_describe_error_resp(group_id: &str, error: Errors, message: Option<&str>) -> ConcreteResponse {
+        use crate::consumer_group_describe_response_data::{ConsumerGroupDescribeResponseData, DescribedGroup};
+        let mut group = DescribedGroup::new();
+        group
+            .set_group_id(group_id.to_string())
+            .set_error_code(error.code())
+            .set_error_message(message.map(str::to_string));
+        let mut data = ConsumerGroupDescribeResponseData::new();
+        data.set_groups(vec![group]);
+        ConcreteResponse::ConsumerGroupDescribe(crate::common::requests::ConsumerGroupDescribeResponse::new(data))
+    }
+
+    fn describe_groups_error_resp(group_id: &str, error: Errors, message: Option<&str>) -> ConcreteResponse {
+        use crate::describe_groups_response_data::{DescribeGroupsResponseData, DescribedGroup};
+        let mut group = DescribedGroup::new();
+        group
+            .set_group_id(group_id.to_string())
+            .set_error_code(error.code())
+            .set_error_message(message.map(str::to_string));
+        let mut data = DescribeGroupsResponseData::new();
+        data.set_groups(vec![group]);
+        ConcreteResponse::DescribeGroups(crate::common::requests::DescribeGroupsResponse::new(data))
+    }
+
+    /// Broker enumeration: `list_groups` fans out one `ListGroups` per broker and
+    /// unions the results.
+    #[tokio::test]
+    async fn test_list_groups() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(listed_group("g2", "consumer", "Stable", "Consumer"), &nodes[1]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(empty_list_groups_resp(), &nodes[2]);
+
+        let result = admin.list_groups(ListGroupsOptions::new());
+        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+
+        let mut ids: Vec<String> = result
+            .valid()
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|g| g.group_id().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["g1".to_string(), "g2".to_string()]);
+        assert!(result.errors().get().await.unwrap().is_empty());
+    }
+
+    /// `list_groups`' protocol-type filter excludes non-matching groups.
+    #[tokio::test]
+    async fn test_list_groups_filters_protocol_type() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(empty_list_groups_resp(), &nodes[2]);
+
+        let options = ListGroupsOptions::new().with_protocol_types(HashSet::from(["consumer".to_string()]));
+        let result = admin.list_groups(options);
+        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+
+        let ids: Vec<String> = result
+            .valid()
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|g| g.group_id().to_string())
+            .collect();
+        assert_eq!(ids, vec!["g1".to_string()]);
+    }
+
+    /// Broker enumeration: `list_consumer_groups` fans out per broker.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_consumer_groups() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(empty_list_groups_resp(), &nodes[2]);
+
+        let result = admin.list_consumer_groups(ListConsumerGroupsOptions::new());
+        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+
+        // Only the consumer-protocol group is retained.
+        let ids: Vec<String> = result
+            .valid()
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|g| g.group_id().to_string())
+            .collect();
+        assert_eq!(ids, vec!["g1".to_string()]);
+    }
+
+    /// `describe_consumer_groups` finds the coordinator then describes the group
+    /// with the KIP-848 `ConsumerGroupDescribe` API.
+    #[tokio::test]
+    async fn test_describe_consumer_groups() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("g1", &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(consumer_group_describe_resp("g1"), &nodes[0]);
+
+        let result = admin.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
+        let future = result.described_groups()["g1"].clone();
+        pump_until(&mut runnable, 40, |_r| future.is_done()).await;
+
+        let description = future.get().await.unwrap();
+        assert_eq!(description.group_id(), "g1");
+        assert_eq!(description.group_type(), GroupType::Consumer);
+        assert_eq!(description.group_state(), GroupState::Stable);
+        assert_eq!(description.partition_assignor(), "uniform");
+        // The driver identifies the coordinator by broker id (the Node it routed
+        // the fulfillment request to).
+        assert_eq!(description.coordinator().map(Node::id), Some(0));
+    }
+
+    /// A `describe_consumer_groups` on a nonexistent group id surfaces
+    /// `GROUP_ID_NOT_FOUND` after the classic fallback also reports it, keeping
+    /// the more-informative `ConsumerGroupDescribe` message.
+    #[tokio::test]
+    async fn test_describe_consumer_groups_group_id_not_found() {
+        let (admin, mut runnable, time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("missing", &nodes[0])]));
+        runnable.client_mut().prepare_response_for_node(
+            consumer_group_describe_error_resp("missing", Errors::GroupIdNotFound, Some("informative message")),
+            &nodes[0],
+        );
+        // Fallback: classic DescribeGroups also reports GROUP_ID_NOT_FOUND.
+        runnable.client_mut().prepare_response_for_node(
+            describe_groups_error_resp("missing", Errors::GroupIdNotFound, Some("terse message")),
+            &nodes[0],
+        );
+
+        let result = admin.describe_consumer_groups(&["missing".to_string()], DescribeConsumerGroupsOptions::new());
+        let future = result.described_groups()["missing"].clone();
+        // The classic-API fallback is a driver retry gated on the retry backoff,
+        // so the mock clock must advance for the second (DescribeGroups) request.
+        for _ in 0..60 {
+            if future.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+
+        let err = future.get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::GroupIdNotFound);
+        assert_eq!(err.message(), "informative message");
+    }
+
+    /// Mirrors `testDescribeGroupsWithBothUnsupportedApis`: the first
+    /// `ConsumerGroupDescribe` request fails with `UNSUPPORTED_VERSION`, the
+    /// driver falls back to the classic `DescribeGroups` request, and when that
+    /// too fails with `UNSUPPORTED_VERSION` the group future surfaces the
+    /// `UnsupportedVersionException`.
+    #[tokio::test]
+    async fn test_describe_groups_with_both_unsupported_apis() {
+        let (admin, mut runnable, time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("g1", &nodes[0])]));
+        // The first request sent is a ConsumerGroupDescribe request. Fail it to
+        // fall back to the classic version.
+        runnable.client_mut().prepare_unsupported_version_response();
+        // Fail the classic DescribeGroups fallback as well.
+        runnable.client_mut().prepare_unsupported_version_response();
+
+        let result = admin.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
+        let future = result.described_groups()["g1"].clone();
+        // The classic-API fallback is a driver retry gated on the retry backoff,
+        // so the mock clock must advance for the second request to be sent.
+        for _ in 0..60 {
+            if future.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+
+        let err = future.get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    /// Seeds a group config in the mock (the only way Java's mock populates its
+    /// `groupConfigs` keyset is via `incrementalAlterConfigs` on a GROUP
+    /// resource).
+    async fn seed_mock_group(mock: &crate::admin::MockAdminClient, group_id: &str) {
+        use crate::admin::{AlterConfigOp, ConfigEntry, OpType};
+        let resource = ConfigResource::new(ConfigResourceType::Group, group_id.to_string());
+        let ops = vec![AlterConfigOp::new(
+            ConfigEntry::new("consumer.session.timeout.ms".to_string(), Some("45000".to_string())),
+            OpType::Set,
+        )];
+        let mut configs = HashMap::new();
+        configs.insert(resource.clone(), ops);
+        mock.incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+    }
+
+    /// The mock's `list_groups` returns one CONSUMER/STABLE listing per seeded
+    /// group config (mirrors Java's mock).
+    #[tokio::test]
+    async fn test_mock_list_groups() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        seed_mock_group(&mock, "g1").await;
+        let result = mock.list_groups(ListGroupsOptions::new());
+        let listings = result.valid().get().await.unwrap();
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].group_id(), "g1");
+        assert_eq!(listings[0].group_type(), Some(GroupType::Consumer));
+        assert_eq!(listings[0].group_state(), Some(GroupState::Stable));
+    }
+
+    /// The mock's `list_consumer_groups` returns one listing per seeded group.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_mock_list_consumer_groups() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        seed_mock_group(&mock, "g1").await;
+        let result = mock.list_consumer_groups(ListConsumerGroupsOptions::new());
+        let listings = result.valid().get().await.unwrap();
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].group_id(), "g1");
+        assert!(!listings[0].is_simple_consumer_group());
+    }
+
+    /// The mock's `describe_consumer_groups` mirrors Java's
+    /// `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_describe_consumer_groups_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
+        let err = result.described_groups()["g1"].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    /// The mock's `describe_classic_groups` mirrors Java's
+    /// `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_describe_classic_groups_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.describe_classic_groups(&["g1".to_string()], DescribeClassicGroupsOptions::new());
+        let err = result.described_groups()["g1"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
 }

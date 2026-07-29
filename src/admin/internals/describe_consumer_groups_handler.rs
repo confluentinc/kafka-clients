@@ -21,10 +21,6 @@
 //! to the classic `DescribeGroups` API on `UNSUPPORTED_VERSION` /
 //! `GROUP_ID_NOT_FOUND`.
 
-// Handlers are wired into KafkaAdminClient in the next commit of this phase;
-// the module-level allow is removed once that wiring lands.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 

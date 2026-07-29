@@ -30,7 +30,6 @@ pub struct DescribeConsumerGroupsResult {
 }
 
 impl DescribeConsumerGroupsResult {
-    #[allow(dead_code)] // wired by KafkaAdminClient later in this phase
     /// Creates a result from the per-group-id futures.
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<ConsumerGroupDescription>>) -> Self {
         Self { futures }
