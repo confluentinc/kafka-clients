@@ -175,55 +175,147 @@ impl std::fmt::Display for AclOperation {
 mod tests {
     use super::*;
 
+    // Mirrors `AclOperationTest.AclOperationTestInfo` in the Java client.
+    struct Info {
+        operation: AclOperation,
+        code: i8,
+        name: &'static str,
+        unknown: bool,
+    }
+
+    // Mirrors `AclOperationTest.INFOS` in the Java client, in declaration order.
+    const INFOS: [Info; 16] = [
+        Info { operation: AclOperation::Unknown, code: 0, name: "unknown", unknown: true },
+        Info { operation: AclOperation::Any, code: 1, name: "any", unknown: false },
+        Info { operation: AclOperation::All, code: 2, name: "all", unknown: false },
+        Info { operation: AclOperation::Read, code: 3, name: "read", unknown: false },
+        Info { operation: AclOperation::Write, code: 4, name: "write", unknown: false },
+        Info { operation: AclOperation::Create, code: 5, name: "create", unknown: false },
+        Info { operation: AclOperation::Delete, code: 6, name: "delete", unknown: false },
+        Info { operation: AclOperation::Alter, code: 7, name: "alter", unknown: false },
+        Info { operation: AclOperation::Describe, code: 8, name: "describe", unknown: false },
+        Info {
+            operation: AclOperation::ClusterAction,
+            code: 9,
+            name: "cluster_action",
+            unknown: false,
+        },
+        Info {
+            operation: AclOperation::DescribeConfigs,
+            code: 10,
+            name: "describe_configs",
+            unknown: false,
+        },
+        Info {
+            operation: AclOperation::AlterConfigs,
+            code: 11,
+            name: "alter_configs",
+            unknown: false,
+        },
+        Info {
+            operation: AclOperation::IdempotentWrite,
+            code: 12,
+            name: "idempotent_write",
+            unknown: false,
+        },
+        Info {
+            operation: AclOperation::CreateTokens,
+            code: 13,
+            name: "create_tokens",
+            unknown: false,
+        },
+        Info {
+            operation: AclOperation::DescribeTokens,
+            code: 14,
+            name: "describe_tokens",
+            unknown: false,
+        },
+        Info {
+            operation: AclOperation::TwoPhaseCommit,
+            code: 15,
+            name: "two_phase_commit",
+            unknown: false,
+        },
+    ];
+
+    // Test-local mirror of Java's `AclOperation.values()` (declaration order).
+    const VALUES: [AclOperation; 16] = [
+        AclOperation::Unknown,
+        AclOperation::Any,
+        AclOperation::All,
+        AclOperation::Read,
+        AclOperation::Write,
+        AclOperation::Create,
+        AclOperation::Delete,
+        AclOperation::Alter,
+        AclOperation::Describe,
+        AclOperation::ClusterAction,
+        AclOperation::DescribeConfigs,
+        AclOperation::AlterConfigs,
+        AclOperation::IdempotentWrite,
+        AclOperation::CreateTokens,
+        AclOperation::DescribeTokens,
+        AclOperation::TwoPhaseCommit,
+    ];
+
+    /// Mirrors `AclOperationTest.testIsUnknown`.
     #[test]
-    fn code_round_trips_for_all_variants() {
-        let all = [
-            AclOperation::Unknown,
-            AclOperation::Any,
-            AclOperation::All,
-            AclOperation::Read,
-            AclOperation::Write,
-            AclOperation::Create,
-            AclOperation::Delete,
-            AclOperation::Alter,
-            AclOperation::Describe,
-            AclOperation::ClusterAction,
-            AclOperation::DescribeConfigs,
-            AclOperation::AlterConfigs,
-            AclOperation::IdempotentWrite,
-            AclOperation::CreateTokens,
-            AclOperation::DescribeTokens,
-            AclOperation::TwoPhaseCommit,
-        ];
-        for op in all {
-            assert_eq!(AclOperation::from_code(op.code()), op);
+    fn test_is_unknown() {
+        for info in &INFOS {
+            assert_eq!(
+                info.unknown,
+                info.operation.is_unknown(),
+                "{} was supposed to have unknown == {}",
+                info.operation,
+                info.unknown
+            );
         }
     }
 
+    /// Mirrors `AclOperationTest.testCode`.
     #[test]
-    fn code_values_match_java_wire_values() {
-        assert_eq!(AclOperation::Unknown.code(), 0);
-        assert_eq!(AclOperation::Read.code(), 3);
-        assert_eq!(AclOperation::Describe.code(), 8);
-        assert_eq!(AclOperation::TwoPhaseCommit.code(), 15);
+    fn test_code() {
+        assert_eq!(VALUES.len(), INFOS.len());
+        for info in &INFOS {
+            assert_eq!(
+                info.code,
+                info.operation.code(),
+                "{} was supposed to have code == {}",
+                info.operation,
+                info.code
+            );
+            assert_eq!(
+                info.operation,
+                AclOperation::from_code(info.code),
+                "AclOperation::from_code({}) was supposed to be {}",
+                info.code,
+                info.operation
+            );
+        }
+        assert_eq!(AclOperation::Unknown, AclOperation::from_code(120));
     }
 
+    /// Mirrors `AclOperationTest.testName`.
     #[test]
-    fn unknown_code_maps_to_unknown() {
-        assert_eq!(AclOperation::from_code(100), AclOperation::Unknown);
-        assert_eq!(AclOperation::from_code(-1), AclOperation::Unknown);
+    fn test_name() {
+        for info in &INFOS {
+            assert_eq!(
+                info.operation,
+                AclOperation::from_string(info.name),
+                "AclOperation::from_string({}) was supposed to be {}",
+                info.name,
+                info.operation
+            );
+        }
+        assert_eq!(AclOperation::Unknown, AclOperation::from_string("something"));
     }
 
+    /// Mirrors `AclOperationTest.testExhaustive`.
     #[test]
-    fn from_string_is_case_insensitive_and_defaults_to_unknown() {
-        assert_eq!(AclOperation::from_string("read"), AclOperation::Read);
-        assert_eq!(AclOperation::from_string("ALTER_CONFIGS"), AclOperation::AlterConfigs);
-        assert_eq!(AclOperation::from_string("nonsense"), AclOperation::Unknown);
-    }
-
-    #[test]
-    fn is_unknown() {
-        assert!(AclOperation::Unknown.is_unknown());
-        assert!(!AclOperation::Read.is_unknown());
+    fn test_exhaustive() {
+        assert_eq!(INFOS.len(), VALUES.len());
+        for (i, info) in INFOS.iter().enumerate() {
+            assert_eq!(info.operation, VALUES[i]);
+        }
     }
 }
