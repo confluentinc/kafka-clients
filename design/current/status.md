@@ -531,3 +531,40 @@ RPCs (`LeastLoadedBrokerOrActiveKController`), independent of the rest of Tier 3
   reduced to spot-checks) fixed + re-verified clean (exhaustive `INFOS`-table
   loops, all 16 ops + 4 perms pinned). See
   `design/history/Milestone-11/Tier3-Phase-1/COMMENTS.DONE.1.md`.
+
+## Tier 3 Phase 2 — Client quotas ✓ (2026-07-29)
+
+Translated `describe_client_quotas` and `alter_client_quotas`, Rust core + unit
+tests + real-broker integration tests, all green. Both are plain `Call` RPCs
+(`LeastLoadedNodeProvider`), independent of the rest of Tier 3.
+
+- **Quota primitives (net new)**: `common::quota::{ClientQuotaEntity,
+  ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotaAlteration (+ nested
+  Op)}`. `ClientQuotaEntity.entries` is `HashMap<String, Option<String>>` —
+  `None` faithfully represents Java's null entity name (the built-in DEFAULT
+  quota entity), distinct from `Some("")` (an entity literally named `""`);
+  round-trips null↔wire-null end-to-end.
+- **Match-type tri-state**: a `ClientQuotaMatch { Exact(String), Default, Any }`
+  enum models Java's `Optional<String> match` (justified DoD #7 helper); wire
+  codes `EXACT=0` / `DEFAULT=1` / `SPECIFIED(any)=2` verified against the spec.
+- **Removal semantics**: `ClientQuotaAlteration.Op.value: Option<f64>`, `None` =
+  removal → encoded `remove=true` + `value=0.0`; `Some(0.0)` (set-to-zero) stays
+  distinct from removal on the wire.
+- **New types**: `admin::{Describe,Alter}ClientQuotas{Options,Result}`. Wire
+  wrappers (net new): `common::requests::{Describe,Alter}ClientQuotas{Request,Response}`
+  with all enum arms wired and hand-computed byte-level vectors. `MockAdminClient`
+  returns "Not implement yet" (Java mock's exact typo preserved) per §9.
+
+### Tests
+- **Rust lib suite: 2747 passing.**
+- **Integration**: `tests/integration/admin_quotas_test.rs` — 3/3 green against a
+  real 4.2.0 broker (alter→describe byte-rate round-trip; `Op(None)` removal no
+  longer reported; entity-type filter returns only matching entities).
+- No dedicated Java per-class test files exist for the four `common/quota/*`
+  classes (upstream gap, recorded per DoD #3) — compensated with labeled
+  "new test, no Java original" equals/hashCode/round-trip POJO tests.
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: 1 Behavior Mismatch on first pass (`ClientQuotaEntity` couldn't
+  represent the null/default entity name — wire-incompatible) fixed +
+  re-verified clean. See
+  `design/history/Milestone-11/Tier3-Phase-2/COMMENTS.DONE.1.md`.

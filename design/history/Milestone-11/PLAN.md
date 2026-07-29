@@ -63,11 +63,21 @@
 > cycle. Reused the Tier-2 `AclOperation`/`AclPermissionType`/`from_32_bit_field`.
 > Review record at `design/history/Milestone-11/Tier3-Phase-1/COMMENTS.DONE.1.md`.
 >
-> **Next: Tier 3 Phase 2 "Client quotas".** The Tier 3 breakdown below remains
-> valid and ready to execute as-is, following the same Manager → Actor → Critic
-> cadence. REMINDER: **Tier 3 Phase 3 (SCRAM) needs a new PBKDF2 crypto crate —
-> HARD STOP there** to get the crate decision approved before touching
-> `Cargo.toml` (finding #4). Tier 4 remains out of scope.
+> **Tier 3 Phase 2 "Client quotas" is COMPLETE (2026-07-29):**
+> `describe_client_quotas`, `alter_client_quotas` + `common.quota` primitives —
+> Rust core + unit tests + real-broker integration tests, Critic-clean after one
+> fix cycle. `ClientQuotaEntity` models the nullable/default entity name
+> faithfully. Review record at
+> `design/history/Milestone-11/Tier3-Phase-2/COMMENTS.DONE.1.md`.
+>
+> **Next: Tier 3 Phase 3 "SCRAM credentials" — HARD STOP (2026-07-29).**
+> Phase 3 needs a new PBKDF2 crypto crate (`pbkdf2`+`hmac`+`sha2`, or `ring`)
+> for `ScramFormatter.hi()` (finding #4), which changes `Cargo.toml`. Per
+> CLAUDE.md §1.2 the dependency must be approved by the user BEFORE any Phase 3
+> Rust-core work. **Paused here awaiting the crate decision.** Tier 3 Phases 4–7
+> (delegation tokens, features, producers/transactions, client metrics) and Tier
+> 4 (out of scope) follow. Phases 4/5/6/7 need no new crate and could proceed
+> independently if the user prefers to defer SCRAM.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed

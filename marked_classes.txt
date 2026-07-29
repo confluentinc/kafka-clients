@@ -23,6 +23,8 @@ org.apache.kafka.clients.NodeApiVersions
 org.apache.kafka.clients.RequestCompletionHandler
 org.apache.kafka.clients.admin.Admin
 org.apache.kafka.clients.admin.AdminClientConfig
+org.apache.kafka.clients.admin.AlterClientQuotasOptions
+org.apache.kafka.clients.admin.AlterClientQuotasResult
 org.apache.kafka.clients.admin.AlterConfigOp
 org.apache.kafka.clients.admin.AlterConfigsOptions
 org.apache.kafka.clients.admin.AlterConfigsResult
@@ -58,6 +60,8 @@ org.apache.kafka.clients.admin.DescribeAclsOptions
 org.apache.kafka.clients.admin.DescribeAclsResult
 org.apache.kafka.clients.admin.DescribeClassicGroupsOptions
 org.apache.kafka.clients.admin.DescribeClassicGroupsResult
+org.apache.kafka.clients.admin.DescribeClientQuotasOptions
+org.apache.kafka.clients.admin.DescribeClientQuotasResult
 org.apache.kafka.clients.admin.DescribeClusterOptions
 org.apache.kafka.clients.admin.DescribeClusterResult
 org.apache.kafka.clients.admin.DescribeConfigsOptions
@@ -672,6 +676,10 @@ org.apache.kafka.common.protocol.types.BoundField
 org.apache.kafka.common.protocol.types.Field
 org.apache.kafka.common.protocol.types.RawTaggedField
 org.apache.kafka.common.protocol.types.Schema
+org.apache.kafka.common.quota.ClientQuotaAlteration
+org.apache.kafka.common.quota.ClientQuotaEntity
+org.apache.kafka.common.quota.ClientQuotaFilter
+org.apache.kafka.common.quota.ClientQuotaFilterComponent
 org.apache.kafka.common.record.AbstractRecords
 org.apache.kafka.common.record.CompressionRatioEstimator
 org.apache.kafka.common.record.CompressionType
@@ -686,6 +694,8 @@ org.apache.kafka.common.record.SimpleRecord
 org.apache.kafka.common.record.TimestampType
 org.apache.kafka.common.requests.AbstractRequest
 org.apache.kafka.common.requests.AbstractResponse
+org.apache.kafka.common.requests.AlterClientQuotasRequest
+org.apache.kafka.common.requests.AlterClientQuotasResponse
 org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest
 org.apache.kafka.common.requests.AlterPartitionReassignmentsResponse
 org.apache.kafka.common.requests.AlterReplicaLogDirsRequest
@@ -710,6 +720,8 @@ org.apache.kafka.common.requests.DeleteTopicsRequest
 org.apache.kafka.common.requests.DeleteTopicsResponse
 org.apache.kafka.common.requests.DescribeAclsRequest
 org.apache.kafka.common.requests.DescribeAclsResponse
+org.apache.kafka.common.requests.DescribeClientQuotasRequest
+org.apache.kafka.common.requests.DescribeClientQuotasResponse
 org.apache.kafka.common.requests.DescribeClusterRequest
 org.apache.kafka.common.requests.DescribeClusterResponse
 org.apache.kafka.common.requests.DescribeConfigsRequest
