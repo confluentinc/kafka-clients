@@ -25,19 +25,22 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::admin::{
-    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterPartitionReassignmentsOptions,
-    AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription,
-    Config, ConfigEntry, ConsumerGroupDescription, CreatePartitionsOptions, CreatePartitionsResult,
-    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions,
-    DeleteTopicsResult, DeletedRecords, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
+    Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
+    AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
+    AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription, Config, ConfigEntry,
+    ConsumerGroupDescription, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteRecordsOptions, DeleteRecordsResult,
+    DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
     DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
     DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult,
     DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
-    ElectLeadersOptions, ElectLeadersResult, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
-    ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult,
-    LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment,
-    RecordsToDelete, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    ElectLeadersOptions, ElectLeadersResult, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConfigResourcesResult, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult,
+    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions,
+    ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
+    PartitionReassignment, RecordsToDelete, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing,
+    TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -51,6 +54,7 @@ use crate::common::{GroupState, GroupType};
 use crate::common::{
     KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
+use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
 
 use std::collections::{BTreeSet, HashSet};
@@ -116,6 +120,9 @@ struct State {
     // / `update_end_offsets` (mirrors Java's `beginningOffsets` / `endOffsets`).
     beginning_offsets: HashMap<TopicPartition, i64>,
     end_offsets: HashMap<TopicPartition, i64>,
+    // Committed consumer-group offsets seeded via `update_consumer_group_offsets`,
+    // returned by `list_consumer_group_offsets` (mirrors Java's `committedOffsets`).
+    committed_offsets: HashMap<TopicPartition, i64>,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -173,6 +180,7 @@ impl MockAdminClient {
                 reassignments: HashMap::new(),
                 beginning_offsets: HashMap::new(),
                 end_offsets: HashMap::new(),
+                committed_offsets: HashMap::new(),
             }),
         }
     }
@@ -193,6 +201,15 @@ impl MockAdminClient {
     pub fn update_end_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.end_offsets.extend(new_offsets);
+    }
+
+    /// Seeds the committed consumer-group offsets returned by
+    /// `list_consumer_group_offsets` for the given partitions.
+    ///
+    /// Mirrors `MockAdminClient.updateConsumerGroupOffsets`.
+    pub fn update_consumer_group_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
+        let mut state = self.state.lock().unwrap();
+        state.committed_offsets.extend(new_offsets);
     }
 
     /// Overrides the log directories for a broker (mirrors Java's
@@ -1195,6 +1212,80 @@ impl Admin for MockAdminClient {
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeClassicGroupsResult::new(futures)
+    }
+
+    fn list_consumer_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+        _options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult {
+        // Java ignores the group and assumes each test works on a single group;
+        // more than one group is "Not implemented yet"
+        // (MockAdminClient.java:750). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        if group_specs.len() != 1 {
+            let futures = group_specs
+                .keys()
+                .map(|group| {
+                    let handle: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
+                    handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+                    (group.clone(), handle.future())
+                })
+                .collect();
+            return ListConsumerGroupOffsetsResult::new(futures);
+        }
+
+        let (group, spec) = group_specs.iter().next().expect("exactly one group");
+        // `None` topic partitions (or an empty list) means "all partitions".
+        let include_all = spec.get_topic_partitions().is_none_or(<[_]>::is_empty);
+        let state = self.state.lock().unwrap();
+        let offsets: GroupOffsets = state
+            .committed_offsets
+            .iter()
+            .filter(|(tp, _)| include_all || spec.get_topic_partitions().is_some_and(|tps| tps.contains(tp)))
+            .map(|(tp, &offset)| {
+                (
+                    tp.clone(),
+                    Some(OffsetAndMetadata::new(offset).expect("seeded committed offset is non-negative")),
+                )
+            })
+            .collect();
+        drop(state);
+
+        let handle: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
+        handle.complete(offsets);
+        ListConsumerGroupOffsetsResult::new(HashMap::from([(group.clone(), handle.future())]))
+    }
+
+    fn alter_consumer_group_offsets(
+        &self,
+        _group_id: &str,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        _options: AlterConsumerGroupOffsetsOptions,
+    ) -> AlterConsumerGroupOffsetsResult {
+        // Java's `MockAdminClient.alterConsumerGroupOffsets` throws
+        // `UnsupportedOperationException("Not implement yet")`
+        // (MockAdminClient.java:1213 — note Java's own typo "implement"). Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+        AlterConsumerGroupOffsetsResult::new(handle.future())
+    }
+
+    fn delete_consumer_group_offsets(
+        &self,
+        _group_id: &str,
+        partitions: &HashSet<TopicPartition>,
+        _options: DeleteConsumerGroupOffsetsOptions,
+    ) -> DeleteConsumerGroupOffsetsResult {
+        // Java's `MockAdminClient.deleteConsumerGroupOffsets` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:783). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions.clone())
     }
 
     async fn close(&self, _timeout: Duration) {

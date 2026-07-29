@@ -82,4 +82,14 @@ pub(crate) trait AdminApiLookupStrategy<K>: Send {
     {
         keys.iter().map(|k| (k.clone(), exception.clone())).collect()
     }
+
+    /// Disables batched lookups for this strategy after the broker signals it
+    /// does not support batching (Java's `NoBatchedFindCoordinatorsException` /
+    /// `NoBatchedOffsetFetchRequestException`).
+    ///
+    /// The default is a no-op; only [`CoordinatorStrategy`](super::coordinator_strategy::CoordinatorStrategy)
+    /// overrides it. Java expresses this by downcasting
+    /// `handler.lookupStrategy()` to `CoordinatorStrategy` and calling
+    /// `disableBatch()`; Rust models the downcast as a defaulted trait method.
+    fn disable_batch(&self) {}
 }

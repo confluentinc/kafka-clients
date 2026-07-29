@@ -372,6 +372,21 @@ where
             let lookup_keys = self.future.lookup_keys();
             let to_unmap: Vec<K> = keys.iter().filter(|k| lookup_keys.contains(*k)).cloned().collect();
             self.retry_lookup(to_unmap);
+        } else if is_no_batched_support(error) {
+            // Mirrors Java's `NoBatchedFindCoordinatorsException` /
+            // `NoBatchedOffsetFetchRequestException` branch: the broker cannot
+            // handle a batched request, so disable batching end-to-end and retry
+            // the lookup for the affected keys. This branch must precede the
+            // generic `UnsupportedVersion` branch because those Java exceptions
+            // are `UnsupportedVersionException` subclasses.
+            kafka_debug!(
+                self.log_context,
+                "Batched request is unsupported by the broker. Disabling batching and retrying the lookup."
+            );
+            self.handler.lookup_strategy().disable_batch();
+            let lookup_keys = self.future.lookup_keys();
+            let to_unmap: Vec<K> = keys.iter().filter(|k| lookup_keys.contains(*k)).cloned().collect();
+            self.retry_lookup(to_unmap);
         } else if error.error() == Errors::UnsupportedVersion {
             if is_fulfillment {
                 let broker_id = scope.destination_broker_id().unwrap_or(-1);
@@ -429,6 +444,30 @@ where
             None => Some(self.handler.lookup_strategy().build_request(keys)),
         }
     }
+}
+
+/// Whether `error` is the "broker does not support batching" flavor of
+/// `UnsupportedVersion` (Java's `NoBatchedFindCoordinatorsException` /
+/// `NoBatchedOffsetFetchRequestException`, both `UnsupportedVersionException`
+/// subclasses thrown by the request builders at build time).
+///
+/// Rust flattens a build-time `UnsupportedVersion` failure into a
+/// `KafkaError::Generic(UnsupportedVersion)` carrying the builder's message
+/// (see `NetworkClient`'s version-mismatch path), losing Java's exception type.
+/// The two request builders emit distinctive messages, so we recover the
+/// distinction by matching them. These substrings mirror
+/// `FindCoordinatorRequest.Builder.build` and
+/// `OffsetFetchRequest.Builder.throwIfBatchingIsUnsupported`.
+fn is_no_batched_support(error: &KafkaError) -> bool {
+    if error.error() != Errors::UnsupportedVersion {
+        return false;
+    }
+    let message = error.message();
+    // OffsetFetch: "Broker does not support batching groups for fetch offset request on version N".
+    message.contains("does not support batching groups")
+        // FindCoordinator: "Cannot create a vN FindCoordinator request because we require
+        // features supported only in M or later."
+        || message.contains("FindCoordinator request because we require features")
 }
 
 #[cfg(test)]

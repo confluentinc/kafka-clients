@@ -77,6 +77,7 @@ use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{
     Cluster, GroupState, GroupType, KafkaError, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
 };
+use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
 use crate::create_partitions_request_data::{
     CreatePartitionsAssignment, CreatePartitionsRequestData, CreatePartitionsTopic,
@@ -99,25 +100,30 @@ use super::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
 use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSignal};
 use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
+use super::internals::alter_consumer_group_offsets_handler::AlterConsumerGroupOffsetsHandler;
 use super::internals::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 use super::internals::coordinator_key::CoordinatorKey;
+use super::internals::delete_consumer_group_offsets_handler::DeleteConsumerGroupOffsetsHandler;
 use super::internals::delete_records_handler::DeleteRecordsHandler;
 use super::internals::describe_classic_groups_handler::DescribeClassicGroupsHandler;
 use super::internals::describe_consumer_groups_handler::DescribeConsumerGroupsHandler;
+use super::internals::list_consumer_group_offsets_handler::ListConsumerGroupOffsetsHandler;
 use super::internals::list_offsets_handler::ListOffsetsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
 use super::records_to_delete::RecordsToDelete;
 use super::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
-    AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions,
-    AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym, ConfigType, CreatePartitionsOptions,
-    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterConsumerGroupOffsetsOptions,
+    AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult,
+    AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym,
+    ConfigType, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteRecordsOptions, DeleteRecordsResult,
     DeleteTopicsOptions, DeleteTopicsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
     DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
     DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult,
     DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
     ElectLeadersOptions, ElectLeadersResult, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
-    ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions,
     ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
     NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, ReplicaInfo, ReplicaLogDirInfo, TopicDescription,
     TopicListing, TopicMetadataAndConfig,
@@ -3071,6 +3077,75 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         DescribeClassicGroupsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn list_consumer_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let group_ids: Vec<String> = group_specs.keys().cloned().collect();
+        let future = ListConsumerGroupOffsetsHandler::new_future(&group_ids);
+        let result_map = future.all();
+        let handler = ListConsumerGroupOffsetsHandler::new(
+            group_specs.clone(),
+            options.should_require_stable(),
+            log_context.clone(),
+        );
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        ListConsumerGroupOffsetsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn alter_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> AlterConsumerGroupOffsetsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = AlterConsumerGroupOffsetsHandler::new_future(group_id);
+        let result_map = future.all();
+        let key = CoordinatorKey::by_group_id(group_id);
+        let handler = AlterConsumerGroupOffsetsHandler::new(group_id, offsets.clone(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        AlterConsumerGroupOffsetsResult::new(result_map.get(&key).expect("future exists for the group key").clone())
+    }
+
+    fn delete_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: &HashSet<TopicPartition>,
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> DeleteConsumerGroupOffsetsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DeleteConsumerGroupOffsetsHandler::new_future(group_id);
+        let result_map = future.all();
+        let key = CoordinatorKey::by_group_id(group_id);
+        let handler = DeleteConsumerGroupOffsetsHandler::new(group_id, partitions.clone(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DeleteConsumerGroupOffsetsResult::new(
+            result_map.get(&key).expect("future exists for the group key").clone(),
+            partitions.clone(),
+        )
     }
 
     async fn close(&self, timeout: Duration) {

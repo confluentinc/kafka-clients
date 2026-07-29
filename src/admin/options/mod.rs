@@ -20,10 +20,12 @@
 //! specific fields.
 
 pub mod alter_configs_options;
+pub mod alter_consumer_group_offsets_options;
 pub mod alter_partition_reassignments_options;
 pub mod alter_replica_log_dirs_options;
 pub mod create_partitions_options;
 pub mod create_topics_options;
+pub mod delete_consumer_group_offsets_options;
 pub mod delete_records_options;
 pub mod delete_topics_options;
 pub mod describe_classic_groups_options;
@@ -35,6 +37,7 @@ pub mod describe_replica_log_dirs_options;
 pub mod describe_topics_options;
 pub mod elect_leaders_options;
 pub mod list_config_resources_options;
+pub mod list_consumer_group_offsets_options;
 pub mod list_consumer_groups_options;
 pub mod list_groups_options;
 pub mod list_offsets_options;
@@ -42,10 +45,12 @@ pub mod list_partition_reassignments_options;
 pub mod list_topics_options;
 
 pub use alter_configs_options::AlterConfigsOptions;
+pub use alter_consumer_group_offsets_options::AlterConsumerGroupOffsetsOptions;
 pub use alter_partition_reassignments_options::AlterPartitionReassignmentsOptions;
 pub use alter_replica_log_dirs_options::AlterReplicaLogDirsOptions;
 pub use create_partitions_options::CreatePartitionsOptions;
 pub use create_topics_options::CreateTopicsOptions;
+pub use delete_consumer_group_offsets_options::DeleteConsumerGroupOffsetsOptions;
 pub use delete_records_options::DeleteRecordsOptions;
 pub use delete_topics_options::DeleteTopicsOptions;
 pub use describe_classic_groups_options::DescribeClassicGroupsOptions;
@@ -57,6 +62,7 @@ pub use describe_replica_log_dirs_options::DescribeReplicaLogDirsOptions;
 pub use describe_topics_options::DescribeTopicsOptions;
 pub use elect_leaders_options::ElectLeadersOptions;
 pub use list_config_resources_options::ListConfigResourcesOptions;
+pub use list_consumer_group_offsets_options::ListConsumerGroupOffsetsOptions;
 #[allow(deprecated)]
 pub use list_consumer_groups_options::ListConsumerGroupsOptions;
 pub use list_groups_options::ListGroupsOptions;
