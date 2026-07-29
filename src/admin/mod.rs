@@ -19,6 +19,8 @@
 //! `.claude/rules/admin-client.md` for the design decisions that govern this
 //! module.
 
+pub mod abort_transaction_result;
+pub mod abort_transaction_spec;
 pub mod admin_client_config;
 pub mod alter_client_quotas_result;
 pub mod alter_config_op;
@@ -50,6 +52,7 @@ pub mod describe_consumer_groups_result;
 pub mod describe_delegation_token_result;
 pub mod describe_features_result;
 pub mod describe_log_dirs_result;
+pub mod describe_producers_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
 pub mod elect_leaders_result;
@@ -78,6 +81,7 @@ pub mod new_topic;
 pub mod offset_spec;
 pub mod options;
 pub mod partition_reassignment;
+pub mod producer_state;
 pub mod records_to_delete;
 pub mod remove_members_from_consumer_group_result;
 pub mod renew_delegation_token_result;
@@ -89,6 +93,8 @@ pub mod update_features_result;
 
 pub(crate) mod internals;
 
+pub use abort_transaction_result::AbortTransactionResult;
+pub use abort_transaction_spec::AbortTransactionSpec;
 pub use admin_client_config::AdminClientConfig;
 pub use alter_client_quotas_result::AlterClientQuotasResult;
 pub use alter_config_op::{AlterConfigOp, OpType};
@@ -123,6 +129,7 @@ pub use describe_consumer_groups_result::DescribeConsumerGroupsResult;
 pub use describe_delegation_token_result::DescribeDelegationTokenResult;
 pub use describe_features_result::DescribeFeaturesResult;
 pub use describe_log_dirs_result::DescribeLogDirsResult;
+pub use describe_producers_result::{DescribeProducersResult, PartitionProducerState};
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
 pub use elect_leaders_result::ElectLeadersResult;
@@ -153,18 +160,19 @@ pub use offset_spec::OffsetSpec;
 #[allow(deprecated)]
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
-    AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
+    AbortTransactionOptions, AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
     AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreateAclsOptions, CreateDelegationTokenOptions,
     CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
     DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions,
     DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions,
-    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
+    DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions,
+    ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
     RenewDelegationTokenOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
+pub use producer_state::ProducerState;
 pub use records_to_delete::RecordsToDelete;
 pub use remove_members_from_consumer_group_result::RemoveMembersFromConsumerGroupResult;
 pub use renew_delegation_token_result::RenewDelegationTokenResult;
@@ -238,6 +246,21 @@ pub trait Admin: Send + Sync {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
     ) -> DeleteRecordsResult;
+
+    /// Describe the active producers for a set of topic partitions.
+    ///
+    /// Corresponds to `Admin.describeProducers(Collection<TopicPartition>, DescribeProducersOptions)`.
+    fn describe_producers(
+        &self,
+        partitions: &[TopicPartition],
+        options: DescribeProducersOptions,
+    ) -> DescribeProducersResult;
+
+    /// Forcefully abort a transaction which is open on a topic partition.
+    ///
+    /// Corresponds to `Admin.abortTransaction(AbortTransactionSpec, AbortTransactionOptions)`.
+    fn abort_transaction(&self, spec: AbortTransactionSpec, options: AbortTransactionOptions)
+    -> AbortTransactionResult;
 
     /// Get information about the nodes in the cluster.
     ///

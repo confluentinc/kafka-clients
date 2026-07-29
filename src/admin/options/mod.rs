@@ -19,6 +19,7 @@
 //! each options struct simply carries its own optional timeout plus operation
 //! specific fields.
 
+pub mod abort_transaction_options;
 pub mod alter_client_quotas_options;
 pub mod alter_configs_options;
 pub mod alter_consumer_group_offsets_options;
@@ -42,6 +43,7 @@ pub mod describe_consumer_groups_options;
 pub mod describe_delegation_token_options;
 pub mod describe_features_options;
 pub mod describe_log_dirs_options;
+pub mod describe_producers_options;
 pub mod describe_replica_log_dirs_options;
 pub mod describe_topics_options;
 pub mod elect_leaders_options;
@@ -57,6 +59,7 @@ pub mod remove_members_from_consumer_group_options;
 pub mod renew_delegation_token_options;
 pub mod update_features_options;
 
+pub use abort_transaction_options::AbortTransactionOptions;
 pub use alter_client_quotas_options::AlterClientQuotasOptions;
 pub use alter_configs_options::AlterConfigsOptions;
 pub use alter_consumer_group_offsets_options::AlterConsumerGroupOffsetsOptions;
@@ -80,6 +83,7 @@ pub use describe_consumer_groups_options::DescribeConsumerGroupsOptions;
 pub use describe_delegation_token_options::DescribeDelegationTokenOptions;
 pub use describe_features_options::DescribeFeaturesOptions;
 pub use describe_log_dirs_options::DescribeLogDirsOptions;
+pub use describe_producers_options::DescribeProducersOptions;
 pub use describe_replica_log_dirs_options::DescribeReplicaLogDirsOptions;
 pub use describe_topics_options::DescribeTopicsOptions;
 pub use elect_leaders_options::ElectLeadersOptions;
