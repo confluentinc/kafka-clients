@@ -7565,6 +7565,55 @@ mod tests {
         assert_eq!(all.get().await.unwrap().len(), 2);
     }
 
+    /// Translated from `KafkaAdminClientTest.testListConsumerGroupOffsetsOptionsWithBatchedApi`
+    /// (helper `verifyListConsumerGroupOffsetsOptions`): the `requireStable`
+    /// option and the request timeout propagate to the built `OffsetFetch` wire
+    /// request, and the group id / topic / partition indexes map through.
+    #[tokio::test]
+    async fn test_list_consumer_group_offsets_options_with_batched_api() {
+        use crate::common::requests::ConcreteRequest;
+
+        // Java uses mockCluster(3, 0) with RETRIES_CONFIG = "0".
+        let (admin, mut runnable, _time, nodes) = env_with_props(&[("retries", "0")]);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let options = ListConsumerGroupOffsetsOptions::new()
+            .require_stable(true)
+            .timeout_ms(Some(300));
+        let _result = admin.list_consumer_group_offsets(&single_spec(&[TopicPartition::new("A", 0)]), options);
+
+        // Pump until the `OffsetFetch` request is queued. The `FindCoordinator`
+        // request is matched to the prepared response at send time (so it never
+        // enters the queue); the first request left in the queue is the
+        // `OffsetFetch` request built after the coordinator is resolved.
+        pump_until_request_queued(&mut runnable).await;
+
+        let reqs = runnable.client_mut().requests_mut();
+        assert_eq!(reqs.len(), 1);
+        let client_request = &mut reqs[0];
+        // The `ListConsumerGroupOffsetsOptions.timeoutMs(300)` propagates to the
+        // sent request's timeout (Java asserts clientRequest.requestTimeoutMs()).
+        assert_eq!(client_request.request_timeout_ms(), 300);
+        match client_request.request_builder_mut().build().unwrap() {
+            ConcreteRequest::OffsetFetch(req) => {
+                let data = req.data();
+                // The core contract this test pins: requireStable(true) reaches
+                // the wire.
+                assert!(data.require_stable);
+                let group_ids: Vec<String> = data.groups.iter().map(|g| g.group_id.clone()).collect();
+                assert_eq!(group_ids, vec![GROUP_ID.to_string()]);
+                let group = &data.groups[0];
+                let topics = group.topics.as_ref().expect("topics present");
+                let topic_names: Vec<String> = topics.iter().map(|t| t.name.clone()).collect();
+                assert_eq!(topic_names, vec!["A".to_string()]);
+                assert_eq!(topics[0].partition_indexes, vec![0]);
+            },
+            other => panic!("expected an OffsetFetch request, got {other:?}"),
+        }
+    }
+
     fn offsets_to_alter() -> HashMap<TopicPartition, OffsetAndMetadata> {
         HashMap::from([
             (TopicPartition::new("foo", 0), OffsetAndMetadata::new(123).unwrap()),

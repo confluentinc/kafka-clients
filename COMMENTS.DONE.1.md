@@ -211,3 +211,146 @@ Actor (N=1) in the fix cycle and verified against the Java source
   `test_create_topics_retry_backoff` (asserts the retry is gated by the backoff:
   the retry does not fire until the mock clock advances past the jittered
   upper-bound backoff).
+
+---
+
+# Tier 2 Phase 2 (Group offsets)
+
+Resolved review items from the Critic (N=1) review of the client-level
+offset-RPC tests (introduced in commit `cb16905`). Fixed by the Actor (N=1)
+in the fix cycle.
+
+## RESOLVED — `requireStable` option→wire propagation was not test-covered for `list_consumer_group_offsets` (DoD #3)
+- **File**: `src/admin/kafka_admin_client.rs` (client-level tests)
+- **Java Reference**: `KafkaAdminClientTest.java::testListConsumerGroupOffsetsOptionsWithBatchedApi`
+  → helper `verifyListConsumerGroupOffsetsOptions()`
+- **Fix**: Added `test_list_consumer_group_offsets_options_with_batched_api`,
+  a faithful client-level translation of `verifyListConsumerGroupOffsetsOptions`.
+  It builds the request with
+  `ListConsumerGroupOffsetsOptions::new().require_stable(true).timeout_ms(Some(300))`
+  and a single-partition spec (`TopicPartition("A", 0)`), prepares a
+  `FindCoordinator` success, then pumps until the built `OffsetFetch` request
+  is queued and inspects it at the wire level. Asserts, matching the Java
+  assertions one-for-one:
+  - `data.require_stable == true` (the core contract — the flag reaches the wire),
+  - the request's `request_timeout_ms() == 300` (Java's
+    `clientRequest.requestTimeoutMs()` — translated because the Rust runnable
+    derives the per-request timeout from the options-driven deadline, see
+    `admin_client_runnable.rs:404`),
+  - the built groups map to exactly `[GROUP_ID]`, the group's topics to
+    exactly `["A"]`, and the topic's `partition_indexes` to `[0]`.
+  The `FindCoordinator` request is matched to the prepared response at send
+  time (MockClient `send`), so it never enters the request queue — the first
+  queued request is the `OffsetFetch`, which `pump_until_request_queued`
+  stops on without advancing the mock clock (keeping the derived timeout at
+  exactly 300).
+  **Teeth verified**: with the handler temporarily inverted to
+  `data.set_require_stable(!self.require_stable)` the new test fails at the
+  `assert!(data.require_stable)` line; reverted to the correct
+  `self.require_stable` it passes. (Hardcoding `false` instead makes the
+  `require_stable` field dead code under `#![deny(warnings)]`, which is itself
+  a compile-time guard that the field has exactly one use site.)
+  `cargo test --lib` count: 2561 → 2562.
+
+## RESOLVED (documentation note) — undocumented fold of the retriable client tests
+- **Java Reference**: `testListConsumerGroupOffsetsRetriableErrors`,
+  `testAlterConsumerGroupOffsetsRetriableErrors`,
+  `testAlterConsumerGroupOffsetsFindCoordinatorRetriableErrors`,
+  `testDeleteConsumerGroupOffsetsFindCoordinatorRetriableErrors`.
+- **Resolution (no code change)**: Recording the fold explicitly, as the
+  Critic requested, so the omission is auditable per DoD #3. These four Java
+  tests have no 1:1 Rust counterpart, and that is a **defensible fold**, not a
+  gap, for the following reason: the driver retry/re-lookup loop they exercise
+  is handler-agnostic and is already covered end-to-end by
+  `test_list_consumer_group_offsets`, which drives a retriable `FindCoordinator`
+  error (retried), a retriable `OffsetFetch` error (`CoordinatorLoadInProgress`,
+  retried), and `NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE` responses (which
+  trigger coordinator re-lookup) all in one test. Each handler's own
+  retry-vs-unmap-vs-fail *decision* is unit-tested per handler
+  (`list`/`alter`/`delete` `*_handle_response` tests, matching the Java
+  `*HandlerTest` method-for-method). Because the driver loop does not vary by
+  handler, the alter/delete end-to-end retriable variants would re-exercise the
+  exact same driver code path with a different handler that is independently
+  unit-tested — adding no uncovered behavior. The fold therefore preserves
+  coverage of every distinct code path while avoiding redundant end-to-end
+  scaffolding.
+
+---
+
+# Tier 2 Phase 1 (Group listing & describe)
+
+Resolved review items from the Critic (N=1) review of `5bfebe8..HEAD`
+(`8ff6a3c`..`947042a`). All three were test/completeness gaps; no functional
+production-code bug was reported. Fixed by the Actor (N=1) in the fix cycle.
+
+## RESOLVED — `describeClassicGroups` RPC had zero test coverage (DoD #3)
+- **File**: `src/admin/kafka_admin_client.rs` (client-level tests)
+- **Java Reference**: `KafkaAdminClientTest.java:7075`
+  (`testDescribeClassicGroups`), `:7163`
+  (`testDescribeClassicGroupsWithAuthorizedOperationsOmitted`), `:7187`
+  (`testDescribeMultipleClassicGroups`).
+- **Fix**: Translated all three client-level slices using the existing
+  `env()` / `find_coordinator_resp` / `describe_groups_*_resp` harness:
+  - `test_describe_classic_groups`: retriable `FindCoordinator` errors are
+    retried; retriable / `NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE`
+    `DescribeGroups` errors trigger a re-lookup; the final response's two
+    members (one a static member) have their assignment bytes decoded via
+    `ConsumerProtocol::deserialize_assignment` into the expected 3 partitions;
+    asserts `ClassicGroupState::Stable`.
+  - `test_describe_classic_groups_with_authorized_operations_omitted`: asserts
+    `authorized_operations()` is empty when omitted (Java returns `null`;
+    `valid_acl_operations(AUTHORIZED_OPERATIONS_OMITTED)` returns an empty set).
+  - `test_describe_multiple_classic_groups`: two group ids on one coordinator,
+    batched into a single `DescribeGroups` request; asserts both keys present in
+    `described_groups()`.
+  New helpers: `find_coordinator_error_resp`, `described_member`,
+  `describe_groups_full_resp`. Commit `fixup! ...wire group RPCs...`.
+
+## RESOLVED — list-groups states/types filter wiring + older-broker path untested (DoD #3)
+- **File**: `src/admin/kafka_admin_client.rs` (client-level tests)
+- **Java Reference**: `KafkaAdminClientTest.java:3229`
+  (`testListGroupsWithTypes`), `:3266`
+  (`testListGroupsWithTypesOlderBrokerVersion`), `:3471`
+  (`testListConsumerGroupsWithStates`), `:3644`
+  (`testListConsumerGroupsWithTypesOlderBrokerVersion`), the deprecated
+  variants, and the metadata-failure slices (`:3448`).
+- **Fix**: Translated `test_list_groups_with_types`,
+  `test_list_groups_with_types_older_broker_version`,
+  `test_list_consumer_groups_with_states`,
+  `test_list_consumer_groups_with_types_older_broker_version`,
+  `test_list_consumer_groups_deprecated_with_states_and_types`,
+  `test_list_consumer_groups_deprecated_older_broker_version`,
+  `test_list_consumer_groups_metadata_failure`, and
+  `test_list_groups_metadata_failure`. The wiring tests inspect the emitted
+  `ListGroups` request (built from the queued `ClientRequest`) and assert its
+  `states_filter` / `types_filter` match the options-derived filter — a swap or
+  drop of those fields now fails CI. The metadata-failure tests assert
+  `handle_failure` wraps the error as
+  "Failed to find brokers to send list{Groups,ConsumerGroups}".
+  - **Deviation (documented)**: the Rust `MockClient` does not negotiate API
+    versions and never invokes `ListGroupsRequestBuilder::build_version`, so the
+    real broker-side downgrade cannot run end-to-end through the mock. It is
+    modeled two ways: the *omit* path builds the emitted request at v4
+    (the negotiated version) and asserts the types filter is dropped; the
+    *reject* path uses `prepare_unsupported_version_response` (the same
+    version-mismatch response the real `NetworkClient` produces when the builder
+    throws `UnsupportedVersionException`), and asserts the future surfaces
+    `UnsupportedVersion`. The builder's own version-gating remains unit-tested in
+    `list_groups_request.rs`. New helpers: `env_nodes_with_props`,
+    `pump_until_request_queued`, `listed_groups`. Commit `fixup! ...wire group RPCs...`.
+
+## RESOLVED — `ConsumerProtocol` omitted 3 public methods (DoD #2, LOW)
+- **File**: `src/consumer/internals/consumer_protocol.rs`
+- **Java Reference**: `ConsumerProtocol.java:128-145`
+  (`deserializeConsumerProtocolSubscription` x2), `:198-213`
+  (`deserializeConsumerProtocolAssignment` x2), `:167-170`
+  (`serializeAssignment(ConsumerProtocolAssignment, short)`).
+- **Fix**: Added `deserialize_consumer_protocol_subscription` (+`_versioned`),
+  `deserialize_consumer_protocol_assignment` (+`_versioned`), and
+  `serialize_assignment_data` (the `serializeAssignment(data, short)` overload —
+  renamed with a `_data` suffix since Rust cannot overload `serialize_assignment`).
+  Each is a one-liner over the already-present generated `read` /
+  `to_version_prefixed_byte_buffer`, with two new round-trip unit tests. The
+  `static {}` LOWEST/HIGHEST cross-schema invariant check is intentionally not
+  ported (harmless compile-time-constant assertion). Commit
+  `fixup! ...translate ConsumerProtocol...`.
