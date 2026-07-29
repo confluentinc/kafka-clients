@@ -88,4 +88,5 @@
 - [M11 Tier2 P3 group/member deletion](m11_tier2_phase3_notes.md) — DeleteGroups+LeaveGroup wire; abstract-base-via-composition; removeAll describe-chain via SimpleAdminApiFuture::handle; MockClient matches at send-time (late response hangs); reason trunc 255
 - [M11 Tier3 P1 ACLs](m11_tier3_phase1_acls_notes.md) — LeastLoaded retry (no metadata refresh) vs Controller; module_inception; DeleteAclsResult custom aggregate future; authorizer fixture can't gate ANONYMOUS super user
 - [M11 Tier3 P2 client quotas](m11_tier3_phase2_client_quotas_notes.md) — ClientQuotaMatch tri-state enum; Op None=removal; manual Hash for map-key entity; generated msg data pre-existed
+- [M11 Tier3 P4 delegation tokens](m11_tier3_phase4_delegation_tokens_notes.md) — prereqs+wire+mock; admin has no SASL so integration deferred; TokenInformation eq/hash quirk
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
