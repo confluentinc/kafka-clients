@@ -66,6 +66,7 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
+use crate::update_features_request_data::UpdateFeaturesRequestData;
 
 use super::AlterClientQuotasRequest;
 use super::AlterPartitionReassignmentsRequest;
@@ -111,6 +112,7 @@ use super::RequestHeader;
 use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
+use super::UpdateFeaturesRequest;
 
 /// Trait for building requests at a specific version.
 ///
@@ -232,6 +234,8 @@ pub enum ConcreteRequest {
     ExpireDelegationToken(ExpireDelegationTokenRequest),
     /// A DescribeDelegationToken request.
     DescribeDelegationToken(DescribeDelegationTokenRequest),
+    /// An UpdateFeatures request.
+    UpdateFeatures(UpdateFeaturesRequest),
 }
 
 impl ConcreteRequest {
@@ -278,6 +282,7 @@ impl ConcreteRequest {
             Self::RenewDelegationToken(r) => r.version(),
             Self::ExpireDelegationToken(r) => r.version(),
             Self::DescribeDelegationToken(r) => r.version(),
+            Self::UpdateFeatures(r) => r.version(),
         }
     }
 
@@ -324,6 +329,7 @@ impl ConcreteRequest {
             Self::RenewDelegationToken(r) => r.api_key(),
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
+            Self::UpdateFeatures(r) => r.api_key(),
         }
     }
 
@@ -376,6 +382,7 @@ impl ConcreteRequest {
             Self::RenewDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ExpireDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::UpdateFeatures(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -530,6 +537,9 @@ impl ConcreteRequest {
             Self::DescribeDelegationToken(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::UpdateFeatures(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -583,6 +593,7 @@ impl ConcreteRequest {
             Self::RenewDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -647,6 +658,7 @@ impl ConcreteRequest {
             Self::RenewDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ExpireDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::UpdateFeatures(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -854,6 +866,10 @@ impl ConcreteRequest {
                     api_version,
                 )))
             },
+            ApiKeys::UPDATE_FEATURES => {
+                let data = UpdateFeaturesRequestData::read(readable, api_version)?;
+                Ok(Self::UpdateFeatures(UpdateFeaturesRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -905,6 +921,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::RenewDelegationToken(r) => write!(f, "{r}"),
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
+            Self::UpdateFeatures(r) => write!(f, "{r}"),
         }
     }
 }

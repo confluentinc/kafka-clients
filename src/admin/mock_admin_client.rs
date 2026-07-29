@@ -37,16 +37,18 @@ use crate::admin::{
     DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClientQuotasOptions,
     DescribeClientQuotasResult, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
     DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeDelegationTokenOptions,
-    DescribeDelegationTokenResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
-    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
-    ExpireDelegationTokenOptions, ExpireDelegationTokenResult, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConfigResourcesResult, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions,
-    ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
-    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, RenewDelegationTokenResult, ReplicaInfo,
-    ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    DescribeDelegationTokenResult, DescribeFeaturesOptions, DescribeFeaturesResult, DescribeLogDirsOptions,
+    DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions,
+    DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, ExpireDelegationTokenOptions,
+    ExpireDelegationTokenResult, FeatureMetadata, FeatureUpdate, FinalizedVersionRange, GroupListing, GroupOffsets,
+    ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
+    ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo, ListPartitionReassignmentsOptions,
+    ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions,
+    RenewDelegationTokenResult, ReplicaInfo, ReplicaLogDirInfo, SupportedVersionRange, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, UpdateFeaturesOptions, UpdateFeaturesResult, UpgradeType,
 };
 #[allow(deprecated)]
 use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -135,6 +137,15 @@ struct State {
     committed_offsets: HashMap<TopicPartition, i64>,
     // In-memory delegation tokens (mirrors Java's `allTokens`).
     all_tokens: Vec<DelegationToken>,
+    // Current finalized feature levels, keyed by feature name (mirrors Java's
+    // `featureLevels`). Mutated by `update_features` unless `validate_only`.
+    feature_levels: HashMap<String, i16>,
+    // Minimum supported feature levels, keyed by feature name (mirrors Java's
+    // `minSupportedFeatureLevels`).
+    min_supported_feature_levels: HashMap<String, i16>,
+    // Maximum supported feature levels, keyed by feature name (mirrors Java's
+    // `maxSupportedFeatureLevels`).
+    max_supported_feature_levels: HashMap<String, i16>,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -194,8 +205,29 @@ impl MockAdminClient {
                 end_offsets: HashMap::new(),
                 committed_offsets: HashMap::new(),
                 all_tokens: Vec::new(),
+                feature_levels: HashMap::new(),
+                min_supported_feature_levels: HashMap::new(),
+                max_supported_feature_levels: HashMap::new(),
             }),
         }
+    }
+
+    /// Seeds the finalized feature levels, along with the minimum and maximum
+    /// supported feature levels, returned by `describe_features` and consulted
+    /// by `update_features`.
+    ///
+    /// Mirrors Java's `MockAdminClient.Builder.featureLevels` /
+    /// `minSupportedFeatureLevels` / `maxSupportedFeatureLevels`.
+    pub fn set_feature_levels(
+        &self,
+        feature_levels: HashMap<String, i16>,
+        min_supported_feature_levels: HashMap<String, i16>,
+        max_supported_feature_levels: HashMap<String, i16>,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state.feature_levels = feature_levels;
+        state.min_supported_feature_levels = min_supported_feature_levels;
+        state.max_supported_feature_levels = max_supported_feature_levels;
     }
 
     /// Seeds the beginning offsets returned by `list_offsets` for the given
@@ -1524,9 +1556,124 @@ impl Admin for MockAdminClient {
         DescribeDelegationTokenResult::new(handle.future())
     }
 
+    fn describe_features(&self, _options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
+        // Mirrors MockAdminClient.describeFeatures: derive finalized and
+        // supported ranges from the seeded feature-level maps.
+        let state = self.state.lock().unwrap();
+        let handle: KafkaFutureImpl<FeatureMetadata> = KafkaFutureImpl::new();
+
+        let mut finalized_features = HashMap::new();
+        let mut supported_features = HashMap::new();
+        for (feature, &level) in &state.feature_levels {
+            let min = state.min_supported_feature_levels.get(feature).copied().unwrap_or(0);
+            let max = state.max_supported_feature_levels.get(feature).copied().unwrap_or(0);
+            match (FinalizedVersionRange::new(level, level), SupportedVersionRange::new(min, max)) {
+                (Ok(finalized), Ok(supported)) => {
+                    finalized_features.insert(feature.clone(), finalized);
+                    supported_features.insert(feature.clone(), supported);
+                },
+                (Err(e), _) | (_, Err(e)) => {
+                    handle.complete_exceptionally(e);
+                    return DescribeFeaturesResult::new(handle.future());
+                },
+            }
+        }
+
+        handle.complete(FeatureMetadata::new(finalized_features, Some(123), supported_features));
+        DescribeFeaturesResult::new(handle.future())
+    }
+
+    fn update_features(
+        &self,
+        feature_updates: &HashMap<String, FeatureUpdate>,
+        options: UpdateFeaturesOptions,
+    ) -> Result<UpdateFeaturesResult, KafkaError> {
+        // Mirrors MockAdminClient.updateFeatures: validate each update against
+        // the seeded version bounds; the first failure aborts the whole batch.
+        let mut state = self.state.lock().unwrap();
+        let mut error: Option<KafkaError> = None;
+        for (feature, update) in feature_updates {
+            let cur = state.feature_levels.get(feature).copied().unwrap_or(0);
+            let next = update.max_version_level();
+            let min = state.min_supported_feature_levels.get(feature).copied().unwrap_or(0);
+            let max = state.max_supported_feature_levels.get(feature).copied().unwrap_or(0);
+            if let Err(message) = validate_feature_update(cur, next, min, max, update.upgrade_type()) {
+                error = Some(invalid_update_version(feature, next, &message));
+                break;
+            }
+        }
+
+        let mut results: HashMap<String, crate::common::KafkaFuture<()>> = HashMap::new();
+        for (feature, update) in feature_updates {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            match &error {
+                None => {
+                    handle.complete(());
+                    if !options.get_validate_only() {
+                        state.feature_levels.insert(feature.clone(), update.max_version_level());
+                    }
+                },
+                Some(e) => {
+                    handle.complete_exceptionally(e.clone());
+                },
+            }
+            results.insert(feature.clone(), handle.future());
+        }
+
+        Ok(UpdateFeaturesResult::new(results))
+    }
+
     async fn close(&self, _timeout: Duration) {
         // Nothing to close for the in-memory mock.
     }
+}
+
+/// Validates a single feature update against the mock's seeded version bounds,
+/// returning the inner error message on failure. Mirrors the `switch` /
+/// bounds checks inside `MockAdminClient.updateFeatures`.
+fn validate_feature_update(cur: i16, next: i16, min: i16, max: i16, upgrade_type: UpgradeType) -> Result<(), String> {
+    match upgrade_type {
+        UpgradeType::Unknown => return Err("Invalid upgrade type.".to_string()),
+        UpgradeType::Upgrade => {
+            if cur > next {
+                return Err("Can't upgrade to lower version.".to_string());
+            }
+        },
+        UpgradeType::SafeDowngrade => {
+            if cur < next {
+                return Err("Can't downgrade to newer version.".to_string());
+            }
+        },
+        UpgradeType::UnsafeDowngrade => {
+            if cur < next {
+                return Err("Can't downgrade to newer version.".to_string());
+            }
+            // Simulate a scenario where all the even feature levels are unsafe
+            // to downgrade from. Mirrors Java exactly: the inner
+            // `SAFE_DOWNGRADE` guard can never fire in this `UNSAFE_DOWNGRADE`
+            // branch, so the loop only walks `cur` down to `next`.
+            let mut cur = cur;
+            while next != cur {
+                cur -= 1;
+            }
+        },
+    }
+    if next < min {
+        return Err(format!("Can't downgrade below {min}"));
+    }
+    if next > max {
+        return Err(format!("Can't upgrade above {max}"));
+    }
+    Ok(())
+}
+
+/// Composes the mock's `InvalidRequestException` for a rejected feature update.
+/// Mirrors `MockAdminClient.invalidUpdateVersion`.
+fn invalid_update_version(feature: &str, version: i16, message: &str) -> KafkaError {
+    KafkaError::with_message(
+        Errors::InvalidRequest,
+        format!("Invalid update version {version} for feature {feature}. {message}"),
+    )
 }
 
 #[cfg(test)]
@@ -1535,6 +1682,157 @@ mod tests {
 
     fn admin() -> MockAdminClient {
         MockAdminClient::create(3)
+    }
+
+    /// A mock seeded with a single feature `feature` at level 3, supported over
+    /// the range [1, 5] (mirrors the shape used by Java's `MockAdminClient`
+    /// feature tests).
+    fn admin_with_features() -> MockAdminClient {
+        let mock = MockAdminClient::create(1);
+        mock.set_feature_levels(
+            HashMap::from([("feature".to_string(), 3i16)]),
+            HashMap::from([("feature".to_string(), 1i16)]),
+            HashMap::from([("feature".to_string(), 5i16)]),
+        );
+        mock
+    }
+
+    async fn update_one(mock: &MockAdminClient, next: i16, upgrade_type: UpgradeType) -> Result<(), KafkaError> {
+        let updates = HashMap::from([("feature".to_string(), FeatureUpdate::new(next, upgrade_type).unwrap())]);
+        let result = mock.update_features(&updates, UpdateFeaturesOptions::new()).unwrap();
+        result.values()["feature"].get().await
+    }
+
+    #[tokio::test]
+    async fn mock_describe_features_returns_seeded_ranges() {
+        let mock = admin_with_features();
+        let metadata = mock
+            .describe_features(DescribeFeaturesOptions::new())
+            .feature_metadata()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(metadata.finalized_features_epoch(), Some(123));
+        assert_eq!(
+            metadata.finalized_features()["feature"],
+            FinalizedVersionRange::new(3, 3).unwrap()
+        );
+        assert_eq!(
+            metadata.supported_features()["feature"],
+            SupportedVersionRange::new(1, 5).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_upgrade_succeeds_and_mutates_level() {
+        let mock = admin_with_features();
+        update_one(&mock, 4, UpgradeType::Upgrade).await.unwrap();
+        // The finalized level is now 4.
+        let metadata = mock
+            .describe_features(DescribeFeaturesOptions::new())
+            .feature_metadata()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata.finalized_features()["feature"],
+            FinalizedVersionRange::new(4, 4).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_validate_only_does_not_mutate() {
+        let mock = admin_with_features();
+        let updates = HashMap::from([("feature".to_string(), FeatureUpdate::new(4, UpgradeType::Upgrade).unwrap())]);
+        let result = mock
+            .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+            .unwrap();
+        result.values()["feature"].get().await.unwrap();
+        // Level unchanged because validate_only was set.
+        let metadata = mock
+            .describe_features(DescribeFeaturesOptions::new())
+            .feature_metadata()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata.finalized_features()["feature"],
+            FinalizedVersionRange::new(3, 3).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_rejects_upgrade_to_lower_version() {
+        let mock = admin_with_features();
+        let err = update_one(&mock, 2, UpgradeType::Upgrade).await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(
+            err.message(),
+            "Invalid update version 2 for feature feature. Can't upgrade to lower version."
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_rejects_safe_downgrade_to_newer_version() {
+        let mock = admin_with_features();
+        let err = update_one(&mock, 4, UpgradeType::SafeDowngrade).await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(
+            err.message(),
+            "Invalid update version 4 for feature feature. Can't downgrade to newer version."
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_rejects_upgrade_above_max() {
+        let mock = admin_with_features();
+        let err = update_one(&mock, 6, UpgradeType::Upgrade).await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(
+            err.message(),
+            "Invalid update version 6 for feature feature. Can't upgrade above 5"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_rejects_downgrade_below_min() {
+        let mock = admin_with_features();
+        // next = 0 (a deletion), with SAFE_DOWNGRADE; min is 1.
+        let err = update_one(&mock, 0, UpgradeType::SafeDowngrade).await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(
+            err.message(),
+            "Invalid update version 0 for feature feature. Can't downgrade below 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_rejects_unknown_upgrade_type() {
+        let mock = admin_with_features();
+        let err = update_one(&mock, 2, UpgradeType::Unknown).await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        assert_eq!(
+            err.message(),
+            "Invalid update version 2 for feature feature. Invalid upgrade type."
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_update_features_unsafe_downgrade_succeeds() {
+        let mock = admin_with_features();
+        // cur = 3, next = 2, UNSAFE_DOWNGRADE: allowed (the mock's even-level
+        // guard is dead code, mirroring Java).
+        update_one(&mock, 2, UpgradeType::UnsafeDowngrade).await.unwrap();
+        let metadata = mock
+            .describe_features(DescribeFeaturesOptions::new())
+            .feature_metadata()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata.finalized_features()["feature"],
+            FinalizedVersionRange::new(2, 2).unwrap()
+        );
     }
 
     #[tokio::test]
