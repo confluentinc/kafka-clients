@@ -36,6 +36,7 @@ pub mod network;
 pub mod node;
 pub mod partition_info;
 pub mod protocol;
+pub mod quota;
 pub mod record;
 pub mod requests;
 pub mod resource;
