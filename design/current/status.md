@@ -568,3 +568,47 @@ tests + real-broker integration tests, all green. Both are plain `Call` RPCs
   represent the null/default entity name — wire-incompatible) fixed +
   re-verified clean. See
   `design/history/Milestone-11/Tier3-Phase-2/COMMENTS.DONE.1.md`.
+
+> **Tier 3 Phase 3 (SCRAM credentials) is DEFERRED** (2026-07-29): it needs a
+> new PBKDF2 crypto crate (`Cargo.toml` change, CLAUDE.md §1.2) not yet
+> approved. Phases 4–7 (which need no new crate) proceed first; SCRAM resumes
+> on explicit crate approval.
+
+## Tier 3 Phase 4 — Delegation tokens ✓ (2026-07-29)
+
+Translated `create_delegation_token`, `renew_delegation_token`,
+`expire_delegation_token`, `describe_delegation_token`, Rust core + unit tests,
+all green. All four are plain `Call` RPCs (`LeastLoadedNodeProvider`),
+independent of other Tier 3 phases.
+
+- **Prerequisites (net new)**: `common::security::auth::KafkaPrincipal`
+  (`USER_TYPE`, `ANONYMOUS`, eq/hash by type+name),
+  `common::security::token::delegation::{DelegationToken, TokenInformation}`.
+  `DelegationToken::hmac_as_base64_string` uses a from-scratch RFC 4648 standard
+  (padded, `+/`) base64 encoder (the existing uuid encoder is URL-safe).
+- **New types**: `admin::{Create,Renew,Expire,Describe}DelegationToken{Options,Result}`.
+  Wire wrappers (net new): the four `common::requests::*DelegationToken{Request,Response}`
+  with all enum arms wired and hand-computed byte-level vectors (raw HMAC bytes +
+  principal strings). Deprecated Java `maxlifeTimeMs` aliases ported as
+  `#[deprecated]` for DoD #2 completeness.
+- **`MockAdminClient`**: FULL in-memory logic translated faithfully from Java's
+  mock (finding #9/#10 — Java's mock implements these, so they are NOT stubbed):
+  in-memory token list, `USER_TYPE` renewer validation, `-1` expire sentinel,
+  owners describe-filter.
+
+### Tests
+- **Rust lib suite: 2808 passing.**
+- **Unit tests are NEW, written against `MockAdminClient` as the behavioral
+  reference (finding #10 — there are ZERO Java client-side delegation-token unit
+  tests)**: non-`User` renewer → `InvalidPrincipalType`; unknown-HMAC renew/expire
+  → `DelegationTokenNotFound`; `-1` expire removes; owners filter; plus
+  byte-level wire vectors for all four RPCs and `KafkaPrincipalTest` coverage.
+- **Integration deferred (documented)**: delegation-token creation requires a
+  SASL-authenticated connection, but `AdminClientConfig`/`from_config` have no
+  SASL support yet (hardcode `PLAINTEXT`) — SASL-in-admin-client is a separate
+  feature. The behavioral contract is covered by the mock unit tests per finding
+  #10. Nothing broken registered in `main.rs`.
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: **CLEAN on first pass — no fix cycle needed** (MockAdminClient fidelity
+  and base64 encoder both verified). See
+  `design/history/Milestone-11/Tier3-Phase-4/COMMENTS.DONE.1.md`.
