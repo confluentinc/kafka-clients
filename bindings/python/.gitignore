@@ -4,3 +4,5 @@ build/
 __pycache__/
 dist/
 *.jsonl
+# Minimal Rust crate staged into the sdist by setup.py's custom `sdist` command.
+/rust/

@@ -1,0 +1,283 @@
+version: v1.0
+name: Build Python wheels
+
+# Builds the Python binding wheels with cibuildwheel and verifies them.
+#   Build blocks:  compile the C extension (_confluentkafka.c) against the Rust
+#     library pulled from the artifact store -- on Linux inside manylinux_2_28,
+#     on macOS and Windows natively -- then repair each wheel so it is
+#     self-contained (auditwheel vendors the .so and stamps the manylinux tag;
+#     delocate vendors the .dylib; delvewheel vendors the .dll) and push the
+#     wheels to the artifact store.
+#   Verify blocks: pull the wheels and test every wheel -- install, import, run
+#     the unit tests, and a compression/TLS smoke -- proving they are
+#     self-contained and portable (Linux additionally across distros / glibc
+#     versions). Linux/macOS verify via .semaphore/test-wheels.sh; the Windows
+#     unit tests run inside cibuildwheel across every Python version at build
+#     time, with a separate install/import smoke in the verify block.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-3
+
+global_job_config:
+  env_vars:
+    - name: CIBW_BUILD
+      value: cp310-* cp311-* cp312-* cp313-* cp314-*
+    - name: CIBW_SKIP
+      value: "*musllinux* *i686 *t-*"
+    - name: CIBW_MANYLINUX_X86_64_IMAGE
+      value: manylinux_2_28
+    - name: CIBW_MANYLINUX_AARCH64_IMAGE
+      value: manylinux_2_28
+  prologue:
+    commands:
+      - checkout
+      - sem-version python 3.11
+      - python -m pip install --upgrade pip
+
+blocks:
+  - name: "Build wheels: Linux x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            # Stage the Rust library + header inside the package dir so the
+            # cibuildwheel container can see them.
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
+            - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            # cibuildwheel copies the whole repo to /project and builds the
+            # subdir, so $PWD is the repo root -- point at bindings/python/native.
+            # Keep $PWD literal; cibuildwheel expands it inside the container.
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
+            - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
+
+  - name: "Build wheels: Linux arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
+            - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
+            - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
+
+  - name: "Verify wheels: Linux x64"
+    dependencies:
+      - "Build wheels: Linux x64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Verify wheels: Linux arm64"
+    dependencies:
+      - "Build wheels: Linux arm64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Build wheels: macOS x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-amd64-6
+      env_vars:
+        - name: ARCH
+          value: x64
+        - name: CIBW_ARCHS
+          value: x86_64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
+            - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=10.13'
+            - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
+
+  - name: "Build wheels: macOS arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: ARCH
+          value: arm64
+        - name: CIBW_ARCHS
+          value: arm64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            - mkdir -p bindings/python/native/lib bindings/python/native/include
+            - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
+            - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=11.0'
+            - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
+            - ls -l wheelhouse/
+            - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
+
+  - name: "Verify wheels: macOS x64"
+    dependencies:
+      - "Build wheels: macOS x64"
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-amd64-6
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-macos-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Verify wheels: macOS arm64"
+    dependencies:
+      - "Build wheels: macOS arm64"
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: ARCH
+          value: arm64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-macos-${ARCH} --destination wheelhouse --force
+            - ls -l wheelhouse/
+            - sh .semaphore/test-wheels.sh wheelhouse
+
+  - name: "Build wheels: Windows x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: ARCH
+          value: x64
+        - name: CIBW_ARCHS
+          value: AMD64
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install cibuildwheel==3.2.1
+            - New-Item -ItemType Directory -Force target\include,target\release | Out-Null
+            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.h --destination target\include\confluent_kafka.h --force
+            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.lib --destination target\release\confluent_kafka.lib --force
+            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.dll --destination target\release\confluent_kafka.dll --force
+            - $env:CIBW_BEFORE_BUILD = "python -m pip install delvewheel"
+            - $env:CIBW_REPAIR_WHEEL_COMMAND = "python -m delvewheel repair --add-path `"$PWD\target\release`" -w {dest_dir} {wheel}"
+            # Run the unit tests inside cibuildwheel for every built Python version.
+            - $env:CIBW_TEST_REQUIRES = "pytest pytest-asyncio"
+            - $env:CIBW_TEST_COMMAND = "python -m pytest `"{project}\bindings\python\test\unit`" -o asyncio_mode=auto"
+            - python -m cibuildwheel --platform windows --output-dir wheelhouse bindings\python
+            - Get-ChildItem wheelhouse
+            - artifact push workflow wheelhouse --destination wheels-windows-${Env:ARCH} --force
+
+  - name: "Verify wheels: Windows x64"
+    dependencies:
+      - "Build wheels: Windows x64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: ARCH
+          value: x64
+      jobs:
+        - name: verify
+          commands:
+            - artifact pull workflow wheels-windows-${Env:ARCH} --destination wheelhouse --force
+            - Get-ChildItem wheelhouse
+            - python -m pip install pytest pytest-asyncio
+            - python -m pip install --no-index --find-links wheelhouse confluent-kafka4
+            - "python -c \"import _confluentkafka; print('import OK')\""
+            - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
+
+  - name: "Build sdist"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      jobs:
+        - name: build
+          commands:
+            - python -m pip install build
+            - python -m build -s --outdir sdist-out bindings/python
+            - ls -l sdist-out/
+            - artifact push workflow sdist-out --destination sdist --force
+
+  - name: "Verify sdist (from source)"
+    dependencies:
+      - "Build sdist"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      jobs:
+        - name: verify
+          commands:
+            - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            - source "$HOME/.cargo/env"
+            - sudo apt-get update -qq && sudo apt-get install -y -qq cmake nasm
+            - artifact pull workflow sdist --destination sdist-out --force
+            - ls -l sdist-out/
+            - python -m venv /tmp/sdistvenv
+            - . /tmp/sdistvenv/bin/activate
+            - python -m pip install --upgrade pip
+            - unset CONFLUENT_KAFKA_LIB_DIR
+            - python -m pip install -v sdist-out/*.tar.gz
+            - "python -c \"import _confluentkafka; print('import OK from-source sdist')\""
+            - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
