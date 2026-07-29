@@ -68,14 +68,17 @@ use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuota
 use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
 use crate::common::requests::{
     AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreateAclsRequest,
-    CreateAclsRequestBuilder, CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest,
-    DeleteAclsRequestBuilder, DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder,
-    DescribeAclsResponse, DescribeClientQuotasRequestBuilder, DescribeClusterRequestBuilder,
-    DescribeConfigsRequestBuilder, DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER,
-    ENDPOINT_TYPE_CONTROLLER, IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder,
-    ListGroupsRequestBuilder, MetadataRequestBuilder, RequestBuilder,
+    CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder, CreatePartitionsRequestBuilder,
+    CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder, DeleteAclsResponse,
+    DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse, DescribeClientQuotasRequestBuilder,
+    DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder, DescribeDelegationTokenRequestBuilder,
+    DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
+    ExpireDelegationTokenRequestBuilder, IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder,
+    ListGroupsRequestBuilder, MetadataRequestBuilder, RenewDelegationTokenRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
+use crate::common::security::auth::KafkaPrincipal;
+use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{
     Cluster, GroupState, GroupType, KafkaError, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
@@ -125,21 +128,23 @@ use super::{
     AlterConfigsResult, AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult,
     AlterPartitionReassignmentsOptions, AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions,
     AlterReplicaLogDirsResult, Config, ConfigEntry, ConfigSource, ConfigSynonym, ConfigType, CreateAclsOptions,
-    CreateAclsResult, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult,
-    DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult,
-    DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult,
-    DeleteTopicsOptions, DeleteTopicsResult, DescribeAclsOptions, DescribeAclsResult, DescribeClassicGroupsOptions,
-    DescribeClassicGroupsResult, DescribeClientQuotasOptions, DescribeClientQuotasResult, DescribeClusterOptions,
-    DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions,
-    DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
-    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
-    FilterResult, FilterResults, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
+    CreateAclsResult, CreateDelegationTokenOptions, CreateDelegationTokenResult, CreatePartitionsOptions,
+    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
+    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
+    DescribeAclsOptions, DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
+    DescribeClientQuotasOptions, DescribeClientQuotasResult, DescribeClusterOptions, DescribeClusterResult,
+    DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult,
+    DescribeDelegationTokenOptions, DescribeDelegationTokenResult, DescribeLogDirsOptions, DescribeLogDirsResult,
+    DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
+    ElectLeadersOptions, ElectLeadersResult, ExpireDelegationTokenOptions, ExpireDelegationTokenResult, FilterResult,
+    FilterResults, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
     ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
     ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListPartitionReassignmentsOptions,
     ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
     NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RemoveMembersFromConsumerGroupOptions,
-    RemoveMembersFromConsumerGroupResult, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing,
-    TopicMetadataAndConfig,
+    RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, RenewDelegationTokenResult, ReplicaInfo,
+    ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use super::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -152,10 +157,13 @@ use crate::common::requests::{
     ListPartitionReassignmentsRequestBuilder, maybe_truncate_reason,
 };
 use crate::common::{ElectionType, Node};
+use crate::create_delegation_token_request_data::{CreatableRenewers, CreateDelegationTokenRequestData};
+use crate::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
 use crate::leave_group_request_data::MemberIdentity;
 use crate::list_partition_reassignments_request_data::{
     ListPartitionReassignmentsRequestData, ListPartitionReassignmentsTopics,
 };
+use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
 use std::collections::{BTreeSet, HashSet};
 
 /// The default reason sent in a `LeaveGroup` request when an admin removes a
@@ -1079,6 +1087,214 @@ fn get_alter_client_quotas_call(
 
     Call::new(
         "alterClientQuotas",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a `createDelegationToken` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.createDelegationToken`.
+fn get_create_delegation_token_call(
+    options: CreateDelegationTokenOptions,
+    handle: KafkaFutureImpl<DelegationToken>,
+    deadline: i64,
+) -> Call {
+    // The renewer principals are needed both to build the request and to
+    // reconstruct the returned TokenInformation (Java uses `options.renewers()`
+    // in handleResponse), so capture them once.
+    let renewer_principals = options.get_renewers().to_vec();
+    let owner = options.get_owner().cloned();
+    let max_lifetime_ms = options.get_max_lifetime_ms();
+
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = CreateDelegationTokenRequestData::new();
+        data.max_lifetime_ms = max_lifetime_ms;
+        data.renewers = renewer_principals
+            .iter()
+            .map(|principal| {
+                let mut renewer = CreatableRenewers::new();
+                renewer.principal_name = principal.name().to_string();
+                renewer.principal_type = principal.principal_type().to_string();
+                renewer
+            })
+            .collect();
+        if let Some(owner) = &owner {
+            data.owner_principal_name = Some(owner.name().to_string());
+            data.owner_principal_type = Some(owner.principal_type().to_string());
+        }
+        Ok(Box::new(CreateDelegationTokenRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let resp_renewers = options.get_renewers().to_vec();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::CreateDelegationToken(create_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateDelegationToken response"));
+        };
+        // Mirrors CreateDelegationToken handleResponse: error first, else build
+        // the TokenInformation / DelegationToken from the response data using
+        // the requested renewers.
+        if create_response.has_error() {
+            resp_handle.complete_exceptionally(KafkaError::new(create_response.error()));
+        } else {
+            let data = create_response.data();
+            let token_info = TokenInformation::with_requester(
+                data.token_id.clone(),
+                KafkaPrincipal::new(data.principal_type.clone(), data.principal_name.clone()),
+                KafkaPrincipal::new(
+                    data.token_requester_principal_type.clone(),
+                    data.token_requester_principal_name.clone(),
+                ),
+                resp_renewers.clone(),
+                data.issue_timestamp_ms,
+                data.max_timestamp_ms,
+                data.expiry_timestamp_ms,
+            );
+            let token = DelegationToken::new(token_info, data.hmac.clone());
+            resp_handle.complete(token);
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "createDelegationToken",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a `renewDelegationToken` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.renewDelegationToken`.
+fn get_renew_delegation_token_call(
+    hmac: Vec<u8>,
+    renew_time_period_ms: i64,
+    handle: KafkaFutureImpl<i64>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = RenewDelegationTokenRequestData::new();
+        data.hmac = hmac.clone();
+        data.renew_period_ms = renew_time_period_ms;
+        Ok(Box::new(RenewDelegationTokenRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::RenewDelegationToken(renew_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a RenewDelegationToken response"));
+        };
+        if renew_response.has_error() {
+            resp_handle.complete_exceptionally(KafkaError::new(renew_response.error()));
+        } else {
+            resp_handle.complete(renew_response.expiry_timestamp());
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "renewDelegationToken",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds an `expireDelegationToken` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.expireDelegationToken`.
+fn get_expire_delegation_token_call(
+    hmac: Vec<u8>,
+    expiry_time_period_ms: i64,
+    handle: KafkaFutureImpl<i64>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = ExpireDelegationTokenRequestData::new();
+        data.hmac = hmac.clone();
+        data.expiry_time_period_ms = expiry_time_period_ms;
+        Ok(Box::new(ExpireDelegationTokenRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::ExpireDelegationToken(expire_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected an ExpireDelegationToken response"));
+        };
+        if expire_response.has_error() {
+            resp_handle.complete_exceptionally(KafkaError::new(expire_response.error()));
+        } else {
+            resp_handle.complete(expire_response.expiry_timestamp());
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "expireDelegationToken",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds a `describeDelegationToken` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.describeDelegationToken`.
+fn get_describe_delegation_token_call(
+    owners: Option<Vec<KafkaPrincipal>>,
+    handle: KafkaFutureImpl<Vec<DelegationToken>>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        Ok(Box::new(DescribeDelegationTokenRequestBuilder::from_owners(owners.as_deref())) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeDelegationToken(describe_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeDelegationToken response"));
+        };
+        if describe_response.has_error() {
+            resp_handle.complete_exceptionally(KafkaError::new(describe_response.error()));
+        } else {
+            resp_handle.complete(describe_response.tokens());
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "describeDelegationToken",
         deadline,
         NodeProvider::LeastLoaded,
         create_request,
@@ -3723,6 +3939,52 @@ impl Admin for KafkaAdminClient {
             get_alter_client_quotas_call(entries.to_vec(), options.is_validate_only(), Arc::new(handles), deadline);
         self.submit(call);
         AlterClientQuotasResult::new(public)
+    }
+
+    fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let call = get_create_delegation_token_call(options, handle, deadline);
+        self.submit(call);
+        CreateDelegationTokenResult::new(public)
+    }
+
+    fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let call = get_renew_delegation_token_call(hmac.to_vec(), options.get_renew_time_period_ms(), handle, deadline);
+        self.submit(call);
+        RenewDelegationTokenResult::new(public)
+    }
+
+    fn expire_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: ExpireDelegationTokenOptions,
+    ) -> ExpireDelegationTokenResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let call =
+            get_expire_delegation_token_call(hmac.to_vec(), options.get_expiry_time_period_ms(), handle, deadline);
+        self.submit(call);
+        ExpireDelegationTokenResult::new(public)
+    }
+
+    fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let owners = options.get_owners().map(<[KafkaPrincipal]>::to_vec);
+        let call = get_describe_delegation_token_call(owners, handle, deadline);
+        self.submit(call);
+        DescribeDelegationTokenResult::new(public)
     }
 
     async fn close(&self, timeout: Duration) {

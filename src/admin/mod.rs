@@ -32,6 +32,7 @@ pub mod config_entry;
 pub mod consumer_group_description;
 pub mod consumer_group_listing;
 pub mod create_acls_result;
+pub mod create_delegation_token_result;
 pub mod create_partitions_result;
 pub mod create_topics_result;
 pub mod delete_acls_result;
@@ -46,10 +47,12 @@ pub mod describe_client_quotas_result;
 pub mod describe_cluster_result;
 pub mod describe_configs_result;
 pub mod describe_consumer_groups_result;
+pub mod describe_delegation_token_result;
 pub mod describe_log_dirs_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
 pub mod elect_leaders_result;
+pub mod expire_delegation_token_result;
 pub mod group_listing;
 pub mod kafka_admin_client;
 pub mod list_config_resources_result;
@@ -73,6 +76,7 @@ pub mod options;
 pub mod partition_reassignment;
 pub mod records_to_delete;
 pub mod remove_members_from_consumer_group_result;
+pub mod renew_delegation_token_result;
 pub mod replica_info;
 pub mod topic_description;
 pub mod topic_listing;
@@ -95,6 +99,7 @@ pub use consumer_group_listing::ConsumerGroupListing;
 use std::collections::HashMap;
 
 pub use create_acls_result::CreateAclsResult;
+pub use create_delegation_token_result::CreateDelegationTokenResult;
 pub use create_partitions_result::CreatePartitionsResult;
 pub use create_topics_result::{CreateTopicsResult, TopicMetadataAndConfig};
 pub use delete_acls_result::{DeleteAclsResult, FilterResult, FilterResults};
@@ -109,10 +114,12 @@ pub use describe_client_quotas_result::DescribeClientQuotasResult;
 pub use describe_cluster_result::DescribeClusterResult;
 pub use describe_configs_result::DescribeConfigsResult;
 pub use describe_consumer_groups_result::DescribeConsumerGroupsResult;
+pub use describe_delegation_token_result::DescribeDelegationTokenResult;
 pub use describe_log_dirs_result::DescribeLogDirsResult;
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
 pub use elect_leaders_result::ElectLeadersResult;
+pub use expire_delegation_token_result::ExpireDelegationTokenResult;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_config_resources_result::ListConfigResourcesResult;
@@ -137,17 +144,20 @@ pub use offset_spec::OffsetSpec;
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
     AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreateAclsOptions, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
-    DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions, DescribeClassicGroupsOptions,
-    DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
-    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreateAclsOptions, CreateDelegationTokenOptions,
+    CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions,
+    DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions,
     ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions,
     ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
+    RenewDelegationTokenOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
 pub use remove_members_from_consumer_group_result::RemoveMembersFromConsumerGroupResult;
+pub use renew_delegation_token_result::RenewDelegationTokenResult;
 pub use replica_info::ReplicaInfo;
 pub use topic_description::TopicDescription;
 pub use topic_listing::TopicListing;
@@ -434,6 +444,34 @@ pub trait Admin: Send + Sync {
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
     ) -> AlterClientQuotasResult;
+
+    /// Create a delegation token.
+    ///
+    /// Corresponds to
+    /// `Admin.createDelegationToken(CreateDelegationTokenOptions)`.
+    fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult;
+
+    /// Renew a delegation token identified by its HMAC.
+    ///
+    /// Corresponds to
+    /// `Admin.renewDelegationToken(byte[], RenewDelegationTokenOptions)`.
+    fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult;
+
+    /// Expire a delegation token identified by its HMAC.
+    ///
+    /// Corresponds to
+    /// `Admin.expireDelegationToken(byte[], ExpireDelegationTokenOptions)`.
+    fn expire_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: ExpireDelegationTokenOptions,
+    ) -> ExpireDelegationTokenResult;
+
+    /// Describe the delegation tokens matching the provided owners filter.
+    ///
+    /// Corresponds to
+    /// `Admin.describeDelegationToken(DescribeDelegationTokenOptions)`.
+    fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

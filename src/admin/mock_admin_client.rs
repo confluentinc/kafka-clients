@@ -29,22 +29,24 @@ use crate::admin::{
     Admin, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult,
     AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult, AlterPartitionReassignmentsOptions,
     AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription,
-    Config, ConfigEntry, ConsumerGroupDescription, CreateAclsOptions, CreateAclsResult, CreatePartitionsOptions,
-    CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions,
-    DeleteConsumerGroupsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult,
-    DeletedRecords, DescribeAclsOptions, DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
-    DescribeClientQuotasOptions, DescribeClientQuotasResult, DescribeClusterOptions, DescribeClusterResult,
-    DescribeConfigsOptions, DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult,
-    DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult,
-    DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, GroupListing, GroupOffsets,
-    ListConfigResourcesOptions, ListConfigResourcesResult, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsResult, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult,
-    ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo, ListPartitionReassignmentsOptions,
-    ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult, LogDirDescription, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult, ReplicaInfo, ReplicaLogDirInfo,
-    TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Config, ConfigEntry, ConsumerGroupDescription, CreateAclsOptions, CreateAclsResult, CreateDelegationTokenOptions,
+    CreateDelegationTokenResult, CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions,
+    CreateTopicsResult, DeleteAclsOptions, DeleteAclsResult, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupOffsetsResult, DeleteConsumerGroupsOptions, DeleteConsumerGroupsResult, DeleteRecordsOptions,
+    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeAclsOptions,
+    DescribeAclsResult, DescribeClassicGroupsOptions, DescribeClassicGroupsResult, DescribeClientQuotasOptions,
+    DescribeClientQuotasResult, DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions,
+    DescribeConfigsResult, DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeDelegationTokenOptions,
+    DescribeDelegationTokenResult, DescribeLogDirsOptions, DescribeLogDirsResult, DescribeReplicaLogDirsOptions,
+    DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult,
+    ExpireDelegationTokenOptions, ExpireDelegationTokenResult, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConfigResourcesResult, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsResult,
+    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions,
+    ListTopicsResult, LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, RenewDelegationTokenResult, ReplicaInfo,
+    ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
@@ -55,6 +57,8 @@ use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
+use crate::common::security::auth::KafkaPrincipal;
+use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::{GroupState, GroupType};
 use crate::common::{
     KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
@@ -129,6 +133,8 @@ struct State {
     // Committed consumer-group offsets seeded via `update_consumer_group_offsets`,
     // returned by `list_consumer_group_offsets` (mirrors Java's `committedOffsets`).
     committed_offsets: HashMap<TopicPartition, i64>,
+    // In-memory delegation tokens (mirrors Java's `allTokens`).
+    all_tokens: Vec<DelegationToken>,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -187,6 +193,7 @@ impl MockAdminClient {
                 beginning_offsets: HashMap::new(),
                 end_offsets: HashMap::new(),
                 committed_offsets: HashMap::new(),
+                all_tokens: Vec::new(),
             }),
         }
     }
@@ -289,6 +296,16 @@ impl MockAdminClient {
 
 fn timeout_error() -> KafkaError {
     KafkaError::Timeout("The mock timed out the request.".to_string())
+}
+
+/// Current wall-clock time in milliseconds since the Unix epoch, mirroring
+/// Java's `System.currentTimeMillis()` used by the mock's delegation-token
+/// methods.
+fn current_time_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as i64
 }
 
 /// Computes the `PartitionReassignment` for a partition from the mock's stored
@@ -1397,6 +1414,116 @@ impl Admin for MockAdminClient {
         AlterClientQuotasResult::new(futures)
     }
 
+    fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
+        // Mirrors MockAdminClient.createDelegationToken: reject any non-User
+        // renewer, otherwise mint a token whose id doubles as its HMAC and
+        // whose owner is the first renewer, and store it in `all_tokens`.
+        let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
+        for renewer in options.get_renewers() {
+            if renewer.principal_type() != KafkaPrincipal::USER_TYPE {
+                handle.complete_exceptionally(KafkaError::with_message(Errors::InvalidPrincipalType, ""));
+                return CreateDelegationTokenResult::new(handle.future());
+            }
+        }
+
+        let token_id = Uuid::random_uuid().to_string();
+        // Java uses `options.renewers().get(0)` as the owner; the delegation
+        // token's HMAC is the UTF-8 bytes of the token id.
+        let owner = options.get_renewers()[0].clone();
+        let token_info = TokenInformation::new(
+            token_id.clone(),
+            owner,
+            options.get_renewers().to_vec(),
+            current_time_millis(),
+            options.get_max_lifetime_ms(),
+            -1,
+        );
+        let token = DelegationToken::new(token_info, token_id.into_bytes());
+        self.state.lock().unwrap().all_tokens.push(token.clone());
+        handle.complete(token);
+        CreateDelegationTokenResult::new(handle.future())
+    }
+
+    fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult {
+        // Mirrors MockAdminClient.renewDelegationToken: update the expiry of
+        // every matching token; error if none matched.
+        let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
+        let expiry_timestamp = options.get_renew_time_period_ms();
+        let mut token_found = false;
+        {
+            let mut state = self.state.lock().unwrap();
+            for token in &mut state.all_tokens {
+                if token.hmac() == hmac {
+                    token.token_info_mut().set_expiry_timestamp(expiry_timestamp);
+                    token_found = true;
+                }
+            }
+        }
+        if token_found {
+            handle.complete(expiry_timestamp);
+        } else {
+            handle.complete_exceptionally(KafkaError::with_message(Errors::DelegationTokenNotFound, ""));
+        }
+        RenewDelegationTokenResult::new(handle.future())
+    }
+
+    fn expire_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: ExpireDelegationTokenOptions,
+    ) -> ExpireDelegationTokenResult {
+        // Mirrors MockAdminClient.expireDelegationToken: remove matching tokens
+        // whose expiry period is the `-1` sentinel or already in the past;
+        // error if none matched.
+        let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
+        let expiry_timestamp = options.get_expiry_time_period_ms();
+        let now = current_time_millis();
+        let mut token_found = false;
+        let mut tokens_to_remove = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            for token in &state.all_tokens {
+                if token.hmac() == hmac {
+                    if expiry_timestamp == -1 || expiry_timestamp < now {
+                        tokens_to_remove.push(token.clone());
+                    }
+                    token_found = true;
+                }
+            }
+            if token_found {
+                state.all_tokens.retain(|token| !tokens_to_remove.contains(token));
+            }
+        }
+        if token_found {
+            handle.complete(expiry_timestamp);
+        } else {
+            handle.complete_exceptionally(KafkaError::with_message(Errors::DelegationTokenNotFound, ""));
+        }
+        ExpireDelegationTokenResult::new(handle.future())
+    }
+
+    fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult {
+        // Mirrors MockAdminClient.describeDelegationToken: no owners filter
+        // returns every token; otherwise only tokens whose owner is in the
+        // filter. (Java NPEs on a null owners list; the Rust option models the
+        // nullable field, and both a null and an empty filter return all
+        // tokens — matching the real client's "null describes all" contract.)
+        let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
+        let state = self.state.lock().unwrap();
+        let tokens = match options.get_owners() {
+            // Null or empty owners filter -> describe all tokens.
+            None | Some([]) => state.all_tokens.clone(),
+            Some(owners) => state
+                .all_tokens
+                .iter()
+                .filter(|token| owners.contains(token.token_info().owner()))
+                .cloned()
+                .collect(),
+        };
+        handle.complete(tokens);
+        DescribeDelegationTokenResult::new(handle.future())
+    }
+
     async fn close(&self, _timeout: Duration) {
         // Nothing to close for the in-memory mock.
     }
@@ -1745,5 +1872,157 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed, vec![ConfigResource::new(ConfigResourceType::Topic, "t".to_string())]);
+    }
+
+    // --- Delegation tokens ---
+    //
+    // There are ZERO Java client-side unit tests for delegation tokens anywhere
+    // in `clients/src/test/java` (Milestone-11 finding #10). The tests below are
+    // NEW, written against `MockAdminClient`'s real in-memory logic
+    // (MockAdminClient.java ~641-725), which is the authoritative behavioral
+    // reference for this phase.
+
+    fn user(name: &str) -> KafkaPrincipal {
+        KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, name)
+    }
+
+    /// New test, no Java original: a non-`User`-type renewer is rejected with
+    /// `InvalidPrincipalType` and the exact (empty) message Java uses.
+    #[tokio::test]
+    async fn create_delegation_token_rejects_non_user_renewer() {
+        let client = admin();
+        let options = CreateDelegationTokenOptions::new().renewers(vec![KafkaPrincipal::new("Group", "admins")]);
+        let err = client
+            .create_delegation_token(options)
+            .delegation_token()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidPrincipalType);
+        assert_eq!(err.message(), "");
+    }
+
+    /// New test, no Java original: a created token is owned by the first
+    /// renewer, has the `-1` (unexpired) sentinel, and is listed by an
+    /// unfiltered describe.
+    #[tokio::test]
+    async fn create_then_describe_lists_token() {
+        let client = admin();
+        let options = CreateDelegationTokenOptions::new()
+            .renewers(vec![user("alice")])
+            .max_lifetime_ms(1000);
+        let token = client.create_delegation_token(options).delegation_token().get().await.unwrap();
+        assert_eq!(token.token_info().owner(), &user("alice"));
+        assert_eq!(token.token_info().max_timestamp(), 1000);
+        assert_eq!(token.token_info().expiry_timestamp(), -1);
+        assert_eq!(token.hmac(), token.token_info().token_id().as_bytes());
+
+        let listed = client
+            .describe_delegation_token(DescribeDelegationTokenOptions::new())
+            .delegation_tokens()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![token]);
+    }
+
+    /// New test, no Java original: renewing an unknown HMAC fails with
+    /// `DelegationTokenNotFound`; renewing a known HMAC updates the expiry.
+    #[tokio::test]
+    async fn renew_delegation_token_found_and_not_found() {
+        let client = admin();
+        let unknown = client
+            .renew_delegation_token(b"nope", RenewDelegationTokenOptions::new().renew_time_period_ms(10))
+            .expiry_timestamp()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.error(), Errors::DelegationTokenNotFound);
+        assert_eq!(unknown.message(), "");
+
+        let token = client
+            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
+        let expiry = client
+            .renew_delegation_token(token.hmac(), RenewDelegationTokenOptions::new().renew_time_period_ms(4242))
+            .expiry_timestamp()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(expiry, 4242);
+    }
+
+    /// New test, no Java original: expiring an unknown HMAC fails with
+    /// `DelegationTokenNotFound`.
+    #[tokio::test]
+    async fn expire_delegation_token_not_found() {
+        let client = admin();
+        let err = client
+            .expire_delegation_token(b"nope", ExpireDelegationTokenOptions::new())
+            .expiry_timestamp()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(err.error(), Errors::DelegationTokenNotFound);
+        assert_eq!(err.message(), "");
+    }
+
+    /// New test, no Java original: expiring with the `-1` sentinel removes the
+    /// token so a later describe no longer lists it.
+    #[tokio::test]
+    async fn expire_delegation_token_negative_one_removes_token() {
+        let client = admin();
+        let token = client
+            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
+
+        let expiry = client
+            .expire_delegation_token(token.hmac(), ExpireDelegationTokenOptions::new().expiry_time_period_ms(-1))
+            .expiry_timestamp()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(expiry, -1);
+
+        let listed = client
+            .describe_delegation_token(DescribeDelegationTokenOptions::new())
+            .delegation_tokens()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+    }
+
+    /// New test, no Java original: a describe with an `owners` filter returns
+    /// only tokens whose owner matches.
+    #[tokio::test]
+    async fn describe_delegation_token_owners_filter() {
+        let client = admin();
+        let token_alice = client
+            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
+        let _token_bob = client
+            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("bob")]))
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
+
+        let listed = client
+            .describe_delegation_token(DescribeDelegationTokenOptions::new().owners(Some(vec![user("alice")])))
+            .delegation_tokens()
+            .get()
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![token_alice]);
     }
 }
