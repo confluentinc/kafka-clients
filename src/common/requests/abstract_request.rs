@@ -47,16 +47,20 @@ use crate::describe_configs_request_data::DescribeConfigsRequestData;
 use crate::describe_delegation_token_request_data::DescribeDelegationTokenRequestData;
 use crate::describe_groups_request_data::DescribeGroupsRequestData;
 use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
+use crate::describe_producers_request_data::DescribeProducersRequestData;
+use crate::describe_transactions_request_data::DescribeTransactionsRequestData;
 use crate::elect_leaders_request_data::ElectLeadersRequestData;
 use crate::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
+use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::leave_group_request_data::LeaveGroupRequestData;
 use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
+use crate::list_transactions_request_data::ListTransactionsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
 use crate::offset_delete_request_data::OffsetDeleteRequestData;
@@ -67,6 +71,7 @@ use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 use crate::update_features_request_data::UpdateFeaturesRequestData;
+use crate::write_txn_markers_request_data::WriteTxnMarkersRequestData;
 
 use super::AlterClientQuotasRequest;
 use super::AlterPartitionReassignmentsRequest;
@@ -90,16 +95,20 @@ use super::DescribeConfigsRequest;
 use super::DescribeDelegationTokenRequest;
 use super::DescribeGroupsRequest;
 use super::DescribeLogDirsRequest;
+use super::DescribeProducersRequest;
+use super::DescribeTransactionsRequest;
 use super::ElectLeadersRequest;
 use super::ExpireDelegationTokenRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::IncrementalAlterConfigsRequest;
+use super::InitProducerIdRequest;
 use super::LeaveGroupRequest;
 use super::ListConfigResourcesRequest;
 use super::ListGroupsRequest;
 use super::ListOffsetsRequest;
 use super::ListPartitionReassignmentsRequest;
+use super::ListTransactionsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
 use super::OffsetDeleteRequest;
@@ -113,6 +122,7 @@ use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
 use super::UpdateFeaturesRequest;
+use super::WriteTxnMarkersRequest;
 
 /// Trait for building requests at a specific version.
 ///
@@ -236,6 +246,16 @@ pub enum ConcreteRequest {
     DescribeDelegationToken(DescribeDelegationTokenRequest),
     /// An UpdateFeatures request.
     UpdateFeatures(UpdateFeaturesRequest),
+    /// A DescribeProducers request.
+    DescribeProducers(DescribeProducersRequest),
+    /// A DescribeTransactions request.
+    DescribeTransactions(DescribeTransactionsRequest),
+    /// An InitProducerId request.
+    InitProducerId(InitProducerIdRequest),
+    /// A WriteTxnMarkers request.
+    WriteTxnMarkers(WriteTxnMarkersRequest),
+    /// A ListTransactions request.
+    ListTransactions(ListTransactionsRequest),
 }
 
 impl ConcreteRequest {
@@ -283,6 +303,11 @@ impl ConcreteRequest {
             Self::ExpireDelegationToken(r) => r.version(),
             Self::DescribeDelegationToken(r) => r.version(),
             Self::UpdateFeatures(r) => r.version(),
+            Self::DescribeProducers(r) => r.version(),
+            Self::DescribeTransactions(r) => r.version(),
+            Self::InitProducerId(r) => r.version(),
+            Self::WriteTxnMarkers(r) => r.version(),
+            Self::ListTransactions(r) => r.version(),
         }
     }
 
@@ -330,6 +355,11 @@ impl ConcreteRequest {
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
             Self::UpdateFeatures(r) => r.api_key(),
+            Self::DescribeProducers(r) => r.api_key(),
+            Self::DescribeTransactions(r) => r.api_key(),
+            Self::InitProducerId(r) => r.api_key(),
+            Self::WriteTxnMarkers(r) => r.api_key(),
+            Self::ListTransactions(r) => r.api_key(),
         }
     }
 
@@ -383,6 +413,11 @@ impl ConcreteRequest {
             Self::ExpireDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::UpdateFeatures(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeProducers(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::InitProducerId(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::WriteTxnMarkers(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -540,6 +575,21 @@ impl ConcreteRequest {
             Self::UpdateFeatures(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeProducers(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeTransactions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::InitProducerId(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::WriteTxnMarkers(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListTransactions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -594,6 +644,11 @@ impl ConcreteRequest {
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
+            Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -659,6 +714,11 @@ impl ConcreteRequest {
             Self::ExpireDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::UpdateFeatures(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeProducers(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::InitProducerId(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::WriteTxnMarkers(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -870,6 +930,26 @@ impl ConcreteRequest {
                 let data = UpdateFeaturesRequestData::read(readable, api_version)?;
                 Ok(Self::UpdateFeatures(UpdateFeaturesRequest::new(data, api_version)))
             },
+            ApiKeys::DESCRIBE_PRODUCERS => {
+                let data = DescribeProducersRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeProducers(DescribeProducersRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_TRANSACTIONS => {
+                let data = DescribeTransactionsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeTransactions(DescribeTransactionsRequest::new(data, api_version)))
+            },
+            ApiKeys::INIT_PRODUCER_ID => {
+                let data = InitProducerIdRequestData::read(readable, api_version)?;
+                Ok(Self::InitProducerId(InitProducerIdRequest::new(data, api_version)))
+            },
+            ApiKeys::WRITE_TXN_MARKERS => {
+                let data = WriteTxnMarkersRequestData::read(readable, api_version)?;
+                Ok(Self::WriteTxnMarkers(WriteTxnMarkersRequest::new(data, api_version)))
+            },
+            ApiKeys::LIST_TRANSACTIONS => {
+                let data = ListTransactionsRequestData::read(readable, api_version)?;
+                Ok(Self::ListTransactions(ListTransactionsRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -922,6 +1002,11 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
             Self::UpdateFeatures(r) => write!(f, "{r}"),
+            Self::DescribeProducers(r) => write!(f, "{r}"),
+            Self::DescribeTransactions(r) => write!(f, "{r}"),
+            Self::InitProducerId(r) => write!(f, "{r}"),
+            Self::WriteTxnMarkers(r) => write!(f, "{r}"),
+            Self::ListTransactions(r) => write!(f, "{r}"),
         }
     }
 }

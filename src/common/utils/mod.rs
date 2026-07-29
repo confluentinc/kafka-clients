@@ -18,9 +18,11 @@ pub mod exponential_backoff;
 pub mod log_context;
 #[macro_use]
 pub mod log_macros;
+pub mod producer_id_and_epoch;
 
 pub use exponential_backoff::ExponentialBackoff;
 pub use log_context::LogContext;
+pub use producer_id_and_epoch::ProducerIdAndEpoch;
 
 /// Converts a signed i32 to a non-negative value by clearing the sign bit.
 ///

@@ -62,6 +62,10 @@ pub mod describe_groups_request;
 pub mod describe_groups_response;
 pub mod describe_log_dirs_request;
 pub mod describe_log_dirs_response;
+pub mod describe_producers_request;
+pub mod describe_producers_response;
+pub mod describe_transactions_request;
+pub mod describe_transactions_response;
 pub mod elect_leaders_request;
 pub mod elect_leaders_response;
 pub mod expire_delegation_token_request;
@@ -73,6 +77,8 @@ pub mod find_coordinator_request;
 pub mod find_coordinator_response;
 pub mod incremental_alter_configs_request;
 pub mod incremental_alter_configs_response;
+pub mod init_producer_id_request;
+pub mod init_producer_id_response;
 pub mod join_group_request;
 pub mod leave_group_request;
 pub mod leave_group_response;
@@ -84,6 +90,8 @@ pub mod list_offsets_request;
 pub mod list_offsets_response;
 pub mod list_partition_reassignments_request;
 pub mod list_partition_reassignments_response;
+pub mod list_transactions_request;
+pub mod list_transactions_response;
 pub mod metadata_request;
 pub mod metadata_response;
 pub mod offset_commit_request;
@@ -110,6 +118,8 @@ pub mod sasl_handshake_response;
 pub mod send_builder;
 pub mod update_features_request;
 pub mod update_features_response;
+pub mod write_txn_markers_request;
+pub mod write_txn_markers_response;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
@@ -168,6 +178,10 @@ pub use describe_groups_request::{DescribeGroupsRequest, DescribeGroupsRequestBu
 pub use describe_groups_response::DescribeGroupsResponse;
 pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsRequestBuilder};
 pub use describe_log_dirs_response::DescribeLogDirsResponse;
+pub use describe_producers_request::{DescribeProducersRequest, DescribeProducersRequestBuilder};
+pub use describe_producers_response::DescribeProducersResponse;
+pub use describe_transactions_request::{DescribeTransactionsRequest, DescribeTransactionsRequestBuilder};
+pub use describe_transactions_response::DescribeTransactionsResponse;
 pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
 pub use elect_leaders_response::ElectLeadersResponse;
 pub use expire_delegation_token_request::{ExpireDelegationTokenRequest, ExpireDelegationTokenRequestBuilder};
@@ -180,6 +194,8 @@ pub use find_coordinator_request::{
 pub use find_coordinator_response::FindCoordinatorResponse;
 pub use incremental_alter_configs_request::{IncrementalAlterConfigsRequest, IncrementalAlterConfigsRequestBuilder};
 pub use incremental_alter_configs_response::IncrementalAlterConfigsResponse;
+pub use init_producer_id_request::{InitProducerIdRequest, InitProducerIdRequestBuilder};
+pub use init_producer_id_response::InitProducerIdResponse;
 pub use join_group_request::{MAX_REASON_LENGTH, UNKNOWN_MEMBER_ID, maybe_truncate_reason};
 pub use leave_group_request::{LeaveGroupRequest, LeaveGroupRequestBuilder};
 pub use leave_group_response::LeaveGroupResponse;
@@ -193,6 +209,8 @@ pub use list_partition_reassignments_request::{
     ListPartitionReassignmentsRequest, ListPartitionReassignmentsRequestBuilder,
 };
 pub use list_partition_reassignments_response::ListPartitionReassignmentsResponse;
+pub use list_transactions_request::{ListTransactionsRequest, ListTransactionsRequestBuilder};
+pub use list_transactions_response::ListTransactionsResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
 pub use offset_commit_request::{OffsetCommitRequest, OffsetCommitRequestBuilder};
@@ -217,6 +235,8 @@ pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 pub use update_features_request::{FeatureUpdateItem, UpdateFeaturesRequest, UpdateFeaturesRequestBuilder};
 pub use update_features_response::UpdateFeaturesResponse;
+pub use write_txn_markers_request::{WriteTxnMarkersRequest, WriteTxnMarkersRequestBuilder};
+pub use write_txn_markers_response::WriteTxnMarkersResponse;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
 ///

@@ -49,16 +49,20 @@ use super::DescribeConfigsResponse;
 use super::DescribeDelegationTokenResponse;
 use super::DescribeGroupsResponse;
 use super::DescribeLogDirsResponse;
+use super::DescribeProducersResponse;
+use super::DescribeTransactionsResponse;
 use super::ElectLeadersResponse;
 use super::ExpireDelegationTokenResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::IncrementalAlterConfigsResponse;
+use super::InitProducerIdResponse;
 use super::LeaveGroupResponse;
 use super::ListConfigResourcesResponse;
 use super::ListGroupsResponse;
 use super::ListOffsetsResponse;
 use super::ListPartitionReassignmentsResponse;
+use super::ListTransactionsResponse;
 use super::MetadataResponse;
 use super::OffsetCommitResponse;
 use super::OffsetDeleteResponse;
@@ -72,6 +76,7 @@ use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
 use super::UpdateFeaturesResponse;
+use super::WriteTxnMarkersResponse;
 
 /// Default throttle time in milliseconds.
 pub const DEFAULT_THROTTLE_TIME: i32 = 0;
@@ -166,6 +171,16 @@ pub enum ConcreteResponse {
     DescribeDelegationToken(DescribeDelegationTokenResponse),
     /// An UpdateFeatures response.
     UpdateFeatures(UpdateFeaturesResponse),
+    /// A DescribeProducers response.
+    DescribeProducers(DescribeProducersResponse),
+    /// A DescribeTransactions response.
+    DescribeTransactions(DescribeTransactionsResponse),
+    /// An InitProducerId response.
+    InitProducerId(InitProducerIdResponse),
+    /// A WriteTxnMarkers response.
+    WriteTxnMarkers(WriteTxnMarkersResponse),
+    /// A ListTransactions response.
+    ListTransactions(ListTransactionsResponse),
 }
 
 impl ConcreteResponse {
@@ -213,6 +228,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
             Self::UpdateFeatures(r) => r.api_key(),
+            Self::DescribeProducers(r) => r.api_key(),
+            Self::DescribeTransactions(r) => r.api_key(),
+            Self::InitProducerId(r) => r.api_key(),
+            Self::WriteTxnMarkers(r) => r.api_key(),
+            Self::ListTransactions(r) => r.api_key(),
         }
     }
 
@@ -266,6 +286,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::UpdateFeatures(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeProducers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::InitProducerId(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::WriteTxnMarkers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ListTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -401,6 +426,21 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeProducers(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeTransactions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::InitProducerId(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::WriteTxnMarkers(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListTransactions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -454,6 +494,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
+            Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -511,6 +556,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.error_counts(),
             Self::DescribeDelegationToken(r) => r.error_counts(),
             Self::UpdateFeatures(r) => r.error_counts(),
+            Self::DescribeProducers(r) => r.error_counts(),
+            Self::DescribeTransactions(r) => r.error_counts(),
+            Self::InitProducerId(r) => r.error_counts(),
+            Self::WriteTxnMarkers(r) => r.error_counts(),
+            Self::ListTransactions(r) => r.error_counts(),
         }
     }
 
@@ -560,6 +610,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.throttle_time_ms(),
             Self::DescribeDelegationToken(r) => r.throttle_time_ms(),
             Self::UpdateFeatures(r) => r.throttle_time_ms(),
+            Self::DescribeProducers(r) => r.throttle_time_ms(),
+            Self::DescribeTransactions(r) => r.throttle_time_ms(),
+            Self::InitProducerId(r) => r.throttle_time_ms(),
+            Self::WriteTxnMarkers(r) => r.throttle_time_ms(),
+            Self::ListTransactions(r) => r.throttle_time_ms(),
         }
     }
 
@@ -608,6 +663,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::UpdateFeatures(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeProducers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::InitProducerId(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::WriteTxnMarkers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ListTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -655,6 +715,11 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.should_client_throttle(version),
             Self::DescribeDelegationToken(r) => r.should_client_throttle(version),
             Self::UpdateFeatures(r) => r.should_client_throttle(version),
+            Self::DescribeProducers(r) => r.should_client_throttle(version),
+            Self::DescribeTransactions(r) => r.should_client_throttle(version),
+            Self::InitProducerId(r) => r.should_client_throttle(version),
+            Self::WriteTxnMarkers(r) => r.should_client_throttle(version),
+            Self::ListTransactions(r) => r.should_client_throttle(version),
         }
     }
 
@@ -867,6 +932,26 @@ impl ConcreteResponse {
                 let response = UpdateFeaturesResponse::parse(readable, version)?;
                 Ok(Self::UpdateFeatures(response))
             },
+            ApiKeys::DESCRIBE_PRODUCERS => {
+                let response = DescribeProducersResponse::parse(readable, version)?;
+                Ok(Self::DescribeProducers(response))
+            },
+            ApiKeys::DESCRIBE_TRANSACTIONS => {
+                let response = DescribeTransactionsResponse::parse(readable, version)?;
+                Ok(Self::DescribeTransactions(response))
+            },
+            ApiKeys::INIT_PRODUCER_ID => {
+                let response = InitProducerIdResponse::parse(readable, version)?;
+                Ok(Self::InitProducerId(response))
+            },
+            ApiKeys::WRITE_TXN_MARKERS => {
+                let response = WriteTxnMarkersResponse::parse(readable, version)?;
+                Ok(Self::WriteTxnMarkers(response))
+            },
+            ApiKeys::LIST_TRANSACTIONS => {
+                let response = ListTransactionsResponse::parse(readable, version)?;
+                Ok(Self::ListTransactions(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -919,6 +1004,11 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
             Self::UpdateFeatures(r) => write!(f, "{r}"),
+            Self::DescribeProducers(r) => write!(f, "{r}"),
+            Self::DescribeTransactions(r) => write!(f, "{r}"),
+            Self::InitProducerId(r) => write!(f, "{r}"),
+            Self::WriteTxnMarkers(r) => write!(f, "{r}"),
+            Self::ListTransactions(r) => write!(f, "{r}"),
         }
     }
 }
