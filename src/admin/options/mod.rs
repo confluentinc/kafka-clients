@@ -50,6 +50,7 @@ pub mod describe_transactions_options;
 pub mod elect_leaders_options;
 pub mod expire_delegation_token_options;
 pub mod fence_producers_options;
+pub mod list_client_metrics_resources_options;
 pub mod list_config_resources_options;
 pub mod list_consumer_group_offsets_options;
 pub mod list_consumer_groups_options;
@@ -94,6 +95,8 @@ pub use describe_transactions_options::DescribeTransactionsOptions;
 pub use elect_leaders_options::ElectLeadersOptions;
 pub use expire_delegation_token_options::ExpireDelegationTokenOptions;
 pub use fence_producers_options::FenceProducersOptions;
+#[allow(deprecated)]
+pub use list_client_metrics_resources_options::ListClientMetricsResourcesOptions;
 pub use list_config_resources_options::ListConfigResourcesOptions;
 pub use list_consumer_group_offsets_options::ListConsumerGroupOffsetsOptions;
 #[allow(deprecated)]

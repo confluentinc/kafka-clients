@@ -251,3 +251,65 @@ async fn test_list_config_resources_lists_resources() {
     admin.close(Duration::from_secs(5)).await;
     ctx.cleanup().await;
 }
+
+/// End-to-end check of the deprecated `listClientMetricsResources` RPC against
+/// a real Kafka 4.2.0 broker. Seeds a KIP-714 client-metrics subscription with
+/// `incrementalAlterConfigs` on a `CLIENT_METRICS` config resource, then asserts
+/// it shows up in the listing. Mirrors the intent of Java's
+/// `KafkaAdminClientIntegrationTest` client-metrics coverage.
+#[tokio::test]
+#[allow(deprecated)]
+async fn test_list_client_metrics_resources_lists_subscription() {
+    use confluent_kafka::admin::ListClientMetricsResourcesOptions;
+
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let admin = admin_for(ctx.bootstrap_servers());
+
+    // A client-metrics subscription is a CLIENT_METRICS config resource; create
+    // one by setting its subscription configs (KIP-714). `interval.ms` is the
+    // push interval; `metrics` scopes which client metrics are collected.
+    let subscription = ctx.topic("admin_client_metrics_sub");
+    let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, subscription.clone());
+    let ops = vec![
+        AlterConfigOp::new(
+            ConfigEntry::new("interval.ms".to_string(), Some("60000".to_string())),
+            OpType::Set,
+        ),
+        AlterConfigOp::new(ConfigEntry::new("metrics".to_string(), Some(String::new())), OpType::Set),
+    ];
+    let mut configs = HashMap::new();
+    configs.insert(resource.clone(), ops);
+    admin
+        .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("create client-metrics subscription");
+
+    let listings = admin
+        .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("list client metrics resources");
+    assert!(
+        listings.iter().any(|l| l.name() == subscription),
+        "expected the created subscription {subscription:?} in {listings:?}"
+    );
+
+    // Delete the subscription so the broker is left clean.
+    let delete_ops = vec![AlterConfigOp::new(
+        ConfigEntry::new("interval.ms".to_string(), None),
+        OpType::Delete,
+    )];
+    let mut delete_configs = HashMap::new();
+    delete_configs.insert(resource, delete_ops);
+    let _ = admin
+        .incremental_alter_configs(&delete_configs, AlterConfigsOptions::new())
+        .all()
+        .get()
+        .await;
+
+    admin.close(Duration::from_secs(5)).await;
+    ctx.cleanup().await;
+}

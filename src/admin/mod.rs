@@ -29,6 +29,7 @@ pub mod alter_consumer_group_offsets_result;
 pub mod alter_partition_reassignments_result;
 pub mod alter_replica_log_dirs_result;
 pub mod classic_group_description;
+pub mod client_metrics_resource_listing;
 pub mod config;
 pub mod config_entry;
 pub mod consumer_group_description;
@@ -64,6 +65,7 @@ pub mod fence_producers_result;
 pub mod finalized_version_range;
 pub mod group_listing;
 pub mod kafka_admin_client;
+pub mod list_client_metrics_resources_result;
 pub mod list_config_resources_result;
 pub mod list_consumer_group_offsets_result;
 pub mod list_consumer_group_offsets_spec;
@@ -110,6 +112,8 @@ pub use alter_consumer_group_offsets_result::AlterConsumerGroupOffsetsResult;
 pub use alter_partition_reassignments_result::AlterPartitionReassignmentsResult;
 pub use alter_replica_log_dirs_result::AlterReplicaLogDirsResult;
 pub use classic_group_description::ClassicGroupDescription;
+#[allow(deprecated)]
+pub use client_metrics_resource_listing::ClientMetricsResourceListing;
 pub use config::Config;
 pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
 pub use consumer_group_description::ConsumerGroupDescription;
@@ -148,6 +152,8 @@ pub use fence_producers_result::FenceProducersResult;
 pub use finalized_version_range::FinalizedVersionRange;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
+#[allow(deprecated)]
+pub use list_client_metrics_resources_result::ListClientMetricsResourcesResult;
 pub use list_config_resources_result::ListConfigResourcesResult;
 pub use list_consumer_group_offsets_result::{GroupOffsets, ListConsumerGroupOffsetsResult};
 pub use list_consumer_group_offsets_spec::ListConsumerGroupOffsetsSpec;
@@ -167,6 +173,8 @@ pub use new_partition_reassignment::NewPartitionReassignment;
 pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
 pub use offset_spec::OffsetSpec;
+#[allow(deprecated)]
+pub use options::ListClientMetricsResourcesOptions;
 #[allow(deprecated)]
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
@@ -337,6 +345,17 @@ pub trait Admin: Send + Sync {
         config_resource_types: &HashSet<ConfigResourceType>,
         options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult;
+
+    /// List the client metrics resources available in the cluster.
+    ///
+    /// Corresponds to `Admin.listClientMetricsResources(ListClientMetricsResourcesOptions)`
+    /// (deprecated since 4.1 in favor of
+    /// [`list_config_resources`](Admin::list_config_resources)).
+    #[allow(deprecated)]
+    fn list_client_metrics_resources(
+        &self,
+        options: ListClientMetricsResourcesOptions,
+    ) -> ListClientMetricsResourcesResult;
 
     /// Query the information of all log directories on the given set of
     /// brokers.

@@ -90,4 +90,6 @@
 - [M11 Tier3 P2 client quotas](m11_tier3_phase2_client_quotas_notes.md) — ClientQuotaMatch tri-state enum; Op None=removal; manual Hash for map-key entity; generated msg data pre-existed
 - [M11 Tier3 P4 delegation tokens](m11_tier3_phase4_delegation_tokens_notes.md) — prereqs+wire+mock; admin has no SASL so integration deferred; TokenInformation eq/hash quirk
 - [M11 Tier3 P5 features](m11_tier3_phase5_features_notes.md) — describe reuses ApiVersions; updateFeatures net-new wire + Result-for-sync-throw; mock version-bounds validation (finding #9)
+- [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
+- [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary

@@ -158,7 +158,10 @@ use super::{
     ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
-use super::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
+use super::{
+    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions,
+    ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
+};
 use super::{
     DescribeFeaturesOptions, DescribeFeaturesResult, FeatureMetadata, FeatureUpdate, FinalizedVersionRange,
     SupportedVersionRange, UpdateFeaturesOptions, UpdateFeaturesResult,
@@ -3353,6 +3356,64 @@ impl Admin for KafkaAdminClient {
         );
         self.submit(call);
         ListConfigResourcesResult::new(public)
+    }
+
+    #[allow(deprecated)]
+    fn list_client_metrics_resources(
+        &self,
+        options: ListClientMetricsResourcesOptions,
+    ) -> ListClientMetricsResourcesResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<Vec<ClientMetricsResourceListing>> = KafkaFutureImpl::new();
+        let public = handle.future();
+
+        // Reuse the `ListConfigResources` wire path, filtered to the
+        // `CLIENT_METRICS` resource type (mirrors Java's
+        // `ListConfigResourcesRequest.Builder` seeded with
+        // `List.of(ConfigResource.Type.CLIENT_METRICS.id())`).
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            let mut data = ListConfigResourcesRequestData::new();
+            data.set_resource_types(vec![ConfigResourceType::ClientMetrics.id()]);
+            Ok(Box::new(ListConfigResourcesRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        });
+
+        let resp_handle = handle.clone();
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::ListConfigResources(list_response) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
+            };
+            let error = list_response.error();
+            if error != Errors::None {
+                resp_handle.complete_exceptionally(KafkaError::new(error));
+            } else {
+                let listings: Vec<ClientMetricsResourceListing> = list_response
+                    .config_resources()
+                    .into_iter()
+                    .filter(|resource| resource.resource_type() == ConfigResourceType::ClientMetrics)
+                    .map(|resource| ClientMetricsResourceListing::new(resource.name()))
+                    .collect();
+                resp_handle.complete(listings);
+            }
+            HandleResult::Done
+        });
+
+        let fail_handle = handle.clone();
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            fail_handle.complete_exceptionally(error.clone());
+        });
+
+        let call = Call::new(
+            "listClientMetricsResources",
+            deadline,
+            NodeProvider::LeastLoaded,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        ListClientMetricsResourcesResult::new(public)
     }
 
     fn describe_log_dirs(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
@@ -7235,6 +7296,61 @@ mod tests {
         pump(&mut runnable, 5).await;
         let err = result.all().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    // --- listClientMetricsResources ------------------------------------------
+
+    /// Translated from `KafkaAdminClientTest.testListClientMetricsResources`.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_client_metrics_resources() {
+        use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
+        let (admin, mut runnable, _time, _nodes) = env();
+        let client_metrics_id = ConfigResourceType::ClientMetrics.id();
+        let expected: HashSet<ClientMetricsResourceListing> = [
+            ClientMetricsResourceListing::new("one"),
+            ClientMetricsResourceListing::new("two"),
+        ]
+        .into_iter()
+        .collect();
+        runnable.client_mut().prepare_response(list_config_resources_response(
+            Errors::None,
+            &[("one", client_metrics_id), ("two", client_metrics_id)],
+        ));
+        let result = admin.list_client_metrics_resources(ListClientMetricsResourcesOptions::new());
+        pump(&mut runnable, 5).await;
+        let listed = result.all().get().await.unwrap();
+        assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testListClientMetricsResourcesEmpty`.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_client_metrics_resources_empty() {
+        use crate::admin::ListClientMetricsResourcesOptions;
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(list_config_resources_response(Errors::None, &[]));
+        let result = admin.list_client_metrics_resources(ListClientMetricsResourcesOptions::new());
+        pump(&mut runnable, 5).await;
+        assert!(result.all().get().await.unwrap().is_empty());
+    }
+
+    /// Translated from `KafkaAdminClientTest.testListClientMetricsResourcesNotSupported`.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_client_metrics_resources_not_supported() {
+        use crate::admin::ListClientMetricsResourcesOptions;
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
+        let result = admin.list_client_metrics_resources(ListClientMetricsResourcesOptions::new());
+        pump(&mut runnable, 5).await;
+        let err = result.all().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert_eq!(err.message(), "The version of API is not supported.");
     }
 
     // Branch (2) coverage at the `Call` bridge: the `maybe_retry` hook installed
