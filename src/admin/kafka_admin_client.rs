@@ -3479,6 +3479,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicI64, Ordering};
 
+    use crate::admin::MemberToRemove;
     use crate::admin::internals::admin_client_runnable::AdminClientRunnable;
     use crate::common::Node;
     use crate::common::protocol::Errors;
@@ -7479,6 +7480,18 @@ mod tests {
         ConcreteResponse::FindCoordinator(crate::common::requests::FindCoordinatorResponse::new(data))
     }
 
+    /// An old (single-coordinator) `FindCoordinator` error response, mirroring
+    /// `prepareOldFindCoordinatorResponse(error, Node.noNode())`.
+    fn old_find_coordinator_error_resp(error: Errors) -> ConcreteResponse {
+        use crate::find_coordinator_response_data::FindCoordinatorResponseData;
+        let mut data = FindCoordinatorResponseData::new();
+        data.set_error_code(error.code())
+            .set_node_id(-1)
+            .set_host(String::new())
+            .set_port(-1);
+        ConcreteResponse::FindCoordinator(crate::common::requests::FindCoordinatorResponse::new(data))
+    }
+
     fn single_spec(partitions: &[TopicPartition]) -> HashMap<String, ListConsumerGroupOffsetsSpec> {
         HashMap::from([(
             GROUP_ID.to_string(),
@@ -7994,5 +8007,455 @@ mod tests {
         drive_until(&mut runnable, &time, 80, || all.is_done()).await;
         assert_eq!(all.get().await.unwrap(), ());
         assert_eq!(result.partition_result(&tp1).unwrap().get().await.unwrap(), ());
+    }
+
+    // --- deleteConsumerGroups / removeMembersFromConsumerGroup --------------
+
+    /// A `DeleteGroups` response with one result per (group, error) entry.
+    fn delete_groups_resp(entries: &[(&str, Errors)]) -> ConcreteResponse {
+        use crate::delete_groups_response_data::{DeletableGroupResult, DeleteGroupsResponseData};
+        let results: Vec<DeletableGroupResult> = entries
+            .iter()
+            .map(|(group_id, error)| {
+                let mut r = DeletableGroupResult::new();
+                r.set_group_id((*group_id).to_string()).set_error_code(error.code());
+                r
+            })
+            .collect();
+        let mut data = DeleteGroupsResponseData::new();
+        data.set_results(results);
+        ConcreteResponse::DeleteGroups(crate::common::requests::DeleteGroupsResponse::new(data))
+    }
+
+    /// A `LeaveGroup` response carrying only a top-level error.
+    fn leave_group_top_level(error: Errors) -> ConcreteResponse {
+        use crate::leave_group_response_data::LeaveGroupResponseData;
+        let mut data = LeaveGroupResponseData::new();
+        data.set_error_code(error.code());
+        ConcreteResponse::LeaveGroup(crate::common::requests::LeaveGroupResponse::new(data))
+    }
+
+    /// A successful `LeaveGroup` response with one member response per
+    /// `(group.instance.id, error)` entry (member id echoed as empty, as the
+    /// broker does for a static member removed by instance id).
+    fn leave_group_members_resp(members: &[(&str, Errors)]) -> ConcreteResponse {
+        use crate::leave_group_response_data::{LeaveGroupResponseData, MemberResponse};
+        let member_responses: Vec<MemberResponse> = members
+            .iter()
+            .map(|(instance_id, error)| {
+                let mut m = MemberResponse::new();
+                m.set_group_instance_id(Some((*instance_id).to_string()))
+                    .set_error_code(error.code());
+                m
+            })
+            .collect();
+        let mut data = LeaveGroupResponseData::new();
+        data.set_error_code(Errors::None.code()).set_members(member_responses);
+        ConcreteResponse::LeaveGroup(crate::common::requests::LeaveGroupResponse::new(data))
+    }
+
+    /// A `ConsumerGroupDescribe` response listing static members (used by the
+    /// `removeAll` describe path). Each member carries a `group.instance.id`.
+    fn consumer_group_describe_members_resp(group_id: &str, instance_ids: &[&str]) -> ConcreteResponse {
+        use crate::consumer_group_describe_response_data::{ConsumerGroupDescribeResponseData, DescribedGroup, Member};
+        let members: Vec<Member> = instance_ids
+            .iter()
+            .enumerate()
+            .map(|(i, instance_id)| {
+                let mut m = Member::new();
+                m.set_member_id(format!("member-{i}"))
+                    .set_instance_id(Some((*instance_id).to_string()));
+                m
+            })
+            .collect();
+        let mut group = DescribedGroup::new();
+        group
+            .set_group_id(group_id.to_string())
+            .set_group_state("Stable".to_string())
+            .set_group_epoch(5)
+            .set_assignment_epoch(5)
+            .set_assignor_name("uniform".to_string())
+            .set_members(members);
+        let mut data = ConsumerGroupDescribeResponseData::new();
+        data.set_groups(vec![group]);
+        ConcreteResponse::ConsumerGroupDescribe(crate::common::requests::ConsumerGroupDescribeResponse::new(data))
+    }
+
+    fn members_to_remove(instance_ids: &[&str]) -> RemoveMembersFromConsumerGroupOptions {
+        RemoveMembersFromConsumerGroupOptions::new(instance_ids.iter().map(|id| MemberToRemove::new(*id))).unwrap()
+    }
+
+    /// Translated from `testDeleteConsumerGroupsNumRetries`: with `retries=0`, a
+    /// `NOT_COORDINATOR` re-lookup exhausts the retry budget and the deletion
+    /// times out.
+    #[tokio::test]
+    async fn test_delete_consumer_groups_num_retries() {
+        let default_api_timeout: i64 = 60000;
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(
+            3,
+            &[
+                ("default.api.timeout.ms", &default_api_timeout.to_string()),
+                ("retries", "0"),
+            ],
+        );
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("groupId", &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(delete_groups_resp(&[("groupId", Errors::NotCoordinator)]));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[("groupId", &nodes[0])]));
+
+        let result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let all = result.all();
+        pump_until(&mut runnable, 40, |r| !r.client_mut().has_pending_responses()).await;
+        time.sleep(default_api_timeout + 1);
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+        assert!(matches!(all.get().await.unwrap_err(), KafkaError::Timeout(_)));
+    }
+
+    /// Translated from `testDeleteConsumerGroupsWithOlderBroker`: retriable
+    /// `FindCoordinator` errors are retried, non-retriable ones fail, and
+    /// coordinator-moved `DeleteGroups` errors trigger a re-lookup. Uses the old
+    /// (single-coordinator) `FindCoordinator` response form throughout.
+    #[tokio::test]
+    async fn test_delete_consumer_groups_with_older_broker() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(1, &[("retries", "2147483647")]);
+
+        // Retriable FindCoordinator errors are retried, then a good coordinator.
+        runnable
+            .client_mut()
+            .prepare_response(old_find_coordinator_error_resp(Errors::CoordinatorNotAvailable));
+        runnable
+            .client_mut()
+            .prepare_response(old_find_coordinator_error_resp(Errors::CoordinatorLoadInProgress));
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable
+            .client_mut()
+            .prepare_response(delete_groups_resp(&[("groupId", Errors::None)]));
+
+        let result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let deleted = result.deleted_groups()["groupId"].clone();
+        drive_until(&mut runnable, &time, 80, || deleted.is_done()).await;
+        assert_eq!(deleted.get().await.unwrap(), ());
+
+        // A non-retriable FindCoordinator error surfaces.
+        runnable
+            .client_mut()
+            .prepare_response(old_find_coordinator_error_resp(Errors::GroupAuthorizationFailed));
+        let error_result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let error_deleted = error_result.deleted_groups()["groupId"].clone();
+        drive_until(&mut runnable, &time, 80, || error_deleted.is_done()).await;
+        assert_eq!(error_deleted.get().await.unwrap_err().error(), Errors::GroupAuthorizationFailed);
+
+        // Retriable DeleteGroups errors (load-in-progress, then coordinator moved)
+        // are retried, with a re-lookup for the coordinator-moved errors.
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable
+            .client_mut()
+            .prepare_response(delete_groups_resp(&[("groupId", Errors::CoordinatorLoadInProgress)]));
+        runnable
+            .client_mut()
+            .prepare_response(delete_groups_resp(&[("groupId", Errors::NotCoordinator)]));
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable
+            .client_mut()
+            .prepare_response(delete_groups_resp(&[("groupId", Errors::CoordinatorNotAvailable)]));
+        runnable.client_mut().prepare_response(old_find_coordinator_resp(&nodes[0]));
+        runnable
+            .client_mut()
+            .prepare_response(delete_groups_resp(&[("groupId", Errors::None)]));
+
+        let retry_result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let retry_deleted = retry_result.deleted_groups()["groupId"].clone();
+        drive_until(&mut runnable, &time, 120, || retry_deleted.is_done()).await;
+        assert_eq!(retry_deleted.get().await.unwrap(), ());
+    }
+
+    /// Translated from `testRemoveMembersFromGroupNumRetries`.
+    #[tokio::test]
+    async fn test_remove_members_from_group_num_retries() {
+        let default_api_timeout: i64 = 60000;
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(
+            3,
+            &[
+                ("default.api.timeout.ms", &default_api_timeout.to_string()),
+                ("retries", "0"),
+            ],
+        );
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(leave_group_top_level(Errors::NotCoordinator));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let result =
+            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&["instance-1", "instance-2"]));
+        let all = result.all();
+        pump_until(&mut runnable, 40, |r| !r.client_mut().has_pending_responses()).await;
+        time.sleep(default_api_timeout + 1);
+        drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+        assert!(matches!(all.get().await.unwrap_err(), KafkaError::Timeout(_)));
+    }
+
+    /// Translated from `testRemoveMembersFromGroupRetriableErrors`.
+    #[tokio::test]
+    async fn test_remove_members_from_group_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(leave_group_top_level(Errors::CoordinatorLoadInProgress));
+        runnable
+            .client_mut()
+            .prepare_response(leave_group_top_level(Errors::NotCoordinator));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(leave_group_top_level(Errors::CoordinatorNotAvailable));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(leave_group_members_resp(&[("instance-1", Errors::None)]));
+
+        let member = MemberToRemove::new("instance-1");
+        let result = admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&["instance-1"]));
+        let all = result.all();
+        drive_until(&mut runnable, &time, 120, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap(), ());
+        assert_eq!(result.member_result(&member).unwrap().get().await.unwrap(), ());
+    }
+
+    /// Translated from `testRemoveMembersFromGroupNonRetriableErrors`.
+    #[tokio::test]
+    async fn test_remove_members_from_group_non_retriable_errors() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        for error in [
+            Errors::GroupAuthorizationFailed,
+            Errors::InvalidGroupId,
+            Errors::GroupIdNotFound,
+        ] {
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            runnable.client_mut().prepare_response(leave_group_top_level(error));
+
+            let member = MemberToRemove::new("instance-1");
+            let result = admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&["instance-1"]));
+            let all = result.all();
+            drive_until(&mut runnable, &time, 60, || all.is_done()).await;
+            assert_eq!(all.get().await.unwrap_err().error(), error);
+            assert_eq!(result.member_result(&member).unwrap().get().await.unwrap_err().error(), error);
+        }
+    }
+
+    /// Translated from `testRemoveMembersFromGroup`: member-level error, then a
+    /// missing member, then success, and finally the two `removeAll` scenarios.
+    #[tokio::test]
+    async fn test_remove_members_from_group() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        let instance_one = "instance-1";
+        let instance_two = "instance-2";
+        let member_one = MemberToRemove::new(instance_one);
+        let member_two = MemberToRemove::new(instance_two);
+
+        // Inject one member-level error (instance-1 -> UNKNOWN_MEMBER_ID).
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(leave_group_members_resp(&[
+            (instance_one, Errors::UnknownMemberId),
+            (instance_two, Errors::None),
+        ]));
+
+        let member_level_error_result =
+            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
+        let all = member_level_error_result.all();
+        drive_until(&mut runnable, &time, 60, || all.is_done()).await;
+        assert_eq!(all.get().await.unwrap_err().error(), Errors::UnknownMemberId);
+        assert_eq!(
+            member_level_error_result
+                .member_result(&member_one)
+                .unwrap()
+                .get()
+                .await
+                .unwrap_err()
+                .error(),
+            Errors::UnknownMemberId
+        );
+        assert_eq!(
+            member_level_error_result
+                .member_result(&member_two)
+                .unwrap()
+                .get()
+                .await
+                .unwrap(),
+            ()
+        );
+
+        // Return with a missing member (instance-1 absent from the response).
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(leave_group_members_resp(&[(instance_two, Errors::None)]));
+
+        let missing_member_result =
+            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
+        let missing_all = missing_member_result.all();
+        drive_until(&mut runnable, &time, 60, || missing_all.is_done()).await;
+        assert!(matches!(missing_all.get().await.unwrap_err(), KafkaError::IllegalArgument(_)));
+        assert!(matches!(
+            missing_member_result
+                .member_result(&member_one)
+                .unwrap()
+                .get()
+                .await
+                .unwrap_err(),
+            KafkaError::IllegalArgument(_)
+        ));
+        assert_eq!(
+            missing_member_result.member_result(&member_two).unwrap().get().await.unwrap(),
+            ()
+        );
+
+        // Return with success for both members.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(leave_group_members_resp(&[
+            (instance_two, Errors::None),
+            (instance_one, Errors::None),
+        ]));
+        let no_error_result =
+            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
+        let no_error_all = no_error_result.all();
+        drive_until(&mut runnable, &time, 60, || no_error_all.is_done()).await;
+        assert_eq!(no_error_all.get().await.unwrap(), ());
+        assert_eq!(no_error_result.member_result(&member_one).unwrap().get().await.unwrap(), ());
+        assert_eq!(no_error_result.member_result(&member_two).unwrap().get().await.unwrap(), ());
+
+        // removeAll with a partial failure: describe the group, then remove all
+        // members but one reports UNKNOWN_MEMBER_ID.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(consumer_group_describe_members_resp(GROUP_ID, &[instance_one, instance_two]));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(leave_group_members_resp(&[
+            (instance_one, Errors::UnknownMemberId),
+            (instance_two, Errors::None),
+        ]));
+        let partial_failure_result =
+            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let partial_all = partial_failure_result.all();
+        drive_until(&mut runnable, &time, 80, || partial_all.is_done()).await;
+        assert_eq!(partial_all.get().await.unwrap_err().error(), Errors::UnknownMemberId);
+
+        // removeAll with success.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(consumer_group_describe_members_resp(GROUP_ID, &[instance_one, instance_two]));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(leave_group_members_resp(&[
+            (instance_two, Errors::None),
+            (instance_one, Errors::None),
+        ]));
+        let success_result =
+            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let success_all = success_result.all();
+        drive_until(&mut runnable, &time, 80, || success_all.is_done()).await;
+        assert_eq!(success_all.get().await.unwrap(), ());
+    }
+
+    /// Drives one `removeMembersFromConsumerGroup` with the given `reason`,
+    /// asserting the emitted `LeaveGroup` request carried `expected_reason` on
+    /// every member. Mirrors the private Java helper
+    /// `testRemoveMembersFromGroup(reason, expectedReason)` — Java attaches a
+    /// request-matcher predicate to the prepared response; our `MockClient` has
+    /// no such matcher, so we inspect the emitted (queued, unanswered) request
+    /// directly, which is the established request-inspection pattern.
+    async fn assert_remove_members_reason(reason: Option<&str>, expected_reason: &str) {
+        use crate::common::requests::ConcreteRequest;
+        let (admin, mut runnable, _time, nodes) = offsets_env(3);
+        // Answer only FindCoordinator so the LeaveGroup request is sent but stays
+        // queued (no prepared response), ready for inspection.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let mut options = members_to_remove(&["instance-1", "instance-2"]);
+        if let Some(reason) = reason {
+            options.reason(reason);
+        }
+        let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
+
+        pump_until(&mut runnable, 40, |r| {
+            r.client_mut()
+                .requests_mut()
+                .iter_mut()
+                .any(|req| matches!(req.request_builder_mut().build(), Ok(ConcreteRequest::LeaveGroup(_))))
+        })
+        .await;
+
+        let leave_request = runnable
+            .client_mut()
+            .requests_mut()
+            .iter_mut()
+            .find_map(|req| match req.request_builder_mut().build() {
+                Ok(ConcreteRequest::LeaveGroup(r)) => Some(r),
+                _ => None,
+            })
+            .expect("a LeaveGroup request should be queued");
+        assert!(!leave_request.data().members.is_empty());
+        for member in &leave_request.data().members {
+            assert_eq!(member.reason.as_deref(), Some(expected_reason));
+        }
+    }
+
+    /// Translated from `testRemoveMembersFromGroupReason`.
+    #[tokio::test]
+    async fn test_remove_members_from_group_reason() {
+        assert_remove_members_reason(Some("testing remove members reason"), "testing remove members reason").await;
+    }
+
+    /// Translated from `testRemoveMembersFromGroupTruncatesReason`: a reason
+    /// longer than 255 chars is truncated to exactly 255 on the wire.
+    #[tokio::test]
+    async fn test_remove_members_from_group_truncates_reason() {
+        let reason = "Very looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong reason that is 271 characters long to make sure that length limit logic handles the scenario nicely";
+        assert_eq!(reason.chars().count(), 271);
+        let truncated: String = reason.chars().take(255).collect();
+        assert_remove_members_reason(Some(reason), &truncated).await;
+    }
+
+    /// Translated from `testRemoveMembersFromGroupDefaultReason`: a null or empty
+    /// reason falls back to the default reason.
+    #[tokio::test]
+    async fn test_remove_members_from_group_default_reason() {
+        assert_remove_members_reason(None, DEFAULT_LEAVE_GROUP_REASON).await;
+        assert_remove_members_reason(Some(""), DEFAULT_LEAVE_GROUP_REASON).await;
     }
 }
