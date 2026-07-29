@@ -3368,10 +3368,61 @@ mod tests {
         (admin, runnable, time, nodes)
     }
 
+    /// Like [`env_with_props`], but with a configurable broker count (mirrors
+    /// Java's `mockCluster(numNodes, 0)`). Used by the group-listing broker
+    /// enumeration tests that want a single broker.
+    fn env_nodes_with_props(
+        num_nodes: i32,
+        extra: &[(&str, &str)],
+    ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(num_nodes, 0);
+        let client = MockClient::new(nodes.clone(), time.provider());
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        for (k, v) in extra {
+            props.insert((*k).to_string(), (*v).to_string());
+        }
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        (admin, runnable, time, nodes)
+    }
+
     async fn pump(runnable: &mut AdminClientRunnable<MockClient>, iters: usize) {
         for _ in 0..iters {
             runnable.run_once().await;
         }
+    }
+
+    /// Pumps `run_once` until at least one request is queued (sent but not yet
+    /// responded), so a test can inspect the emitted wire request.
+    async fn pump_until_request_queued(runnable: &mut AdminClientRunnable<MockClient>) {
+        for _ in 0..40 {
+            if runnable.client_mut().request_count() >= 1 {
+                return;
+            }
+            runnable.run_once().await;
+        }
+        panic!("no request was queued after pumping");
+    }
+
+    /// Builds a multi-group `ListGroups` response.
+    fn listed_groups(groups: &[(&str, &str, &str, &str)]) -> ConcreteResponse {
+        use crate::list_groups_response_data::{ListGroupsResponseData, ListedGroup};
+        let wire: Vec<ListedGroup> = groups
+            .iter()
+            .map(|(id, protocol_type, state, group_type)| {
+                let mut g = ListedGroup::new();
+                g.set_group_id((*id).to_string())
+                    .set_protocol_type((*protocol_type).to_string())
+                    .set_group_state((*state).to_string())
+                    .set_group_type((*group_type).to_string());
+                g
+            })
+            .collect();
+        let mut data = ListGroupsResponseData::new();
+        data.set_groups(wire);
+        ConcreteResponse::ListGroups(crate::common::requests::ListGroupsResponse::new(data))
     }
 
     fn create_result(name: &str, error: Errors, error_message: Option<&str>) -> CreatableTopicResult {
@@ -6484,6 +6535,305 @@ mod tests {
             .map(|g| g.group_id().to_string())
             .collect();
         assert_eq!(ids, vec!["g1".to_string()]);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testListGroupsWithTypes`.
+    ///
+    /// Asserts the emitted `ListGroups` request carries the types filter
+    /// derived from `ListGroupsOptions::with_types`, then that both listings are
+    /// returned.
+    #[tokio::test]
+    async fn test_list_groups_with_types() {
+        use crate::common::requests::ConcreteRequest;
+
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+
+        let options = ListGroupsOptions::new().with_types(HashSet::from([GroupType::Consumer]));
+        let result = admin.list_groups(options);
+        pump_until_request_queued(&mut runnable).await;
+
+        // The single per-broker ListGroups request carries the types filter.
+        {
+            let reqs = runnable.client_mut().requests_mut();
+            assert_eq!(reqs.len(), 1);
+            match reqs[0].request_builder_mut().build().unwrap() {
+                ConcreteRequest::ListGroups(req) => {
+                    assert!(req.data().states_filter.is_empty());
+                    assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
+                },
+                other => panic!("expected a ListGroups request, got {other:?}"),
+            }
+        }
+
+        runnable.client_mut().respond_from(
+            listed_groups(&[
+                ("group-1", PROTOCOL_TYPE, "Stable", "Consumer"),
+                ("group-2", "", "Empty", "Consumer"),
+            ]),
+            &nodes[0],
+        );
+        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+
+        let mut ids: Vec<String> = result
+            .valid()
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|g| g.group_id().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["group-1".to_string(), "group-2".to_string()]);
+        assert!(result.errors().get().await.unwrap().is_empty());
+    }
+
+    /// Translated from `KafkaAdminClientTest.testListGroupsWithTypesOlderBrokerVersion`.
+    ///
+    /// A `SHARE`/`CONSUMER`-only types filter surfaces `UnsupportedVersion`
+    /// (the broker's older `ListGroups` version cannot express it), while a
+    /// `CLASSIC`-only filter is silently omitted at the older version and
+    /// succeeds. The Rust `MockClient` does not negotiate API versions, so the
+    /// broker-side downgrade is modeled two ways: the omit path is verified by
+    /// building the emitted request at v4 (mirroring the negotiated version) and
+    /// asserting the types filter is dropped, and the reject path is modeled
+    /// with `prepare_unsupported_version_response` (the same version-mismatch
+    /// response the real `NetworkClient` produces when the builder throws).
+    #[tokio::test]
+    async fn test_list_groups_with_types_older_broker_version() {
+        use crate::common::requests::ConcreteRequest;
+
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+
+        // A SHARE-only filter cannot be omitted, so it surfaces UnsupportedVersion.
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable.client_mut().prepare_unsupported_version_response();
+        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Share])));
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+
+        // A CLASSIC-only filter is omitted on an older broker and succeeds.
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Classic])));
+        pump_until_request_queued(&mut runnable).await;
+        {
+            let reqs = runnable.client_mut().requests_mut();
+            assert_eq!(reqs.len(), 1);
+            // At v5 the request still carries the classic types filter ...
+            match reqs[0].request_builder_mut().build().unwrap() {
+                ConcreteRequest::ListGroups(req) => {
+                    assert_eq!(req.data().types_filter, vec![GroupType::Classic.to_string()]);
+                },
+                other => panic!("expected a ListGroups request, got {other:?}"),
+            }
+            // ... but building at the older broker's v4 omits it (the request
+            // succeeds against the older broker with an empty filter).
+            match reqs[0].request_builder_mut().build_version(4).unwrap() {
+                ConcreteRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
+                other => panic!("expected a ListGroups request, got {other:?}"),
+            }
+        }
+        runnable
+            .client_mut()
+            .respond_from(listed_groups(&[("group-1", PROTOCOL_TYPE, "Stable", "")]), &nodes[0]);
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        let listings = result.all().get().await.unwrap();
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].group_id(), "group-1");
+
+        // A CONSUMER-only filter (without classic) also surfaces UnsupportedVersion.
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable.client_mut().prepare_unsupported_version_response();
+        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Consumer])));
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testListConsumerGroupsWithStates`.
+    ///
+    /// `for_consumer_groups()` derives a `[Classic, Consumer]` types filter; this
+    /// asserts that filter reaches the wire request, then that both consumer
+    /// groups are returned.
+    #[tokio::test]
+    async fn test_list_consumer_groups_with_states() {
+        use crate::common::requests::ConcreteRequest;
+
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+
+        let result = admin.list_groups(ListGroupsOptions::for_consumer_groups());
+        pump_until_request_queued(&mut runnable).await;
+        {
+            let reqs = runnable.client_mut().requests_mut();
+            match reqs[0].request_builder_mut().build().unwrap() {
+                ConcreteRequest::ListGroups(req) => {
+                    let mut types = req.data().types_filter.clone();
+                    types.sort();
+                    assert_eq!(types, vec![GroupType::Classic.to_string(), GroupType::Consumer.to_string()]);
+                },
+                other => panic!("expected a ListGroups request, got {other:?}"),
+            }
+        }
+
+        runnable.client_mut().respond_from(
+            listed_groups(&[("group-1", PROTOCOL_TYPE, "Stable", ""), ("group-2", "", "Empty", "")]),
+            &nodes[0],
+        );
+        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+        let mut ids: Vec<String> = result
+            .valid()
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|g| g.group_id().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["group-1".to_string(), "group-2".to_string()]);
+        assert!(result.errors().get().await.unwrap().is_empty());
+    }
+
+    /// Translated from
+    /// `KafkaAdminClientTest.testListConsumerGroupsWithTypesOlderBrokerVersion`.
+    ///
+    /// A states filter reaches a v4 broker (states are v4+), and a `SHARE` types
+    /// filter surfaces `UnsupportedVersion` against the older broker.
+    #[tokio::test]
+    async fn test_list_consumer_groups_with_types_older_broker_version() {
+        use crate::common::requests::ConcreteRequest;
+
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+
+        // States filter with no types filter is fine at v4.
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        let result = admin.list_groups(ListGroupsOptions::new().in_group_states(HashSet::from([GroupState::Stable])));
+        pump_until_request_queued(&mut runnable).await;
+        {
+            let reqs = runnable.client_mut().requests_mut();
+            match reqs[0].request_builder_mut().build_version(4).unwrap() {
+                ConcreteRequest::ListGroups(req) => {
+                    assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
+                    assert!(req.data().types_filter.is_empty());
+                },
+                other => panic!("expected a ListGroups request, got {other:?}"),
+            }
+        }
+        runnable
+            .client_mut()
+            .respond_from(listed_groups(&[("group-1", PROTOCOL_TYPE, "Stable", "")]), &nodes[0]);
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap().len(), 1);
+
+        // A SHARE types filter cannot be set against the older broker.
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable.client_mut().prepare_unsupported_version_response();
+        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Share])));
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    /// Translated from the deprecated
+    /// `KafkaAdminClientTest.testListConsumerGroupsWithStates` /
+    /// `...WithTypes` variants: the deprecated `list_consumer_groups` API also
+    /// carries the states/types filter to the wire request.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_consumer_groups_deprecated_with_states_and_types() {
+        use crate::common::requests::ConcreteRequest;
+
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+
+        let options = ListConsumerGroupsOptions::new()
+            .in_group_states(HashSet::from([GroupState::Stable]))
+            .with_types(HashSet::from([GroupType::Consumer]));
+        let result = admin.list_consumer_groups(options);
+        pump_until_request_queued(&mut runnable).await;
+        {
+            let reqs = runnable.client_mut().requests_mut();
+            match reqs[0].request_builder_mut().build().unwrap() {
+                ConcreteRequest::ListGroups(req) => {
+                    assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
+                    assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
+                },
+                other => panic!("expected a ListGroups request, got {other:?}"),
+            }
+        }
+        runnable
+            .client_mut()
+            .respond_from(listed_groups(&[("group-1", PROTOCOL_TYPE, "Stable", "Consumer")]), &nodes[0]);
+        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+        assert_eq!(result.valid().get().await.unwrap().len(), 1);
+    }
+
+    /// Translated from the deprecated
+    /// `KafkaAdminClientTest.testListConsumerGroupsWithTypesOlderBrokerVersion`:
+    /// a SHARE types filter surfaces `UnsupportedVersion` through the deprecated
+    /// API's future.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_consumer_groups_deprecated_older_broker_version() {
+        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+        runnable.client_mut().prepare_unsupported_version_response();
+
+        let options = ListConsumerGroupsOptions::new().with_types(HashSet::from([GroupType::Share]));
+        let result = admin.list_consumer_groups(options);
+        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    /// Translated from `KafkaAdminClientTest.testListConsumerGroupsMetadataFailure`.
+    ///
+    /// An empty metadata response leaves no brokers to send `ListGroups` to; with
+    /// `retries=0` the metadata call fails terminally and `handle_failure` wraps
+    /// it as "Failed to find brokers to send listConsumerGroups".
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_list_consumer_groups_metadata_failure() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        // Empty broker list → no brokers to send to.
+        runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
+
+        let result = admin.list_consumer_groups(ListConsumerGroupsOptions::new());
+        for _ in 0..40 {
+            if result.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        let err = result.all().get().await.unwrap_err();
+        assert!(
+            err.message().contains("Failed to find brokers to send listConsumerGroups"),
+            "got: {}",
+            err.message()
+        );
+        let _ = &nodes;
+    }
+
+    /// The `list_groups` metadata-failure counterpart of
+    /// `testListConsumerGroupsMetadataFailure` (Java exercises the shared
+    /// `findAllBrokers` path from both entry points).
+    #[tokio::test]
+    async fn test_list_groups_metadata_failure() {
+        let (admin, mut runnable, time, _nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
+
+        let result = admin.list_groups(ListGroupsOptions::new());
+        for _ in 0..40 {
+            if result.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        let err = result.all().get().await.unwrap_err();
+        assert!(
+            err.message().contains("Failed to find brokers to send listGroups"),
+            "got: {}",
+            err.message()
+        );
     }
 
     /// `describe_consumer_groups` finds the coordinator then describes the group
