@@ -38,6 +38,7 @@ pub mod partition_info;
 pub mod protocol;
 pub mod record;
 pub mod requests;
+pub mod resource;
 pub mod security;
 pub mod serialization;
 pub mod topic_collection;

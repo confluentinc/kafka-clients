@@ -75,6 +75,18 @@ impl AclPermissionType {
     }
 }
 
+impl std::fmt::Display for AclPermissionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            AclPermissionType::Unknown => "UNKNOWN",
+            AclPermissionType::Any => "ANY",
+            AclPermissionType::Deny => "DENY",
+            AclPermissionType::Allow => "ALLOW",
+        };
+        write!(f, "{name}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
