@@ -164,6 +164,34 @@ impl ConsumerProtocol {
         Self::deserialize_subscription_versioned(&mut buffer, version)
     }
 
+    /// Deserializes the raw generated subscription struct at the given version
+    /// (body only, version already consumed).
+    ///
+    /// Mirrors
+    /// `ConsumerProtocol.deserializeConsumerProtocolSubscription(ByteBuffer, short)`.
+    pub(crate) fn deserialize_consumer_protocol_subscription_versioned(
+        buffer: &mut dyn Readable,
+        version: i16,
+    ) -> Result<ConsumerProtocolSubscriptionData, KafkaError> {
+        let version = Self::check_subscription_version(version)?;
+        ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| {
+            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
+        })
+    }
+
+    /// Deserializes the raw generated subscription struct, reading the version
+    /// header from the buffer.
+    ///
+    /// Mirrors
+    /// `ConsumerProtocol.deserializeConsumerProtocolSubscription(ByteBuffer)`.
+    pub(crate) fn deserialize_consumer_protocol_subscription(
+        bytes: &[u8],
+    ) -> Result<ConsumerProtocolSubscriptionData, KafkaError> {
+        let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
+        let version = Self::deserialize_version(&mut buffer)?;
+        Self::deserialize_consumer_protocol_subscription_versioned(&mut buffer, version)
+    }
+
     /// Serializes an assignment at the highest supported version.
     ///
     /// Mirrors `ConsumerProtocol.serializeAssignment(Assignment)`.
@@ -194,6 +222,21 @@ impl ConsumerProtocol {
         }
         data.set_assigned_partitions(assigned);
 
+        Ok(to_version_prefixed_byte_buffer(version, &mut data)
+            .map_err(|e| KafkaError::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
+            .into_buffer())
+    }
+
+    /// Serializes the raw generated assignment struct at the given version.
+    ///
+    /// Mirrors `ConsumerProtocol.serializeAssignment(ConsumerProtocolAssignment, short)`.
+    /// Rust cannot overload `serialize_assignment`, so this data-struct variant
+    /// carries the `_data` suffix.
+    pub(crate) fn serialize_assignment_data(
+        mut data: ConsumerProtocolAssignmentData,
+        version: i16,
+    ) -> Result<Vec<u8>, KafkaError> {
+        let version = Self::check_assignment_version(version)?;
         Ok(to_version_prefixed_byte_buffer(version, &mut data)
             .map_err(|e| KafkaError::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
             .into_buffer())
@@ -232,6 +275,34 @@ impl ConsumerProtocol {
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_assignment_versioned(&mut buffer, version)
+    }
+
+    /// Deserializes the raw generated assignment struct at the given version
+    /// (body only, version already consumed).
+    ///
+    /// Mirrors
+    /// `ConsumerProtocol.deserializeConsumerProtocolAssignment(ByteBuffer, short)`.
+    pub(crate) fn deserialize_consumer_protocol_assignment_versioned(
+        buffer: &mut dyn Readable,
+        version: i16,
+    ) -> Result<ConsumerProtocolAssignmentData, KafkaError> {
+        let version = Self::check_assignment_version(version)?;
+        ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| {
+            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
+        })
+    }
+
+    /// Deserializes the raw generated assignment struct, reading the version
+    /// header from the buffer.
+    ///
+    /// Mirrors
+    /// `ConsumerProtocol.deserializeConsumerProtocolAssignment(ByteBuffer)`.
+    pub(crate) fn deserialize_consumer_protocol_assignment(
+        bytes: &[u8],
+    ) -> Result<ConsumerProtocolAssignmentData, KafkaError> {
+        let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
+        let version = Self::deserialize_version(&mut buffer)?;
+        Self::deserialize_consumer_protocol_assignment_versioned(&mut buffer, version)
     }
 
     /// Validates a subscription version, clamping to the highest supported
@@ -351,5 +422,44 @@ mod tests {
         let bytes = ConsumerProtocol::serialize_assignment_versioned(&assignment, 99).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
         assert_eq!(decoded.partitions(), &[tp("t", 0)]);
+    }
+
+    /// Round-trips the raw generated assignment struct through
+    /// `serialize_assignment_data` / `deserialize_consumer_protocol_assignment`.
+    #[test]
+    fn consumer_protocol_assignment_data_round_trip() {
+        // Serialize a normal assignment, then decode it as the raw data struct.
+        let assignment = Assignment::with_partitions(vec![tp("foo", 0), tp("foo", 1)]);
+        let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
+
+        let data = ConsumerProtocol::deserialize_consumer_protocol_assignment(&bytes).unwrap();
+        assert_eq!(data.assigned_partitions.len(), 1);
+        assert_eq!(data.assigned_partitions[0].topic, "foo");
+        assert_eq!(data.assigned_partitions[0].partitions, vec![0, 1]);
+
+        // Re-serialize the raw data struct and confirm it decodes back to the
+        // same partitions via the high-level entry point.
+        let reserialized = ConsumerProtocol::serialize_assignment_data(
+            data,
+            ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,
+        )
+        .unwrap();
+        let decoded = ConsumerProtocol::deserialize_assignment(&reserialized).unwrap();
+        let mut partitions = decoded.partitions().to_vec();
+        partitions.sort_by(|a, b| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+        assert_eq!(partitions, vec![tp("foo", 0), tp("foo", 1)]);
+    }
+
+    /// Round-trips the raw generated subscription struct through
+    /// `serialize_subscription` / `deserialize_consumer_protocol_subscription`.
+    #[test]
+    fn consumer_protocol_subscription_data_round_trip() {
+        let subscription = Subscription::new(vec!["b".to_string(), "a".to_string()], None, vec![tp("a", 0)], 3, None);
+        let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
+
+        let data = ConsumerProtocol::deserialize_consumer_protocol_subscription(&bytes).unwrap();
+        // Topics are sorted on serialization.
+        assert_eq!(data.topics, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(data.generation_id, 3);
     }
 }
