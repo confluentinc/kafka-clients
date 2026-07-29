@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security authentication types (org.apache.kafka.common.security.auth).
+//! Delegation token types (org.apache.kafka.common.security.token.delegation).
 
-pub mod kafka_principal;
-pub mod security_protocol;
+pub mod delegation_token;
+pub mod token_information;
 
-pub use kafka_principal::KafkaPrincipal;
-pub use security_protocol::SecurityProtocol;
+pub use delegation_token::DelegationToken;
+pub use token_information::TokenInformation;

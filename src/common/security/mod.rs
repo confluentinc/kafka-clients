@@ -17,6 +17,7 @@
 pub mod auth;
 pub mod authenticator;
 pub mod ssl;
+pub mod token;
 
 pub use auth::SecurityProtocol;
 pub use authenticator::SaslClientAuthenticator;
