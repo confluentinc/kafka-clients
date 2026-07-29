@@ -85,3 +85,4 @@
 - [M11 P5 elections/reassign/offsets](m11_phase5_elections_reassignments_offsets_notes.md) — final Tier 1; listOffsets on AdminApiDriver; OffsetSpec enum; 3 controller-Call wrappers
 - [M11 Tier2 P1 group listing/describe](m11_tier2_phase1_notes.md) — layers done; format gotcha; driver/list-Call patterns
 - [M11 Tier2 P2 group offsets](m11_tier2_phase2_notes.md) — OffsetDelete is dedicated RPC (not OffsetCommit -1 sentinel); disableBatch driver wiring; MockClient version-mismatch helper; old-form FC avoids flaky scope-crossing
+- [M11 Tier2 P3 group/member deletion](m11_tier2_phase3_notes.md) — DeleteGroups+LeaveGroup wire; abstract-base-via-composition; removeAll describe-chain via SimpleAdminApiFuture::handle; MockClient matches at send-time (late response hangs); reason trunc 255
