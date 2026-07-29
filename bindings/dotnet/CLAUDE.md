@@ -14,7 +14,7 @@ them explicitly (never rely on nested auto-loading).
 **The one law:** the binding restores the Java **shape** in C# **idiom** and holds **no Kafka
 logic** — batching, partitioning, retries, offsets all live once, in the Rust
 core. So it's **not a 1:1 mirror** — expect host-only types with no Java/C-ABI
-counterpart: `Native`, `SafeHandle` subclasses, `IDisposable`, marshalling
+counterpart: `NativeMethods`, `SafeHandle` subclasses, `IDisposable`, marshalling
 helpers, the C-callback→delegate adapter, the `TaskCompletionSource` bridge.
 That's expected scaffolding — plumbing for the shape + safe resource management,
 never Kafka behavior. If you're writing Kafka behavior in C#, you're in the wrong
@@ -26,14 +26,14 @@ layer.
 
 **Four layers.** Java client (the shape) → Rust core (`src/…`, all logic) → C ABI
 (`src/ffi/*.rs` → generated `target/include/confluent_kafka.h`) → **.NET binding**
-(a `Native` P/Invoke class + `SafeHandle`s + managed types).
+(a `NativeMethods` P/Invoke class + `SafeHandle`s + managed types).
 
 **One call, end to end** (mechanics → ffi-marshalling.md):
 
 ```
 producer.SendAsync(record)  ──►  Task<RecordMetadata>
    validate args · pin key/value · make TaskCompletionSource
-        │  P/Invoke: Native.Producer_send(handle, …, out err) → future handle
+        │  P/Invoke: NativeMethods.Producer_send(handle, …, out err) → future handle
         │  completion pump blocks on get_all(), completes each TCS
         │    (Option A — pull-pump shown; the producer's completion model is
         │     OPEN, push is Option B — ffi §A7. The consumer is push-only, no pump.)
@@ -43,10 +43,19 @@ producer.SendAsync(record)  ──►  Task<RecordMetadata>
    Rust   Producer::send(ProducerRecord) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
-**Status:** The C ABI exposes the **producer** and **consumer** (each with sync
-and `_async`/callback variants). Admin / transactions are **not** exposed yet. Source of truth for the
-surface = `src/ffi/*.rs` + `cbindgen.toml` (the header is generated, not checked
-in).
+**Status:** The C ABI exposes the **producer** and **consumer**. Blocking ops
+generally come in a sync form plus a callback-based `_async` form, but the
+pairing is not uniform: instantaneous ops are sync-only by design
+(`assignment`/`subscription`/`paused`/`client_id`/`group_metadata`/`wakeup`/
+`enforce_rebalance`), while `current_lag` / `seek_with_metadata` /
+`close_with_timeout` are sync-only yet **block in Java** — a **gap**, not a design
+choice (§4 **Sync vs async**; so there is also no timed *async* close, §4
+Disposal). ⚠ `Consumer_commit_async`
+is Java's `commitAsync` — a *sync* call returning `KafkaError*`, **not** a push
+variant (the push variant of `commitSync` is `commit_sync_async`);
+`poll_async` is the only `_async` fn taking a timeout. Admin / transactions are
+**not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+`cbindgen.toml` (the header is generated, not checked in).
 
 ---
 
@@ -60,40 +69,52 @@ the unsafe boundary is quarantined:
 
 ```
 bindings/dotnet/
-├─ Confluent.Kafka.ShareConsumer.sln    ← solution + shared config at the root
+├─ Confluent.Kafka.sln    ← solution + shared config at the root
 ├─ Directory.Build.props · .editorconfig · .gitignore
 ├─ src/
-│  └─ Confluent.Kafka.ShareConsumer/    ← the library project (named for the package id, §4)
-│     └─ Internal/                       ← internal scaffolding
+│  └─ Confluent.Kafka/    ← the library project (named for the package id, §4)
+│     ├─ <public API — flat at the root; topical folders (e.g. Admin/) as families grow>
+│     └─ Internal/                       ← internal scaffolding — the ONLY non-public folder
 │        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
 └─ tests/
-   └─ Confluent.Kafka.ShareConsumer.UnitTests/   ← Mock* unit tests
+   └─ Confluent.Kafka.UnitTests/   ← Mock* unit tests
 ```
 
 (Folders are organizational; C# accessibility is still the `internal` keyword +
-the assembly.) **`Internal/` is the visibility marker:** every type under
-`Internal/` is explicitly `internal` (and `sealed` where practical), and
-everything at the library project root is `public` — wanting a type under
-`Internal/` to be `public` is the signal it belongs at the project root. There is
-no inner `src/` inside the project: the outer top-level `src/` *is* the library
-project's parent; the project root itself holds the public API.
+the assembly.) **`Internal/` is the visibility marker — the *only* folder that
+implies non-public:** every type under it is explicitly `internal` (and `sealed`
+where practical), and `Internal/Interop/` is the only place `unsafe` appears.
+Wanting a type under `Internal/` to be `public` is the signal it belongs in the
+public tree. Public API lives **at or below** the library project root: flat at
+the root while the surface is small, moving into **topical** folders (with the
+matching child namespace) once a family gets large — in .NET, folders
+conventionally mirror namespaces/topics, *not* accessibility, and a flat root
+does not scale (ckd needed `Admin/` for 107 public types, plus `Exceptions/`,
+and its root is still ~90 files). So a public `Admin/` folder is expected and
+correct; what is never allowed is a public type under `Internal/`. There is no
+inner `src/` inside the project: the outer top-level `src/` *is* the library
+project's parent.
 
-- **library project root** (`src/Confluent.Kafka.ShareConsumer/`) — **all public
-  API** (namespace `Confluent.Kafka.ShareConsumer`), whatever the C# kind: the
+- **library project root** (`src/Confluent.Kafka/`) — **all public
+  API** (namespace `Confluent.Kafka`), whatever the C# kind: the
   client types *and* supporting value types / enums (`ProducerRecord`,
   `RecordMetadata`, `Headers`, `TopicPartition`, later `ConsumerRecord` /
-  `OffsetAndMetadata` / enums). If a user can name it, it lives here.
+  `OffsetAndMetadata` / enums). If a user can name it, it lives here — flat while
+  the surface is small, in a **topical** subfolder with the matching child
+  namespace (e.g. `Admin/` → `Confluent.Kafka.Admin`, ckd's
+  precedent) once a family grows.
 - `Internal/` — **internal** managed scaffolding
-  (`Confluent.Kafka.ShareConsumer.Internal`): the async-completion bridge (the
+  (`Confluent.Kafka.Internal`): the async-completion bridge (the
   consumer's callback→`TaskCompletionSource` adapter; the producer's pull-pump
   *or* push adapter — open, ffi §A7), config → properties marshalling.
 - `Internal/Interop/` — the **P/Invoke boundary**
-  (`Confluent.Kafka.ShareConsumer.Internal.Interop`): the `Native` `[DllImport]`
-  class, `SafeHandle`s, `Utf8` helpers, callback delegates, and the blittable
+  (`Confluent.Kafka.Internal.Interop`): the `NativeMethods`
+  `[DllImport]` class (`NativeMethods.cs` — the name CA1060 requires),
+  `SafeHandle`s, `Utf8Marshal` helpers, callback delegates, and the blittable
   `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
   interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
   with `ffi-marshalling.md`.
-- `tests/Confluent.Kafka.ShareConsumer.UnitTests/` — `Mock*` unit tests
+- `tests/Confluent.Kafka.UnitTests/` — `Mock*` unit tests
   (`MockProducer`; `MockConsumer` as the consumer lands), a top-level sibling of
   `src/` in its own project directory **outside** the library tree — so default
   SDK compile globbing never pulls test files into the library assembly (no
@@ -107,7 +128,7 @@ Mirror the **Java** client in idiomatic C#. The producer surface we're building
 toward (bytes-only interim per the serializer decision in §4):
 
 ```csharp
-namespace Confluent.Kafka.ShareConsumer;   // interim id; folds into Confluent.Kafka later — §4
+namespace Confluent.Kafka;   // same id/assembly as ckd — revisit before publish, §4
 
 public sealed class ProducerRecord {
     public string Topic { get; }
@@ -218,7 +239,7 @@ its C# realization, and where the enforcing rule lives.
 | Java | C# idiom | Rule / detail |
 |---|---|---|
 | `Future<RecordMetadata>` | `Task<RecordMetadata>` | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §A7/§B7 |
-| blocking / `Future`-returning / I/O call (producer `send`/`flush`/`close`; consumer `poll`/`commit`/`position`) | `async Task` + `CancellationToken` | best-effort cancel — ffi §A7/§B7, §4 |
+| **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`seek`/`pause`/`resume`/`currentLag`/`unsubscribe`) | `Task`/`Task<T>` + `Async` suffix + `CancellationToken` | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7 |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
 | `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §A5 |
 | `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` (family) / `InvalidOperationException` (`ObjectDisposedException` when used after close) | validate **before** the FFI call — ffi §A5 |
@@ -226,7 +247,7 @@ its C# realization, and where the enforcing rule lives.
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` (async) | invoked on the **caller's task** during `poll`/`commit`/`close` — consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` (async) | same caller's-task model — consumer-threading §31 |
-| **non-blocking / instantaneous** call (`offset()`, `assignment()`, mock helpers) | **stays sync** — property (`Offset`) or plain method | not everything becomes async — `consumer-threading.md §1` |
+| **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase + `Async` suffix (`SendAsync`, `PollAsync`) | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
@@ -249,9 +270,10 @@ comment).
 
 | Decision | Default | Why / when |
 |---|---|---|
-| **Namespace / package id** | **Now:** `Confluent.Kafka.ShareConsumer` — a **distinct** package id / assembly / namespace, so it coexists with ckd's `Confluent.Kafka` 2.x (NuGet resolves **one version per package id** and the CLR binds **one assembly per simple name** — a distinct id is the only way to run alongside 2.x; `extern alias` can't bypass either wall). **Later:** switch to the bare `Confluent.Kafka` (new major, e.g. 4.x) once this client is a full **superset that replaces** 2.x. | before any public type |
+| **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
 | **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `CloseAsync(TimeSpan)`. *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. | first client type |
 | **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
+| **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |
 | **Async naming** | `Async` suffix on `Task`-returning methods (`SendAsync`); ffi-marshalling assumes this. Deviation: strict-Java `Send`. | first async method |
 | **Interface naming** | `IProducer` / `IConsumer` — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it), same idiom-layering as `Async`; the root name stays recognizable. Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
@@ -261,11 +283,44 @@ comment).
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
 | **Nullable reference types** | `#nullable enable` project-wide; annotate the P/Invoke surface precisely. | project setup |
 
-**Consumer-era note** — a Java sync/async *pair* (e.g. `commitSync`/`commitAsync`)
-maps to `CommitSync()` (genuinely synchronous — blocks the caller; fine since
-commit is low-frequency, not hot-path) **+** `CommitAsync()` (`Task`). The `Async`
-suffix marks the `Task`-returner; the sync twin stays sync — no suffix, calls the
-blocking-native ABI directly (not sync-over-async).
+### Sync vs async — the governing rule
+
+Decide from the **Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`),
+never from the Javadoc, the interface, or the method name. Under KIP-848 the
+consumer is an event loop: the app thread enqueues an event and *waits for the
+background thread to apply it*, so `subscribe`, `assign`, `seek`,
+`seekToBeginning`/`seekToEnd`, `pause`, `resume`, `currentLag` and `unsubscribe`
+all **block** despite reading as instantaneous (classic-consumer intuition does
+not transfer). **If you cannot check, assume it blocks.**
+
+| Java signal | C# |
+|---|---|
+| **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>`, `Async` suffix, `CancellationToken` |
+| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>`, `Async` suffix |
+| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>`, `Async` suffix — the `Task` **replaces** the callback; do **not** add a callback-taking overload |
+| Non-blocking **getter** | sync **property** |
+| Non-blocking **action**, no completion signal | sync plain **method** |
+
+Any **one** trigger is enough — blocking is just the most common of the three.
+
+**Stays sync on the consumer — exactly these:** `Assignment`, `Subscription`,
+`Paused` (properties), `GroupMetadata()`, `Wakeup()`, `Metrics`,
+`Register`/`UnregisterMetricForSubscription`, and `EnforceRebalance()` (a no-op
+that only logs under KIP-848). **On the producer:** `Metrics`,
+`BeginTransaction()`, and the two metric-subscription methods. Everything else is
+async.
+
+⚠ **The ABI must be able to honor it.** Where Java blocks but the ABI exposes only
+a sync entry point — `current_lag`, `seek_with_metadata` — the rule cannot be
+followed, because wrapping the sync call in `Task.Run` is sync-over-async
+(forbidden, ffi §B7). Those are **Mode B** (§6.3), not judgment calls.
+
+**Exception — Java sync/async pairs.** Where Java ships an explicit pair (e.g.
+`commitSync`/`commitAsync`), keep **both**: `CommitSync()` stays genuinely
+synchronous — it blocks the caller, which is fine since commit is low-frequency,
+not hot-path — **plus** `CommitAsync()` (`Task`). The `Async` suffix marks the
+`Task`-returner; the sync twin takes no suffix and calls the blocking-native ABI
+directly (never sync-over-async).
 
 ---
 
@@ -305,16 +360,16 @@ This file (CLAUDE.md) never restates those; it references them by section.
 ```
 Is the feature already exposed at the C ABI (src/ffi)?
         │
-   yes ─┤→ MODE A · .NET-only    (Native decl + SafeHandle + managed wrapper)        → 6.2
+   yes ─┤→ MODE A · .NET-only    (NativeMethods decl + SafeHandle + wrapper)         → 6.2
         │
-   no ──┘→ MODE B · Full-stack   (src/ffi → header → Native → managed API)           → 6.3
+   no ──┘→ MODE B · Full-stack   (src/ffi → header → NativeMethods → managed API)    → 6.3
 ```
 
 ### 6.2 Mode A — .NET-only port
 
 The `kafka_*` function already exists in the header:
 
-1. **P/Invoke** — add the `[DllImport]` declaration to `Native` (ffi §0.1).
+1. **P/Invoke** — add the `[DllImport]` declaration to `NativeMethods` (ffi §0.1).
 2. **Ownership** — a `SafeHandle` subclass for any new long-lived handle
    (ffi §A2/§B2); transient handles are read-and-freed, not wrapped.
 3. **Managed API** — the Java-shaped method in the client class (`Producer.cs` /
@@ -340,7 +395,7 @@ personas; §8.1/§8.2). The `dotnet-actor` **depends on** them and owns **steps
    `cbindgen.toml` `[export].include`.
 4. **Regenerate** — `cargo build --features ffi`; confirm the symbols land in
    `target/include/confluent_kafka.h`.
-5. **Wrap in `Native`** — `[DllImport]` declarations + `SafeHandle`s.
+5. **Wrap in `NativeMethods`** — `[DllImport]` declarations + `SafeHandle`s.
 6. **Expose the managed API** — the Java-shaped surface in a new class.
 7. **Test & build** — Mock/parity tests → `dotnet build` → `dotnet test`.
 
@@ -500,6 +555,18 @@ logic**. The concrete checklist is the **Anti-patterns** blocks in
   is the forward-looking plan (scope / deliverables / decisions), while
   `COMMENTS.DONE.<N>.md` records decisions and deviations made *during*
   execution. Never commit `.DS_Store` here.
-- ⚠ **Nested-agent discovery is unverified** — if the harness does not
-  auto-register `bindings/dotnet/.claude/agents/*.md`, place copies under the
-  repo-root `.claude/agents/` or invoke with the persona files loaded explicitly.
+- ⚠ **Nested-agent discovery does NOT work** — the harness does **not**
+  auto-register `bindings/dotnet/.claude/agents/*.md`, so the personas are not
+  invocable from where they live. To use them, **copy both persona files to the
+  repo-root `.claude/agents/`** (or invoke with the persona files loaded
+  explicitly); without that copy nothing in §8.1–§8.3 is reachable. The root copy
+  is a snapshot, not a link — **re-copy after editing a persona**, and treat the
+  binding-local file as the one you edit.
+- **Persona tracking policy — two locations, opposite rules:**
+  - `bindings/dotnet/.claude/agents/dotnet-{actor,critic}.md` — the
+    **binding-local** personas and the **source of truth**. **Intentionally
+    tracked**: keep them as-is, do **NOT** untrack them.
+  - repo-root `.claude/agents/dotnet-{actor,critic}.md` — the **discovery
+    copies** created by the workaround above. These must **NEVER** be committed:
+    keep them untracked, never `git add` them, and never let them appear in a
+    commit or PR diff.
