@@ -119,27 +119,43 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
 ## 0.2 Native library loading, packaging & AOT
 
 **Decision:** The native lib is our own Rust cdylib `confluent_kafka` (from `cargo
-build --features ffi`). **No NuGet, ever** — the binding is consumed as a
-**project / source reference**, and an MSBuild step copies the native into the
-consuming app's output dir where default `[DllImport]` probing finds it. One
+build --features ffi`), delivered in **two phases**. **Now (pre-publish):** no
+NuGet at all — the binding is consumed as a **project / source reference** and an
+MSBuild step copies the native into the consuming app's output dir, where default
+`[DllImport]` probing finds it. **At publish:** the binding ships as a NuGet
+package that carries the native as **`runtimes/{rid}/native/` assets in the same
+package**; NuGet copies them to output and the same probing resolves them. Only
+*delivery* changes between phases — the loading path is identical: one
 `NativeMethods` class, one `DllName`, no hand-rolled loader.
 
 **Rule:**
 
-  - **Packaging:** an MSBuild target copies `target/<cfg>/…confluent_kafka.…` to
-    `$(OutDir)` (`CopyToOutputDirectory=PreserveNewest`); default probing (app base
-    dir) resolves it. **No NuGet / no `runtimes/{rid}/native/` package** — the build
-    copies the native explicitly. The bare `[DllImport("confluent_kafka")]` maps to
-    the per-OS filename Cargo emits — never hardcode a filename/absolute path.
+  - **Packaging — now (pre-publish):** an MSBuild target copies
+    `target/<cfg>/…confluent_kafka.…` to `$(OutDir)`
+    (`CopyToOutputDirectory=PreserveNewest`); default probing (app base dir)
+    resolves it. No NuGet, because the consumer builds the Rust themselves. The
+    bare `[DllImport("confluent_kafka")]` maps to the per-OS filename Cargo emits
+    — never hardcode a filename/absolute path.
+  - **Packaging — at publish:** the binding is a NuGet package and the native
+    rides along as `runtimes/{rid}/native/…` assets **in that same package**, not
+    a companion `*.redist`. Same package because the cdylib is built from this
+    repo at this commit and versions in lockstep with the managed assembly — one
+    package id makes managed/native version skew structurally impossible. (ckd
+    splits `librdkafka.redist` out only because librdkafka is a *third-party*
+    artifact with its own release cadence and its own consumers; that driver does
+    not apply to us.) Revisit a split only if carrying every RID makes the
+    package too large. A NuGet consumer has no Rust toolchain, so RID assets are
+    the **only** delivery path once we publish.
   - **Cross-platform:** one `DllName` covers every OS — the runtime maps it to
     `confluent_kafka.dll` / `libconfluent_kafka.so` / `libconfluent_kafka.dylib`.
-    OS/arch/libc is selected by *which native is copied*, keyed by RID (`win-x64`,
-    `linux-x64`, `linux-musl-x64`, `osx-arm64`, …). With **no NuGet**, that
-    selection happens at **build/publish** time (`dotnet publish -r <rid>` copies
-    the matching native) or via `NativeLibrary.SetDllImportResolver` — never NuGet
-    RID assets. musl/Alpine = the `linux-musl-x64` RID (build the musl-target
-    cdylib), **not** a second `NativeMethods` class or `/etc/os-release` detection.
-  - **Loading:** rely on default `[DllImport]` resolution — do **not** port
+    OS/arch/libc is selected by *which native is present*, keyed by RID
+    (`win-x64`, `linux-x64`, `linux-musl-x64`, `osx-arm64`, …). **Now** that
+    selection happens at build/publish time (`dotnet publish -r <rid>` copies the
+    matching native) or via `NativeLibrary.SetDllImportResolver`; **at publish**
+    NuGet's RID asset resolution does it. musl/Alpine = the `linux-musl-x64` RID
+    (build the musl-target cdylib), **not** a second `NativeMethods` class or
+    `/etc/os-release` detection.
+  - **Loading (identical in both phases):** rely on default `[DllImport]` resolution — do **not** port
     confluent-kafka-dotnet's `Librdkafka.Initialize` (manual `dlopen`/`LoadLibraryEx`
     preload, reflection binding, distro/GSSAPI variant selection); none applies to
     one self-built cdylib. Custom probing → `NativeLibrary.SetDllImportResolver`
@@ -152,19 +168,23 @@ consuming app's output dir where default `[DllImport]` probing finds it. One
     reflection loader) is AOT-amenable, unlike theirs. Don't add reflection-based
     loading.
 
-**Why:** we build and control one native and consume it by project reference, so
-the drivers of their loader (third-party binary placement, musl/glibc + GSSAPI
-variant selection by filename) don't exist for us; the RID *classifies* which
-binary is needed, but the **build/publish (or a resolver) delivers it** — no NuGet
-required. Cargo's output names already match default P/Invoke resolution.
+**Why:** we build and control one native, and it versions with the managed
+assembly, so the drivers of their loader (third-party binary placement,
+musl/glibc + GSSAPI variant selection by filename) don't exist for us. The RID
+*classifies* which binary is needed; **who delivers it** is the only thing that
+changes across the two phases — the local Rust build now, NuGet RID assets at
+publish. Cargo's output names already match default P/Invoke resolution, so the
+loading code is phase-independent.
 
 **Anti-patterns:**
 
   - Porting `Librdkafka.Initialize` / reflection binding / 3× NativeMethods /
     `/etc/os-release` — unnecessary, and it kills AOT.
   - Hardcoding an absolute path or platform filename in `[DllImport]`.
-  - Adding a NuGet packaging path, or assuming any `runtimes/{rid}/native/`
-    auto-copy — the decision is **no NuGet**; the build copies the native.
+  - **Now:** assuming a `runtimes/{rid}/native/` auto-copy — pre-publish there is
+    no package, so the build copies the native explicitly. **At publish:**
+    hand-rolling that copy instead of using RID assets, or splitting the native
+    into a companion package without a package-size reason.
   - A second `NativeMethods` class / `DllName` for musl — musl is the `linux-musl-x64`
     RID, same `DllName`.
 
@@ -173,6 +193,9 @@ required. Cargo's output names already match default P/Invoke resolution.
   - A smoke call (`MockProducer` create → send → close) loads and works on net462,
     net8.0, net10.0 on Windows + Linux in CI, with the native copied to output.
   - A missing native gives a clear `DllNotFoundException`, not an obscure crash.
+  - **At publish:** `dotnet pack` emits `runtimes/{rid}/native/` for every
+    supported RID, and a consuming test project resolves the native **from the
+    package alone** — no Rust toolchain, no local `cargo build`.
 
 ---
 
