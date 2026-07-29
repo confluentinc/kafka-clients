@@ -20,8 +20,8 @@
 pub mod async_kafka_consumer;
 pub mod close_options;
 pub mod consumer_config;
-pub mod consumer_partition_assignor;
 pub mod consumer_group_metadata;
+pub mod consumer_partition_assignor;
 pub mod consumer_rebalance_listener;
 pub mod consumer_rebalance_listener_method_name;
 pub mod consumer_record;

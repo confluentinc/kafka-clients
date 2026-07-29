@@ -34,7 +34,6 @@ pub struct ListConsumerGroupsResult {
 }
 
 impl ListConsumerGroupsResult {
-    #[allow(dead_code)] // wired by KafkaAdminClient later in this phase
     /// Creates a result from the combined per-broker listings-or-errors future.
     pub(crate) fn new(source: KafkaFuture<Vec<Result<ConsumerGroupListing, KafkaError>>>) -> Self {
         Self { source }

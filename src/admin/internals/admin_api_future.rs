@@ -81,7 +81,6 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
 /// Corresponds to `AdminApiFuture.SimpleAdminApiFuture` (created via
 /// `AdminApiFuture.forKeys(keys)`). Used by the group-describe handlers, which
 /// key their futures by [`CoordinatorKey`](super::coordinator_key::CoordinatorKey).
-#[allow(dead_code)] // wired by group-describe handlers later in this phase
 pub(crate) struct SimpleAdminApiFuture<K, V>
 where
     K: Clone + Eq + Hash,
@@ -90,7 +89,6 @@ where
     futures: HashMap<K, KafkaFutureImpl<V>>,
 }
 
-#[allow(dead_code)] // wired by group-describe handlers later in this phase
 impl<K, V> SimpleAdminApiFuture<K, V>
 where
     K: Clone + Eq + Hash + Send,

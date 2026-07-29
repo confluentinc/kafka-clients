@@ -44,7 +44,6 @@ pub(crate) enum ApiRequestScope {
     /// batching is disabled. Has no destination broker, so lookup is required.
     ///
     /// Corresponds to `CoordinatorStrategy.LookupRequestScope`.
-    #[allow(dead_code)] // wired by CoordinatorStrategy/driver later in this phase
     CoordinatorLookup(CoordinatorKey),
     /// A fulfillment scope keyed by destination broker id. Each destination
     /// broker in the fulfillment stage gets its own request scope.

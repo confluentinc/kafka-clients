@@ -287,6 +287,36 @@ pub trait Admin: Send + Sync {
         options: ListOffsetsOptions,
     ) -> ListOffsetsResult;
 
+    /// List the groups available in the cluster.
+    ///
+    /// Corresponds to `Admin.listGroups(ListGroupsOptions)`.
+    fn list_groups(&self, options: ListGroupsOptions) -> ListGroupsResult;
+
+    /// List the consumer groups available in the cluster.
+    ///
+    /// Corresponds to `Admin.listConsumerGroups(ListConsumerGroupsOptions)`
+    /// (deprecated since 4.1 in favor of [`list_groups`](Admin::list_groups)).
+    #[allow(deprecated)]
+    fn list_consumer_groups(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult;
+
+    /// Describe some consumer groups in the cluster.
+    ///
+    /// Corresponds to `Admin.describeConsumerGroups(Collection<String>, DescribeConsumerGroupsOptions)`.
+    fn describe_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeConsumerGroupsOptions,
+    ) -> DescribeConsumerGroupsResult;
+
+    /// Describe some classic groups in the cluster.
+    ///
+    /// Corresponds to `Admin.describeClassicGroups(Collection<String>, DescribeClassicGroupsOptions)`.
+    fn describe_classic_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeClassicGroupsOptions,
+    ) -> DescribeClassicGroupsResult;
+
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.
     ///

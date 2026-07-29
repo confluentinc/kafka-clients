@@ -20,10 +20,6 @@
 //! Always uses the classic `DescribeGroups` API (batched: one request per
 //! coordinator for all its keys).
 
-// Handlers are wired into KafkaAdminClient in the next commit of this phase;
-// the module-level allow is removed once that wiring lands.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 
 use crate::admin::internals::admin_utils::valid_acl_operations;

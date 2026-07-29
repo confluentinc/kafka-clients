@@ -26,26 +26,32 @@ use async_trait::async_trait;
 
 use crate::admin::{
     Admin, AlterConfigOp, AlterConfigsOptions, AlterConfigsResult, AlterPartitionReassignmentsOptions,
-    AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, Config, ConfigEntry,
-    CreatePartitionsOptions, CreatePartitionsResult, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions,
-    DeleteRecordsResult, DeleteTopicsOptions, DeleteTopicsResult, DeletedRecords, DescribeClusterOptions,
-    DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult, DescribeLogDirsOptions,
-    DescribeLogDirsResult, DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions,
-    DescribeTopicsResult, ElectLeadersOptions, ElectLeadersResult, ListConfigResourcesOptions,
-    ListConfigResourcesResult, ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo,
+    AlterPartitionReassignmentsResult, AlterReplicaLogDirsOptions, AlterReplicaLogDirsResult, ClassicGroupDescription,
+    Config, ConfigEntry, ConsumerGroupDescription, CreatePartitionsOptions, CreatePartitionsResult,
+    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteRecordsResult, DeleteTopicsOptions,
+    DeleteTopicsResult, DeletedRecords, DescribeClassicGroupsOptions, DescribeClassicGroupsResult,
+    DescribeClusterOptions, DescribeClusterResult, DescribeConfigsOptions, DescribeConfigsResult,
+    DescribeConsumerGroupsOptions, DescribeConsumerGroupsResult, DescribeLogDirsOptions, DescribeLogDirsResult,
+    DescribeReplicaLogDirsOptions, DescribeReplicaLogDirsResult, DescribeTopicsOptions, DescribeTopicsResult,
+    ElectLeadersOptions, ElectLeadersResult, GroupListing, ListConfigResourcesOptions, ListConfigResourcesResult,
+    ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResult, ListOffsetsResultInfo,
     ListPartitionReassignmentsOptions, ListPartitionReassignmentsResult, ListTopicsOptions, ListTopicsResult,
     LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment,
     RecordsToDelete, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
+#[allow(deprecated)]
+use crate::admin::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
 use crate::common::ElectionType;
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::protocol::Errors;
 use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
+use crate::common::{GroupState, GroupType};
 use crate::common::{
     KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
+use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -1117,6 +1123,78 @@ impl Admin for MockAdminClient {
             futures.insert(tp.clone(), future.future());
         }
         ListOffsetsResult::new(futures)
+    }
+
+    fn list_groups(&self, _options: ListGroupsOptions) -> ListGroupsResult {
+        // Mirrors Java's `MockAdminClient.listGroups`: one CONSUMER/STABLE
+        // GroupListing per seeded group config.
+        let state = self.state.lock().unwrap();
+        let listings: Vec<Result<GroupListing, KafkaError>> = state
+            .group_configs
+            .keys()
+            .map(|g| {
+                Ok(GroupListing::new(
+                    g.clone(),
+                    Some(GroupType::Consumer),
+                    PROTOCOL_TYPE,
+                    Some(GroupState::Stable),
+                ))
+            })
+            .collect();
+        let handle: KafkaFutureImpl<Vec<Result<GroupListing, KafkaError>>> = KafkaFutureImpl::new();
+        handle.complete(listings);
+        ListGroupsResult::new(handle.future())
+    }
+
+    #[allow(deprecated)]
+    fn list_consumer_groups(&self, _options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
+        // Mirrors Java's `MockAdminClient.listConsumerGroups`: a simple
+        // ConsumerGroupListing per seeded group config.
+        let state = self.state.lock().unwrap();
+        let listings: Vec<Result<ConsumerGroupListing, KafkaError>> = state
+            .group_configs
+            .keys()
+            .map(|g| Ok(ConsumerGroupListing::new(g.clone(), None, None, false)))
+            .collect();
+        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, KafkaError>>> = KafkaFutureImpl::new();
+        handle.complete(listings);
+        ListConsumerGroupsResult::new(handle.future())
+    }
+
+    fn describe_consumer_groups(
+        &self,
+        group_ids: &[String],
+        _options: DescribeConsumerGroupsOptions,
+    ) -> DescribeConsumerGroupsResult {
+        // Java's `MockAdminClient.describeConsumerGroups` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:735). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let mut futures = HashMap::new();
+        for group_id in group_ids {
+            let handle: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            futures.insert(group_id.clone(), handle.future());
+        }
+        DescribeConsumerGroupsResult::new(futures)
+    }
+
+    fn describe_classic_groups(
+        &self,
+        group_ids: &[String],
+        _options: DescribeClassicGroupsOptions,
+    ) -> DescribeClassicGroupsResult {
+        // Java's `MockAdminClient.describeClassicGroups` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:1478). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let mut futures = HashMap::new();
+        for group_id in group_ids {
+            let handle: KafkaFutureImpl<ClassicGroupDescription> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            futures.insert(group_id.clone(), handle.future());
+        }
+        DescribeClassicGroupsResult::new(futures)
     }
 
     async fn close(&self, _timeout: Duration) {
