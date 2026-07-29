@@ -1,4 +1,5 @@
 /target
+tests/integration/admin_smoke_test_manual.rs
 tools/java-perf-test/bin/
 *.class
 *.png
