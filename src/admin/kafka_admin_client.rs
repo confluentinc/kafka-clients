@@ -120,6 +120,8 @@ use super::internals::delete_records_handler::DeleteRecordsHandler;
 use super::internals::describe_classic_groups_handler::DescribeClassicGroupsHandler;
 use super::internals::describe_consumer_groups_handler::DescribeConsumerGroupsHandler;
 use super::internals::describe_producers_handler::DescribeProducersHandler;
+use super::internals::describe_transactions_handler::DescribeTransactionsHandler;
+use super::internals::fence_producers_handler::FenceProducersHandler;
 use super::internals::list_consumer_group_offsets_handler::ListConsumerGroupOffsetsHandler;
 use super::internals::list_offsets_handler::ListOffsetsHandler;
 use super::internals::partition_leader_cache::PartitionLeaderCache;
@@ -127,7 +129,8 @@ use super::internals::remove_members_from_consumer_group_handler::RemoveMembersF
 use super::records_to_delete::RecordsToDelete;
 use super::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
-    DescribeProducersResult,
+    DescribeProducersResult, DescribeTransactionsOptions, DescribeTransactionsResult, FenceProducersOptions,
+    FenceProducersResult,
 };
 use super::{
     Admin, AdminClientConfig, AlterClientQuotasOptions, AlterClientQuotasResult, AlterConfigOp, AlterConfigsOptions,
@@ -195,6 +198,9 @@ struct Shared {
     #[allow(dead_code)]
     client_id: String,
     default_api_timeout_ms: i32,
+    /// The `request.timeout.ms` config, used as the default transaction timeout
+    /// for `fenceProducers` (mirrors `KafkaAdminClient.requestTimeoutMs`).
+    request_timeout_ms: i32,
     admin_tx: mpsc::UnboundedSender<Call>,
     wakeup: Arc<Notify>,
     shutdown: Arc<ShutdownSignal>,
@@ -327,6 +333,7 @@ impl KafkaAdminClient {
         let shared = Shared {
             client_id: config.client_id().to_string(),
             default_api_timeout_ms: config.default_api_timeout_ms(),
+            request_timeout_ms: config.request_timeout_ms(),
             admin_tx,
             wakeup,
             shutdown,
@@ -3001,6 +3008,40 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         AbortTransactionResult::new(result_map)
+    }
+
+    fn describe_transactions(
+        &self,
+        transactional_ids: &[String],
+        options: DescribeTransactionsOptions,
+    ) -> DescribeTransactionsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DescribeTransactionsHandler::new_future(transactional_ids);
+        let result_map = future.all();
+        let handler = DescribeTransactionsHandler::new(log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DescribeTransactionsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn fence_producers(&self, transactional_ids: &[String], options: FenceProducersOptions) -> FenceProducersResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = FenceProducersHandler::new_future(transactional_ids);
+        let result_map = future.all();
+        let handler = FenceProducersHandler::new(&options, log_context.clone(), self.shared.request_timeout_ms);
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        FenceProducersResult::new(coordinator_keyed_by_id(result_map))
     }
 
     fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
@@ -6393,6 +6434,194 @@ mod tests {
         let mock = MockAdminClient::create(1);
         let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
         let result = mock.abort_transaction(spec, AbortTransactionOptions::new());
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+    }
+
+    // --- describeTransactions / fenceProducers -------------------------------
+
+    use crate::admin::{DescribeTransactionsOptions, FenceProducersOptions, TransactionDescription, TransactionState};
+    use crate::common::requests::InitProducerIdResponse;
+    use crate::describe_transactions_response_data::{
+        DescribeTransactionsResponseData, TransactionState as WireTxnState,
+    };
+    use crate::init_producer_id_response_data::InitProducerIdResponseData;
+
+    fn describe_txn_state(
+        transactional_id: &str,
+        state: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        timeout_ms: i32,
+        start_time_ms: i64,
+    ) -> WireTxnState {
+        let mut s = WireTxnState::new();
+        s.set_error_code(Errors::None.code());
+        s.set_transactional_id(transactional_id.to_string());
+        s.set_transaction_state(state.to_string());
+        s.set_producer_id(producer_id);
+        s.set_producer_epoch(producer_epoch);
+        s.set_transaction_timeout_ms(timeout_ms);
+        s.set_transaction_start_time_ms(start_time_ms);
+        s
+    }
+
+    fn describe_transactions_resp(states: Vec<WireTxnState>) -> ConcreteResponse {
+        let mut data = DescribeTransactionsResponseData::new();
+        data.set_transaction_states(states);
+        ConcreteResponse::DescribeTransactions(crate::common::requests::DescribeTransactionsResponse::new(data))
+    }
+
+    fn describe_txn_error_state(transactional_id: &str, error: Errors) -> WireTxnState {
+        let mut s = WireTxnState::new();
+        s.set_error_code(error.code());
+        s.set_transactional_id(transactional_id.to_string());
+        s
+    }
+
+    fn init_producer_id_resp(error: Errors, producer_id: i64, producer_epoch: i16) -> ConcreteResponse {
+        let mut data = InitProducerIdResponseData::new();
+        data.set_error_code(error.code());
+        data.set_producer_id(producer_id);
+        data.set_producer_epoch(producer_epoch);
+        ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeTransactions`.
+    #[tokio::test]
+    async fn test_describe_transactions() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let transactional_id = "foo";
+        let coordinator = &nodes[0];
+
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
+        runnable.client_mut().prepare_response_for_node(
+            describe_transactions_resp(vec![describe_txn_state(
+                transactional_id,
+                "CompleteCommit",
+                12345,
+                15,
+                10000,
+                -1,
+            )]),
+            coordinator,
+        );
+
+        let result = admin.describe_transactions(&["foo".to_string()], DescribeTransactionsOptions::new());
+        let future = result.description(transactional_id).unwrap();
+        pump_until(&mut runnable, 40, |_r| future.is_done()).await;
+        let expected = TransactionDescription::new(
+            coordinator.id(),
+            TransactionState::CompleteCommit,
+            12345,
+            15,
+            10000,
+            None,
+            HashSet::new(),
+        );
+        assert_eq!(future.get().await.unwrap(), expected);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testRetryDescribeTransactionsAfterNotCoordinatorError`.
+    #[tokio::test]
+    async fn test_retry_describe_transactions_after_not_coordinator_error() {
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
+        let transactional_id = "foo";
+        let coordinator1 = &nodes[0];
+        let coordinator2 = &nodes[1];
+
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator1)]));
+        runnable.client_mut().prepare_response_for_node(
+            describe_transactions_resp(vec![describe_txn_error_state(transactional_id, Errors::NotCoordinator)]),
+            coordinator1,
+        );
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator2)]));
+        runnable.client_mut().prepare_response_for_node(
+            describe_transactions_resp(vec![describe_txn_state(
+                transactional_id,
+                "CompleteCommit",
+                12345,
+                15,
+                10000,
+                -1,
+            )]),
+            coordinator2,
+        );
+
+        let result = admin.describe_transactions(&["foo".to_string()], DescribeTransactionsOptions::new());
+        let future = result.description(transactional_id).unwrap();
+        drive_until(&mut runnable, &time, 60, || future.is_done()).await;
+        let expected = TransactionDescription::new(
+            coordinator2.id(),
+            TransactionState::CompleteCommit,
+            12345,
+            15,
+            10000,
+            None,
+            HashSet::new(),
+        );
+        assert_eq!(future.get().await.unwrap(), expected);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testFenceProducers`.
+    #[tokio::test]
+    async fn test_fence_producers() {
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retry.backoff.ms", "100")]);
+        let transactional_id = "copyCat";
+        let coordinator = &nodes[0];
+
+        // Retriable FindCoordinator error, then success, then a coordinator-load
+        // InitProducerId retry, then a coordinator-moved retry, then success.
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_error_resp(transactional_id, Errors::CoordinatorNotAvailable));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(init_producer_id_resp(Errors::CoordinatorLoadInProgress, 0, 0), coordinator);
+        runnable
+            .client_mut()
+            .prepare_response_for_node(init_producer_id_resp(Errors::NotCoordinator, 0, 0), coordinator);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(init_producer_id_resp(Errors::None, 4761, 489), coordinator);
+
+        let result = admin.fence_producers(&["copyCat".to_string()], FenceProducersOptions::new());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 80, || all.is_done()).await;
+        all.get().await.unwrap();
+        assert_eq!(result.producer_id(transactional_id).unwrap().get().await.unwrap(), 4761);
+        assert_eq!(result.epoch_id(transactional_id).unwrap().get().await.unwrap(), 489);
+    }
+
+    /// The mock's `describe_transactions` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_describe_transactions_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.describe_transactions(&["t".to_string()], DescribeTransactionsOptions::new());
+        assert_eq!(
+            result.description("t").unwrap().get().await.unwrap_err().error(),
+            Errors::UnsupportedVersion
+        );
+    }
+
+    /// The mock's `fence_producers` mirrors Java's `UnsupportedOperationException`.
+    #[tokio::test]
+    async fn test_mock_fence_producers_unsupported() {
+        use crate::admin::MockAdminClient;
+        let mock = MockAdminClient::create(1);
+        let result = mock.fence_producers(&["t".to_string()], FenceProducersOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 

@@ -38,6 +38,8 @@ pub(crate) mod delete_records_handler;
 pub(crate) mod describe_classic_groups_handler;
 pub(crate) mod describe_consumer_groups_handler;
 pub(crate) mod describe_producers_handler;
+pub(crate) mod describe_transactions_handler;
+pub(crate) mod fence_producers_handler;
 pub(crate) mod list_consumer_group_offsets_handler;
 pub(crate) mod list_offsets_handler;
 pub(crate) mod partition_leader_cache;
