@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System;
 using Confluent.Kafka.Internal.Interop;
 using Xunit;
 
@@ -31,26 +30,22 @@ public sealed class NativeLoadProbeTests
 {
     /// <summary>
     /// Smoke: <c>ConsumerProperties_new</c> → <c>_put</c> (key/value pinned via
-    /// <see cref="Utf8Marshal.Pin"/>) → <c>_destroy</c>. Proves the native loads, the
-    /// first <c>[DllImport]</c> resolves its <c>EntryPoint</c>, and the type map +
-    /// <see cref="Utf8Marshal.Pin"/> round-trip a <c>const char*</c> into native.
+    /// <see cref="Utf8Marshal.Pin"/>) → <c>_destroy</c> (now via
+    /// <see cref="SafeConsumerPropertiesHandle"/>'s <c>Dispose</c>). Proves the native
+    /// loads, the first <c>[DllImport]</c> resolves its <c>EntryPoint</c>, the
+    /// SafeHandle-return marshaller hands back a valid owned handle (M2/P2), and the
+    /// type map + <see cref="Utf8Marshal.Pin"/> round-trip a <c>const char*</c> into
+    /// native.
     /// </summary>
     [Fact]
     public void ConsumerProperties_NewPutDestroy_LoadsNativeAndRoundTrips()
     {
-        IntPtr props = NativeMethods.ConsumerPropertiesNew();
-        try
-        {
-            Assert.NotEqual(IntPtr.Zero, props);
+        using SafeConsumerPropertiesHandle props = NativeMethods.ConsumerPropertiesNew();
+        Assert.False(props.IsInvalid);
 
-            using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("bootstrap.servers");
-            using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("localhost:9092");
-            NativeMethods.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
-        }
-        finally
-        {
-            NativeMethods.ConsumerPropertiesDestroy(props);
-        }
+        using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("bootstrap.servers");
+        using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("localhost:9092");
+        NativeMethods.ConsumerPropertiesPut(props.DangerousGetHandle(), key.Pointer, value.Pointer);
     }
 
     /// <summary>
@@ -65,18 +60,11 @@ public sealed class NativeLoadProbeTests
     [Fact]
     public void ConsumerProperties_NonAsciiConfig_MarshalsWithoutCrashing()
     {
-        IntPtr props = NativeMethods.ConsumerPropertiesNew();
-        try
-        {
-            Assert.NotEqual(IntPtr.Zero, props);
+        using SafeConsumerPropertiesHandle props = NativeMethods.ConsumerPropertiesNew();
+        Assert.False(props.IsInvalid);
 
-            using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("clï.ïd");
-            using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("café-brøker-🎉");
-            NativeMethods.ConsumerPropertiesPut(props, key.Pointer, value.Pointer);
-        }
-        finally
-        {
-            NativeMethods.ConsumerPropertiesDestroy(props);
-        }
+        using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("clï.ïd");
+        using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin("café-brøker-🎉");
+        NativeMethods.ConsumerPropertiesPut(props.DangerousGetHandle(), key.Pointer, value.Pointer);
     }
 }
