@@ -41,6 +41,8 @@ org.apache.kafka.clients.admin.ConsumerGroupDescription
 org.apache.kafka.clients.admin.ConsumerGroupListing
 org.apache.kafka.clients.admin.CreateAclsOptions
 org.apache.kafka.clients.admin.CreateAclsResult
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions
+org.apache.kafka.clients.admin.CreateDelegationTokenResult
 org.apache.kafka.clients.admin.CreatePartitionsOptions
 org.apache.kafka.clients.admin.CreatePartitionsResult
 org.apache.kafka.clients.admin.CreateTopicsOptions
@@ -68,6 +70,8 @@ org.apache.kafka.clients.admin.DescribeConfigsOptions
 org.apache.kafka.clients.admin.DescribeConfigsResult
 org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions
 org.apache.kafka.clients.admin.DescribeConsumerGroupsResult
+org.apache.kafka.clients.admin.DescribeDelegationTokenOptions
+org.apache.kafka.clients.admin.DescribeDelegationTokenResult
 org.apache.kafka.clients.admin.DescribeLogDirsOptions
 org.apache.kafka.clients.admin.DescribeLogDirsResult
 org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions
@@ -76,6 +80,8 @@ org.apache.kafka.clients.admin.DescribeTopicsOptions
 org.apache.kafka.clients.admin.DescribeTopicsResult
 org.apache.kafka.clients.admin.ElectLeadersOptions
 org.apache.kafka.clients.admin.ElectLeadersResult
+org.apache.kafka.clients.admin.ExpireDelegationTokenOptions
+org.apache.kafka.clients.admin.ExpireDelegationTokenResult
 org.apache.kafka.clients.admin.GroupListing
 org.apache.kafka.clients.admin.KafkaAdminClient
 org.apache.kafka.clients.admin.ListConfigResourcesOptions
@@ -106,6 +112,8 @@ org.apache.kafka.clients.admin.PartitionReassignment
 org.apache.kafka.clients.admin.RecordsToDelete
 org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions
 org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult
+org.apache.kafka.clients.admin.RenewDelegationTokenOptions
+org.apache.kafka.clients.admin.RenewDelegationTokenResult
 org.apache.kafka.clients.admin.TopicDescription
 org.apache.kafka.clients.admin.TopicListing
 org.apache.kafka.clients.admin.internals.AdminApiDriver
@@ -706,6 +714,8 @@ org.apache.kafka.common.requests.ConsumerGroupDescribeRequest
 org.apache.kafka.common.requests.ConsumerGroupDescribeResponse
 org.apache.kafka.common.requests.CreateAclsRequest
 org.apache.kafka.common.requests.CreateAclsResponse
+org.apache.kafka.common.requests.CreateDelegationTokenRequest
+org.apache.kafka.common.requests.CreateDelegationTokenResponse
 org.apache.kafka.common.requests.CreatePartitionsRequest
 org.apache.kafka.common.requests.CreatePartitionsResponse
 org.apache.kafka.common.requests.CreateTopicsRequest
@@ -726,12 +736,16 @@ org.apache.kafka.common.requests.DescribeClusterRequest
 org.apache.kafka.common.requests.DescribeClusterResponse
 org.apache.kafka.common.requests.DescribeConfigsRequest
 org.apache.kafka.common.requests.DescribeConfigsResponse
+org.apache.kafka.common.requests.DescribeDelegationTokenRequest
+org.apache.kafka.common.requests.DescribeDelegationTokenResponse
 org.apache.kafka.common.requests.DescribeGroupsRequest
 org.apache.kafka.common.requests.DescribeGroupsResponse
 org.apache.kafka.common.requests.DescribeLogDirsRequest
 org.apache.kafka.common.requests.DescribeLogDirsResponse
 org.apache.kafka.common.requests.ElectLeadersRequest
 org.apache.kafka.common.requests.ElectLeadersResponse
+org.apache.kafka.common.requests.ExpireDelegationTokenRequest
+org.apache.kafka.common.requests.ExpireDelegationTokenResponse
 org.apache.kafka.common.requests.IncrementalAlterConfigsRequest
 org.apache.kafka.common.requests.IncrementalAlterConfigsResponse
 org.apache.kafka.common.requests.LeaveGroupRequest
@@ -748,6 +762,8 @@ org.apache.kafka.common.requests.OffsetDeleteRequest
 org.apache.kafka.common.requests.OffsetDeleteResponse
 org.apache.kafka.common.requests.ProduceRequest
 org.apache.kafka.common.requests.ProduceResponse
+org.apache.kafka.common.requests.RenewDelegationTokenRequest
+org.apache.kafka.common.requests.RenewDelegationTokenResponse
 org.apache.kafka.common.requests.RequestAndSize
 org.apache.kafka.common.requests.RequestHeader
 org.apache.kafka.common.requests.RequestTestUtils
@@ -762,9 +778,12 @@ org.apache.kafka.common.resource.Resource
 org.apache.kafka.common.resource.ResourcePattern
 org.apache.kafka.common.resource.ResourcePatternFilter
 org.apache.kafka.common.resource.ResourceType
+org.apache.kafka.common.security.auth.KafkaPrincipal
 org.apache.kafka.common.security.auth.SecurityProtocol
 org.apache.kafka.common.security.authenticator.SaslClientAuthenticator
 org.apache.kafka.common.security.ssl.SslFactory
+org.apache.kafka.common.security.token.delegation.DelegationToken
+org.apache.kafka.common.security.token.delegation.TokenInformation
 org.apache.kafka.common.serialization.ByteArraySerializer
 org.apache.kafka.common.serialization.Serializer
 org.apache.kafka.common.serialization.StringSerializer

@@ -28,13 +28,18 @@ round-trip latency; they independently re-verify every landed phase.
 - Scope is **Rust core + unit tests + real-broker integration tests only** — no
   C FFI, no Python bindings this milestone (see [[milestone11-scope-rust-only]]).
 
-**Guard: `tests/integration/admin_smoke_test_manual.rs` must stay UNTRACKED.**
-It is the user's developer-local manual smoke test, intentionally not
-version-controlled (its `mod` line in `tests/integration/main.rs` is a local
-uncommitted edit). Actors have accidentally `git add`-swept it into their
-commits (happened in Tier 3 Phase 1, commits 9fe737e/9114755 — fixed by
-untracking in a follow-up `chore:` commit). **After every Actor phase, before
-the handoff commit, verify `git ls-tree -r HEAD --name-only | grep
-admin_smoke_test_manual` returns nothing.** If it got committed, `git rm
---cached` it + drop the committed `mod` line, then restore the `mod` line as a
-local uncommitted edit — never alter the file's contents.
+**Guard: `tests/integration/admin_smoke_test_manual.rs` is developer-local — never commit it OR a `mod` line referencing it.**
+It is the user's manual smoke test. As of 2026-07-29 the coordinator added it to
+`.gitignore` (commit 0a9e4c0), so `git add` can no longer pick up the `.rs`
+file. **This happened TWICE before that fix** (Tier 3 P1 commits 9fe737e/9114755
+committed the file; Tier 3 P2 commit 85c6c44 re-introduced the
+`mod admin_smoke_test_manual;` line into tracked `tests/integration/main.rs`
+even after the file itself was untracked in d2b6e36 — a fresh clone then failed
+to compile `tests/integration` because the referenced module wasn't tracked).
+**Lesson: the failure mode is the `mod` line inside tracked `main.rs`, not just
+the tracked `.rs` file.** Checking `git ls-tree | grep admin_smoke_test_manual`
+(filenames only) is INSUFFICIENT — it misses the mod-line-in-main.rs case. After
+every Actor phase also run `git show HEAD:tests/integration/main.rs | grep
+admin_smoke_test_manual` (must be empty) and remind each Actor: the file is
+gitignored/untracked and no commit may reference it (its `mod` line stays a
+local uncommitted edit).

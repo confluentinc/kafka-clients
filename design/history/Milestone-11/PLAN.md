@@ -70,14 +70,23 @@
 > faithfully. Review record at
 > `design/history/Milestone-11/Tier3-Phase-2/COMMENTS.DONE.1.md`.
 >
-> **Next: Tier 3 Phase 3 "SCRAM credentials" — HARD STOP (2026-07-29).**
-> Phase 3 needs a new PBKDF2 crypto crate (`pbkdf2`+`hmac`+`sha2`, or `ring`)
-> for `ScramFormatter.hi()` (finding #4), which changes `Cargo.toml`. Per
-> CLAUDE.md §1.2 the dependency must be approved by the user BEFORE any Phase 3
-> Rust-core work. **Paused here awaiting the crate decision.** Tier 3 Phases 4–7
-> (delegation tokens, features, producers/transactions, client metrics) and Tier
-> 4 (out of scope) follow. Phases 4/5/6/7 need no new crate and could proceed
-> independently if the user prefers to defer SCRAM.
+> **Tier 3 Phase 3 "SCRAM credentials" is DEFERRED (2026-07-29)** — needs a new
+> PBKDF2 crypto crate (`pbkdf2`+`hmac`+`sha2`, or `ring`) for `ScramFormatter.hi()`
+> (finding #4), changing `Cargo.toml`. Per CLAUDE.md §1.2 the user must approve
+> the dependency first; "continue the implementation" was NOT explicit approval.
+> Per the user's direction, Phases 4–7 (no new crate) run FIRST; SCRAM resumes
+> only on an explicit relayed crate approval — do not touch `Cargo.toml` until then.
+>
+> **Tier 3 Phase 4 "Delegation tokens" is COMPLETE (2026-07-29):**
+> `create/renew/expire/describe_delegation_token` + `KafkaPrincipal`/
+> `DelegationToken`/`TokenInformation` — Rust core + unit tests (against the mock,
+> per finding #10), Critic-CLEAN on first pass (no fix cycle). Integration
+> deferred (admin client has no SASL support yet — a separate feature). Review
+> record at `design/history/Milestone-11/Tier3-Phase-4/COMMENTS.DONE.1.md`.
+>
+> **Next: Tier 3 Phase 5 "Features".** Then Phase 6 (producers/transactions),
+> Phase 7 (client metrics). SCRAM (Phase 3) revisited only on crate approval.
+> Tier 4 remains out of scope.
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed
