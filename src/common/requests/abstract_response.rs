@@ -28,6 +28,7 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
+use super::AlterClientQuotasResponse;
 use super::AlterPartitionReassignmentsResponse;
 use super::AlterReplicaLogDirsResponse;
 use super::ApiVersionsResponse;
@@ -41,6 +42,7 @@ use super::DeleteGroupsResponse;
 use super::DeleteRecordsResponse;
 use super::DeleteTopicsResponse;
 use super::DescribeAclsResponse;
+use super::DescribeClientQuotasResponse;
 use super::DescribeClusterResponse;
 use super::DescribeConfigsResponse;
 use super::DescribeGroupsResponse;
@@ -145,6 +147,10 @@ pub enum ConcreteResponse {
     CreateAcls(CreateAclsResponse),
     /// A DeleteAcls response.
     DeleteAcls(DeleteAclsResponse),
+    /// A DescribeClientQuotas response.
+    DescribeClientQuotas(DescribeClientQuotasResponse),
+    /// An AlterClientQuotas response.
+    AlterClientQuotas(AlterClientQuotasResponse),
 }
 
 impl ConcreteResponse {
@@ -185,6 +191,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => r.api_key(),
             Self::CreateAcls(r) => r.api_key(),
             Self::DeleteAcls(r) => r.api_key(),
+            Self::DescribeClientQuotas(r) => r.api_key(),
+            Self::AlterClientQuotas(r) => r.api_key(),
         }
     }
 
@@ -231,6 +239,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::CreateAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DeleteAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeClientQuotas(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AlterClientQuotas(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -345,6 +355,12 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeClientQuotas(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterClientQuotas(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -391,6 +407,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreateAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -441,6 +459,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => r.error_counts(),
             Self::CreateAcls(r) => r.error_counts(),
             Self::DeleteAcls(r) => r.error_counts(),
+            Self::DescribeClientQuotas(r) => r.error_counts(),
+            Self::AlterClientQuotas(r) => r.error_counts(),
         }
     }
 
@@ -483,6 +503,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => r.throttle_time_ms(),
             Self::CreateAcls(r) => r.throttle_time_ms(),
             Self::DeleteAcls(r) => r.throttle_time_ms(),
+            Self::DescribeClientQuotas(r) => r.throttle_time_ms(),
+            Self::AlterClientQuotas(r) => r.throttle_time_ms(),
         }
     }
 
@@ -524,6 +546,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::CreateAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DeleteAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeClientQuotas(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AlterClientQuotas(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -564,6 +588,8 @@ impl ConcreteResponse {
             Self::DescribeAcls(r) => r.should_client_throttle(version),
             Self::CreateAcls(r) => r.should_client_throttle(version),
             Self::DeleteAcls(r) => r.should_client_throttle(version),
+            Self::DescribeClientQuotas(r) => r.should_client_throttle(version),
+            Self::AlterClientQuotas(r) => r.should_client_throttle(version),
         }
     }
 
@@ -748,6 +774,14 @@ impl ConcreteResponse {
                 let response = DeleteAclsResponse::parse(readable, version)?;
                 Ok(Self::DeleteAcls(response))
             },
+            ApiKeys::DESCRIBE_CLIENT_QUOTAS => {
+                let response = DescribeClientQuotasResponse::parse(readable, version)?;
+                Ok(Self::DescribeClientQuotas(response))
+            },
+            ApiKeys::ALTER_CLIENT_QUOTAS => {
+                let response = AlterClientQuotasResponse::parse(readable, version)?;
+                Ok(Self::AlterClientQuotas(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -793,6 +827,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::DescribeAcls(r) => write!(f, "{r}"),
             Self::CreateAcls(r) => write!(f, "{r}"),
             Self::DeleteAcls(r) => write!(f, "{r}"),
+            Self::DescribeClientQuotas(r) => write!(f, "{r}"),
+            Self::AlterClientQuotas(r) => write!(f, "{r}"),
         }
     }
 }

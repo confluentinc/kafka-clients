@@ -23,6 +23,7 @@
 
 use std::io;
 
+use crate::alter_client_quotas_request_data::AlterClientQuotasRequestData;
 use crate::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
 use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
@@ -39,6 +40,7 @@ use crate::delete_groups_request_data::DeleteGroupsRequestData;
 use crate::delete_records_request_data::DeleteRecordsRequestData;
 use crate::delete_topics_request_data::DeleteTopicsRequestData;
 use crate::describe_acls_request_data::DescribeAclsRequestData;
+use crate::describe_client_quotas_request_data::DescribeClientQuotasRequestData;
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::DescribeConfigsRequestData;
 use crate::describe_groups_request_data::DescribeGroupsRequestData;
@@ -61,6 +63,7 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
+use super::AlterClientQuotasRequest;
 use super::AlterPartitionReassignmentsRequest;
 use super::AlterReplicaLogDirsRequest;
 use super::ApiVersionsRequest;
@@ -75,6 +78,7 @@ use super::DeleteGroupsRequest;
 use super::DeleteRecordsRequest;
 use super::DeleteTopicsRequest;
 use super::DescribeAclsRequest;
+use super::DescribeClientQuotasRequest;
 use super::DescribeClusterRequest;
 use super::DescribeConfigsRequest;
 use super::DescribeGroupsRequest;
@@ -208,6 +212,10 @@ pub enum ConcreteRequest {
     CreateAcls(CreateAclsRequest),
     /// A DeleteAcls request.
     DeleteAcls(DeleteAclsRequest),
+    /// A DescribeClientQuotas request.
+    DescribeClientQuotas(DescribeClientQuotasRequest),
+    /// An AlterClientQuotas request.
+    AlterClientQuotas(AlterClientQuotasRequest),
 }
 
 impl ConcreteRequest {
@@ -248,6 +256,8 @@ impl ConcreteRequest {
             Self::DescribeAcls(r) => r.version(),
             Self::CreateAcls(r) => r.version(),
             Self::DeleteAcls(r) => r.version(),
+            Self::DescribeClientQuotas(r) => r.version(),
+            Self::AlterClientQuotas(r) => r.version(),
         }
     }
 
@@ -288,6 +298,8 @@ impl ConcreteRequest {
             Self::DescribeAcls(r) => r.api_key(),
             Self::CreateAcls(r) => r.api_key(),
             Self::DeleteAcls(r) => r.api_key(),
+            Self::DescribeClientQuotas(r) => r.api_key(),
+            Self::AlterClientQuotas(r) => r.api_key(),
         }
     }
 
@@ -334,6 +346,8 @@ impl ConcreteRequest {
             Self::DescribeAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::CreateAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DeleteAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeClientQuotas(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterClientQuotas(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -470,6 +484,12 @@ impl ConcreteRequest {
             Self::DeleteAcls(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeClientQuotas(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterClientQuotas(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -517,6 +537,8 @@ impl ConcreteRequest {
             Self::DescribeAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreateAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -575,6 +597,8 @@ impl ConcreteRequest {
             Self::DescribeAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::CreateAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DeleteAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeClientQuotas(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterClientQuotas(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -749,6 +773,14 @@ impl ConcreteRequest {
                 let data = DeleteAclsRequestData::read(readable, api_version)?;
                 Ok(Self::DeleteAcls(DeleteAclsRequest::new(data, api_version)))
             },
+            ApiKeys::DESCRIBE_CLIENT_QUOTAS => {
+                let data = DescribeClientQuotasRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeClientQuotas(DescribeClientQuotasRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_CLIENT_QUOTAS => {
+                let data = AlterClientQuotasRequestData::read(readable, api_version)?;
+                Ok(Self::AlterClientQuotas(AlterClientQuotasRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -794,6 +826,8 @@ impl std::fmt::Display for ConcreteRequest {
             Self::DescribeAcls(r) => write!(f, "{r}"),
             Self::CreateAcls(r) => write!(f, "{r}"),
             Self::DeleteAcls(r) => write!(f, "{r}"),
+            Self::DescribeClientQuotas(r) => write!(f, "{r}"),
+            Self::AlterClientQuotas(r) => write!(f, "{r}"),
         }
     }
 }
