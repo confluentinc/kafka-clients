@@ -104,10 +104,10 @@ Additional gates specific to M0/P1 (the rename), all green:
   including its dated supersession note), the archived M0/P0
   `COMMENTS.DONE.1.md` (2), this phase's own
   `design/history/M0/P1-rename-identity/PLAN.md` (18 — a rename plan must name
-  what it renames), and this file's transition narrative above (2). *Governance
-  pointers* below links the first three; the fourth is this file. The M0/P1
-  review record `COMMENTS.DONE.1.md` quotes them too, hence the second
-  exclusion.
+  what it renames), and this file itself — its transition narrative above and
+  its *Governance pointers* section below. That section links the first three;
+  the fourth is this file. The M0/P1 review record `COMMENTS.DONE.1.md` quotes
+  them too, hence the second exclusion.
 - `.snk` byte-identical across the move (SHA-256 `d33f5c98…8eb197`); the
   `InternalsVisibleTo` `Key=` blob still equals `sn -tp` on the key file, and
   `Include=` matches the test project's `<AssemblyName>`.

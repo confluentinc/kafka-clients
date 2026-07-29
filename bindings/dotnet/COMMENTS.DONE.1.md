@@ -330,3 +330,97 @@ All PLAN §9 gates re-run on the fixed tree, plus the new evaluated-property gat
 | V9 — sln GUID integrity | 7 unique GUIDs, `.sln` untouched by the fixup ✓ |
 | V10 — sln BOM | `efbbbf` ✓ |
 | V11 — untracked personas intact | exactly the 2 `?? .claude/agents/dotnet-*.md`; 0 in any commit ✓ |
+
+---
+
+## Fix cycle 2 — Critic re-review of `397d4c1`: one Nit, closed
+
+Commit reviewed by the Critic: `397d4c1` *"fixup! M0/P1 rename: close Critic
+(N=1) COMMENTS items 1-3"* (phase sanity-checked across `c0190ac..HEAD`).
+**Critic result:** items 1-3 confirmed RESOLVED on independent re-derivation,
+both Actor deviations adjudicated **SOUND**, and **one** new item — a
+non-blocking Nit (item 4 below). **Actor result: fixed and closed**, reproduced
+independently before fixing. This closes the phase.
+
+### 4 · [Nit — non-blocking] `STATUS.md`'s repaired invariant bullet published a stale self-count — `(2)` for a file that now holds 3 — **RESOLVED**
+
+**Where:** `bindings/dotnet/design/current/STATUS.md:102-110` — the bullet that
+`397d4c1` rewrote to close item 2 above, under the heading *"Additional gates
+specific to M0/P1 (the rename), all green"*.
+
+**Why it was wrong** (reproduced before fixing). The rewrite fixed the headline
+count (two → four), and three of the four per-file counts are exact (6 / 2 / 18),
+but the parenthetical for **this very file** did not survive its own edit: the
+same commit added the grep recipe on line 100, which itself contains the literal
+string, taking `design/current/STATUS.md` from 2 occurrences to 3 while still
+publishing `(2)`:
+
+```
+14:  … `Confluent.Kafka.ShareConsumer`)   ← transition narrative (above the claim)
+100: … grep -rIn "ShareConsumer" …        ← the recipe added by 397d4c1
+178: … `Confluent.Kafka.ShareConsumer` …  ← Governance pointers (BELOW the claim)
+```
+
+Wrong under either reading: whole-file = **3**; strictly *"the transition
+narrative above"* = **1**, because line 178 sits *below* the claim in *Governance
+pointers* and line 100 is the recipe itself. Same defect class as item 2 at
+smaller magnitude — a count inside a green-gate bullet that one grep disproves.
+
+**Resolution — the count is deleted, not bumped.** A per-file occurrence count
+published *inside the file being counted* is structurally self-falsifying: any
+future edit that mentions the old identity — including the edit that fixes the
+number — invalidates it again. That is the identical recursion already solved by
+scoping for `COMMENTS.DONE.1.md` (item 2's deviation). Bumping `2 → 3` re-arms
+the trap; removing the claim terminates it. The clause now reads:
+
+> …and this file itself — its transition narrative above and its *Governance
+> pointers* section below.
+
+Substance preserved: the bullet still says **four** surfaces, still enumerates
+all four, and still publishes both checkable halves of the invariant. The three
+`design/` counts (6 / 2 / 18) are kept — re-verified exact, not self-referential,
+and those files are archived and not edited again. Dropping the positional
+*"above (2)"* also removes the mis-location the Critic noted, since line 178 sits
+below the claim, not above it.
+
+**Deliberately not done** (the Critic explicitly did *not* file it): anchoring
+the published recipe's bare `.` to `bindings/dotnet`. The bare `.` is correct as
+written — cwd-relative to the binding root, and it also sweeps **untracked
+`obj/`/`bin/`**, which is exactly PLAN R1's stale-build-output hazard that
+`git ls-files` cannot see. Anchoring would gain only cwd-independence at the cost
+of that reading, so it is churn on a markdown line; skipped.
+
+**Deviation — the fixup subject is again deliberately not autosquash-targetable**
+(same reasoning as the cycle-1 fixup, which the Critic adjudicated **SOUND**):
+the bullet entered in `8dc59b4` and its third occurrence in `397d4c1`, so a
+literal `fixup! <subject>` token can name only one of the two parents and would
+misattribute the change to the other. The commit body instead names both SHAs
+with their subjects and maps each to what it introduced — `agent-roles.md` asks
+for a *reference* to the commit that introduced the issue and to the comments
+describing it, not specifically git's autosquash token.
+
+---
+
+## Fix cycle 2 — verification re-run
+
+Markdown-only change (plus this review record). Item-specific gates first, then
+all PLAN §9 gates re-run on the fixed tree — unchanged from the cycle-1 re-run:
+
+| Gate | Result |
+|---|---|
+| **NEW** — no self-referential count | `STATUS.md` publishes no count of itself; the enumeration still reads **four** ✓ |
+| **NEW** — literal occurrences | `grep -n "ShareConsumer" design/current/STATUS.md` → lines 14, 100, 178 — narrative, recipe, governance pointer; none is a published count ✓ |
+| V1 — old dirs gone | exit 0 ✓ |
+| V2 — scoped grep + `git ls-files` | both empty (exit 1) ✓ |
+| V3 — build | `0 Warning(s) 0 Error(s)`, 5 assemblies (ns2.0/net8.0/net10.0 lib + net8.0/net10.0 tests) ✓ |
+| V4 — test `-f net10.0` | 1 passed, 0 failed ✓ |
+| V5 — `dotnet format --verify-no-changes` | exit 0, no output ✓ |
+| V6 — `.snk` SHA-256 / token | `d33f5c98…8eb197` / `a6a493010a30d243`, unchanged ✓ |
+| V7 — IVT grant consistency | 160-byte `Key=` blob is byte-identical to the blob derived from `Confluent.Kafka.snk`; both hash to token `a6a493010a30d243` ✓ |
+| V8 — renames detected as renames | unchanged (a markdown-only fixup touches no path) ✓ |
+| V9 — sln GUID integrity | 7 unique GUIDs, `.sln` untouched ✓ |
+| V10 — sln BOM | `efbbbf` ✓ |
+| V11 — untracked personas intact | exactly the 2 `?? .claude/agents/dotnet-*.md` + the 2 `agent-memory/` dirs; 0 in any commit ✓ |
+| V12 — packaging gate still shut | evaluated `IsPackable=false`, `GeneratePackageOnBuild=false` (`-getProperty:`, not grep) ✓ |
+
+`COMMENTS.1.md` is left **0 bytes**: no open items remain for N=1 in this phase.
