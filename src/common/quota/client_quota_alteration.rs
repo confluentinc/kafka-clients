@@ -107,7 +107,7 @@ mod tests {
 
     fn entity() -> ClientQuotaEntity {
         let mut m = HashMap::new();
-        m.insert(USER.to_string(), "u1".to_string());
+        m.insert(USER.to_string(), Some("u1".to_string()));
         ClientQuotaEntity::new(m)
     }
 
