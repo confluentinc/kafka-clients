@@ -48,11 +48,15 @@ pub mod describe_cluster_result;
 pub mod describe_configs_result;
 pub mod describe_consumer_groups_result;
 pub mod describe_delegation_token_result;
+pub mod describe_features_result;
 pub mod describe_log_dirs_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
 pub mod elect_leaders_result;
 pub mod expire_delegation_token_result;
+pub mod feature_metadata;
+pub mod feature_update;
+pub mod finalized_version_range;
 pub mod group_listing;
 pub mod kafka_admin_client;
 pub mod list_config_resources_result;
@@ -78,8 +82,10 @@ pub mod records_to_delete;
 pub mod remove_members_from_consumer_group_result;
 pub mod renew_delegation_token_result;
 pub mod replica_info;
+pub mod supported_version_range;
 pub mod topic_description;
 pub mod topic_listing;
+pub mod update_features_result;
 
 pub(crate) mod internals;
 
@@ -115,11 +121,15 @@ pub use describe_cluster_result::DescribeClusterResult;
 pub use describe_configs_result::DescribeConfigsResult;
 pub use describe_consumer_groups_result::DescribeConsumerGroupsResult;
 pub use describe_delegation_token_result::DescribeDelegationTokenResult;
+pub use describe_features_result::DescribeFeaturesResult;
 pub use describe_log_dirs_result::DescribeLogDirsResult;
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
 pub use elect_leaders_result::ElectLeadersResult;
 pub use expire_delegation_token_result::ExpireDelegationTokenResult;
+pub use feature_metadata::FeatureMetadata;
+pub use feature_update::{FeatureUpdate, UpgradeType};
+pub use finalized_version_range::FinalizedVersionRange;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_config_resources_result::ListConfigResourcesResult;
@@ -148,19 +158,21 @@ pub use options::{
     CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
     DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions,
     DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
-    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeLogDirsOptions,
+    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions,
     ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions,
     ListPartitionReassignmentsOptions, ListTopicsOptions, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions,
+    RenewDelegationTokenOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use records_to_delete::RecordsToDelete;
 pub use remove_members_from_consumer_group_result::RemoveMembersFromConsumerGroupResult;
 pub use renew_delegation_token_result::RenewDelegationTokenResult;
 pub use replica_info::ReplicaInfo;
+pub use supported_version_range::SupportedVersionRange;
 pub use topic_description::TopicDescription;
 pub use topic_listing::TopicListing;
+pub use update_features_result::UpdateFeaturesResult;
 
 use std::time::Duration;
 
@@ -472,6 +484,32 @@ pub trait Admin: Send + Sync {
     /// Corresponds to
     /// `Admin.describeDelegationToken(DescribeDelegationTokenOptions)`.
     fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult;
+
+    /// Describe the finalized and supported features of the cluster.
+    ///
+    /// Corresponds to `Admin.describeFeatures(DescribeFeaturesOptions)`.
+    fn describe_features(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult;
+
+    /// Apply the given feature updates.
+    ///
+    /// Corresponds to
+    /// `Admin.updateFeatures(Map<String, FeatureUpdate>, UpdateFeaturesOptions)`.
+    ///
+    /// Java throws `IllegalArgumentException` synchronously when the update map
+    /// is empty or contains a blank feature name; per CLAUDE.md §10.2, that
+    /// unchecked-but-recoverable throw becomes an `Err` here (the only admin
+    /// RPC whose client-side validation can fail before the `Call` is
+    /// enqueued).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::illegal_argument`] if `feature_updates` is empty or
+    /// any feature name is blank.
+    fn update_features(
+        &self,
+        feature_updates: &HashMap<String, FeatureUpdate>,
+        options: UpdateFeaturesOptions,
+    ) -> Result<UpdateFeaturesResult, KafkaError>;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.

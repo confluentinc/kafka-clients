@@ -148,13 +148,19 @@ use super::{
 };
 #[allow(deprecated)]
 use super::{ConsumerGroupListing, ListConsumerGroupsOptions, ListConsumerGroupsResult};
+use super::{
+    DescribeFeaturesOptions, DescribeFeaturesResult, FeatureMetadata, FeatureUpdate, FinalizedVersionRange,
+    SupportedVersionRange, UpdateFeaturesOptions, UpdateFeaturesResult,
+};
 use crate::alter_partition_reassignments_request_data::{
     AlterPartitionReassignmentsRequestData, ReassignablePartition, ReassignableTopic,
 };
+use crate::api_versions_response_data::ApiVersionsResponseData;
 use crate::common::TopicPartitionReplica;
 use crate::common::requests::{
-    AlterPartitionReassignmentsRequestBuilder, ElectLeadersRequestBuilder, ElectLeadersResponse,
-    ListPartitionReassignmentsRequestBuilder, maybe_truncate_reason,
+    AlterPartitionReassignmentsRequestBuilder, ApiVersionsRequestBuilder, ElectLeadersRequestBuilder,
+    ElectLeadersResponse, ListPartitionReassignmentsRequestBuilder, UpdateFeaturesRequestBuilder,
+    maybe_truncate_reason,
 };
 use crate::common::{ElectionType, Node};
 use crate::create_delegation_token_request_data::{CreatableRenewers, CreateDelegationTokenRequestData};
@@ -164,6 +170,7 @@ use crate::list_partition_reassignments_request_data::{
     ListPartitionReassignmentsRequestData, ListPartitionReassignmentsTopics,
 };
 use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
+use crate::update_features_request_data::{FeatureUpdateKey, UpdateFeaturesRequestData};
 use std::collections::{BTreeSet, HashSet};
 
 /// The default reason sent in a `LeaveGroup` request when an admin removes a
@@ -828,6 +835,41 @@ fn api_error(code: i16, message: &Option<String>) -> KafkaError {
         Some(m) if !m.is_empty() => KafkaError::with_message(error, m.clone()),
         _ => KafkaError::new(error),
     }
+}
+
+/// Builds a [`FeatureMetadata`] from an `ApiVersionsResponse`'s data, mirroring
+/// the `createFeatureMetadata` closure inside `KafkaAdminClient.describeFeatures`.
+///
+/// # Errors
+///
+/// Returns an error if a finalized/supported version range from the response is
+/// invalid (mirrors Java's constructor throwing `IllegalArgumentException`).
+fn create_feature_metadata(data: &ApiVersionsResponseData) -> Result<FeatureMetadata, KafkaError> {
+    let mut finalized_features = HashMap::new();
+    for key in &data.finalized_features {
+        finalized_features.insert(
+            key.name.clone(),
+            FinalizedVersionRange::new(key.min_version_level, key.max_version_level)?,
+        );
+    }
+
+    // A finalized-features epoch of >= 0 is present; otherwise it is absent.
+    let finalized_features_epoch = if data.finalized_features_epoch >= 0 {
+        Some(data.finalized_features_epoch)
+    } else {
+        None
+    };
+
+    let mut supported_features = HashMap::new();
+    for key in &data.supported_features {
+        supported_features.insert(key.name.clone(), SupportedVersionRange::new(key.min_version, key.max_version)?);
+    }
+
+    Ok(FeatureMetadata::new(
+        finalized_features,
+        finalized_features_epoch,
+        supported_features,
+    ))
 }
 
 /// Returns `true` if a topic name cannot be represented in an RPC (empty).
@@ -3987,6 +4029,190 @@ impl Admin for KafkaAdminClient {
         DescribeDelegationTokenResult::new(public)
     }
 
+    fn describe_features(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
+        let handle: KafkaFutureImpl<FeatureMetadata> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        // Mirrors Java: a set nodeId routes to that specific broker via
+        // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
+        // broker or the active controller.
+        let node_provider = match options.get_node_id() {
+            Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+            None => NodeProvider::LeastLoadedBrokerOrActiveKController,
+        };
+
+        let create_request =
+            Box::new(move |_timeout_ms: i32| Ok(Box::new(ApiVersionsRequestBuilder::new()) as Box<dyn RequestBuilder>));
+
+        let resp_handle = handle.clone();
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::ApiVersions(api_versions) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected an ApiVersions response"));
+            };
+            let data = api_versions.data();
+            if data.error_code == Errors::None.code() {
+                match create_feature_metadata(data) {
+                    Ok(metadata) => resp_handle.complete(metadata),
+                    Err(e) => resp_handle.complete_exceptionally(e),
+                };
+            } else {
+                resp_handle.complete_exceptionally(KafkaError::new(Errors::for_code(data.error_code)));
+            }
+            HandleResult::Done
+        });
+
+        let fail_handle = handle.clone();
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            fail_handle.complete_exceptionally(error.clone());
+        });
+
+        let call = Call::new(
+            "describeFeatures",
+            deadline,
+            node_provider,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        DescribeFeaturesResult::new(public)
+    }
+
+    fn update_features(
+        &self,
+        feature_updates: &HashMap<String, FeatureUpdate>,
+        options: UpdateFeaturesOptions,
+    ) -> Result<UpdateFeaturesResult, KafkaError> {
+        if feature_updates.is_empty() {
+            return Err(KafkaError::illegal_argument("Feature updates can not be null or empty."));
+        }
+
+        let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
+        for feature in feature_updates.keys() {
+            if feature.is_empty() {
+                return Err(KafkaError::illegal_argument("Provided feature can not be empty."));
+            }
+            handles.insert(feature.clone(), KafkaFutureImpl::new());
+        }
+        let handles = Arc::new(handles);
+        let public: HashMap<String, KafkaFuture<()>> = handles
+            .iter()
+            .map(|(feature, handle)| (feature.clone(), handle.future()))
+            .collect();
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        // Snapshot the updates for the (possibly retried) request builder.
+        let updates_for_request: Vec<(String, FeatureUpdate)> = feature_updates
+            .iter()
+            .map(|(feature, update)| (feature.clone(), *update))
+            .collect();
+        let validate_only = options.get_validate_only();
+        let create_request = Box::new(move |timeout_ms: i32| {
+            let mut collection = Vec::with_capacity(updates_for_request.len());
+            for (feature, update) in &updates_for_request {
+                let mut item = FeatureUpdateKey::new();
+                item.set_feature(feature.clone());
+                item.set_max_version_level(update.max_version_level());
+                item.set_upgrade_type(update.upgrade_type().code());
+                collection.push(item);
+            }
+            let mut data = UpdateFeaturesRequestData::new();
+            data.set_timeout_ms(timeout_ms);
+            data.set_validate_only(validate_only);
+            data.set_feature_updates(collection);
+            Ok(Box::new(UpdateFeaturesRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        });
+
+        let resp_mm = self.shared.metadata_manager.clone();
+        let resp_handles = Arc::clone(&handles);
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+            let ConcreteResponse::UpdateFeatures(update_response) = response else {
+                return HandleResult::Retry(KafkaError::illegal_state("Expected an UpdateFeatures response"));
+            };
+            let data = update_response.data();
+            let top_level_error = Errors::for_code(data.error_code);
+            match top_level_error {
+                Errors::None => {
+                    if data.results.is_empty() {
+                        // For V2 and above, NONE responses just have a top-level
+                        // NONE error -- mark all the futures as completed.
+                        for future in resp_handles.values() {
+                            future.complete(());
+                        }
+                    } else {
+                        for result in &data.results {
+                            match resp_handles.get(&result.feature) {
+                                // The server should send back a result for every
+                                // feature, but we only complete known features.
+                                None => {},
+                                Some(future) => {
+                                    let error = Errors::for_code(result.error_code);
+                                    if error == Errors::None {
+                                        future.complete(());
+                                    } else {
+                                        future.complete_exceptionally(api_error(
+                                            result.error_code,
+                                            &result.error_message,
+                                        ));
+                                    }
+                                },
+                            }
+                        }
+                        // Sanity check: the server should send back a response
+                        // for every feature (mirrors completeUnrealizedFutures).
+                        for (feature, future) in resp_handles.iter() {
+                            if !future.is_done() {
+                                future.complete_exceptionally(KafkaError::with_message(
+                                    Errors::UnknownServerError,
+                                    format!("The controller response did not contain a result for feature {feature}"),
+                                ));
+                            }
+                        }
+                    }
+                },
+                Errors::NotController => {
+                    // Mirrors handleNotControllerError(Errors.NOT_CONTROLLER):
+                    // clear the cached controller, request a metadata refresh and
+                    // retry the call.
+                    resp_mm.clear_controller();
+                    resp_mm.request_update();
+                    return HandleResult::Retry(KafkaError::new(Errors::NotController));
+                },
+                _ => {
+                    let error = api_error(data.error_code, &data.error_message);
+                    for future in resp_handles.values() {
+                        future.complete_exceptionally(error.clone());
+                    }
+                },
+            }
+            HandleResult::Done
+        });
+
+        let fail_handles = Arc::clone(&handles);
+        let handle_failure = Box::new(move |error: &KafkaError| {
+            for future in fail_handles.values() {
+                future.complete_exceptionally(error.clone());
+            }
+        });
+
+        let call = Call::new(
+            "updateFeatures",
+            deadline,
+            NodeProvider::Controller,
+            create_request,
+            handle_response,
+            handle_failure,
+            Box::new(|| false),
+        );
+        self.submit(call);
+        Ok(UpdateFeaturesResult::new(public))
+    }
+
     async fn close(&self, timeout: Duration) {
         let now = self.now();
         let deadline = now.saturating_add(timeout.as_millis() as i64);
@@ -7133,6 +7359,245 @@ mod tests {
             assert!(matches!(err, KafkaError::Timeout(_)));
         }
     }
+
+    // --- describeFeatures / updateFeatures -------------------------------------
+
+    use crate::admin::UpgradeType;
+    use crate::api_message_type::ListenerType;
+    use crate::api_versions_response_data::{ApiVersionsResponseData, SupportedFeatureKey};
+    use crate::common::requests::{ApiVersionsResponse, ApiVersionsResponseBuilder, UpdateFeaturesResponse};
+
+    /// Mirrors `KafkaAdminClientTest.defaultFeatureMetadata`.
+    fn default_feature_metadata() -> FeatureMetadata {
+        let mut finalized = HashMap::new();
+        finalized.insert("test_feature_1".to_string(), FinalizedVersionRange::new(2, 2).unwrap());
+        let mut supported = HashMap::new();
+        supported.insert("test_feature_1".to_string(), SupportedVersionRange::new(1, 5).unwrap());
+        FeatureMetadata::new(finalized, Some(1), supported)
+    }
+
+    /// Mirrors `KafkaAdminClientTest.prepareApiVersionsResponseForDescribeFeatures`.
+    fn api_versions_feature_response(error: Errors) -> ConcreteResponse {
+        if error == Errors::None {
+            let mut supported = SupportedFeatureKey::new();
+            supported.set_name("test_feature_1".to_string());
+            supported.set_min_version(1);
+            supported.set_max_version(5);
+            let mut finalized = HashMap::new();
+            finalized.insert("test_feature_1".to_string(), 2i16);
+            let response = ApiVersionsResponseBuilder::new()
+                .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, false, false))
+                .set_supported_features(vec![supported])
+                .set_finalized_features(finalized)
+                .set_finalized_features_epoch(1)
+                .build();
+            ConcreteResponse::ApiVersions(response)
+        } else {
+            let mut data = ApiVersionsResponseData::new();
+            data.set_throttle_time_ms(0);
+            data.set_error_code(error.code());
+            ConcreteResponse::ApiVersions(ApiVersionsResponse::new(data))
+        }
+    }
+
+    /// Builds an `UpdateFeatures` response echoing the given feature names when
+    /// the top-level error is NONE (mirrors `UpdateFeaturesResponse.createWithErrors`).
+    fn update_features_response(top_error: Errors, message: Option<&str>, updates: &[&str]) -> ConcreteResponse {
+        let set: BTreeSet<String> = updates.iter().map(|s| (*s).to_string()).collect();
+        ConcreteResponse::UpdateFeatures(UpdateFeaturesResponse::create_with_errors(
+            top_error,
+            message.map(str::to_string),
+            &set,
+            0,
+        ))
+    }
+
+    /// Mirrors `KafkaAdminClientTest.makeTestFeatureUpdates`.
+    fn make_test_feature_updates() -> HashMap<String, FeatureUpdate> {
+        let mut map = HashMap::new();
+        map.insert(
+            "test_feature_1".to_string(),
+            FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap(),
+        );
+        map.insert(
+            "test_feature_2".to_string(),
+            FeatureUpdate::new(3, UpgradeType::SafeDowngrade).unwrap(),
+        );
+        map
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesSuccess`.
+    #[tokio::test]
+    async fn test_describe_features_success() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(api_versions_feature_response(Errors::None));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)));
+        pump(&mut runnable, 5).await;
+        let metadata = result.feature_metadata().get().await.unwrap();
+        assert_eq!(metadata, default_feature_metadata());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesFailure`.
+    #[tokio::test]
+    async fn test_describe_features_failure() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(api_versions_feature_response(Errors::InvalidRequest));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)));
+        pump(&mut runnable, 5).await;
+        let err = result.feature_metadata().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesWithNodeSuccess` — a set
+    /// `nodeId` routes the request to that broker via `ConstantNodeIdProvider`.
+    #[tokio::test]
+    async fn test_describe_features_with_node_success() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response_for_node(api_versions_feature_response(Errors::None), &nodes[0]);
+        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)).node_id(0));
+        pump(&mut runnable, 5).await;
+        let metadata = result.feature_metadata().get().await.unwrap();
+        assert_eq!(metadata, default_feature_metadata());
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeFeaturesWithNodeFailure` — the
+    /// response is prepared for node 1 but the request targets node 0, so it is
+    /// never answered and the future times out.
+    #[tokio::test]
+    async fn test_describe_features_with_node_failure() {
+        let (admin, mut runnable, time, nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response_for_node(api_versions_feature_response(Errors::None), &nodes[1]);
+        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(1000)).node_id(0));
+        pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
+        time.sleep(2000);
+        pump_until(&mut runnable, 30, |_r| result.feature_metadata().is_done()).await;
+        assert!(result.feature_metadata().get().await.is_err());
+    }
+
+    /// Drives `KafkaAdminClientTest.testUpdateFeaturesDuringSuccess` — a
+    /// `@ParameterizedTest` over `@ValueSource(shorts = {1, 2})`. v1 responses
+    /// carry per-feature results; v2+ carry only a top-level NONE.
+    #[tokio::test]
+    async fn test_update_features_during_success() {
+        for version in [1i16, 2] {
+            let (admin, mut runnable, _time, _nodes) = env();
+            let features: Vec<&str> = if version <= 1 {
+                vec!["test_feature_1", "test_feature_2"]
+            } else {
+                Vec::new()
+            };
+            runnable
+                .client_mut()
+                .prepare_response(update_features_response(Errors::None, None, &features));
+            let updates = make_test_feature_updates();
+            let result = admin
+                .update_features(&updates, UpdateFeaturesOptions::new().timeout_ms(Some(10000)))
+                .unwrap();
+            pump(&mut runnable, 5).await;
+            for future in result.values().values() {
+                future.get().await.unwrap();
+            }
+        }
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUpdateFeaturesTopLevelError`.
+    #[tokio::test]
+    async fn test_update_features_top_level_error() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable
+            .client_mut()
+            .prepare_response(update_features_response(Errors::InvalidRequest, None, &[]));
+        let updates = make_test_feature_updates();
+        let result = admin
+            .update_features(&updates, UpdateFeaturesOptions::new().timeout_ms(Some(10000)))
+            .unwrap();
+        pump(&mut runnable, 5).await;
+        for future in result.values().values() {
+            let err = future.get().await.unwrap_err();
+            assert_eq!(err.error(), Errors::InvalidRequest);
+            // The top-level error carried no message, so it falls back to the
+            // error code's default message (mirrors ApiError.exception()).
+            assert_eq!(err.message(), Errors::InvalidRequest.message());
+        }
+    }
+
+    /// Drives `KafkaAdminClientTest.testUpdateFeaturesHandleNotControllerException`
+    /// — a `@ParameterizedTest` over `@ValueSource(shorts = {1, 2})`.
+    #[tokio::test]
+    async fn test_update_features_handle_not_controller_exception() {
+        for version in [1i16, 2] {
+            let (admin, mut runnable, time, nodes) = env();
+            // First attempt hits the wrong controller.
+            runnable
+                .client_mut()
+                .prepare_response(update_features_response(Errors::NotController, None, &[]));
+            // Then a metadata refresh updates the controller to node 1.
+            runnable
+                .client_mut()
+                .prepare_response(ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                    &nodes,
+                    Some("mock-cluster"),
+                    1,
+                    Vec::new(),
+                )));
+            // Then the retry succeeds.
+            let features: Vec<&str> = if version <= 1 {
+                vec!["test_feature_1", "test_feature_2"]
+            } else {
+                Vec::new()
+            };
+            runnable
+                .client_mut()
+                .prepare_response(update_features_response(Errors::None, None, &features));
+            let updates = make_test_feature_updates();
+            let result = admin
+                .update_features(&updates, UpdateFeaturesOptions::new().timeout_ms(Some(10000)))
+                .unwrap();
+            // The NOT_CONTROLLER retry is gated by retry-backoff, so advance the
+            // mock clock until every future resolves.
+            for _ in 0..30 {
+                if result.values().values().all(|f| f.is_done()) {
+                    break;
+                }
+                runnable.run_once().await;
+                time.sleep(200);
+            }
+            result.all().get().await.unwrap();
+        }
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUpdateFeaturesShouldFailRequestForEmptyUpdates`.
+    #[tokio::test]
+    async fn test_update_features_should_fail_request_for_empty_updates() {
+        let (admin, _runnable, _time, _nodes) = env();
+        let err = admin
+            .update_features(&HashMap::new(), UpdateFeaturesOptions::new())
+            .unwrap_err();
+        assert_eq!(err.message(), "Feature updates can not be null or empty.");
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testUpdateFeaturesShouldFailRequestForInvalidFeatureName`.
+    #[tokio::test]
+    async fn test_update_features_should_fail_request_for_invalid_feature_name() {
+        let (admin, _runnable, _time, _nodes) = env();
+        let mut updates = HashMap::new();
+        updates.insert("feature".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+        updates.insert(String::new(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+        let err = admin.update_features(&updates, UpdateFeaturesOptions::new()).unwrap_err();
+        assert_eq!(err.message(), "Provided feature can not be empty.");
+    }
+
+    // `testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion`
+    // is a `FeatureUpdate` constructor test; it lives in `feature_update.rs`
+    // (`new_rejects_deletion_with_upgrade_flag`).
 
     fn alter_reassignments_resp(
         top_error: Errors,

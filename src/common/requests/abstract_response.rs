@@ -71,6 +71,7 @@ use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
+use super::UpdateFeaturesResponse;
 
 /// Default throttle time in milliseconds.
 pub const DEFAULT_THROTTLE_TIME: i32 = 0;
@@ -163,6 +164,8 @@ pub enum ConcreteResponse {
     ExpireDelegationToken(ExpireDelegationTokenResponse),
     /// A DescribeDelegationToken response.
     DescribeDelegationToken(DescribeDelegationTokenResponse),
+    /// An UpdateFeatures response.
+    UpdateFeatures(UpdateFeaturesResponse),
 }
 
 impl ConcreteResponse {
@@ -209,6 +212,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => r.api_key(),
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
+            Self::UpdateFeatures(r) => r.api_key(),
         }
     }
 
@@ -261,6 +265,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ExpireDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::UpdateFeatures(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -393,6 +398,9 @@ impl ConcreteResponse {
             Self::DescribeDelegationToken(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::UpdateFeatures(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -445,6 +453,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -501,6 +510,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => r.error_counts(),
             Self::ExpireDelegationToken(r) => r.error_counts(),
             Self::DescribeDelegationToken(r) => r.error_counts(),
+            Self::UpdateFeatures(r) => r.error_counts(),
         }
     }
 
@@ -549,6 +559,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => r.throttle_time_ms(),
             Self::ExpireDelegationToken(r) => r.throttle_time_ms(),
             Self::DescribeDelegationToken(r) => r.throttle_time_ms(),
+            Self::UpdateFeatures(r) => r.throttle_time_ms(),
         }
     }
 
@@ -596,6 +607,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ExpireDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::UpdateFeatures(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -642,6 +654,7 @@ impl ConcreteResponse {
             Self::RenewDelegationToken(r) => r.should_client_throttle(version),
             Self::ExpireDelegationToken(r) => r.should_client_throttle(version),
             Self::DescribeDelegationToken(r) => r.should_client_throttle(version),
+            Self::UpdateFeatures(r) => r.should_client_throttle(version),
         }
     }
 
@@ -850,6 +863,10 @@ impl ConcreteResponse {
                 let response = DescribeDelegationTokenResponse::parse(readable, version)?;
                 Ok(Self::DescribeDelegationToken(response))
             },
+            ApiKeys::UPDATE_FEATURES => {
+                let response = UpdateFeaturesResponse::parse(readable, version)?;
+                Ok(Self::UpdateFeatures(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -901,6 +918,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::RenewDelegationToken(r) => write!(f, "{r}"),
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
+            Self::UpdateFeatures(r) => write!(f, "{r}"),
         }
     }
 }
