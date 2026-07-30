@@ -104,11 +104,14 @@ blocks:
       jobs:
         - name: build
           commands:
-            # aws-lc-rs (rustls backend) needs nasm + cmake on Windows x86_64.
             - choco install -y --no-progress nasm cmake
             - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"
-            - $ck = Get-ChildItem "$env:USERPROFILE\.cargo\bin","$env:USERPROFILE\.rustup\toolchains" -Filter cargo.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($ck) { Write-Host "Using existing cargo at $($ck.FullName)"; $env:PATH = "$($ck.DirectoryName);$env:PATH" }
-            - if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe; .\rustup-init.exe -y --default-toolchain stable --profile minimal; $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH" }
+            - $env:RUSTUP_HOME = "$env:TEMP\rustup-$env:SEMAPHORE_JOB_ID"
+            - $env:CARGO_HOME = "$env:TEMP\cargo-$env:SEMAPHORE_JOB_ID"
+            - $env:RUSTUP_TOOLCHAIN = "stable"
+            - Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+            - for ($i=1; $i -le 3; $i++) { .\rustup-init.exe -y --default-toolchain stable --profile minimal --no-modify-path; if ($LASTEXITCODE -eq 0) { break }; Write-Host "rustup-init attempt $i failed (exit $LASTEXITCODE); retrying in 15s"; Start-Sleep -Seconds 15 }
+            - $env:PATH = "$env:CARGO_HOME\bin;$env:PATH"
             - cargo --version
             - cargo build --features ffi --release
             - New-Item -ItemType Directory -Force dist | Out-Null
