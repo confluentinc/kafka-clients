@@ -86,6 +86,23 @@ impl Default for ClusterConfig {
 /// pool ([`super::cluster_pool`]) keyed on a single `ClusterConfig` per distinct
 /// `num_partitions`, so they all share one container instead of each starting
 /// its own.
+/// Single-broker cluster with the standard KRaft authorizer enabled, used by
+/// the ACL admin RPC integration tests (finding #11).
+///
+/// `KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer`
+/// turns on ACL enforcement; `KAFKA_SUPER_USERS=User:ANONYMOUS` grants the
+/// test client (which connects over the PLAINTEXT listener as the anonymous
+/// principal) blanket access so it is never locked out of managing ACLs.
+pub fn authorizer_single_broker() -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert(
+        "KAFKA_AUTHORIZER_CLASS_NAME".to_string(),
+        "org.apache.kafka.metadata.authorizer.StandardAuthorizer".to_string(),
+    );
+    props.insert("KAFKA_SUPER_USERS".to_string(), "User:ANONYMOUS".to_string());
+    ClusterConfig::with_properties(props)
+}
+
 pub fn kip848_3_broker(num_partitions: u16) -> ClusterConfig {
     let mut props = BTreeMap::new();
     props.insert(

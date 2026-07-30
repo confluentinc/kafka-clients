@@ -42,7 +42,7 @@ pub const MIN_BATCHED_VERSION: i16 = 4;
 /// Coordinator type identifier for a `FindCoordinator` request.
 ///
 /// Corresponds to `FindCoordinatorRequest.CoordinatorType` in Java.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoordinatorType {
     /// Group coordinator (consumer groups).
     Group,

@@ -513,7 +513,10 @@ async fn test_async_assign_and_commit_async_not_committed() {
     )
     .await;
 
-    let committed_offset = consumer.committed(&[tp.clone()]).await.expect("committed should succeed");
+    let committed_offset = consumer
+        .committed(std::slice::from_ref(&tp))
+        .await
+        .expect("committed should succeed");
     // Java: `assertNotNull(committedOffset)`. The Rust analog is "we got
     // a Map back, not an error" — which we already have. Java then
     // asserts `committedOffset.get(tp)` is null; in the Rust map, no
@@ -562,7 +565,10 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
-    let committed_offset = consumer.committed(&[tp.clone()]).await.expect("committed should succeed");
+    let committed_offset = consumer
+        .committed(std::slice::from_ref(&tp))
+        .await
+        .expect("committed should succeed");
     assert!(
         committed_offset.get(&tp).is_none(),
         "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
@@ -608,7 +614,10 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
 
     consumer.commit_sync().await.expect("commit_sync should succeed");
-    let committed_offset = consumer.committed(&[tp.clone()]).await.expect("committed should succeed");
+    let committed_offset = consumer
+        .committed(std::slice::from_ref(&tp))
+        .await
+        .expect("committed should succeed");
     let entry = committed_offset
         .get(&tp)
         .expect("committed offset for tp should be present after commit_sync");
@@ -739,7 +748,10 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
         consumer.commit_sync().await.expect("commit_sync should succeed");
 
-        let committed = consumer.committed(&[tp.clone()]).await.expect("committed should succeed");
+        let committed = consumer
+            .committed(std::slice::from_ref(&tp))
+            .await
+            .expect("committed should succeed");
         let entry = committed.get(&tp).expect("committed offset for tp should be present");
         assert_eq!(entry.offset(), num_records as i64);
 
@@ -755,7 +767,10 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         .expect("new_consumer should succeed (consumer 2)");
 
         another.assign(vec![tp.clone()]).await.expect("assign should succeed");
-        let committed = another.committed(&[tp.clone()]).await.expect("committed should succeed");
+        let committed = another
+            .committed(std::slice::from_ref(&tp))
+            .await
+            .expect("committed should succeed");
         let entry = committed
             .get(&tp)
             .expect("committed offset for tp should be visible to another consumer in same group");
@@ -806,7 +821,10 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
             .await
             .expect("commit_sync_offsets should succeed");
 
-        let committed = consumer.committed(&[tp.clone()]).await.expect("committed should succeed");
+        let committed = consumer
+            .committed(std::slice::from_ref(&tp))
+            .await
+            .expect("committed should succeed");
         let entry = committed.get(&tp).expect("committed entry should be present");
         assert_eq!(entry.offset(), offset);
 
@@ -821,7 +839,10 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
         )
         .expect("new_consumer should succeed (consumer 2)");
 
-        let committed = another.committed(&[tp.clone()]).await.expect("committed should succeed");
+        let committed = another
+            .committed(std::slice::from_ref(&tp))
+            .await
+            .expect("committed should succeed");
         let entry = committed
             .get(&tp)
             .expect("committed entry should be visible to another consumer in same group");
@@ -877,7 +898,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
     let first = consumer
-        .committed(&[tp.clone()])
+        .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed (first call) should succeed");
     assert_eq!(
@@ -886,7 +907,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     );
 
     let second = consumer
-        .committed(&[tp.clone()])
+        .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed (second call) should succeed");
     assert_eq!(
