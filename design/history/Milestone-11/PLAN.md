@@ -120,11 +120,25 @@
 > subscription create→list→assert→delete). Critic-CLEAN on first pass. 2993 lib
 > tests pass. Review record at `design/history/Milestone-11/Tier3-Phase-7/`.
 >
-> **Tier 3 in-scope phases are now COMPLETE except Phase 3 (SCRAM), which is
-> DEFERRED** pending an explicit relayed crate-dependency approval (`pbkdf2`/
-> `hmac`/`sha2` or `ring` — CLAUDE.md §1.2, `Cargo.toml` change). Do not touch
-> SCRAM until that approval arrives. Tier 4 remains out of scope. When SCRAM is
-> unblocked, resume with the Tier 3 Phase 3 spec (this PLAN, ~line 740).
+> **Tier 3 Phase 3 "SCRAM credentials" is COMPLETE (2026-07-30):**
+> `describeUserScramCredentials`, `alterUserScramCredentials` + the narrow
+> `ScramFormatter.hi()` (PBKDF2-HMAC via `aws-lc-rs`, the user-approved OPTION A
+> crypto dependency — CLAUDE.md §1.2 satisfied) + internal/admin `ScramMechanism`,
+> `ScramCredentialInfo`, `UserScramCredential{Alteration,Upsertion,Deletion}`,
+> `UserScramCredentialsDescription`. Rust core + unit tests (incl. an
+> independently-recomputed RFC 7914/cross-checked `hi()` byte-vector test) +
+> real-broker upsert→describe→delete integration. Mock returns unsupported per
+> finding #9. `aws-lc-rs` added with `default-features = false` so ZERO new
+> compiled crates (normal-edges graph byte-identical to parent — Critic-verified).
+> Critic-CLEAN on first pass. 3029 lib tests pass. Review record at
+> `design/history/Milestone-11/Tier3-Phase-3/`.
+>
+> **MILESTONE 11 IN-SCOPE WORK IS COMPLETE.** All 46/46 in-scope Admin RPCs are
+> translated (Tier 1: 17, Tier 2: 9, Tier 3 Phases 1–7: 20). Rust core + unit
+> tests + real-broker integration throughout; each phase Critic-reviewed to clean.
+> **Out of scope (unchanged):** C FFI / Python bindings (separate future task,
+> reuse PR #116) and Tier 4 (Streams groups, Share groups/KIP-932, KRaft
+> raft-voter admin, `ForwardingAdmin`).
 >
 > (Historical note: an earlier 2026-07-17 pause said "zero uncommitted Tier 2
 > work" — that was superseded; a prior Actor session had in fact landed

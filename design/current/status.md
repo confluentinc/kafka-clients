@@ -739,11 +739,51 @@ RPC: `listClientMetricsResources(ListClientMetricsResourcesOptions)`.
 - Critic: **CLEAN on first pass — no fix cycle needed.** See
   `design/history/Milestone-11/Tier3-Phase-7/` (`REVIEW.md` + `COMMENTS.DONE.1.md`).
 
-## Tier 3 — status: 6 of 7 in-scope phases COMPLETE; Phase 3 (SCRAM) DEFERRED
+## Tier 3 Phase 3 — SCRAM credentials ✓ (2026-07-30)
 
-Complete: Phase 1 (ACLs), Phase 2 (client quotas), Phase 4 (delegation tokens),
-Phase 5 (features), Phase 6 (producers & transactions), Phase 7 (client metrics).
-**Deferred: Phase 3 (SCRAM credentials)** — blocked on an unapproved crypto-crate
-dependency (`pbkdf2`/`hmac`/`sha2` or `ring` for `ScramFormatter.hi()` PBKDF2;
-CLAUDE.md §1.2, `Cargo.toml` change). Resumes only on explicit relayed approval.
-Tier 4 remains out of scope.
+RPCs: `describeUserScramCredentials` (`LeastLoadedNodeProvider`),
+`alterUserScramCredentials` (`ControllerNodeProvider`). The final in-scope phase.
+
+- Crypto dependency (CLAUDE.md §1.2, user-approved OPTION A): `aws-lc-rs`, declared
+  `default-features = false, features = ["aws-lc-sys","alloc"]` so the normal-edges
+  dependency graph is byte-identical to before — **zero new compiled crates**
+  (aws-lc-rs was already in-tree via rustls). Critic-verified.
+- `ScramFormatter::hi()` = RFC 5802 `Hi` via `aws_lc_rs::pbkdf2::derive`
+  (SHA-256→32B, SHA-512→64B, single output block). Narrow translation — NOT a full
+  SASL/SCRAM client. Internal + admin `ScramMechanism`, `ScramCredentialInfo`,
+  `UserScramCredential{Alteration,Upsertion,Deletion}` (abstract base → closed enum),
+  `UserScramCredentialsDescription`, both `{Options,Result}`, and net-new
+  `{Describe,Alter}UserScramCredentials` wire types.
+- `MockAdminClient` returns `KafkaError::unsupported_version("Not implemented yet")`
+  for both (finding #9 — Java's mock throws `UnsupportedOperationException`); unit
+  tests run against the network-mocked `KafkaAdminClient`.
+
+### Tests
+- **Rust lib suite: 3029 passing, 0 failed.**
+- 1:1: `testDescribeUserScramCredentials`, `testAlterUserScramCredentialsUnknownMechanism`,
+  `testAlterUserScramCredentials` (real PBKDF2), `ScramMechanismTest`,
+  `DescribeUserScramCredentialsResultTest`. Byte-level wire vectors for both new types.
+- **Crypto byte-vector test** (the phase's most important): `hi()` asserted against
+  RFC 7914 §11 (SHA-256, c=1) and a Python-hashlib cross-check (SHA-512, c=4096);
+  Critic INDEPENDENTLY recomputed both — exact match. Covers the INT(1) big-endian
+  counter and the iteration loop.
+- **Integration**: `tests/integration/admin_scram_test.rs` — upsert SCRAM-SHA-256
+  (it=8192) → describe (mechanism+iterations round-trip; never the salted password)
+  → delete → assert gone; self-scoped username (global-state-hazard compliant); green
+  against apache/kafka:4.2.0. SASL-auth step scoped out (no SASL client on this
+  branch — same gap as Phase 4), documented.
+- `cargo build` / `format-check` / `lint`: clean. DoD #10 N/A.
+- Critic: **CLEAN on first pass — no fix cycle needed.** See
+  `design/history/Milestone-11/Tier3-Phase-3/` (`REVIEW.md` + `COMMENTS.DONE.1.md`).
+
+## Milestone 11 (AdminClient) — IN-SCOPE WORK COMPLETE ✓ (2026-07-30)
+
+All 46/46 in-scope Admin RPCs translated: Tier 1 (17), Tier 2 (9), Tier 3
+Phases 1–7 (20). Rust core + unit tests + real-broker integration throughout; every
+phase Critic-reviewed to clean. 3029 lib tests passing.
+
+**Out of scope (unchanged):** C FFI / Python bindings — a separate future task
+(reuse the async dispatcher in PR #116); and Tier 4 — Streams groups, Share
+groups/KIP-932, KRaft raft-voter admin (`addRaftVoter`/`removeRaftVoter`/
+`describeMetadataQuorum`/`unregisterBroker`), and `ForwardingAdmin` (broker-plugin
+delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
