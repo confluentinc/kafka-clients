@@ -71,4 +71,9 @@
 - [M11 Tier3 Phase2 quotas](review_m11_tier3_phase2_quotas.md) — ClientQuotaEntity HashMap<String,String> drops Java null-name=default-entity (wire-incompat); match-type/remove codes + enum wiring verified clean
 - [M11 Tier3 Phase4 delegation tokens](review_m11_tier3_phase4_delegation.md) — CLEAN; Java Eq/hashCode-bug forced divergence, nullable-owner=empty(0x01) via FieldSpec, mock-as-spec null-owners deviation, hand-rolled base64 OK
 - [M11 Tier3 Phase5 features](review_m11_tier3_phase5_features.md) — CLEAN; sync-throw→Result faithful (updateFeatures + FeatureUpdate ctor), mock dead SAFE_DOWNGRADE guard, {1,2} v≤1-vs-v2 results, ApiVersions reuse, snake_case toString parity
+- [M11 Tier3 Phase6 producers/txns](review_m11_tier3_phase6.md) — CLEAN; AllBrokersStrategy fits Tier-1 driver (no changes); per-broker-per-poll serialization IS Java behavior; generator omit-vs-throw skip legit; txn-producer integration skip legit
+- [M11 Tier3 Phase7 client-metrics](review_m11_tier3_phase7_client_metrics.md) — CLEAN; listClientMetricsResources reuses ListConfigResources wire (ZERO new types), mock real over client_metrics_configs, timeout()/timeout_ms() convention not a divergence
+- [M11 Tier3 Phase3 SCRAM](review_m11_tier3_phase3_scram.md) — CLEAN; recompute PBKDF2 vectors (==RFC5802 Hi at dkLen=digest); zero-new-crate via cargo-tree parent diff (aws-lc-rs feature deviation SOUND); real-broker round-trip is the crypto acceptance test
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
+- [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
+exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
