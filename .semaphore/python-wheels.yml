@@ -37,7 +37,8 @@ global_job_config:
 
 blocks:
   - name: "Build wheels: Linux x64"
-    dependencies: []
+    dependencies:
+      - "Pre-release check"
     task:
       agent:
         machine:
@@ -49,21 +50,17 @@ blocks:
         - name: build
           commands:
             - python -m pip install cibuildwheel==3.2.1
-            # Stage the Rust library + header inside the package dir so the
-            # cibuildwheel container can see them.
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
             - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
-            # cibuildwheel copies the whole repo to /project and builds the
-            # subdir, so $PWD is the repo root -- point at bindings/python/native.
-            # Keep $PWD literal; cibuildwheel expands it inside the container.
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
             - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${ARCH} --force
 
   - name: "Build wheels: Linux arm64"
-    dependencies: []
+    dependencies:
+      - "Pre-release check"
     task:
       agent:
         machine:
@@ -118,7 +115,8 @@ blocks:
             - sh .semaphore/test-wheels.sh wheelhouse
 
   - name: "Build wheels: macOS x64"
-    dependencies: []
+    dependencies:
+      - "Pre-release check"
     task:
       agent:
         machine:
@@ -141,7 +139,8 @@ blocks:
             - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${ARCH} --force
 
   - name: "Build wheels: macOS arm64"
-    dependencies: []
+    dependencies:
+      - "Pre-release check"
     task:
       agent:
         machine:
@@ -198,7 +197,8 @@ blocks:
             - sh .semaphore/test-wheels.sh wheelhouse
 
   - name: "Build wheels: Windows x64"
-    dependencies: []
+    dependencies:
+      - "Pre-release check"
     task:
       agent:
         machine:
@@ -218,7 +218,6 @@ blocks:
             - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.dll --destination target\release\confluent_kafka.dll --force
             - $env:CIBW_BEFORE_BUILD = "python -m pip install delvewheel"
             - $env:CIBW_REPAIR_WHEEL_COMMAND = "python -m delvewheel repair --add-path `"$PWD\target\release`" -w {dest_dir} {wheel}"
-            # Run the unit tests inside cibuildwheel for every built Python version.
             - $env:CIBW_TEST_REQUIRES = "pytest pytest-asyncio"
             - $env:CIBW_TEST_COMMAND = "python -m pytest `"{project}\bindings\python\test\unit`" -o asyncio_mode=auto"
             - python -m cibuildwheel --platform windows --output-dir wheelhouse bindings\python
@@ -246,7 +245,8 @@ blocks:
             - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
 
   - name: "Build sdist"
-    dependencies: []
+    dependencies:
+      - "Pre-release check"
     task:
       agent:
         machine:
@@ -282,10 +282,6 @@ blocks:
             - "python -c \"import _confluentkafka; print('import OK from-source sdist')\""
             - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
 
-  # Pre-release validation gate: assert the package version is well-formed and, on
-  # a release tag, that the tag matches it. A no-op on non-tag (manual-promotion)
-  # runs; a real gate on a tagged publish run. Standalone -- a failing check fails
-  # the pipeline. When Publish is wired, its promotion should run this on the tag.
   - name: "Pre-release check"
     dependencies: []
     task:
@@ -296,3 +292,26 @@ blocks:
         - name: check
           commands:
             - sh .semaphore/pre-release-check.sh
+
+  - name: "Packaging"
+    dependencies:
+      - "Verify wheels: Linux x64"
+      - "Verify wheels: Linux arm64"
+      - "Verify wheels: macOS x64"
+      - "Verify wheels: macOS arm64"
+      - "Verify wheels: Windows x64"
+      - "Verify sdist (from source)"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      jobs:
+        - name: package
+          commands:
+            - artifact pull workflow artifacts --destination artifacts --force
+            - ls -R artifacts
+            - mkdir -p release
+            - find artifacts -type f -name '*.whl' -exec cp {} release/ \;
+            - find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
+            - ls -l release/
+            - artifact push workflow release --destination release --force
