@@ -60,7 +60,7 @@ blocks:
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${ARCH} --force
 
   - name: "Build wheels: Linux arm64"
     dependencies: []
@@ -81,7 +81,7 @@ blocks:
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination wheels-linux-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${ARCH} --force
 
   - name: "Verify wheels: Linux x64"
     dependencies:
@@ -96,7 +96,7 @@ blocks:
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-linux-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -113,7 +113,7 @@ blocks:
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow wheels-linux-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-linux-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -138,7 +138,7 @@ blocks:
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=10.13'
             - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${ARCH} --force
 
   - name: "Build wheels: macOS arm64"
     dependencies: []
@@ -161,7 +161,7 @@ blocks:
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=11.0'
             - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination wheels-macos-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${ARCH} --force
 
   - name: "Verify wheels: macOS x64"
     dependencies:
@@ -176,7 +176,7 @@ blocks:
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow wheels-macos-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-macos-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -193,7 +193,7 @@ blocks:
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow wheels-macos-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-macos-${ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -223,7 +223,7 @@ blocks:
             - $env:CIBW_TEST_COMMAND = "python -m pytest `"{project}\bindings\python\test\unit`" -o asyncio_mode=auto"
             - python -m cibuildwheel --platform windows --output-dir wheelhouse bindings\python
             - Get-ChildItem wheelhouse
-            - artifact push workflow wheelhouse --destination wheels-windows-${Env:ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-windows-${Env:ARCH} --force
 
   - name: "Verify wheels: Windows x64"
     dependencies:
@@ -238,7 +238,7 @@ blocks:
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow wheels-windows-${Env:ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-windows-${Env:ARCH} --destination wheelhouse --force
             - Get-ChildItem wheelhouse
             - python -m pip install pytest pytest-asyncio
             - python -m pip install --no-index --find-links wheelhouse confluent-kafka4
@@ -257,7 +257,7 @@ blocks:
             - python -m pip install build
             - python -m build -s --outdir sdist-out bindings/python
             - ls -l sdist-out/
-            - artifact push workflow sdist-out --destination sdist --force
+            - artifact push workflow sdist-out --destination artifacts/sdist --force
 
   - name: "Verify sdist (from source)"
     dependencies:
@@ -272,7 +272,7 @@ blocks:
             - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
             - source "$HOME/.cargo/env"
             - sudo apt-get update -qq && sudo apt-get install -y -qq cmake nasm
-            - artifact pull workflow sdist --destination sdist-out --force
+            - artifact pull workflow artifacts/sdist --destination sdist-out --force
             - ls -l sdist-out/
             - python -m venv /tmp/sdistvenv
             - . /tmp/sdistvenv/bin/activate
@@ -281,3 +281,18 @@ blocks:
             - python -m pip install -v sdist-out/*.tar.gz
             - "python -c \"import _confluentkafka; print('import OK from-source sdist')\""
             - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
+
+  # Pre-release validation gate: assert the package version is well-formed and, on
+  # a release tag, that the tag matches it. A no-op on non-tag (manual-promotion)
+  # runs; a real gate on a tagged publish run. Standalone -- a failing check fails
+  # the pipeline. When Publish is wired, its promotion should run this on the tag.
+  - name: "Pre-release check"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      jobs:
+        - name: check
+          commands:
+            - sh .semaphore/pre-release-check.sh
