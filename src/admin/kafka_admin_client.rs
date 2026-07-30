@@ -5604,6 +5604,200 @@ mod tests {
         );
     }
 
+    // --- user SCRAM credentials ----------------------------------------------
+    // (describeUserScramCredentials / alterUserScramCredentials)
+
+    use crate::admin::{
+        AlterUserScramCredentialsOptions, DescribeUserScramCredentialsOptions, ScramCredentialInfo,
+        ScramMechanism as PublicScramMechanism, UserScramCredentialAlteration, UserScramCredentialDeletion,
+        UserScramCredentialUpsertion,
+    };
+    use crate::alter_user_scram_credentials_response_data::{
+        AlterUserScramCredentialsResponseData, AlterUserScramCredentialsResult as WireAlterResult,
+    };
+    use crate::common::requests::{AlterUserScramCredentialsResponse, DescribeUserScramCredentialsResponse};
+    use crate::describe_user_scram_credentials_response_data::CredentialInfo as WireCredentialInfo;
+    use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResult as WireDescribeResult;
+
+    /// Translated from `KafkaAdminClientTest.testDescribeUserScramCredentials`.
+    #[tokio::test]
+    async fn test_describe_user_scram_credentials() {
+        let user0_name = "user0";
+        let user0_mechanism0 = PublicScramMechanism::ScramSha256;
+        let user0_iterations0 = 4096;
+        let user0_mechanism1 = PublicScramMechanism::ScramSha512;
+        let user0_iterations1 = 8192;
+
+        let user1_name = "user1";
+        let user1_mechanism = PublicScramMechanism::ScramSha256;
+        let user1_iterations = 4096;
+
+        let mut ci0 = WireCredentialInfo::new();
+        ci0.set_mechanism(user0_mechanism0.r#type()).set_iterations(user0_iterations0);
+        let mut ci1 = WireCredentialInfo::new();
+        ci1.set_mechanism(user0_mechanism1.r#type()).set_iterations(user0_iterations1);
+        let mut ci_user1 = WireCredentialInfo::new();
+        ci_user1
+            .set_mechanism(user1_mechanism.r#type())
+            .set_iterations(user1_iterations);
+
+        let mut r0 = WireDescribeResult::new();
+        r0.set_user(user0_name.to_string()).set_credential_infos(vec![ci0, ci1]);
+        let mut r1 = WireDescribeResult::new();
+        r1.set_user(user1_name.to_string()).set_credential_infos(vec![ci_user1]);
+        let mut response_data = DescribeUserScramCredentialsResponseData::new();
+        response_data.set_results(vec![r0, r1]);
+
+        let users_requested: HashSet<String> = [user0_name.to_string(), user1_name.to_string()].into_iter().collect();
+
+        // Mirrors the Java loop over [null, empty, [user0, null, user1]]. Rust
+        // has no null in a `&[String]`, so the equivalent inputs are: empty,
+        // empty, and the explicit two-user list.
+        for users in [
+            Vec::<String>::new(),
+            Vec::new(),
+            vec![user0_name.to_string(), user1_name.to_string()],
+        ] {
+            let (admin, mut runnable, _time, _nodes) = env();
+            runnable
+                .client_mut()
+                .prepare_response(ConcreteResponse::DescribeUserScramCredentials(
+                    DescribeUserScramCredentialsResponse::new(response_data.clone(), 0),
+                ));
+
+            let result = admin.describe_user_scram_credentials(&users, DescribeUserScramCredentialsOptions::new());
+            let user0_desc_future = result.description(user0_name);
+            let user1_desc_future = result.description(user1_name);
+            pump(&mut runnable, 5).await;
+
+            let description_results = result.all().get().await.unwrap();
+            let users_described: HashSet<String> = result.users().get().await.unwrap().into_iter().collect();
+            assert_eq!(users_requested, users_described);
+            assert_eq!(users_requested, description_results.keys().cloned().collect::<HashSet<_>>());
+
+            let desc0 = &description_results[user0_name];
+            assert_eq!(desc0.name(), user0_name);
+            assert_eq!(desc0.credential_infos().len(), 2);
+            assert_eq!(desc0.credential_infos()[0].mechanism(), user0_mechanism0);
+            assert_eq!(desc0.credential_infos()[0].iterations(), user0_iterations0);
+            assert_eq!(desc0.credential_infos()[1].mechanism(), user0_mechanism1);
+            assert_eq!(desc0.credential_infos()[1].iterations(), user0_iterations1);
+            assert_eq!(*desc0, user0_desc_future.get().await.unwrap());
+
+            let desc1 = &description_results[user1_name];
+            assert_eq!(desc1.name(), user1_name);
+            assert_eq!(desc1.credential_infos().len(), 1);
+            assert_eq!(desc1.credential_infos()[0].mechanism(), user1_mechanism);
+            assert_eq!(desc1.credential_infos()[0].iterations(), user1_iterations);
+            assert_eq!(*desc1, user1_desc_future.get().await.unwrap());
+        }
+    }
+
+    /// Translated from
+    /// `KafkaAdminClientTest.testAlterUserScramCredentialsUnknownMechanism`.
+    #[tokio::test]
+    async fn test_alter_user_scram_credentials_unknown_mechanism() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let user0_name = "user0";
+        let user0_mechanism = PublicScramMechanism::Unknown;
+        let user1_name = "user1";
+        let user1_mechanism = PublicScramMechanism::Unknown;
+        let user2_name = "user2";
+        let user2_mechanism = PublicScramMechanism::ScramSha256;
+
+        let mut result2 = WireAlterResult::new();
+        result2.set_user(user2_name.to_string());
+        let mut response_data = AlterUserScramCredentialsResponseData::new();
+        response_data.set_results(vec![result2]);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::AlterUserScramCredentials(
+                AlterUserScramCredentialsResponse::new(response_data, 0),
+            ));
+
+        let alterations: Vec<UserScramCredentialAlteration> = vec![
+            UserScramCredentialDeletion::new(user0_name, user0_mechanism).into(),
+            UserScramCredentialUpsertion::new(user1_name, ScramCredentialInfo::new(user1_mechanism, 8192), "password")
+                .into(),
+            UserScramCredentialUpsertion::new(user2_name, ScramCredentialInfo::new(user2_mechanism, 4096), "password")
+                .into(),
+        ];
+        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        pump(&mut runnable, 5).await;
+
+        let result_data = result.values();
+        assert_eq!(result_data.len(), 3);
+        // user0 and user1 have an unknown mechanism -> complete exceptionally.
+        for user in [user0_name, user1_name] {
+            assert!(result_data.contains_key(user));
+            assert!(
+                result_data[user].get().await.is_err(),
+                "expected request for user {user} to complete exceptionally"
+            );
+        }
+        assert!(result_data.contains_key(user2_name));
+        result_data[user2_name].get().await.unwrap();
+
+        assert!(
+            result.all().get().await.is_err(),
+            "expected all() to fail since at least one user failed"
+        );
+    }
+
+    /// Translated from `KafkaAdminClientTest.testAlterUserScramCredentials`.
+    ///
+    /// The Java test has no `throws` and runs real PBKDF2 synchronously; the
+    /// Rust equivalent exercises the same crypto path (each upsertion computes a
+    /// salted password via `ScramFormatter::hi`).
+    #[tokio::test]
+    async fn test_alter_user_scram_credentials() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let user0_name = "user0";
+        let user0_mechanism0 = PublicScramMechanism::ScramSha256;
+        let user0_mechanism1 = PublicScramMechanism::ScramSha512;
+        let user1_name = "user1";
+        let user1_mechanism0 = PublicScramMechanism::ScramSha256;
+        let user2_name = "user2";
+        let user2_mechanism0 = PublicScramMechanism::ScramSha512;
+
+        let mut response_data = AlterUserScramCredentialsResponseData::new();
+        response_data.set_results(
+            [user0_name, user1_name, user2_name]
+                .into_iter()
+                .map(|u| {
+                    let mut r = WireAlterResult::new();
+                    r.set_user(u.to_string()).set_error_code(Errors::None.code());
+                    r
+                })
+                .collect(),
+        );
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::AlterUserScramCredentials(
+                AlterUserScramCredentialsResponse::new(response_data, 0),
+            ));
+
+        let alterations: Vec<UserScramCredentialAlteration> = vec![
+            UserScramCredentialDeletion::new(user0_name, user0_mechanism0).into(),
+            UserScramCredentialUpsertion::new(user0_name, ScramCredentialInfo::new(user0_mechanism1, 8192), "password")
+                .into(),
+            UserScramCredentialUpsertion::new(user1_name, ScramCredentialInfo::new(user1_mechanism0, 8192), "password")
+                .into(),
+            UserScramCredentialDeletion::new(user2_name, user2_mechanism0).into(),
+        ];
+        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        pump(&mut runnable, 5).await;
+
+        let result_data = result.values();
+        assert_eq!(result_data.len(), 3);
+        for user in [user0_name, user1_name, user2_name] {
+            assert!(result_data.contains_key(user));
+            result_data[user].get().await.unwrap();
+        }
+    }
+
     // --- createTopics --------------------------------------------------------
 
     #[tokio::test]
