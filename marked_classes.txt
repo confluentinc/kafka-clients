@@ -37,6 +37,8 @@ org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions
 org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult
 org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions
 org.apache.kafka.clients.admin.AlterReplicaLogDirsResult
+org.apache.kafka.clients.admin.AlterUserScramCredentialsOptions
+org.apache.kafka.clients.admin.AlterUserScramCredentialsResult
 org.apache.kafka.clients.admin.ClassicGroupDescription
 org.apache.kafka.clients.admin.ClientMetricsResourceListing
 org.apache.kafka.clients.admin.Config
@@ -88,6 +90,8 @@ org.apache.kafka.clients.admin.DescribeTopicsOptions
 org.apache.kafka.clients.admin.DescribeTopicsResult
 org.apache.kafka.clients.admin.DescribeTransactionsOptions
 org.apache.kafka.clients.admin.DescribeTransactionsResult
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsOptions
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult
 org.apache.kafka.clients.admin.ElectLeadersOptions
 org.apache.kafka.clients.admin.ElectLeadersResult
 org.apache.kafka.clients.admin.ExpireDelegationTokenOptions
@@ -134,6 +138,8 @@ org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions
 org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult
 org.apache.kafka.clients.admin.RenewDelegationTokenOptions
 org.apache.kafka.clients.admin.RenewDelegationTokenResult
+org.apache.kafka.clients.admin.ScramCredentialInfo
+org.apache.kafka.clients.admin.ScramMechanism
 org.apache.kafka.clients.admin.SupportedVersionRange
 org.apache.kafka.clients.admin.TerminateTransactionOptions
 org.apache.kafka.clients.admin.TerminateTransactionResult
@@ -144,6 +150,10 @@ org.apache.kafka.clients.admin.TransactionListing
 org.apache.kafka.clients.admin.TransactionState
 org.apache.kafka.clients.admin.UpdateFeaturesOptions
 org.apache.kafka.clients.admin.UpdateFeaturesResult
+org.apache.kafka.clients.admin.UserScramCredentialAlteration
+org.apache.kafka.clients.admin.UserScramCredentialDeletion
+org.apache.kafka.clients.admin.UserScramCredentialUpsertion
+org.apache.kafka.clients.admin.UserScramCredentialsDescription
 org.apache.kafka.clients.admin.internals.AbortTransactionHandler
 org.apache.kafka.clients.admin.internals.AdminApiDriver
 org.apache.kafka.clients.admin.internals.AdminApiHandler
@@ -743,6 +753,8 @@ org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest
 org.apache.kafka.common.requests.AlterPartitionReassignmentsResponse
 org.apache.kafka.common.requests.AlterReplicaLogDirsRequest
 org.apache.kafka.common.requests.AlterReplicaLogDirsResponse
+org.apache.kafka.common.requests.AlterUserScramCredentialsRequest
+org.apache.kafka.common.requests.AlterUserScramCredentialsResponse
 org.apache.kafka.common.requests.ApiVersionsRequest
 org.apache.kafka.common.requests.ApiVersionsResponse
 org.apache.kafka.common.requests.ConsumerGroupDescribeRequest
@@ -781,6 +793,8 @@ org.apache.kafka.common.requests.DescribeProducersRequest
 org.apache.kafka.common.requests.DescribeProducersResponse
 org.apache.kafka.common.requests.DescribeTransactionsRequest
 org.apache.kafka.common.requests.DescribeTransactionsResponse
+org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest
+org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse
 org.apache.kafka.common.requests.ElectLeadersRequest
 org.apache.kafka.common.requests.ElectLeadersResponse
 org.apache.kafka.common.requests.ExpireDelegationTokenRequest
@@ -828,6 +842,8 @@ org.apache.kafka.common.resource.ResourceType
 org.apache.kafka.common.security.auth.KafkaPrincipal
 org.apache.kafka.common.security.auth.SecurityProtocol
 org.apache.kafka.common.security.authenticator.SaslClientAuthenticator
+org.apache.kafka.common.security.scram.internals.ScramFormatter
+org.apache.kafka.common.security.scram.internals.ScramMechanism
 org.apache.kafka.common.security.ssl.SslFactory
 org.apache.kafka.common.security.token.delegation.DelegationToken
 org.apache.kafka.common.security.token.delegation.TokenInformation
