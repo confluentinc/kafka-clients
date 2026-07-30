@@ -23,38 +23,110 @@
 
 use std::io;
 
+use crate::alter_client_quotas_request_data::AlterClientQuotasRequestData;
+use crate::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
+use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
+use crate::alter_user_scram_credentials_request_data::AlterUserScramCredentialsRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+use crate::create_acls_request_data::CreateAclsRequestData;
+use crate::create_delegation_token_request_data::CreateDelegationTokenRequestData;
+use crate::create_partitions_request_data::CreatePartitionsRequestData;
+use crate::create_topics_request_data::CreateTopicsRequestData;
+use crate::delete_acls_request_data::DeleteAclsRequestData;
+use crate::delete_groups_request_data::DeleteGroupsRequestData;
+use crate::delete_records_request_data::DeleteRecordsRequestData;
+use crate::delete_topics_request_data::DeleteTopicsRequestData;
+use crate::describe_acls_request_data::DescribeAclsRequestData;
+use crate::describe_client_quotas_request_data::DescribeClientQuotasRequestData;
+use crate::describe_cluster_request_data::DescribeClusterRequestData;
+use crate::describe_configs_request_data::DescribeConfigsRequestData;
+use crate::describe_delegation_token_request_data::DescribeDelegationTokenRequestData;
+use crate::describe_groups_request_data::DescribeGroupsRequestData;
+use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
+use crate::describe_producers_request_data::DescribeProducersRequestData;
+use crate::describe_transactions_request_data::DescribeTransactionsRequestData;
+use crate::describe_user_scram_credentials_request_data::DescribeUserScramCredentialsRequestData;
+use crate::elect_leaders_request_data::ElectLeadersRequestData;
+use crate::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
+use crate::init_producer_id_request_data::InitProducerIdRequestData;
+use crate::leave_group_request_data::LeaveGroupRequestData;
+use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
+use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
+use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
+use crate::list_transactions_request_data::ListTransactionsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
+use crate::offset_delete_request_data::OffsetDeleteRequestData;
 use crate::offset_fetch_request_data::OffsetFetchRequestData;
 use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
 use crate::produce_request_data::ProduceRequestData;
+use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
+use crate::update_features_request_data::UpdateFeaturesRequestData;
+use crate::write_txn_markers_request_data::WriteTxnMarkersRequestData;
 
+use super::AlterClientQuotasRequest;
+use super::AlterPartitionReassignmentsRequest;
+use super::AlterReplicaLogDirsRequest;
+use super::AlterUserScramCredentialsRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
+use super::ConsumerGroupDescribeRequest;
 use super::ConsumerGroupHeartbeatRequest;
+use super::CreateAclsRequest;
+use super::CreateDelegationTokenRequest;
+use super::CreatePartitionsRequest;
+use super::CreateTopicsRequest;
+use super::DeleteAclsRequest;
+use super::DeleteGroupsRequest;
+use super::DeleteRecordsRequest;
+use super::DeleteTopicsRequest;
+use super::DescribeAclsRequest;
+use super::DescribeClientQuotasRequest;
+use super::DescribeClusterRequest;
+use super::DescribeConfigsRequest;
+use super::DescribeDelegationTokenRequest;
+use super::DescribeGroupsRequest;
+use super::DescribeLogDirsRequest;
+use super::DescribeProducersRequest;
+use super::DescribeTransactionsRequest;
+use super::DescribeUserScramCredentialsRequest;
+use super::ElectLeadersRequest;
+use super::ExpireDelegationTokenRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
+use super::IncrementalAlterConfigsRequest;
+use super::InitProducerIdRequest;
+use super::LeaveGroupRequest;
+use super::ListConfigResourcesRequest;
+use super::ListGroupsRequest;
 use super::ListOffsetsRequest;
+use super::ListPartitionReassignmentsRequest;
+use super::ListTransactionsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
+use super::OffsetDeleteRequest;
 use super::OffsetFetchRequest;
 use super::OffsetsForLeaderEpochRequest;
 use super::ProduceRequest;
+use super::RenewDelegationTokenRequest;
 use super::RequestAndSize;
 use super::RequestHeader;
 use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
+use super::UpdateFeaturesRequest;
+use super::WriteTxnMarkersRequest;
 
 /// Trait for building requests at a specific version.
 ///
@@ -110,6 +182,12 @@ pub enum ConcreteRequest {
     SaslAuthenticate(SaslAuthenticateRequest),
     /// A FindCoordinator request.
     FindCoordinator(FindCoordinatorRequest),
+    /// A ListGroups request.
+    ListGroups(ListGroupsRequest),
+    /// A DescribeGroups request.
+    DescribeGroups(DescribeGroupsRequest),
+    /// A ConsumerGroupDescribe request.
+    ConsumerGroupDescribe(ConsumerGroupDescribeRequest),
     /// A ListOffsets request.
     ListOffsets(ListOffsetsRequest),
     /// An OffsetsForLeaderEpoch request.
@@ -118,8 +196,74 @@ pub enum ConcreteRequest {
     ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest),
     /// An OffsetCommit request.
     OffsetCommit(OffsetCommitRequest),
+    /// A DeleteGroups request.
+    DeleteGroups(DeleteGroupsRequest),
+    /// A LeaveGroup request.
+    LeaveGroup(LeaveGroupRequest),
+    /// An OffsetDelete request.
+    OffsetDelete(OffsetDeleteRequest),
     /// An OffsetFetch request.
     OffsetFetch(OffsetFetchRequest),
+    /// A CreateTopics request.
+    CreateTopics(CreateTopicsRequest),
+    /// A DeleteTopics request.
+    DeleteTopics(DeleteTopicsRequest),
+    /// A CreatePartitions request.
+    CreatePartitions(CreatePartitionsRequest),
+    /// A DeleteRecords request.
+    DeleteRecords(DeleteRecordsRequest),
+    /// A DescribeConfigs request.
+    DescribeConfigs(DescribeConfigsRequest),
+    /// An IncrementalAlterConfigs request.
+    IncrementalAlterConfigs(IncrementalAlterConfigsRequest),
+    /// A ListConfigResources request.
+    ListConfigResources(ListConfigResourcesRequest),
+    /// A DescribeCluster request.
+    DescribeCluster(DescribeClusterRequest),
+    /// A DescribeLogDirs request.
+    DescribeLogDirs(DescribeLogDirsRequest),
+    /// An AlterReplicaLogDirs request.
+    AlterReplicaLogDirs(AlterReplicaLogDirsRequest),
+    /// An ElectLeaders request.
+    ElectLeaders(ElectLeadersRequest),
+    /// An AlterPartitionReassignments request.
+    AlterPartitionReassignments(AlterPartitionReassignmentsRequest),
+    /// A ListPartitionReassignments request.
+    ListPartitionReassignments(ListPartitionReassignmentsRequest),
+    /// A DescribeAcls request.
+    DescribeAcls(DescribeAclsRequest),
+    /// A CreateAcls request.
+    CreateAcls(CreateAclsRequest),
+    /// A DeleteAcls request.
+    DeleteAcls(DeleteAclsRequest),
+    /// A DescribeClientQuotas request.
+    DescribeClientQuotas(DescribeClientQuotasRequest),
+    /// An AlterClientQuotas request.
+    AlterClientQuotas(AlterClientQuotasRequest),
+    /// A DescribeUserScramCredentials request.
+    DescribeUserScramCredentials(DescribeUserScramCredentialsRequest),
+    /// An AlterUserScramCredentials request.
+    AlterUserScramCredentials(AlterUserScramCredentialsRequest),
+    /// A CreateDelegationToken request.
+    CreateDelegationToken(CreateDelegationTokenRequest),
+    /// A RenewDelegationToken request.
+    RenewDelegationToken(RenewDelegationTokenRequest),
+    /// An ExpireDelegationToken request.
+    ExpireDelegationToken(ExpireDelegationTokenRequest),
+    /// A DescribeDelegationToken request.
+    DescribeDelegationToken(DescribeDelegationTokenRequest),
+    /// An UpdateFeatures request.
+    UpdateFeatures(UpdateFeaturesRequest),
+    /// A DescribeProducers request.
+    DescribeProducers(DescribeProducersRequest),
+    /// A DescribeTransactions request.
+    DescribeTransactions(DescribeTransactionsRequest),
+    /// An InitProducerId request.
+    InitProducerId(InitProducerIdRequest),
+    /// A WriteTxnMarkers request.
+    WriteTxnMarkers(WriteTxnMarkersRequest),
+    /// A ListTransactions request.
+    ListTransactions(ListTransactionsRequest),
 }
 
 impl ConcreteRequest {
@@ -133,11 +277,47 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => r.version(),
             Self::SaslAuthenticate(r) => r.version(),
             Self::FindCoordinator(r) => r.version(),
+            Self::ListGroups(r) => r.version(),
+            Self::DescribeGroups(r) => r.version(),
+            Self::ConsumerGroupDescribe(r) => r.version(),
             Self::ListOffsets(r) => r.version(),
             Self::OffsetsForLeaderEpoch(r) => r.version(),
             Self::ConsumerGroupHeartbeat(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
+            Self::DeleteGroups(r) => r.version(),
+            Self::LeaveGroup(r) => r.version(),
+            Self::OffsetDelete(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
+            Self::CreateTopics(r) => r.version(),
+            Self::DeleteTopics(r) => r.version(),
+            Self::CreatePartitions(r) => r.version(),
+            Self::DeleteRecords(r) => r.version(),
+            Self::DescribeConfigs(r) => r.version(),
+            Self::IncrementalAlterConfigs(r) => r.version(),
+            Self::ListConfigResources(r) => r.version(),
+            Self::DescribeCluster(r) => r.version(),
+            Self::DescribeLogDirs(r) => r.version(),
+            Self::AlterReplicaLogDirs(r) => r.version(),
+            Self::ElectLeaders(r) => r.version(),
+            Self::AlterPartitionReassignments(r) => r.version(),
+            Self::ListPartitionReassignments(r) => r.version(),
+            Self::DescribeAcls(r) => r.version(),
+            Self::CreateAcls(r) => r.version(),
+            Self::DeleteAcls(r) => r.version(),
+            Self::DescribeClientQuotas(r) => r.version(),
+            Self::AlterClientQuotas(r) => r.version(),
+            Self::DescribeUserScramCredentials(r) => r.version(),
+            Self::AlterUserScramCredentials(r) => r.version(),
+            Self::CreateDelegationToken(r) => r.version(),
+            Self::RenewDelegationToken(r) => r.version(),
+            Self::ExpireDelegationToken(r) => r.version(),
+            Self::DescribeDelegationToken(r) => r.version(),
+            Self::UpdateFeatures(r) => r.version(),
+            Self::DescribeProducers(r) => r.version(),
+            Self::DescribeTransactions(r) => r.version(),
+            Self::InitProducerId(r) => r.version(),
+            Self::WriteTxnMarkers(r) => r.version(),
+            Self::ListTransactions(r) => r.version(),
         }
     }
 
@@ -151,11 +331,47 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
             Self::FindCoordinator(r) => r.api_key(),
+            Self::ListGroups(r) => r.api_key(),
+            Self::DescribeGroups(r) => r.api_key(),
+            Self::ConsumerGroupDescribe(r) => r.api_key(),
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
+            Self::DeleteGroups(r) => r.api_key(),
+            Self::LeaveGroup(r) => r.api_key(),
+            Self::OffsetDelete(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::CreateTopics(r) => r.api_key(),
+            Self::DeleteTopics(r) => r.api_key(),
+            Self::CreatePartitions(r) => r.api_key(),
+            Self::DeleteRecords(r) => r.api_key(),
+            Self::DescribeConfigs(r) => r.api_key(),
+            Self::IncrementalAlterConfigs(r) => r.api_key(),
+            Self::ListConfigResources(r) => r.api_key(),
+            Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeLogDirs(r) => r.api_key(),
+            Self::AlterReplicaLogDirs(r) => r.api_key(),
+            Self::ElectLeaders(r) => r.api_key(),
+            Self::AlterPartitionReassignments(r) => r.api_key(),
+            Self::ListPartitionReassignments(r) => r.api_key(),
+            Self::DescribeAcls(r) => r.api_key(),
+            Self::CreateAcls(r) => r.api_key(),
+            Self::DeleteAcls(r) => r.api_key(),
+            Self::DescribeClientQuotas(r) => r.api_key(),
+            Self::AlterClientQuotas(r) => r.api_key(),
+            Self::DescribeUserScramCredentials(r) => r.api_key(),
+            Self::AlterUserScramCredentials(r) => r.api_key(),
+            Self::CreateDelegationToken(r) => r.api_key(),
+            Self::RenewDelegationToken(r) => r.api_key(),
+            Self::ExpireDelegationToken(r) => r.api_key(),
+            Self::DescribeDelegationToken(r) => r.api_key(),
+            Self::UpdateFeatures(r) => r.api_key(),
+            Self::DescribeProducers(r) => r.api_key(),
+            Self::DescribeTransactions(r) => r.api_key(),
+            Self::InitProducerId(r) => r.api_key(),
+            Self::WriteTxnMarkers(r) => r.api_key(),
+            Self::ListTransactions(r) => r.api_key(),
         }
     }
 
@@ -175,11 +391,47 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::FindCoordinator(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListGroups(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeGroups(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ConsumerGroupDescribe(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListOffsets(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteGroups(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::LeaveGroup(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::OffsetDelete(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteTopics(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreatePartitions(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteRecords(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::IncrementalAlterConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListConfigResources(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterReplicaLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ElectLeaders(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListPartitionReassignments(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteAcls(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeClientQuotas(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterClientQuotas(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeUserScramCredentials(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterUserScramCredentials(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::CreateDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::RenewDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ExpireDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::UpdateFeatures(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeProducers(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::InitProducerId(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::WriteTxnMarkers(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ListTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -235,6 +487,15 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::ListGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ConsumerGroupDescribe(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::ListOffsets(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -247,7 +508,106 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DeleteGroups(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::LeaveGroup(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::OffsetDelete(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::OffsetFetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreateTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteTopics(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreatePartitions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteRecords(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::IncrementalAlterConfigs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListConfigResources(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeCluster(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterReplicaLogDirs(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ElectLeaders(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListPartitionReassignments(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreateAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DeleteAcls(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeClientQuotas(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterClientQuotas(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeUserScramCredentials(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterUserScramCredentials(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::CreateDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::RenewDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ExpireDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeDelegationToken(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::UpdateFeatures(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeProducers(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeTransactions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::InitProducerId(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::WriteTxnMarkers(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ListTransactions(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
         }
@@ -270,11 +630,47 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => Self::serialize_body(r.data_mut(), version),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data_mut(), version),
             Self::FindCoordinator(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ConsumerGroupDescribe(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListOffsets(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data_mut(), version),
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteGroups(r) => Self::serialize_body(r.data_mut(), version),
+            Self::LeaveGroup(r) => Self::serialize_body(r.data_mut(), version),
+            Self::OffsetDelete(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreatePartitions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteRecords(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListPartitionReassignments(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeUserScramCredentials(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterUserScramCredentials(r) => Self::serialize_body(r.data_mut(), version),
+            Self::CreateDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::RenewDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
+            Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
+            Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -306,11 +702,47 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::SaslAuthenticate(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::FindCoordinator(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListGroups(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeGroups(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ConsumerGroupDescribe(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteGroups(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::LeaveGroup(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::OffsetDelete(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteTopics(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreatePartitions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteRecords(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::IncrementalAlterConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListConfigResources(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterReplicaLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ElectLeaders(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListPartitionReassignments(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteAcls(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeClientQuotas(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterClientQuotas(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeUserScramCredentials(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterUserScramCredentials(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::CreateDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::RenewDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ExpireDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::UpdateFeatures(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeProducers(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::InitProducerId(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::WriteTxnMarkers(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -359,6 +791,21 @@ impl ConcreteRequest {
                 let data = FindCoordinatorRequestData::read(readable, api_version)?;
                 Ok(Self::FindCoordinator(FindCoordinatorRequest::new(data, api_version)))
             },
+            ApiKeys::LIST_GROUPS => {
+                let data = ListGroupsRequestData::read(readable, api_version)?;
+                Ok(Self::ListGroups(ListGroupsRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_GROUPS => {
+                let data = DescribeGroupsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeGroups(DescribeGroupsRequest::new(data, api_version)))
+            },
+            ApiKeys::CONSUMER_GROUP_DESCRIBE => {
+                let data = ConsumerGroupDescribeRequestData::read(readable, api_version)?;
+                Ok(Self::ConsumerGroupDescribe(ConsumerGroupDescribeRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
             ApiKeys::LIST_OFFSETS => {
                 let data = ListOffsetsRequestData::read(readable, api_version)?;
                 Ok(Self::ListOffsets(ListOffsetsRequest::new(data, api_version)))
@@ -381,9 +828,165 @@ impl ConcreteRequest {
                 let data = OffsetCommitRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetCommit(OffsetCommitRequest::new(data, api_version)))
             },
+            ApiKeys::DELETE_GROUPS => {
+                let data = DeleteGroupsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteGroups(DeleteGroupsRequest::new(data, api_version)))
+            },
+            ApiKeys::LEAVE_GROUP => {
+                let data = LeaveGroupRequestData::read(readable, api_version)?;
+                Ok(Self::LeaveGroup(LeaveGroupRequest::new(data, api_version)))
+            },
+            ApiKeys::OFFSET_DELETE => {
+                let data = OffsetDeleteRequestData::read(readable, api_version)?;
+                Ok(Self::OffsetDelete(OffsetDeleteRequest::new(data, api_version)))
+            },
             ApiKeys::OFFSET_FETCH => {
                 let data = OffsetFetchRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
+            },
+            ApiKeys::CREATE_TOPICS => {
+                let data = CreateTopicsRequestData::read(readable, api_version)?;
+                Ok(Self::CreateTopics(CreateTopicsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_TOPICS => {
+                let data = DeleteTopicsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteTopics(DeleteTopicsRequest::new(data, api_version)))
+            },
+            ApiKeys::CREATE_PARTITIONS => {
+                let data = CreatePartitionsRequestData::read(readable, api_version)?;
+                Ok(Self::CreatePartitions(CreatePartitionsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_RECORDS => {
+                let data = DeleteRecordsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteRecords(DeleteRecordsRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_CONFIGS => {
+                let data = DescribeConfigsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeConfigs(DescribeConfigsRequest::new(data, api_version)))
+            },
+            ApiKeys::INCREMENTAL_ALTER_CONFIGS => {
+                let data = IncrementalAlterConfigsRequestData::read(readable, api_version)?;
+                Ok(Self::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::LIST_CONFIG_RESOURCES => {
+                let data = ListConfigResourcesRequestData::read(readable, api_version)?;
+                Ok(Self::ListConfigResources(ListConfigResourcesRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_CLUSTER => {
+                let data = DescribeClusterRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeCluster(DescribeClusterRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_LOG_DIRS => {
+                let data = DescribeLogDirsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeLogDirs(DescribeLogDirsRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_REPLICA_LOG_DIRS => {
+                let data = AlterReplicaLogDirsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, api_version)))
+            },
+            ApiKeys::ELECT_LEADERS => {
+                let data = ElectLeadersRequestData::read(readable, api_version)?;
+                Ok(Self::ElectLeaders(ElectLeadersRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_PARTITION_REASSIGNMENTS => {
+                let data = AlterPartitionReassignmentsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::LIST_PARTITION_REASSIGNMENTS => {
+                let data = ListPartitionReassignmentsRequestData::read(readable, api_version)?;
+                Ok(Self::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::DESCRIBE_ACLS => {
+                let data = DescribeAclsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeAcls(DescribeAclsRequest::new(data, api_version)))
+            },
+            ApiKeys::CREATE_ACLS => {
+                let data = CreateAclsRequestData::read(readable, api_version)?;
+                Ok(Self::CreateAcls(CreateAclsRequest::new(data, api_version)))
+            },
+            ApiKeys::DELETE_ACLS => {
+                let data = DeleteAclsRequestData::read(readable, api_version)?;
+                Ok(Self::DeleteAcls(DeleteAclsRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_CLIENT_QUOTAS => {
+                let data = DescribeClientQuotasRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeClientQuotas(DescribeClientQuotasRequest::new(data, api_version)))
+            },
+            ApiKeys::ALTER_CLIENT_QUOTAS => {
+                let data = AlterClientQuotasRequestData::read(readable, api_version)?;
+                Ok(Self::AlterClientQuotas(AlterClientQuotasRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS => {
+                let data = DescribeUserScramCredentialsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeUserScramCredentials(DescribeUserScramCredentialsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::ALTER_USER_SCRAM_CREDENTIALS => {
+                let data = AlterUserScramCredentialsRequestData::read(readable, api_version)?;
+                Ok(Self::AlterUserScramCredentials(AlterUserScramCredentialsRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::CREATE_DELEGATION_TOKEN => {
+                let data = CreateDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::CreateDelegationToken(CreateDelegationTokenRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::RENEW_DELEGATION_TOKEN => {
+                let data = RenewDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::RenewDelegationToken(RenewDelegationTokenRequest::new(data, api_version)))
+            },
+            ApiKeys::EXPIRE_DELEGATION_TOKEN => {
+                let data = ExpireDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::ExpireDelegationToken(ExpireDelegationTokenRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::DESCRIBE_DELEGATION_TOKEN => {
+                let data = DescribeDelegationTokenRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeDelegationToken(DescribeDelegationTokenRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::UPDATE_FEATURES => {
+                let data = UpdateFeaturesRequestData::read(readable, api_version)?;
+                Ok(Self::UpdateFeatures(UpdateFeaturesRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_PRODUCERS => {
+                let data = DescribeProducersRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeProducers(DescribeProducersRequest::new(data, api_version)))
+            },
+            ApiKeys::DESCRIBE_TRANSACTIONS => {
+                let data = DescribeTransactionsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeTransactions(DescribeTransactionsRequest::new(data, api_version)))
+            },
+            ApiKeys::INIT_PRODUCER_ID => {
+                let data = InitProducerIdRequestData::read(readable, api_version)?;
+                Ok(Self::InitProducerId(InitProducerIdRequest::new(data, api_version)))
+            },
+            ApiKeys::WRITE_TXN_MARKERS => {
+                let data = WriteTxnMarkersRequestData::read(readable, api_version)?;
+                Ok(Self::WriteTxnMarkers(WriteTxnMarkersRequest::new(data, api_version)))
+            },
+            ApiKeys::LIST_TRANSACTIONS => {
+                let data = ListTransactionsRequestData::read(readable, api_version)?;
+                Ok(Self::ListTransactions(ListTransactionsRequest::new(data, api_version)))
             },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -403,11 +1006,47 @@ impl std::fmt::Display for ConcreteRequest {
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
             Self::FindCoordinator(r) => write!(f, "{r}"),
+            Self::ListGroups(r) => write!(f, "{r}"),
+            Self::DescribeGroups(r) => write!(f, "{r}"),
+            Self::ConsumerGroupDescribe(r) => write!(f, "{r}"),
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
+            Self::DeleteGroups(r) => write!(f, "{r}"),
+            Self::LeaveGroup(r) => write!(f, "{r}"),
+            Self::OffsetDelete(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::CreateTopics(r) => write!(f, "{r}"),
+            Self::DeleteTopics(r) => write!(f, "{r}"),
+            Self::CreatePartitions(r) => write!(f, "{r}"),
+            Self::DeleteRecords(r) => write!(f, "{r}"),
+            Self::DescribeConfigs(r) => write!(f, "{r}"),
+            Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
+            Self::ListConfigResources(r) => write!(f, "{r}"),
+            Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeLogDirs(r) => write!(f, "{r}"),
+            Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
+            Self::ElectLeaders(r) => write!(f, "{r}"),
+            Self::AlterPartitionReassignments(r) => write!(f, "{r}"),
+            Self::ListPartitionReassignments(r) => write!(f, "{r}"),
+            Self::DescribeAcls(r) => write!(f, "{r}"),
+            Self::CreateAcls(r) => write!(f, "{r}"),
+            Self::DeleteAcls(r) => write!(f, "{r}"),
+            Self::DescribeClientQuotas(r) => write!(f, "{r}"),
+            Self::AlterClientQuotas(r) => write!(f, "{r}"),
+            Self::DescribeUserScramCredentials(r) => write!(f, "{r}"),
+            Self::AlterUserScramCredentials(r) => write!(f, "{r}"),
+            Self::CreateDelegationToken(r) => write!(f, "{r}"),
+            Self::RenewDelegationToken(r) => write!(f, "{r}"),
+            Self::ExpireDelegationToken(r) => write!(f, "{r}"),
+            Self::DescribeDelegationToken(r) => write!(f, "{r}"),
+            Self::UpdateFeatures(r) => write!(f, "{r}"),
+            Self::DescribeProducers(r) => write!(f, "{r}"),
+            Self::DescribeTransactions(r) => write!(f, "{r}"),
+            Self::InitProducerId(r) => write!(f, "{r}"),
+            Self::WriteTxnMarkers(r) => write!(f, "{r}"),
+            Self::ListTransactions(r) => write!(f, "{r}"),
         }
     }
 }

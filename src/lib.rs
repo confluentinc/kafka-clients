@@ -15,6 +15,7 @@
 // Fail on warnings in development
 #![deny(warnings)]
 
+pub mod admin;
 pub mod api_versions;
 pub mod client_request;
 pub mod client_response;
