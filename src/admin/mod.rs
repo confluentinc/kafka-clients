@@ -28,6 +28,7 @@ pub mod alter_configs_result;
 pub mod alter_consumer_group_offsets_result;
 pub mod alter_partition_reassignments_result;
 pub mod alter_replica_log_dirs_result;
+pub mod alter_user_scram_credentials_result;
 pub mod classic_group_description;
 pub mod client_metrics_resource_listing;
 pub mod config;
@@ -57,6 +58,7 @@ pub mod describe_producers_result;
 pub mod describe_replica_log_dirs_result;
 pub mod describe_topics_result;
 pub mod describe_transactions_result;
+pub mod describe_user_scram_credentials_result;
 pub mod elect_leaders_result;
 pub mod expire_delegation_token_result;
 pub mod feature_metadata;
@@ -91,6 +93,8 @@ pub mod records_to_delete;
 pub mod remove_members_from_consumer_group_result;
 pub mod renew_delegation_token_result;
 pub mod replica_info;
+pub mod scram_credential_info;
+pub mod scram_mechanism;
 pub mod supported_version_range;
 pub mod terminate_transaction_result;
 pub mod topic_description;
@@ -99,6 +103,10 @@ pub mod transaction_description;
 pub mod transaction_listing;
 pub mod transaction_state;
 pub mod update_features_result;
+pub mod user_scram_credential_alteration;
+pub mod user_scram_credential_deletion;
+pub mod user_scram_credential_upsertion;
+pub mod user_scram_credentials_description;
 
 pub(crate) mod internals;
 
@@ -111,6 +119,7 @@ pub use alter_configs_result::AlterConfigsResult;
 pub use alter_consumer_group_offsets_result::AlterConsumerGroupOffsetsResult;
 pub use alter_partition_reassignments_result::AlterPartitionReassignmentsResult;
 pub use alter_replica_log_dirs_result::AlterReplicaLogDirsResult;
+pub use alter_user_scram_credentials_result::AlterUserScramCredentialsResult;
 pub use classic_group_description::ClassicGroupDescription;
 #[allow(deprecated)]
 pub use client_metrics_resource_listing::ClientMetricsResourceListing;
@@ -144,6 +153,7 @@ pub use describe_producers_result::{DescribeProducersResult, PartitionProducerSt
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
 pub use describe_topics_result::DescribeTopicsResult;
 pub use describe_transactions_result::DescribeTransactionsResult;
+pub use describe_user_scram_credentials_result::DescribeUserScramCredentialsResult;
 pub use elect_leaders_result::ElectLeadersResult;
 pub use expire_delegation_token_result::ExpireDelegationTokenResult;
 pub use feature_metadata::FeatureMetadata;
@@ -179,15 +189,16 @@ pub use options::ListClientMetricsResourcesOptions;
 pub use options::ListConsumerGroupsOptions;
 pub use options::{
     AbortTransactionOptions, AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, CreateAclsOptions, CreateDelegationTokenOptions,
-    CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
-    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions,
-    DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
-    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
-    DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    ElectLeadersOptions, ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
-    ListTopicsOptions, ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
+    CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions,
+    DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions,
+    DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
+    DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
+    ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
     TerminateTransactionOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
@@ -196,6 +207,8 @@ pub use records_to_delete::RecordsToDelete;
 pub use remove_members_from_consumer_group_result::RemoveMembersFromConsumerGroupResult;
 pub use renew_delegation_token_result::RenewDelegationTokenResult;
 pub use replica_info::ReplicaInfo;
+pub use scram_credential_info::ScramCredentialInfo;
+pub use scram_mechanism::ScramMechanism;
 pub use supported_version_range::SupportedVersionRange;
 pub use terminate_transaction_result::TerminateTransactionResult;
 pub use topic_description::TopicDescription;
@@ -204,6 +217,10 @@ pub use transaction_description::TransactionDescription;
 pub use transaction_listing::TransactionListing;
 pub use transaction_state::TransactionState;
 pub use update_features_result::UpdateFeaturesResult;
+pub use user_scram_credential_alteration::UserScramCredentialAlteration;
+pub use user_scram_credential_deletion::UserScramCredentialDeletion;
+pub use user_scram_credential_upsertion::UserScramCredentialUpsertion;
+pub use user_scram_credentials_description::UserScramCredentialsDescription;
 
 use std::time::Duration;
 
@@ -541,6 +558,27 @@ pub trait Admin: Send + Sync {
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
     ) -> AlterClientQuotasResult;
+
+    /// Describe all SASL/SCRAM credentials for the given users, or all users if
+    /// `users` is empty.
+    ///
+    /// Corresponds to
+    /// `Admin.describeUserScramCredentials(List<String>, DescribeUserScramCredentialsOptions)`.
+    fn describe_user_scram_credentials(
+        &self,
+        users: &[String],
+        options: DescribeUserScramCredentialsOptions,
+    ) -> DescribeUserScramCredentialsResult;
+
+    /// Alter (upsert / delete) SASL/SCRAM credentials for one or more users.
+    ///
+    /// Corresponds to
+    /// `Admin.alterUserScramCredentials(List<UserScramCredentialAlteration>, AlterUserScramCredentialsOptions)`.
+    fn alter_user_scram_credentials(
+        &self,
+        alterations: &[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> AlterUserScramCredentialsResult;
 
     /// Create a delegation token.
     ///

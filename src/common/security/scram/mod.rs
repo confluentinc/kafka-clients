@@ -12,14 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security types and utilities (org.apache.kafka.common.security).
+//! SASL/SCRAM security types (org.apache.kafka.common.security.scram).
 
-pub mod auth;
-pub mod authenticator;
-pub mod scram;
-pub mod ssl;
-pub mod token;
-
-pub use auth::SecurityProtocol;
-pub use authenticator::SaslClientAuthenticator;
-pub use ssl::SslFactory;
+pub(crate) mod internals;

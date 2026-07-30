@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security types and utilities (org.apache.kafka.common.security).
+//! Internal SASL/SCRAM helpers
+//! (org.apache.kafka.common.security.scram.internals).
+//!
+//! Package name contains `internals`, so everything here is `pub(crate)`
+//! (CLAUDE.md naming conventions).
 
-pub mod auth;
-pub mod authenticator;
-pub mod scram;
-pub mod ssl;
-pub mod token;
+pub(crate) mod scram_formatter;
+pub(crate) mod scram_mechanism;
 
-pub use auth::SecurityProtocol;
-pub use authenticator::SaslClientAuthenticator;
-pub use ssl::SslFactory;
+pub(crate) use scram_formatter::ScramFormatter;
+pub(crate) use scram_mechanism::ScramMechanism;
