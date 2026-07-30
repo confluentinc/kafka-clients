@@ -31,7 +31,7 @@ A PR is more likely to be reviewed quickly if it:
 3. **Includes tests.** Bug fixes should include a regression test; new functionality should include unit or integration tests.
 4. **Follows existing code style and conventions.** Match the surrounding code — naming, formatting, structure. Run `cargo xtask format-check` before opening the PR.
 5. **Is scoped and focused.** One logical change per PR. Don't mix refactors, features, and bug fixes.
-6. **Stays responsive.** Please respond to review feedback within 14 days. PRs that go quiet may be closed and can be reopened later when you're ready to pick them up again.
+6. **Stays responsive.** Please respond to review feedback promptly. A PR with no activity for 90 days is marked stale, and after a further 30 days without activity it is closed automatically. Closed PRs can be reopened when you're ready to pick them up again.
 
 We evaluate large or foundational changes (new modules, protocol handling, public API shape) more carefully than small fixes. Expect more back-and-forth on those.
 
@@ -42,6 +42,16 @@ Ahead of GA, we're rolling out tooling to make it easier to file well-structured
 ## AI-assisted contributions
 
 If you use AI tools to help write code, docs, issues, or PR descriptions, see [AI_POLICY.md](AI_POLICY.md).
+
+If you used AI tools to prepare a contribution, please add one of the following commit trailers identifying the tool and version. This gives reviewers a clear signal of which tools are in use.
+
+```
+Co-Authored-By: <AI tool name and version>
+Assisted-By: <AI tool name and version>
+Generated-By: <AI tool name and version>
+```
+
+You remain responsible for everything you submit, regardless of the tools used.
 
 ## Code of conduct
 
