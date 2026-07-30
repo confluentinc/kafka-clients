@@ -106,8 +106,10 @@ blocks:
           commands:
             # aws-lc-rs (rustls backend) needs nasm + cmake on Windows x86_64.
             - choco install -y --no-progress nasm cmake
-            - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+            - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"
+            - $ck = Get-ChildItem "$env:USERPROFILE\.cargo\bin","$env:USERPROFILE\.rustup\toolchains" -Filter cargo.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($ck) { Write-Host "Using existing cargo at $($ck.FullName)"; $env:PATH = "$($ck.DirectoryName);$env:PATH" }
             - if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe; .\rustup-init.exe -y --default-toolchain stable --profile minimal; $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH" }
+            - cargo --version
             - cargo build --features ffi --release
             - New-Item -ItemType Directory -Force dist | Out-Null
             - Copy-Item target\release\confluent_kafka.dll dist\
