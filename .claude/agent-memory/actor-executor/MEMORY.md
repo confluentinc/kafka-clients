@@ -92,4 +92,5 @@
 - [M11 Tier3 P5 features](m11_tier3_phase5_features_notes.md) — describe reuses ApiVersions; updateFeatures net-new wire + Result-for-sync-throw; mock version-bounds validation (finding #9)
 - [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
+- [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary

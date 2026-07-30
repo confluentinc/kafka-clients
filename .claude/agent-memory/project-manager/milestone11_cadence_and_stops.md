@@ -1,9 +1,17 @@
 ---
 name: milestone11-cadence-and-stops
-description: Milestone 11 (AdminClient) execution cadence and the one preserved hard stop (SCRAM crate)
+description: Milestone 11 (AdminClient) execution cadence; in-scope work COMPLETE as of 2026-07-30 (SCRAM stop resolved)
 metadata:
   type: project
 ---
+
+**STATUS (2026-07-30): Milestone 11 in-scope work is COMPLETE.** All 46/46
+in-scope Admin RPCs are translated (Tier 1: 17, Tier 2: 9, Tier 3 P1–P7: 20),
+each Critic-clean, 3029 lib tests passing. The SCRAM hard stop below was RESOLVED —
+the user approved `aws-lc-rs` (see [[aws-lc-rs-crypto-decision]]) and Tier 3 Phase 3
+landed Critic-clean on first pass. Remaining out-of-scope (not started): C FFI /
+Python bindings (separate future task, reuse PR #116) and Tier 4. The cadence notes
+below are retained for any resumed/follow-on Admin work.
 
 Milestone 11 (AdminClient, N=1) runs on a **continuous cadence**: the Manager
 drives Tier 2 → Tier 3 phase-by-phase (Actor → Critic → fix loop → handoff)
