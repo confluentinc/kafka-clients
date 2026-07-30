@@ -45,6 +45,14 @@ snap = "1"
 lz4_flex = "0.11"
 zstd = "0.13"
 crc32c = "0.6"
+# FIPS-capable crypto backend (already the project's chosen rustls provider, see
+# `security/ssl/ssl_factory.rs` installing `rustls::crypto::aws_lc_rs`). Used for
+# PBKDF2-HMAC in `ScramFormatter::hi` (SCRAM credential salting, KIP-554). Already
+# present transitively via rustls, so this adds no new compiled crate.
+# `default-features = false` mirrors rustls's own feature selection: it drops the
+# `ring-io`/`ring-sig-verify` compat shims (which would pull an extra `untrusted`
+# crate we don't need for PBKDF2), keeping the dependency graph unchanged.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
 dashmap = "6"
 futures-util = "0.3"
 async-trait = "0.1"

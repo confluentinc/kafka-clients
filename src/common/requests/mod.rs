@@ -26,6 +26,8 @@ pub mod alter_partition_reassignments_request;
 pub mod alter_partition_reassignments_response;
 pub mod alter_replica_log_dirs_request;
 pub mod alter_replica_log_dirs_response;
+pub mod alter_user_scram_credentials_request;
+pub mod alter_user_scram_credentials_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod consumer_group_describe_request;
@@ -66,6 +68,8 @@ pub mod describe_producers_request;
 pub mod describe_producers_response;
 pub mod describe_transactions_request;
 pub mod describe_transactions_response;
+pub mod describe_user_scram_credentials_request;
+pub mod describe_user_scram_credentials_response;
 pub mod elect_leaders_request;
 pub mod elect_leaders_response;
 pub mod expire_delegation_token_request;
@@ -131,6 +135,10 @@ pub use alter_partition_reassignments_request::{
 pub use alter_partition_reassignments_response::AlterPartitionReassignmentsResponse;
 pub use alter_replica_log_dirs_request::{AlterReplicaLogDirsRequest, AlterReplicaLogDirsRequestBuilder};
 pub use alter_replica_log_dirs_response::AlterReplicaLogDirsResponse;
+pub use alter_user_scram_credentials_request::{
+    AlterUserScramCredentialsRequest, AlterUserScramCredentialsRequestBuilder,
+};
+pub use alter_user_scram_credentials_response::AlterUserScramCredentialsResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
 pub use consumer_group_describe_request::{ConsumerGroupDescribeRequest, ConsumerGroupDescribeRequestBuilder};
@@ -182,6 +190,10 @@ pub use describe_producers_request::{DescribeProducersRequest, DescribeProducers
 pub use describe_producers_response::DescribeProducersResponse;
 pub use describe_transactions_request::{DescribeTransactionsRequest, DescribeTransactionsRequestBuilder};
 pub use describe_transactions_response::DescribeTransactionsResponse;
+pub use describe_user_scram_credentials_request::{
+    DescribeUserScramCredentialsRequest, DescribeUserScramCredentialsRequestBuilder,
+};
+pub use describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse;
 pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
 pub use elect_leaders_response::ElectLeadersResponse;
 pub use expire_delegation_token_request::{ExpireDelegationTokenRequest, ExpireDelegationTokenRequestBuilder};

@@ -56,6 +56,10 @@ use crate::admin::{
     RenewDelegationTokenResult, ReplicaInfo, ReplicaLogDirInfo, SupportedVersionRange, TopicDescription, TopicListing,
     TopicMetadataAndConfig, UpdateFeaturesOptions, UpdateFeaturesResult, UpgradeType,
 };
+use crate::admin::{
+    AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
+    DescribeUserScramCredentialsResult, UserScramCredentialAlteration,
+};
 #[allow(deprecated)]
 use crate::admin::{
     ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions,
@@ -78,6 +82,7 @@ use crate::common::{
 };
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
+use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResponseData;
 use crate::leave_group_request_data::MemberIdentity;
 
 use std::collections::{BTreeSet, HashSet};
@@ -1574,6 +1579,38 @@ impl Admin for MockAdminClient {
             futures.insert(entry.entity().clone(), handle.future());
         }
         AlterClientQuotasResult::new(futures)
+    }
+
+    fn describe_user_scram_credentials(
+        &self,
+        _users: &[String],
+        _options: DescribeUserScramCredentialsOptions,
+    ) -> DescribeUserScramCredentialsResult {
+        // Java's `MockAdminClient.describeUserScramCredentials` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:1251-1254). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
+        let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
+        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        DescribeUserScramCredentialsResult::new(handle.future())
+    }
+
+    fn alter_user_scram_credentials(
+        &self,
+        alterations: &[UserScramCredentialAlteration],
+        _options: AlterUserScramCredentialsOptions,
+    ) -> AlterUserScramCredentialsResult {
+        // Java's `MockAdminClient.alterUserScramCredentials` throws
+        // `UnsupportedOperationException("Not implemented yet")`
+        // (MockAdminClient.java:1256-1259). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future per user rather than a panic.
+        let mut futures = HashMap::new();
+        for alteration in alterations {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            futures.insert(alteration.user().to_string(), handle.future());
+        }
+        AlterUserScramCredentialsResult::new(futures)
     }
 
     fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {

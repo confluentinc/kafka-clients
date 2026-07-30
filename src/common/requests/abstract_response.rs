@@ -31,6 +31,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 use super::AlterClientQuotasResponse;
 use super::AlterPartitionReassignmentsResponse;
 use super::AlterReplicaLogDirsResponse;
+use super::AlterUserScramCredentialsResponse;
 use super::ApiVersionsResponse;
 use super::ConsumerGroupDescribeResponse;
 use super::ConsumerGroupHeartbeatResponse;
@@ -51,6 +52,7 @@ use super::DescribeGroupsResponse;
 use super::DescribeLogDirsResponse;
 use super::DescribeProducersResponse;
 use super::DescribeTransactionsResponse;
+use super::DescribeUserScramCredentialsResponse;
 use super::ElectLeadersResponse;
 use super::ExpireDelegationTokenResponse;
 use super::FetchResponse;
@@ -161,6 +163,10 @@ pub enum ConcreteResponse {
     DescribeClientQuotas(DescribeClientQuotasResponse),
     /// An AlterClientQuotas response.
     AlterClientQuotas(AlterClientQuotasResponse),
+    /// A DescribeUserScramCredentials response.
+    DescribeUserScramCredentials(DescribeUserScramCredentialsResponse),
+    /// An AlterUserScramCredentials response.
+    AlterUserScramCredentials(AlterUserScramCredentialsResponse),
     /// A CreateDelegationToken response.
     CreateDelegationToken(CreateDelegationTokenResponse),
     /// A RenewDelegationToken response.
@@ -223,6 +229,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.api_key(),
             Self::DescribeClientQuotas(r) => r.api_key(),
             Self::AlterClientQuotas(r) => r.api_key(),
+            Self::DescribeUserScramCredentials(r) => r.api_key(),
+            Self::AlterUserScramCredentials(r) => r.api_key(),
             Self::CreateDelegationToken(r) => r.api_key(),
             Self::RenewDelegationToken(r) => r.api_key(),
             Self::ExpireDelegationToken(r) => r.api_key(),
@@ -281,6 +289,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeClientQuotas(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::AlterClientQuotas(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeUserScramCredentials(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AlterUserScramCredentials(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::CreateDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::RenewDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ExpireDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -411,6 +421,12 @@ impl ConcreteResponse {
             Self::AlterClientQuotas(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeUserScramCredentials(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterUserScramCredentials(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::CreateDelegationToken(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -489,6 +505,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterClientQuotas(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeUserScramCredentials(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterUserScramCredentials(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreateDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::RenewDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
@@ -551,6 +569,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.error_counts(),
             Self::DescribeClientQuotas(r) => r.error_counts(),
             Self::AlterClientQuotas(r) => r.error_counts(),
+            Self::DescribeUserScramCredentials(r) => r.error_counts(),
+            Self::AlterUserScramCredentials(r) => r.error_counts(),
             Self::CreateDelegationToken(r) => r.error_counts(),
             Self::RenewDelegationToken(r) => r.error_counts(),
             Self::ExpireDelegationToken(r) => r.error_counts(),
@@ -605,6 +625,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.throttle_time_ms(),
             Self::DescribeClientQuotas(r) => r.throttle_time_ms(),
             Self::AlterClientQuotas(r) => r.throttle_time_ms(),
+            Self::DescribeUserScramCredentials(r) => r.throttle_time_ms(),
+            Self::AlterUserScramCredentials(r) => r.throttle_time_ms(),
             Self::CreateDelegationToken(r) => r.throttle_time_ms(),
             Self::RenewDelegationToken(r) => r.throttle_time_ms(),
             Self::ExpireDelegationToken(r) => r.throttle_time_ms(),
@@ -658,6 +680,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeClientQuotas(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::AlterClientQuotas(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeUserScramCredentials(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AlterUserScramCredentials(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::CreateDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::RenewDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ExpireDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -710,6 +734,8 @@ impl ConcreteResponse {
             Self::DeleteAcls(r) => r.should_client_throttle(version),
             Self::DescribeClientQuotas(r) => r.should_client_throttle(version),
             Self::AlterClientQuotas(r) => r.should_client_throttle(version),
+            Self::DescribeUserScramCredentials(r) => r.should_client_throttle(version),
+            Self::AlterUserScramCredentials(r) => r.should_client_throttle(version),
             Self::CreateDelegationToken(r) => r.should_client_throttle(version),
             Self::RenewDelegationToken(r) => r.should_client_throttle(version),
             Self::ExpireDelegationToken(r) => r.should_client_throttle(version),
@@ -912,6 +938,14 @@ impl ConcreteResponse {
                 let response = AlterClientQuotasResponse::parse(readable, version)?;
                 Ok(Self::AlterClientQuotas(response))
             },
+            ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS => {
+                let response = DescribeUserScramCredentialsResponse::parse(readable, version)?;
+                Ok(Self::DescribeUserScramCredentials(response))
+            },
+            ApiKeys::ALTER_USER_SCRAM_CREDENTIALS => {
+                let response = AlterUserScramCredentialsResponse::parse(readable, version)?;
+                Ok(Self::AlterUserScramCredentials(response))
+            },
             ApiKeys::CREATE_DELEGATION_TOKEN => {
                 let response = CreateDelegationTokenResponse::parse(readable, version)?;
                 Ok(Self::CreateDelegationToken(response))
@@ -999,6 +1033,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::DeleteAcls(r) => write!(f, "{r}"),
             Self::DescribeClientQuotas(r) => write!(f, "{r}"),
             Self::AlterClientQuotas(r) => write!(f, "{r}"),
+            Self::DescribeUserScramCredentials(r) => write!(f, "{r}"),
+            Self::AlterUserScramCredentials(r) => write!(f, "{r}"),
             Self::CreateDelegationToken(r) => write!(f, "{r}"),
             Self::RenewDelegationToken(r) => write!(f, "{r}"),
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),

@@ -57,6 +57,9 @@ use crate::DefaultHostResolver;
 use crate::alter_replica_log_dirs_request_data::{
     AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequestData,
 };
+use crate::alter_user_scram_credentials_request_data::{
+    AlterUserScramCredentialsRequestData, ScramCredentialDeletion, ScramCredentialUpsertion,
+};
 use crate::client_utils;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
@@ -67,17 +70,19 @@ use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
 use crate::common::requests::{
-    AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, ConcreteResponse, CreateAclsRequest,
-    CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder, CreatePartitionsRequestBuilder,
-    CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder, DeleteAclsResponse,
-    DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse, DescribeClientQuotasRequestBuilder,
-    DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder, DescribeDelegationTokenRequestBuilder,
-    DescribeLogDirsRequestBuilder, DescribeLogDirsResponse, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
+    AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, AlterUserScramCredentialsRequestBuilder,
+    ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder,
+    CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder,
+    DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse,
+    DescribeClientQuotasRequestBuilder, DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder,
+    DescribeDelegationTokenRequestBuilder, DescribeLogDirsRequestBuilder, DescribeLogDirsResponse,
+    DescribeUserScramCredentialsRequestBuilder, ENDPOINT_TYPE_BROKER, ENDPOINT_TYPE_CONTROLLER,
     ExpireDelegationTokenRequestBuilder, IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder,
     ListGroupsRequestBuilder, MetadataRequestBuilder, RenewDelegationTokenRequestBuilder, RequestBuilder,
 };
 use crate::common::security::SecurityProtocol;
 use crate::common::security::auth::KafkaPrincipal;
+use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{
@@ -95,6 +100,8 @@ use crate::delete_topics_request_data::{DeleteTopicState, DeleteTopicsRequestDat
 use crate::describe_cluster_request_data::DescribeClusterRequestData;
 use crate::describe_configs_request_data::{DescribeConfigsRequestData, DescribeConfigsResource};
 use crate::describe_log_dirs_request_data::{DescribableLogDirTopic, DescribeLogDirsRequestData};
+use crate::describe_user_scram_credentials_request_data::{DescribeUserScramCredentialsRequestData, UserName};
+use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResponseData;
 use crate::incremental_alter_configs_request_data::{
     AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequestData,
 };
@@ -156,6 +163,11 @@ use super::{
     NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RemoveMembersFromConsumerGroupOptions,
     RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, RenewDelegationTokenResult, ReplicaInfo,
     ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+};
+use super::{
+    AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
+    DescribeUserScramCredentialsResult, ScramMechanism, UserScramCredentialAlteration, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion,
 };
 #[allow(deprecated)]
 use super::{
@@ -1154,6 +1166,195 @@ fn get_alter_client_quotas_call(
         handle_failure,
         Box::new(|| false),
     )
+}
+
+/// Builds a `describeUserScramCredentials` [`Call`]. Translated from the
+/// anonymous `Call` in `KafkaAdminClient.describeUserScramCredentials`.
+fn get_describe_user_scram_credentials_call(
+    users: Vec<String>,
+    handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData>,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = DescribeUserScramCredentialsRequestData::new();
+        // Mirrors Java: only set users when the list is non-empty, skipping any
+        // null entries; an empty/absent list describes all users.
+        if !users.is_empty() {
+            let user_names: Vec<UserName> = users
+                .iter()
+                .map(|user| {
+                    let mut name = UserName::new();
+                    name.set_name(user.clone());
+                    name
+                })
+                .collect();
+            if !user_names.is_empty() {
+                data.set_users(Some(user_names));
+            }
+        }
+        Ok(Box::new(DescribeUserScramCredentialsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_handle = handle.clone();
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::DescribeUserScramCredentials(describe_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeUserScramCredentials response"));
+        };
+        // Mirrors handleResponse: a message-level error fails the whole future,
+        // otherwise the raw data is handed to the *Result view helpers.
+        let data = describe_response.data();
+        let message_level_error_code = data.error_code;
+        if message_level_error_code != Errors::None.code() {
+            resp_handle.complete_exceptionally(api_error(message_level_error_code, &data.error_message));
+        } else {
+            resp_handle.complete(data.clone());
+        }
+        HandleResult::Done
+    });
+
+    let fail_handle = handle.clone();
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        fail_handle.complete_exceptionally(error.clone());
+    });
+
+    Call::new(
+        "describeUserScramCredentials",
+        deadline,
+        NodeProvider::LeastLoaded,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds an `alterUserScramCredentials` [`Call`]. Translated from the anonymous
+/// `Call` in `KafkaAdminClient.alterUserScramCredentials`.
+fn get_alter_user_scram_credentials_call(
+    deletions: Vec<ScramCredentialDeletion>,
+    upsertions: Vec<ScramCredentialUpsertion>,
+    illegal: Arc<HashMap<String, KafkaError>>,
+    futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
+    metadata_manager: AdminMetadataManager,
+    deadline: i64,
+) -> Call {
+    let create_request = Box::new(move |_timeout_ms: i32| {
+        let mut data = AlterUserScramCredentialsRequestData::new();
+        data.set_upsertions(upsertions.clone()).set_deletions(deletions.clone());
+        Ok(Box::new(AlterUserScramCredentialsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+    });
+
+    let resp_mm = metadata_manager;
+    let resp_illegal = Arc::clone(&illegal);
+    let resp_futures = Arc::clone(&futures);
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let ConcreteResponse::AlterUserScramCredentials(alter_response) = response else {
+            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterUserScramCredentials response"));
+        };
+        // Check for controller change first, so that all errors are consistent
+        // in that case (mirrors the NOT_CONTROLLER handling before completion).
+        if let Some(err) = handle_not_controller_error(&resp_mm, &alter_response.error_counts()) {
+            return HandleResult::Retry(err);
+        }
+        // Now that we have the results for the ones we sent, fail any users that
+        // have an illegal alteration as identified above.
+        for (user, error) in resp_illegal.iter() {
+            if let Some(future) = resp_futures.get(user) {
+                future.complete_exceptionally(error.clone());
+            }
+        }
+        for result in &alter_response.data().results {
+            match resp_futures.get(&result.user) {
+                None => {
+                    log::warn!("Server response mentioned unknown user {}", result.user);
+                },
+                Some(future) => {
+                    let error = Errors::for_code(result.error_code);
+                    if error != Errors::None {
+                        future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                    } else {
+                        future.complete(());
+                    }
+                },
+            }
+        }
+        // Sanity check: the broker should send back a result for every user
+        // (mirrors completeUnrealizedFutures).
+        for (user, future) in resp_futures.iter() {
+            if !future.is_done() {
+                future.complete_exceptionally(KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!("The broker response did not contain a result for user {user}"),
+                ));
+            }
+        }
+        HandleResult::Done
+    });
+
+    let fail_futures = Arc::clone(&futures);
+    let handle_failure = Box::new(move |error: &KafkaError| {
+        for future in fail_futures.values() {
+            future.complete_exceptionally(error.clone());
+        }
+    });
+
+    Call::new(
+        "alterUserScramCredentials",
+        deadline,
+        NodeProvider::Controller,
+        create_request,
+        handle_response,
+        handle_failure,
+        Box::new(|| false),
+    )
+}
+
+/// Builds the wire upsertion for a user, computing the salted password via
+/// PBKDF2. Mirrors `KafkaAdminClient.getScramCredentialUpsertion` /
+/// `getSaltedPassword`.
+///
+/// # Errors
+///
+/// Returns an [`Errors::UnsupportedSaslMechanism`] error if the public mechanism
+/// has no internal SCRAM mapping (the Rust analog of Java's
+/// `NoSuchAlgorithmException`).
+fn get_scram_credential_upsertion(
+    upsertion: &UserScramCredentialUpsertion,
+) -> Result<ScramCredentialUpsertion, KafkaError> {
+    let public_mechanism = upsertion.credential_info().mechanism();
+    let internal = InternalScramMechanism::for_mechanism_name(public_mechanism.mechanism_name())
+        .ok_or_else(|| unsupported_sasl_mechanism("Unknown SCRAM mechanism"))?;
+    let salted_password = ScramFormatter::new(internal).hi(
+        upsertion.password(),
+        upsertion.salt(),
+        upsertion.credential_info().iterations(),
+    );
+    let mut wire = ScramCredentialUpsertion::new();
+    wire.set_name(upsertion.user().to_string())
+        .set_mechanism(public_mechanism.r#type())
+        .set_iterations(upsertion.credential_info().iterations())
+        .set_salt(upsertion.salt().to_vec())
+        .set_salted_password(salted_password);
+    Ok(wire)
+}
+
+/// Builds the wire deletion for a user. Mirrors
+/// `KafkaAdminClient.getScramCredentialDeletion`.
+fn get_scram_credential_deletion(deletion: &UserScramCredentialDeletion) -> ScramCredentialDeletion {
+    let mut wire = ScramCredentialDeletion::new();
+    wire.set_name(deletion.user().to_string())
+        .set_mechanism(deletion.mechanism().r#type());
+    wire
+}
+
+/// Mirrors `new UnacceptableCredentialException(message)`.
+fn unacceptable_credential(message: &str) -> KafkaError {
+    KafkaError::with_message(Errors::UnacceptableCredential, message)
+}
+
+/// Mirrors `new UnsupportedSaslMechanismException(message)`.
+fn unsupported_sasl_mechanism(message: &str) -> KafkaError {
+    KafkaError::with_message(Errors::UnsupportedSaslMechanism, message)
 }
 
 /// Builds a `createDelegationToken` [`Call`]. Translated from the anonymous
@@ -4171,6 +4372,132 @@ impl Admin for KafkaAdminClient {
             get_alter_client_quotas_call(entries.to_vec(), options.is_validate_only(), Arc::new(handles), deadline);
         self.submit(call);
         AlterClientQuotasResult::new(public)
+    }
+
+    fn describe_user_scram_credentials(
+        &self,
+        users: &[String],
+        options: DescribeUserScramCredentialsOptions,
+    ) -> DescribeUserScramCredentialsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
+        let public = handle.future();
+        let call = get_describe_user_scram_credentials_call(users.to_vec(), handle, deadline);
+        self.submit(call);
+        DescribeUserScramCredentialsResult::new(public)
+    }
+
+    fn alter_user_scram_credentials(
+        &self,
+        alterations: &[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> AlterUserScramCredentialsResult {
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+
+        // Mirrors Java: one future per user.
+        let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
+        for alteration in alterations {
+            handles.insert(alteration.user().to_string(), KafkaFutureImpl::new());
+        }
+
+        // We track users with an illegal alteration so we can fail all their
+        // alterations later; we also pre-build the wire deletions/upsertions for
+        // the ones that pass validation. Building an upsertion runs PBKDF2.
+        let unknown_scram_mechanism_msg = "Unknown SCRAM mechanism";
+        let mut illegal: HashMap<String, KafkaError> = HashMap::new();
+
+        // Deletions with an empty user or an unknown mechanism are illegal.
+        for alteration in alterations {
+            if let UserScramCredentialAlteration::Deletion(deletion) = alteration {
+                let user = deletion.user();
+                if user.is_empty() {
+                    illegal.insert(user.to_string(), unacceptable_credential("Username must not be empty"));
+                } else if deletion.mechanism() == ScramMechanism::Unknown {
+                    illegal.insert(user.to_string(), unsupported_sasl_mechanism(unknown_scram_mechanism_msg));
+                }
+            }
+        }
+
+        // Upsertions: validate and compute the salted password (PBKDF2) once.
+        let mut user_insertions: HashMap<String, HashMap<i8, ScramCredentialUpsertion>> = HashMap::new();
+        for alteration in alterations {
+            let UserScramCredentialAlteration::Upsertion(upsertion) = alteration else {
+                continue;
+            };
+            let user = upsertion.user();
+            if illegal.contains_key(user) {
+                continue;
+            }
+            if user.is_empty() {
+                illegal.insert(user.to_string(), unacceptable_credential("Username must not be empty"));
+                continue;
+            }
+            if upsertion.password().is_empty() {
+                illegal.insert(user.to_string(), unacceptable_credential("Password must not be empty"));
+                continue;
+            }
+            let mechanism = upsertion.credential_info().mechanism();
+            if mechanism == ScramMechanism::Unknown {
+                illegal.insert(user.to_string(), unsupported_sasl_mechanism(unknown_scram_mechanism_msg));
+                continue;
+            }
+            match get_scram_credential_upsertion(upsertion) {
+                Ok(wire) => {
+                    user_insertions
+                        .entry(user.to_string())
+                        .or_default()
+                        .insert(mechanism.r#type(), wire);
+                },
+                // Mirrors the NoSuchAlgorithmException branch (unknown mechanism).
+                Err(e) => {
+                    illegal.insert(user.to_string(), e);
+                },
+            }
+        }
+
+        // Pre-build the request payloads (in alteration order) for the users that
+        // survived validation. The crypto is already done, so retries just reuse
+        // these; mirrors Java's `userInsertions` map being computed once.
+        let mut request_upsertions = Vec::new();
+        for alteration in alterations {
+            if let UserScramCredentialAlteration::Upsertion(upsertion) = alteration {
+                if illegal.contains_key(upsertion.user()) {
+                    continue;
+                }
+                if let Some(wire) = user_insertions
+                    .get(upsertion.user())
+                    .and_then(|by_mech| by_mech.get(&upsertion.credential_info().mechanism().r#type()))
+                {
+                    request_upsertions.push(wire.clone());
+                }
+            }
+        }
+        let mut request_deletions = Vec::new();
+        for alteration in alterations {
+            if let UserScramCredentialAlteration::Deletion(deletion) = alteration {
+                if illegal.contains_key(deletion.user()) {
+                    continue;
+                }
+                request_deletions.push(get_scram_credential_deletion(deletion));
+            }
+        }
+
+        let handles = Arc::new(handles);
+        let public: HashMap<String, KafkaFuture<()>> =
+            handles.iter().map(|(user, handle)| (user.clone(), handle.future())).collect();
+
+        let call = get_alter_user_scram_credentials_call(
+            request_deletions,
+            request_upsertions,
+            Arc::new(illegal),
+            Arc::clone(&handles),
+            self.shared.metadata_manager.clone(),
+            deadline,
+        );
+        self.submit(call);
+        AlterUserScramCredentialsResult::new(public)
     }
 
     fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
