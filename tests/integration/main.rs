@@ -31,6 +31,7 @@ mod admin_groups_test;
 mod admin_log_dirs_test;
 mod admin_partitions_records_test;
 mod admin_quotas_test;
+mod admin_scram_test;
 mod admin_topics_test;
 mod admin_transactions_test;
 mod api_versions_test;
