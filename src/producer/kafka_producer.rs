@@ -247,6 +247,39 @@ impl<K, V> KafkaProducer<K, V> {
         //    Translated from KafkaProducer.configureDeliveryTimeout().
         let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
 
+        // MILESTONE-11 GUARD: reject configurations that ask for idempotence or
+        // transactions, neither of which is implemented yet.
+        //
+        // `ProducerConfig` defaults `enable.idempotence` to `true` to match Java,
+        // but no `TransactionManager` exists, so nothing requests a producer id
+        // and no sequence numbers are assigned — the producer behaves
+        // non-idempotently. CLAUDE.md §5 requires failing an unimplemented code
+        // path explicitly rather than silently completing, so this errors when
+        // the user *asks* for either feature.
+        //
+        // Deliberately keyed on explicit configuration only: users who never
+        // touched these keys keep today's behavior rather than being broken by a
+        // default they did not choose. The check lives here, not in
+        // `ProducerConfig`, so the config translation stays a faithful mirror of
+        // Java and free of "not yet implemented".
+        //
+        // Removal is a tracked deliverable: the idempotence arm in Phase 4, the
+        // transactional arm in Phase 6.
+        if config.transactional_id.is_some() {
+            return Err(KafkaError::unsupported_version(format!(
+                "Transactions are not yet implemented in this client (Milestone 11, Phase 6); \
+                 remove `{}` from the producer configuration.",
+                ProducerConfig::TRANSACTIONAL_ID_CONFIG
+            )));
+        }
+        if config.enable_idempotence && config.explicitly_set.contains(ProducerConfig::ENABLE_IDEMPOTENCE_CONFIG) {
+            return Err(KafkaError::unsupported_version(format!(
+                "The idempotent producer is not yet implemented in this client (Milestone 11, \
+                 Phase 4); remove `{}` from the producer configuration.",
+                ProducerConfig::ENABLE_IDEMPOTENCE_CONFIG
+            )));
+        }
+
         // 3. Derive compression from config
         //    Translated from KafkaProducer.configureCompression().
         let compression = Compression::of(config.compression_type);
@@ -1022,6 +1055,8 @@ impl<K, V> Drop for KafkaProducer<K, V> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
@@ -1958,6 +1993,68 @@ mod tests {
             partitions.len() >= 2,
             "Expected multiple partitions for different keys, got: {:?}",
             partitions
+        );
+    }
+
+    // -- MILESTONE-11 GUARD tests -------------------------------------------
+    //
+    // These cover the temporary guard in `from_config` that rejects explicit
+    // idempotence / transaction configuration. They are deleted along with the
+    // guard itself: the idempotence arm in Phase 4, the transactional arm in
+    // Phase 6.
+
+    fn guard_props(extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())]);
+        for (key, value) in extra {
+            props.insert((*key).to_string(), (*value).to_string());
+        }
+        props
+    }
+
+    fn from_guard_props(props: &HashMap<String, String>) -> Result<(), KafkaError> {
+        let config = ProducerConfig::from_properties(props)?;
+        KafkaProducer::<String, String>::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+            .map(|_| ())
+    }
+
+    /// The default configuration must still construct: users who never asked for
+    /// idempotence keep today's behavior even though the default is `true`.
+    /// `#[tokio::test]`: unlike the rejection cases, which error before doing
+    /// any work, a successful `from_config` spawns the Sender task and so needs a
+    /// runtime. The spawned task attempts to reach localhost:9999, fails
+    /// harmlessly, and is dropped with the test.
+    #[tokio::test]
+    async fn test_guard_allows_default_config() {
+        from_guard_props(&guard_props(&[])).expect("default config must still construct");
+    }
+
+    #[test]
+    fn test_guard_rejects_explicit_enable_idempotence() {
+        let error = from_guard_props(&guard_props(&[("enable.idempotence", "true")]))
+            .expect_err("explicit idempotence must be rejected until Phase 4");
+        assert!(
+            error.message().contains("idempotent producer is not yet implemented"),
+            "unexpected message: {}",
+            error.message()
+        );
+    }
+
+    /// `enable.idempotence=false` is explicit but asks for nothing unimplemented,
+    /// so it must pass.
+    #[tokio::test]
+    async fn test_guard_allows_explicit_disable_idempotence() {
+        from_guard_props(&guard_props(&[("enable.idempotence", "false")]))
+            .expect("explicitly disabling idempotence must be allowed");
+    }
+
+    #[test]
+    fn test_guard_rejects_transactional_id() {
+        let error = from_guard_props(&guard_props(&[("transactional.id", "my-txn")]))
+            .expect_err("transactional.id must be rejected until Phase 6");
+        assert!(
+            error.message().contains("Transactions are not yet implemented"),
+            "unexpected message: {}",
+            error.message()
         );
     }
 }

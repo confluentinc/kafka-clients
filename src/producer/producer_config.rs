@@ -20,9 +20,10 @@
 //! reflection framework. The field names and default values match the Java
 //! config keys.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{self, AtomicI32};
 
-use log::warn;
+use log::{info, warn};
 
 use crate::common::KafkaError;
 use crate::common::config::sasl_configs;
@@ -31,6 +32,13 @@ use crate::common::config::{SaslConfig, SslConfig};
 use crate::common::record::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::common_client_configs;
+
+/// Process-wide counter for deriving a default `client.id`.
+///
+/// Corresponds to Java's `static AtomicInteger PRODUCER_CLIENT_ID_SEQUENCE`,
+/// which starts at 1. Crate-level (not per-config) to match Java's static scope,
+/// so successive producers in one process get distinct ids.
+static PRODUCER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 
 /// Maximum number of in-flight requests per connection when idempotence is enabled.
 /// Aligned with `ProducerStateEntry.NUM_BATCHES_TO_RETAIN` on the broker.
@@ -183,6 +191,25 @@ pub struct ProducerConfig {
     /// `transaction.timeout.ms` - Maximum time a transaction will remain open.
     /// Default: 60000 ms.
     pub(crate) transaction_timeout_ms: i32,
+
+    /// `transaction.two.phase.commit.enable` - Whether the client participates
+    /// in two-phase commit (KIP-939), where an external coordinator decides when
+    /// to finalize. Default: `false`.
+    pub(crate) two_phase_commit_enable: bool,
+
+    /// Keys the user set explicitly, as opposed to keys left at their default.
+    ///
+    /// Replaces Java's `AbstractConfig.originals().containsKey(..)`, which this
+    /// codebase has no equivalent of. Java's idempotence validation behaves
+    /// differently depending on whether the user *asked* for a setting or merely
+    /// inherited the default: an explicit `enable.idempotence=true` alongside
+    /// `retries=0` is a `ConfigException`, while the same combination reached by
+    /// default silently disables idempotence.
+    ///
+    /// `pub(crate)` like every other field on this struct, so in-crate struct
+    /// literals using `..Default::default()` still compile. It is an
+    /// implementation detail of validation and is not part of the public API.
+    pub(crate) explicitly_set: HashSet<String>,
 }
 
 impl Default for ProducerConfig {
@@ -221,6 +248,8 @@ impl Default for ProducerConfig {
             partitioner_ignore_keys: false,
             transactional_id: None,
             transaction_timeout_ms: 60_000,
+            two_phase_commit_enable: false,
+            explicitly_set: HashSet::new(),
         }
     }
 }
@@ -293,6 +322,8 @@ impl ProducerConfig {
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
     /// Config key: `transaction.timeout.ms`
     pub const TRANSACTION_TIMEOUT_CONFIG: &'static str = "transaction.timeout.ms";
+    /// Config key: `transaction.two.phase.commit.enable`
+    pub const TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG: &'static str = "transaction.two.phase.commit.enable";
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = common_client_configs::SECURITY_PROTOCOL_CONFIG;
     /// Config key: `sasl.mechanism`
@@ -313,7 +344,7 @@ impl ProducerConfig {
     /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
-        let mut config = Self::default();
+        let mut config = Self { explicitly_set: props.keys().cloned().collect(), ..Default::default() };
 
         for (key, value) in props {
             match key.as_str() {
@@ -405,6 +436,9 @@ impl ProducerConfig {
                 Self::TRANSACTION_TIMEOUT_CONFIG => {
                     config.transaction_timeout_ms = Self::parse_i32(key, value)?;
                 },
+                Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG => {
+                    config.two_phase_commit_enable = Self::parse_bool(key, value)?;
+                },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
                         KafkaError::illegal_argument(format!(
@@ -434,7 +468,121 @@ impl ProducerConfig {
             }
         }
 
+        // Order matters and matches Java's constructor: idempotence validation
+        // may override `enable.idempotence`, and the client id derivation reads
+        // `transactional.id`.
+        config.post_process_and_validate_idempotence_configs()?;
+        config.maybe_override_client_id();
+
         Ok(config)
+    }
+
+    /// Whether the user set `key` explicitly.
+    ///
+    /// Replaces Java's `this.originals().containsKey(key)`.
+    fn user_configured(&self, key: &str) -> bool {
+        self.explicitly_set.contains(key)
+    }
+
+    /// Validates and post-processes the idempotence-dependent configs.
+    ///
+    /// Translated from Java's `postProcessAndValidateIdempotenceConfigs`.
+    ///
+    /// Java's asymmetry is deliberate and preserved: for `retries` and `acks`,
+    /// an incompatible value **silently disables** idempotence unless the user
+    /// asked for idempotence explicitly, in which case it is an error. For
+    /// `max.in.flight.requests.per.connection` it is **always** an error. The
+    /// silent-disable path is what keeps existing non-idempotent configurations
+    /// working, so removing it would be a breaking change.
+    fn post_process_and_validate_idempotence_configs(&mut self) -> Result<(), KafkaError> {
+        let user_configured_idempotence = self.user_configured(Self::ENABLE_IDEMPOTENCE_CONFIG);
+        let mut idempotence_enabled = self.enable_idempotence;
+        let mut should_disable_idempotence = false;
+
+        if idempotence_enabled {
+            if self.retries == 0 {
+                if user_configured_idempotence {
+                    return Err(KafkaError::illegal_argument(format!(
+                        "Must set {} to non-zero when using the idempotent producer.",
+                        Self::RETRIES_CONFIG
+                    )));
+                }
+                info!("Idempotence will be disabled because {} is set to 0.", Self::RETRIES_CONFIG);
+                should_disable_idempotence = true;
+            }
+
+            if self.acks != -1 {
+                if user_configured_idempotence {
+                    return Err(KafkaError::illegal_argument(format!(
+                        "Must set {} to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.",
+                        Self::ACKS_CONFIG
+                    )));
+                }
+                info!(
+                    "Idempotence will be disabled because {} is set to {}, not set to 'all'.",
+                    Self::ACKS_CONFIG,
+                    self.acks
+                );
+                should_disable_idempotence = true;
+            }
+
+            // Unlike the two above, this is always an error — never a silent
+            // disable — regardless of whether the user asked for idempotence.
+            if Self::MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE < self.max_in_flight_requests_per_connection {
+                return Err(KafkaError::illegal_argument(format!(
+                    "To use the idempotent producer, {} must be set to at most 5. Current value is {}.",
+                    Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+                    self.max_in_flight_requests_per_connection
+                )));
+            }
+        }
+
+        if should_disable_idempotence {
+            self.enable_idempotence = false;
+            idempotence_enabled = false;
+        }
+
+        // Validated after the idempotence-dependent configs because
+        // `enable.idempotence` may have just been overridden above.
+        if !idempotence_enabled && self.user_configured(Self::TRANSACTIONAL_ID_CONFIG) {
+            return Err(KafkaError::illegal_argument(format!(
+                "Cannot set a {} without also enabling idempotence.",
+                Self::TRANSACTIONAL_ID_CONFIG
+            )));
+        }
+
+        // In standard Kafka transactions the broker enforces
+        // `transaction.timeout.ms` and aborts any transaction not completed in
+        // time. With two-phase commit an external coordinator decides when to
+        // finalize, so broker-side timeouts do not apply. Disallow using both.
+        if self.two_phase_commit_enable && self.user_configured(Self::TRANSACTION_TIMEOUT_CONFIG) {
+            return Err(KafkaError::illegal_argument(format!(
+                "Cannot set {} when {} is set to true. Transactions will not expire with two-phase commit enabled.",
+                Self::TRANSACTION_TIMEOUT_CONFIG,
+                Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Derives `client.id` when the user did not set one.
+    ///
+    /// Translated from Java's `maybeOverrideClientId`. The derived form is
+    /// `producer-<transactional.id>` when a transactional id is set, otherwise
+    /// `producer-<n>` from a process-wide counter starting at 1 — matching
+    /// Java's `static AtomicInteger PRODUCER_CLIENT_ID_SEQUENCE`.
+    fn maybe_override_client_id(&mut self) {
+        if self.user_configured(Self::CLIENT_ID_CONFIG) {
+            return;
+        }
+        self.client_id = match &self.transactional_id {
+            Some(transactional_id) => format!("producer-{transactional_id}"),
+            None => format!(
+                "producer-{}",
+                PRODUCER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
+            ),
+        };
     }
 
     /// Parses a string value as `i32`.
@@ -637,5 +785,251 @@ mod tests {
         );
         assert_eq!(config.ssl_config.keystore_location.as_deref(), Some("/path/to/keystore.pem"));
         assert_eq!(config.ssl_config.endpoint_identification_algorithm, "");
+    }
+
+    // -- Idempotence config validation --------------------------------------
+    //
+    // Translated from `ProducerConfigTest` and the four pure-config tests in
+    // `KafkaProducerTest`. The latter construct a `ProducerConfig` from
+    // `Properties` and assert on values without creating a producer or touching
+    // the network, so they belong here rather than in a producer test.
+
+    /// Java's `KafkaProducerTest.baseProperties()`.
+    fn base_properties() -> HashMap<String, String> {
+        HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())])
+    }
+
+    fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut props = base_properties();
+        for (key, value) in extra {
+            props.insert((*key).to_string(), (*value).to_string());
+        }
+        props
+    }
+
+    /// Translated from `KafkaProducerTest.testOverwriteAcksAndRetriesForIdempotentProducers`.
+    #[test]
+    fn test_overwrite_acks_and_retries_for_idempotent_producers() {
+        let props = props_with(&[("transactional.id", "transactionalId")]);
+        let config = ProducerConfig::from_properties(&props).expect("config should be valid");
+
+        assert!(config.enable_idempotence);
+        assert_eq!(config.acks, -1);
+        assert_eq!(config.retries, i32::MAX);
+        // The derived client id form Java asserts on.
+        assert_eq!(config.client_id, "producer-transactionalId");
+    }
+
+    /// Translated from `KafkaProducerTest.testAcksAndIdempotenceForIdempotentProducers`.
+    #[test]
+    fn test_acks_and_idempotence_for_idempotent_producers() {
+        // Valid: acks=0 with idempotence explicitly off.
+        let config = ProducerConfig::from_properties(&props_with(&[("acks", "0"), ("enable.idempotence", "false")]))
+            .expect("valid");
+        assert!(!config.enable_idempotence, "idempotence should be overwritten");
+        assert_eq!(config.acks, 0, "acks should be overwritten");
+
+        // Valid: transactional.id alone leaves the idempotence/acks defaults.
+        let config =
+            ProducerConfig::from_properties(&props_with(&[("transactional.id", "transactionalId")])).expect("valid");
+        assert!(config.enable_idempotence, "idempotence should be set with the default value");
+        assert_eq!(config.acks, -1, "acks should be set with the default value");
+
+        // Valid: acks=all with idempotence explicitly off.
+        let config = ProducerConfig::from_properties(&props_with(&[("acks", "all"), ("enable.idempotence", "false")]))
+            .expect("valid");
+        assert!(!config.enable_idempotence, "idempotence should be overwritten");
+        assert_eq!(config.acks, -1, "acks should be overwritten");
+
+        // Valid: acks=0 with idempotence UNSET silently disables idempotence.
+        // This is the path that keeps existing configurations working.
+        let config = ProducerConfig::from_properties(&props_with(&[("acks", "0")])).expect("valid");
+        assert!(
+            !config.enable_idempotence,
+            "idempotence should be disabled when acks not set to all and `enable.idempotence` is unset"
+        );
+        assert_eq!(config.acks, 0, "acks should be set with overridden value");
+
+        // Same for acks=1.
+        let config = ProducerConfig::from_properties(&props_with(&[("acks", "1")])).expect("valid");
+        assert!(!config.enable_idempotence);
+        assert_eq!(config.acks, 1);
+
+        // Invalid: transactional.id without idempotence.
+        let error = ProducerConfig::from_properties(&props_with(&[
+            ("acks", "0"),
+            ("enable.idempotence", "false"),
+            ("transactional.id", "transactionalId"),
+        ]))
+        .expect_err("transactional.id requires idempotence");
+        assert_eq!(
+            error.message(),
+            "Cannot set a transactional.id without also enabling idempotence."
+        );
+
+        // Invalid: explicitly enabling idempotence with acks=1 still errors,
+        // rather than silently disabling.
+        let error = ProducerConfig::from_properties(&props_with(&[("acks", "1"), ("enable.idempotence", "true")]))
+            .expect_err("explicit idempotence with acks!=all must error");
+        assert_eq!(
+            error.message(),
+            "Must set acks to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence."
+        );
+
+        // Invalid: acks=0 with a transactional id — idempotence is silently
+        // disabled by the acks arm, and the transactional.id check then fails.
+        let error =
+            ProducerConfig::from_properties(&props_with(&[("acks", "0"), ("transactional.id", "transactionalId")]))
+                .expect_err("transactional producer requires acks=all");
+        assert_eq!(
+            error.message(),
+            "Cannot set a transactional.id without also enabling idempotence."
+        );
+    }
+
+    /// Translated from `KafkaProducerTest.testRetriesAndIdempotenceForIdempotentProducers`.
+    #[test]
+    fn test_retries_and_idempotence_for_idempotent_producers() {
+        // Valid: retries=0 with idempotence explicitly off.
+        let config = ProducerConfig::from_properties(&props_with(&[("retries", "0"), ("enable.idempotence", "false")]))
+            .expect("valid");
+        assert!(!config.enable_idempotence, "idempotence should be overwritten");
+        assert_eq!(config.retries, 0, "retries should be overwritten");
+
+        // Valid: retries=0 with idempotence UNSET silently disables idempotence.
+        let config = ProducerConfig::from_properties(&props_with(&[("retries", "0")])).expect("valid");
+        assert!(
+            !config.enable_idempotence,
+            "idempotence should be disabled when retries set to 0 and `enable.idempotence` is unset"
+        );
+        assert_eq!(config.retries, 0, "retries should be set with overridden value");
+
+        // Invalid: transactional.id without idempotence.
+        let error = ProducerConfig::from_properties(&props_with(&[
+            ("retries", "0"),
+            ("enable.idempotence", "false"),
+            ("transactional.id", "transactionalId"),
+        ]))
+        .expect_err("transactional.id requires idempotence");
+        assert_eq!(
+            error.message(),
+            "Cannot set a transactional.id without also enabling idempotence."
+        );
+
+        // Invalid: explicitly enabling idempotence with retries=0.
+        let error = ProducerConfig::from_properties(&props_with(&[("retries", "0"), ("enable.idempotence", "true")]))
+            .expect_err("explicit idempotence with retries=0 must error");
+        assert_eq!(
+            error.message(),
+            "Must set retries to non-zero when using the idempotent producer."
+        );
+
+        // Invalid: retries=0 with a transactional id.
+        let error =
+            ProducerConfig::from_properties(&props_with(&[("retries", "0"), ("transactional.id", "transactionalId")]))
+                .expect_err("transactional producer requires non-zero retries");
+        assert_eq!(
+            error.message(),
+            "Cannot set a transactional.id without also enabling idempotence."
+        );
+    }
+
+    /// Translated from `KafkaProducerTest.testInflightRequestsAndIdempotenceForIdempotentProducers`.
+    #[test]
+    fn test_inflight_requests_and_idempotence_for_idempotent_producers() {
+        // Valid: in-flight above the cap is fine when idempotence is off.
+        let config = ProducerConfig::from_properties(&props_with(&[
+            ("max.in.flight.requests.per.connection", "6"),
+            ("enable.idempotence", "false"),
+        ]))
+        .expect("valid");
+        assert!(!config.enable_idempotence, "idempotence should be overwritten");
+        assert_eq!(config.max_in_flight_requests_per_connection, 6);
+
+        // Invalid: with idempotence on (by default), exceeding the cap is ALWAYS
+        // an error — this arm never silently disables, unlike acks and retries.
+        let error = ProducerConfig::from_properties(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
+            .expect_err("in-flight above 5 must error");
+        assert_eq!(
+            error.message(),
+            "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6."
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence`.
+    #[test]
+    fn test_upperbound_check_of_enable_idempotence() {
+        let error = ProducerConfig::from_properties(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
+            .expect_err("6 exceeds the cap");
+        assert_eq!(
+            error.message(),
+            "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6."
+        );
+
+        // Exactly at the cap is allowed.
+        ProducerConfig::from_properties(&props_with(&[("max.in.flight.requests.per.connection", "5")]))
+            .expect("5 is at the cap and must be accepted");
+    }
+
+    /// Translated from `ProducerConfigTest.testTwoPhaseCommitIncompatibleWithTransactionTimeout`.
+    #[test]
+    fn test_two_phase_commit_incompatible_with_transaction_timeout() {
+        let both = props_with(&[
+            ("enable.idempotence", "true"),
+            ("transactional.id", "test-txn-id"),
+            ("transaction.two.phase.commit.enable", "true"),
+            ("transaction.timeout.ms", "60000"),
+        ]);
+        let error = ProducerConfig::from_properties(&both).expect_err("2PC and timeout conflict");
+        assert!(error.message().contains(ProducerConfig::TRANSACTION_TIMEOUT_CONFIG));
+        assert!(
+            error
+                .message()
+                .contains(ProducerConfig::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG)
+        );
+
+        // Setting one but not the other is valid.
+        let only_2pc = props_with(&[
+            ("enable.idempotence", "true"),
+            ("transactional.id", "test-txn-id"),
+            ("transaction.two.phase.commit.enable", "true"),
+        ]);
+        ProducerConfig::from_properties(&only_2pc).expect("2PC alone is valid");
+
+        let only_timeout = props_with(&[
+            ("enable.idempotence", "true"),
+            ("transactional.id", "test-txn-id"),
+            ("transaction.two.phase.commit.enable", "false"),
+            ("transaction.timeout.ms", "60000"),
+        ]);
+        ProducerConfig::from_properties(&only_timeout).expect("timeout alone is valid");
+    }
+
+    // -- client.id derivation ------------------------------------------------
+
+    /// Java's `maybeOverrideClientId`: an explicit client.id is preserved.
+    #[test]
+    fn test_explicit_client_id_is_preserved() {
+        let config = ProducerConfig::from_properties(&props_with(&[("client.id", "my-client")])).expect("valid");
+        assert_eq!(config.client_id, "my-client");
+    }
+
+    /// Without an explicit client.id or transactional.id, the derived form is
+    /// `producer-<n>` from the process-wide counter.
+    #[test]
+    fn test_client_id_derived_from_sequence() {
+        let first = ProducerConfig::from_properties(&base_properties()).expect("valid");
+        let second = ProducerConfig::from_properties(&base_properties()).expect("valid");
+
+        assert!(
+            first.client_id.starts_with("producer-"),
+            "expected a derived client id, got {}",
+            first.client_id
+        );
+        // The counter is process-wide, so successive configs differ. Compare
+        // rather than asserting absolute values, since test order is arbitrary.
+        assert_ne!(first.client_id, second.client_id);
+        let n: i32 = first.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
+        assert!(n >= 1, "Java's sequence starts at 1");
     }
 }

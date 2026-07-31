@@ -37,6 +37,9 @@ org.apache.kafka.clients.producer.internals.ProducerBatch
 org.apache.kafka.clients.producer.internals.ProducerMetadata
 org.apache.kafka.clients.producer.internals.RecordAccumulator
 org.apache.kafka.clients.producer.internals.Sender
+org.apache.kafka.clients.producer.internals.TransactionalRequestResult
+org.apache.kafka.clients.producer.internals.TxnPartitionEntry
+org.apache.kafka.clients.producer.internals.TxnPartitionMap
 org.apache.kafka.common.Cluster
 org.apache.kafka.common.ClusterResource
 org.apache.kafka.common.ClusterResourceListener
@@ -583,6 +586,7 @@ org.apache.kafka.common.requests.SaslAuthenticateRequest
 org.apache.kafka.common.requests.SaslAuthenticateResponse
 org.apache.kafka.common.requests.SaslHandshakeRequest
 org.apache.kafka.common.requests.SaslHandshakeResponse
+org.apache.kafka.common.requests.TransactionResult
 org.apache.kafka.common.security.auth.SecurityProtocol
 org.apache.kafka.common.security.authenticator.SaslClientAuthenticator
 org.apache.kafka.common.security.ssl.SslFactory
@@ -591,6 +595,7 @@ org.apache.kafka.common.serialization.Serializer
 org.apache.kafka.common.serialization.StringSerializer
 org.apache.kafka.common.utils.ExponentialBackoff
 org.apache.kafka.common.utils.LogContext
+org.apache.kafka.common.utils.ProducerIdAndEpoch
 org.apache.kafka.message.CodeBuffer
 org.apache.kafka.message.EntityType
 org.apache.kafka.message.FieldSpec

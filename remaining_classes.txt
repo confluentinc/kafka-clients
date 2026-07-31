@@ -148,7 +148,6 @@ org.apache.kafka.common.utils.AppInfoParser
 org.apache.kafka.common.quota.ClientQuotaFilterComponent
 org.apache.kafka.common.quota.ClientQuotaFilter
 org.apache.kafka.common.ElectionType
-org.apache.kafka.common.requests.TransactionResult
 org.apache.kafka.common.IsolationLevel
 org.apache.kafka.common.requests.FetchMetadata
 org.apache.kafka.clients.admin.ConfigEntry
@@ -447,17 +446,13 @@ org.apache.kafka.clients.producer.internals.ProducerInterceptors
 org.apache.kafka.clients.producer.internals.SenderMetricsRegistry
 org.apache.kafka.clients.producer.internals.ProducerMetrics
 org.apache.kafka.common.errors.RecordBatchTooLargeException
-org.apache.kafka.common.utils.ProducerIdAndEpoch
 org.apache.kafka.common.errors.ClusterAuthorizationException
 org.apache.kafka.common.errors.FencedLeaderEpochException
 org.apache.kafka.common.errors.NotLeaderOrFollowerException
 org.apache.kafka.common.errors.TransactionAbortedException
 org.apache.kafka.common.errors.TransactionalIdAuthorizationException
 org.apache.kafka.common.errors.UnknownTopicOrPartitionException
-org.apache.kafka.clients.producer.internals.TransactionalRequestResult
 org.apache.kafka.common.utils.PrimitiveRef
-org.apache.kafka.clients.producer.internals.TxnPartitionEntry
-org.apache.kafka.clients.producer.internals.TxnPartitionMap
 org.apache.kafka.common.errors.GroupAuthorizationException
 org.apache.kafka.common.errors.ApplicationRecoverableException
 org.apache.kafka.common.errors.InvalidPidMappingException
