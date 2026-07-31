@@ -287,6 +287,19 @@ pub enum KafkaError {
     /// `RuntimeException` — neither an `ApiException` nor a `KafkaException`
     /// — so it is never retriable and never fatal.
     ConcurrentModification(String),
+    /// Transaction aborted error — undrained batches are being failed because
+    /// the transaction was aborted.
+    ///
+    /// Corresponds to Java's `TransactionAbortedException`, which extends
+    /// `ApiException` but carries **no wire error code** (it is absent from
+    /// `Errors.java`), so it needs its own variant rather than a
+    /// [`Generic`](Self::Generic) wrapping an [`Errors`]. Java throws it from
+    /// exactly one place: `Sender.abortBatches`, as
+    /// `accumulator.abortUndrainedBatches(new TransactionAbortedException())`.
+    ///
+    /// Unlike [`Wakeup`](Self::Wakeup) this IS an `ApiException`, so
+    /// [`is_api_exception`](Self::is_api_exception) returns `true` for it.
+    TransactionAborted(String),
 }
 
 impl KafkaError {
@@ -399,6 +412,21 @@ impl KafkaError {
     /// Corresponds to Java's `ConcurrentModificationException` thrown by
     /// `KafkaConsumer.acquire()` when the consumer is accessed from more
     /// than one thread.
+    /// Create a transaction aborted error with Java's default message.
+    ///
+    /// Corresponds to Java's no-arg `TransactionAbortedException()`, whose
+    /// message is `"Failing batch since transaction was aborted"`.
+    pub fn transaction_aborted() -> Self {
+        Self::TransactionAborted("Failing batch since transaction was aborted".to_string())
+    }
+
+    /// Create a transaction aborted error with a custom message.
+    ///
+    /// Corresponds to Java's `TransactionAbortedException(String)`.
+    pub fn transaction_aborted_with_message(message: impl Into<String>) -> Self {
+        Self::TransactionAborted(message.into())
+    }
+
     pub fn concurrent_modification(message: impl Into<String>) -> Self {
         Self::ConcurrentModification(message.into())
     }
@@ -428,7 +456,8 @@ impl KafkaError {
             | Self::RecordTooLarge(_)
             | Self::Serialization(_)
             | Self::Wakeup(_)
-            | Self::ConcurrentModification(_) => None,
+            | Self::ConcurrentModification(_)
+            | Self::TransactionAborted(_) => None,
         }
     }
 
@@ -459,7 +488,8 @@ impl KafkaError {
             | Self::RecordTooLarge(msg)
             | Self::Serialization(msg)
             | Self::Wakeup(msg)
-            | Self::ConcurrentModification(msg) => msg,
+            | Self::ConcurrentModification(msg)
+            | Self::TransactionAborted(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
     }
@@ -505,6 +535,8 @@ impl KafkaError {
     /// - `TopicAuthorization` (TopicAuthorizationException extends ApiException)
     /// - `GroupAuthorization` (GroupAuthorizationException extends ApiException)
     /// - `BufferExhausted` (BufferExhaustedException extends ApiException)
+    /// - `TransactionAborted` (TransactionAbortedException extends ApiException,
+    ///   despite carrying no error code)
     ///
     /// NOT `ApiException`:
     /// - `IllegalArgument` (IllegalArgumentException extends RuntimeException)
@@ -568,6 +600,7 @@ impl fmt::Display for KafkaError {
             Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
             Self::Wakeup(msg) => write!(f, "WakeupError: {msg}"),
             Self::ConcurrentModification(msg) => write!(f, "ConcurrentModificationError: {msg}"),
+            Self::TransactionAborted(msg) => write!(f, "TransactionAbortedError: {msg}"),
         }
     }
 }
@@ -605,5 +638,54 @@ mod tests {
     fn concurrent_modification_display() {
         let cme = KafkaError::concurrent_modification("oops");
         assert_eq!(cme.to_string(), "ConcurrentModificationError: oops");
+    }
+
+    #[test]
+    fn transaction_aborted_default_message() {
+        // Java's no-arg TransactionAbortedException message, verbatim.
+        let err = KafkaError::transaction_aborted();
+        assert_eq!(err.message(), "Failing batch since transaction was aborted");
+    }
+
+    #[test]
+    fn transaction_aborted_custom_message() {
+        let err = KafkaError::transaction_aborted_with_message("custom reason");
+        assert_eq!(err.message(), "custom reason");
+    }
+
+    #[test]
+    fn transaction_aborted_display() {
+        let err = KafkaError::transaction_aborted();
+        assert_eq!(
+            err.to_string(),
+            "TransactionAbortedError: Failing batch since transaction was aborted"
+        );
+    }
+
+    #[test]
+    fn transaction_aborted_has_no_error_code() {
+        // TransactionAbortedException is absent from Java's Errors enum, which
+        // is the whole reason this is its own variant.
+        assert!(KafkaError::transaction_aborted().kafka_error().is_none());
+    }
+
+    #[test]
+    fn transaction_aborted_is_api_exception() {
+        // Java: TransactionAbortedException extends ApiException. This is the
+        // difference from Wakeup, which is a KafkaException but NOT an
+        // ApiException — the distinction drives whether KafkaProducer.doSend()
+        // fails the future or propagates.
+        let err = KafkaError::transaction_aborted();
+        assert!(err.is_api_exception());
+        assert!(err.is_kafka_exception());
+        assert!(!KafkaError::wakeup("w").is_api_exception());
+    }
+
+    #[test]
+    fn transaction_aborted_is_not_retriable_or_fatal() {
+        let err = KafkaError::transaction_aborted();
+        assert!(!err.is_retriable());
+        assert!(!err.is_fatal());
+        assert!(!err.txn_requires_abort());
     }
 }
