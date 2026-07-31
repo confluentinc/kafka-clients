@@ -48,7 +48,12 @@ global_job_config:
         fi
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
-      - sudo apt install -y cmake rustup && rustup default stable
+      # `rust-toolchain.toml` pins the exact channel; running any rustc/cargo
+      # command inside the repo makes rustup auto-install that pinned
+      # version instead of a floating `stable` (which drifted ahead of the
+      # locally installed toolchain and broke lint parity -- see
+      # rust-toolchain.toml history).
+      - sudo apt install -y cmake rustup && rustc --version
       - (cd tools/translation_agent && pip install -e '.[dev]')
       # First sweep on a fresh project will have no artifact yet -- allow
       # the pull to fail so the orchestrator can create the DB from scratch.
@@ -86,10 +91,20 @@ blocks:
               if [ "${SEMAPHORE_GIT_PR_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
               elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
-                echo "On main branch (${MAIN_BRANCH}) -- running sweep"
-                translation-agent \
-                  --ak-repo-path "${AK_REPO_PATH}" \
-                  --rust-branch "${MAIN_BRANCH}"
+                # The prologue's `artifact pull ... || true` lands the DB at
+                # repo-root `translation_agent.db`. If the artifact does not
+                # exist yet (no DB, or the artifact hub failed to serve it --
+                # e.g. a transient signed-URL error), skip the sweep and fall
+                # through to the `make verify` below instead of letting
+                # `_run_sweep`'s own strict pull raise and abort the job.
+                if [ -f translation_agent.db ]; then
+                  echo "On main branch (${MAIN_BRANCH}) -- running sweep"
+                  translation-agent \
+                    --ak-repo-path "${AK_REPO_PATH}" \
+                    --rust-branch "${MAIN_BRANCH}"
+                else
+                  echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep, running 'make verify' only"
+                fi
               elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 # The prologue's `artifact pull ... || true` lands the DB at
                 # repo-root `translation_agent.db`. If the artifact does not
