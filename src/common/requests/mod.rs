@@ -51,6 +51,7 @@ pub mod sasl_authenticate_response;
 pub mod sasl_handshake_request;
 pub mod sasl_handshake_response;
 pub mod send_builder;
+pub mod transaction_result;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
@@ -88,6 +89,7 @@ pub use sasl_authenticate_response::SaslAuthenticateResponse;
 pub use sasl_handshake_request::{SaslHandshakeRequest, SaslHandshakeRequestBuilder};
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
+pub use transaction_result::TransactionResult;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
 ///
