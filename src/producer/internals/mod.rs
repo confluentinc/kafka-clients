@@ -25,6 +25,7 @@ pub(crate) mod record_accumulator;
 pub(crate) mod sender;
 pub(crate) mod transactional_request_result;
 pub(crate) mod txn_partition_entry;
+pub(crate) mod txn_partition_map;
 
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::BuiltInPartitioner;
@@ -41,3 +42,5 @@ pub(crate) use sender::Sender;
 pub(crate) use transactional_request_result::TransactionalRequestResult;
 #[allow(unused_imports)]
 pub(crate) use txn_partition_entry::{InFlightBatchKey, TxnPartitionEntry};
+#[allow(unused_imports)]
+pub(crate) use txn_partition_map::TxnPartitionMap;
