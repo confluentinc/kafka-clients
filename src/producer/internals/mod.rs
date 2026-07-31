@@ -24,6 +24,7 @@ pub(crate) mod producer_metadata;
 pub(crate) mod record_accumulator;
 pub(crate) mod sender;
 pub(crate) mod transactional_request_result;
+pub(crate) mod txn_partition_entry;
 
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::BuiltInPartitioner;
@@ -38,3 +39,5 @@ pub(crate) use sender::Sender;
 // from the parent module rather than the file module path. Unused until then.
 #[allow(unused_imports)]
 pub(crate) use transactional_request_result::TransactionalRequestResult;
+#[allow(unused_imports)]
+pub(crate) use txn_partition_entry::{InFlightBatchKey, TxnPartitionEntry};
