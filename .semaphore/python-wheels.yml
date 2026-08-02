@@ -287,7 +287,7 @@ blocks:
     task:
       agent:
         machine:
-          type: s1-prod-ubuntu24-04-amd64-3
+          type: s1-prod-ubuntu24-04-amd64-00
       jobs:
         - name: check
           commands:
@@ -304,7 +304,7 @@ blocks:
     task:
       agent:
         machine:
-          type: s1-prod-ubuntu24-04-amd64-3
+          type: s1-prod-ubuntu24-04-amd64-00
       jobs:
         - name: package
           commands:
@@ -315,3 +315,7 @@ blocks:
             - find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
             - ls -l release/
             - artifact push workflow release --destination release --force
+
+promotions:
+  - name: "Publish to Test PyPI"
+    pipeline_file: publish-test-pypi.yml
