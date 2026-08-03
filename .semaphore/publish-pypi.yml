@@ -36,7 +36,7 @@ blocks:
             # - export TWINE_USERNAME=__token__
             # - export TWINE_PASSWORD="$(vault kv get -format=json v1/ci/kv/pypi/pypi.org | jq -r '.data.data."confluent-kafka4"')"
             # - twine upload --non-interactive release/*
-            - echo "DRY-RUN: publish disabled -- would 'twine upload release/*' to pypi.org"
+            - 'echo "DRY-RUN: publish disabled -- would twine upload release/* to pypi.org"'
 
   - name: "Verify PyPI Release"
     dependencies:
@@ -53,4 +53,4 @@ blocks:
             # --- ACTUAL VERIFY (disabled with publish) ---
             # - pip install "confluent-kafka4==$CK_VERSION"
             # - python -c "import _confluentkafka; print('import OK')"
-            - echo "DRY-RUN: verify disabled -- would install confluent-kafka4==$CK_VERSION from PyPI and smoke-test it"
+            - 'echo "DRY-RUN: verify disabled -- would install confluent-kafka4==$CK_VERSION from PyPI and smoke-test it"'
