@@ -104,15 +104,10 @@ blocks:
       jobs:
         - name: build
           commands:
-            - choco install -y --no-progress nasm cmake rust-ms
-            - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"
-            - $rustBin = "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin"
-            - if (-not (Test-Path "$rustBin\cargo.exe")) { $rustBin = (Get-ChildItem "C:\ProgramData\chocolatey\lib\rust-ms" -Filter cargo.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName }
-            - if (-not $rustBin) { throw "cargo.exe not found after 'choco install rust-ms'" }
-            - $env:PATH = "$rustBin;$env:PATH"
-            - cargo --version
-            - rustc --version
-            - cargo build --features ffi --release
+            - choco install -y --no-progress nasm cmake
+            - 'try { Add-MpPreference -ExclusionPath "C:\ProgramData\chocolatey","$env:TEMP" -ErrorAction Stop; Write-Host "Defender exclusions added" } catch { Write-Host "WARN: no Defender exclusion (need admin?): $_" }'
+            - 'if (Test-Path "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin\cargo.exe") { Write-Host "rust-ms already installed" } else { $ok=$false; for ($i=1; $i -le 4; $i++) { choco install -y --no-progress --force rust-ms; if ($LASTEXITCODE -eq 0) { $ok=$true; break }; Write-Host "rust-ms attempt $i failed (exit $LASTEXITCODE); retrying in 20s"; Start-Sleep -Seconds 20 }; if (-not $ok) { throw "choco install rust-ms failed after 4 attempts" } }'
+            - '$env:PATH = "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin;C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"; cargo --version; rustc --version; cargo build --features ffi --release'
             - New-Item -ItemType Directory -Force dist | Out-Null
             - Copy-Item target\release\confluent_kafka.dll dist\
             # rustc names the MSVC import library confluent_kafka.dll.lib; the extension links it as confluent_kafka.lib.
