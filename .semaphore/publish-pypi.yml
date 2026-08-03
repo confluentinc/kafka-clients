@@ -1,0 +1,56 @@
+version: v1.0
+name: publish-pypi
+
+# Stage C (part 2): publish to the real PyPI, then verify the release installs
+# from PyPI. Promoted from publish-test-pypi.yml (Test PyPI -> PyPI), so this
+# only runs after the Test PyPI hop has succeeded for the same tagged build.
+#
+# Same shape as publish-test-pypi.yml but points at the production index and the
+# production Vault token. Modeled on confluent-kafka-python's
+# .semaphore/publish-pypi.yml.
+#
+# NOT PUBLISHING YET: the credential fetch (Vault) and `twine upload` are
+# COMMENTED OUT; the blocks run a green dry-run. See publish-test-pypi.yml's
+# header for the go-live checklist.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+blocks:
+  - name: "Publish to PyPI"
+    dependencies: []
+    run:
+      when: "tag =~ '.*'"
+    task:
+      jobs:
+        - name: Upload
+          commands:
+            - checkout
+            - sem-version python 3.11
+            - pip install twine
+            - artifact pull workflow release --destination release --force
+            - ls -l release/
+            # --- ACTUAL PUBLISH (disabled until we go live on PyPI) ---
+            # - . vault-setup
+            # - export TWINE_USERNAME=__token__
+            # - export TWINE_PASSWORD="$(vault kv get -format=json v1/ci/kv/pypi/pypi.org | jq -r '.data.data."confluent-kafka4"')"
+            # - twine upload --non-interactive release/*
+            - 'echo "DRY-RUN: publish disabled -- would twine upload release/* to pypi.org"'
+
+  - name: "Verify PyPI Release"
+    dependencies:
+      - "Publish to PyPI"
+    run:
+      when: "tag =~ '.*'"
+    task:
+      jobs:
+        - name: Verify
+          commands:
+            - checkout
+            - sem-version python 3.11
+            - export CK_VERSION=$(python -c "import tomllib; print(tomllib.load(open('bindings/python/pyproject.toml','rb'))['project']['version'])")
+            # --- ACTUAL VERIFY (disabled with publish) ---
+            # - pip install "confluent-kafka4==$CK_VERSION"
+            # - python -c "import _confluentkafka; print('import OK')"
+            - 'echo "DRY-RUN: verify disabled -- would install confluent-kafka4==$CK_VERSION from PyPI and smoke-test it"'
