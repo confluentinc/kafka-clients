@@ -712,4 +712,94 @@ mod tests {
         assert_eq!(entry.inflight_batches_by_sequence.len(), 2, "membership must be invariant");
         assert_eq!(extra.base_sequence(), 9, "untracked batch must be untouched");
     }
+    /// Exhaustive dry-run of the tracked-set / supplied-pool matrix, including
+    /// the shapes of all three Java `startSequencesAtBeginning` call sites.
+    #[test]
+    fn test_reset_matrix_all_combinations() {
+        // Case B: nothing tracked, but the pool has batches (the
+        // `TransactionManager.java:594` shape — that site is guarded by
+        // `!hasInflightBatches`, so the tracked set is empty while the Sender
+        // may still hold batches). Extras must be left alone.
+        {
+            let mut entry = TxnPartitionEntry::new(tp());
+            let mut extra = batch(1, 0, 7, 2);
+            entry
+                .start_sequences_at_beginning(ProducerIdAndEpoch::new(5, 1), &mut [&mut extra])
+                .expect("empty tracked set with a non-empty pool is a no-op");
+            assert_eq!(extra.base_sequence(), 7, "untracked batch must not be rewritten");
+            assert_eq!(entry.next_sequence(), 0);
+            assert_eq!(entry.producer_id_and_epoch(), ProducerIdAndEpoch::new(5, 1));
+            assert!(!entry.has_inflight_batches());
+        }
+
+        // Case C: exact match, single batch.
+        {
+            let mut entry = TxnPartitionEntry::new(tp());
+            let mut a = batch(1, 0, 4, 3);
+            entry.add_inflight_batch(&a);
+            entry
+                .start_sequences_at_beginning(ProducerIdAndEpoch::new(5, 1), &mut [&mut a])
+                .expect("exact pool");
+            assert_eq!(a.base_sequence(), 0);
+            assert_eq!(entry.next_sequence(), 3);
+            assert_eq!(entry.inflight_batches_by_sequence.len(), 1);
+        }
+
+        // Case G: exact match, pool in reverse order — key order must win.
+        {
+            let mut entry = TxnPartitionEntry::new(tp());
+            let mut a = batch(1, 0, 0, 3);
+            let mut c = batch(1, 0, 3, 4);
+            entry.add_inflight_batch(&a);
+            entry.add_inflight_batch(&c);
+            entry
+                .start_sequences_at_beginning(ProducerIdAndEpoch::new(5, 1), &mut [&mut c, &mut a])
+                .expect("reversed pool");
+            assert_eq!(a.base_sequence(), 0, "lowest key first regardless of pool order");
+            assert_eq!(c.base_sequence(), 3);
+            assert_eq!(entry.next_sequence(), 7);
+        }
+
+        // The `:1048` shape: a single partition's in-flight batches rewritten
+        // during produce-response handling. Sender still owns all of them.
+        {
+            let mut entry = TxnPartitionEntry::new(tp());
+            let mut b0 = batch(1, 0, 10, 2);
+            let mut b1 = batch(1, 0, 12, 2);
+            entry.add_inflight_batch(&b0);
+            entry.add_inflight_batch(&b1);
+            entry.increment_sequence(14);
+            entry
+                .start_sequences_at_beginning(ProducerIdAndEpoch::new(2, 5), &mut [&mut b0, &mut b1])
+                .expect("all in-flight batches supplied");
+            assert_eq!((b0.base_sequence(), b1.base_sequence()), (0, 2));
+            assert_eq!(entry.next_sequence(), 4);
+            assert_eq!(entry.inflight_batches_by_sequence.len(), 2);
+        }
+
+        // The `:818` adjust shape, exhaustively: failed batch present in the pool
+        // but untracked; one batch below base_sequence; one at; one after.
+        {
+            let mut entry = TxnPartitionEntry::new(tp());
+            let mut below = batch(1, 0, 0, 2);
+            let mut at = batch(1, 0, 4, 1);
+            let mut after = batch(1, 0, 5, 3);
+            entry.add_inflight_batch(&below);
+            entry.add_inflight_batch(&at);
+            entry.add_inflight_batch(&after);
+            entry.increment_sequence(10);
+            let mut failed = batch(1, 0, 2, 2); // untracked, still owned by Sender
+
+            entry
+                .adjust_sequences_due_to_failed_batch(4, 2, &mut [&mut failed, &mut after, &mut below, &mut at])
+                .expect("superset pool with an untracked failed batch");
+
+            assert_eq!(below.base_sequence(), 0, "below base_sequence: untouched");
+            assert_eq!(at.base_sequence(), 2, "at base_sequence: shifted by record_count");
+            assert_eq!(after.base_sequence(), 3, "after base_sequence: shifted");
+            assert_eq!(failed.base_sequence(), 2, "untracked failed batch: untouched");
+            assert_eq!(entry.next_sequence(), 8);
+            assert_eq!(entry.inflight_batches_by_sequence.len(), 3, "membership invariant");
+        }
+    }
 }
