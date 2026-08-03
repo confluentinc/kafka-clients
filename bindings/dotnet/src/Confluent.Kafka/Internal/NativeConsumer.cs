@@ -40,32 +40,76 @@ namespace Confluent.Kafka.Internal;
 /// operational / precondition / wakeup / concurrent error surfaces.
 /// </para>
 /// <para>
-/// The consumer is <b>one operation in flight</b> (ffi §B5): a
-/// <see cref="ConsumerAccessGuard"/> mirrors the core guard so concurrent misuse
-/// surfaces as the right .NET exception before the P/Invoke. Async ops
-/// (<see cref="SubscribeAsync"/> / <see cref="SeekAsync"/>) bridge the C completion
-/// callback to a <see cref="Task"/>; the completion fires on the core's foreign
-/// dispatcher thread (ffi §B6/§B7). <see cref="Wakeup"/> is the one cross-thread
-/// call — it bypasses the guard by design.
+/// <b>Single-owner, not thread-safe (M3/P2).</b> A Kafka consumer is single-owner —
+/// at most one operation in flight — and this wrapper mirrors the in-repo Python
+/// sibling's contract exactly (<c>bindings/python/consumer.py</c>: "The Rust
+/// consumer is single-owner (one operation in flight). Concurrent use surfaces as a
+/// <c>KafkaError</c> (ConcurrentModification) or, for the non-blocking state reads, a
+/// <c>RuntimeError</c>."). The <b>Rust core's own access guard</b> is the serializer;
+/// there is <b>no managed mirror</b> (M3/P1's <c>ConsumerAccessGuard</c> +
+/// in-flight tracking were removed here as .NET-only additions on top of that
+/// model — a localized, reversible simplification). Concurrency therefore surfaces
+/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeAsync"/> /
+/// <see cref="SeekAsync"/>) is rejected by the core inline and surfaces as a
+/// <b>faulted <see cref="Task"/></b> carrying a <see cref="KafkaException"/>
+/// (ConcurrentModification); a concurrent <b>sync state read</b>
+/// (<see cref="GroupId"/>) surfaces as <see cref="InvalidOperationException"/> from
+/// the core's null-handle rejection path (ffi §B5). <see cref="Wakeup"/> is the one
+/// cross-thread call by design.
 /// </para>
 /// <para>
-/// Teardown has two paths, both gated by a thread-safe closed flag (folds in the
-/// N=5-deferred teardown-thread-safety hardening):
-/// <see cref="DisposeAsync"/> is <b>primary</b> — it drains the in-flight op
-/// (wakeup + await) then closes <em>asynchronously</em> (joins the bg task) before
-/// destroy; <see cref="Dispose"/> is the blocking fallback (<c>close_with_timeout</c>
-/// → destroy). A bare <c>Consumer_destroy</c> before the in-flight callback fires
-/// would cancel it (the callback never fires → the <c>Task</c> hangs and the
-/// <c>GCHandle</c> leaks), which is why the async path drains first (ffi §B7). The
-/// sync path cannot drain (its guarded close is rejected while the op holds the core
-/// guard), so instead it faults the pending op's <c>Task</c> after destroy so a
-/// fire-and-forget awaiter cannot strand — but it does <b>not</b> free the
-/// <c>GCHandle</c>: the completion callback stays the sole owner of that free
-/// (aligning with the in-repo Python + confluent-kafka-dotnet siblings). A callback
-/// already queued before destroy still fires afterward and frees the handle itself;
-/// only if destroy cancels the op before its callback is queued does that one op's
-/// <c>GCHandle</c> leak — a rare, one-time, teardown-only residual (unawaited op +
-/// sync <c>Dispose</c>) that <see cref="DisposeAsync"/> avoids by draining.
+/// The 5 kept invariants (the managed-side safety that does not depend on a managed
+/// guard, ffi §B6/§B7): (1) a per-op self-rooting <see cref="GCHandle"/>; (2) the
+/// completion callback is the <b>sole owner</b> of the <see cref="GCHandle"/> free
+/// (<see cref="OperationCompletionSource"/>); (3) the atomic <see cref="_closed"/>
+/// teardown gate; (4) <see cref="SafeConsumerHandle"/> + <c>TaskCompletionSource</c>
+/// thread-safety; (5) <c>RunContinuationsAsynchronously</c> on the completion
+/// (§B7) — the callback fires on the core's foreign dispatcher thread.
+/// </para>
+/// <para>
+/// <b>Teardown (single-owner).</b> Both paths are gated by the atomic
+/// <see cref="_closed"/> flag. <see cref="DisposeAsync"/> is <b>primary</b>
+/// (<c>close_async → destroy</c>): it closes gracefully — <c>close_async</c> joins
+/// the background task via the completion bridge — before destroy.
+/// <see cref="Dispose"/> is the blocking fallback (<c>close_with_timeout →
+/// destroy</c>). Under the single-owner model the awaiter of an op <b>is</b> its
+/// disposer, so neither path drains a <em>separately-submitted</em> op — there is no
+/// concurrent submitter to drain. This matches the Python sibling (<c>close()</c>
+/// drains its <em>own</em> awaited op, then bare <c>_destroy</c>).
+/// </para>
+/// <para>
+/// <b>Accepted residuals (misuse-only, Python parity, not reachable while
+/// internal-only).</b> These are explicitly accepted under the not-thread-safe
+/// contract; <see cref="DisposeAsync"/> on the awaiting task is the clean path:
+/// </para>
+/// <list type="bullet">
+/// <item>
+/// <b>Teardown with an unawaited in-flight op → strand + one-time
+/// <see cref="GCHandle"/>/context leak.</b> An op that is submitted and then not
+/// awaited across a teardown may strand its <see cref="Task"/> and leak its per-op
+/// <see cref="GCHandle"/> once (the following <c>Consumer_destroy</c> cancels the op,
+/// so its callback never fires). Python accepts the same (bare <c>_destroy</c> after
+/// draining its <em>own</em> awaited op). The M3/P1 managed fault machinery
+/// (<c>FaultTaskOnly</c>) that papered over this is deliberately <b>not</b>
+/// re-added — it was exactly what M3/P2 removed.
+/// </item>
+/// <item>
+/// <b><see cref="Wakeup"/> / <see cref="GroupId"/> handle TOCTOU vs a concurrent
+/// teardown → use-after-free.</b> The closed-flag check and the
+/// <c>DangerousGetHandle()</c> deref are not atomic, so a concurrent teardown
+/// between them could free the handle. Reachable only under cross-thread misuse;
+/// Python has the same, more exposed (its <c>wakeup</c> has no closed check at all).
+/// </item>
+/// <item>
+/// <b>Submit-vs-<c>destroy</c> handle race → use-after-free.</b> The
+/// <c>DangerousGetHandle()</c> in <see cref="SubmitVoidOperation"/> vs a concurrent
+/// <c>Consumer_destroy</c>. Reachable only under cross-thread misuse.
+/// </item>
+/// </list>
+/// <para>
+/// The M3/P1 op-submit-vs-teardown <em>publish window</em> (a strand+leak race that
+/// required in-flight tracking fields) is <b>eliminated</b> by M3/P2: with no
+/// tracking fields there is nothing to publish and no window.
 /// </para>
 /// </remarks>
 internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
@@ -77,29 +121,11 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     private readonly SafeConsumerHandle _handle;
 
-    // Mirrors the core's one-op-in-flight guard so concurrent misuse throws the
-    // right .NET exception type before the P/Invoke (ffi §B5).
-    private readonly ConsumerAccessGuard _guard = new ConsumerAccessGuard();
-
-    // Thread-safe closed flag (replaces the M2 non-atomic bool): 0 = open, 1 =
-    // closing/closed. Makes double / concurrent Dispose safe and gates
-    // use-after-dispose. Folds in the N=5-deferred teardown-thread-safety item.
+    // Thread-safe closed flag (invariant #3, the teardown gate — NOT the removed
+    // managed access guard): 0 = open, 1 = closing/closed. Makes double / concurrent
+    // Dispose safe and gates use-after-dispose. A plain bool would be a torn-read
+    // race .NET has and Python's GIL hides, so this stays atomic.
     private int _closed;
-
-    // The most recently submitted op's Task. Ops are serialized by the guard, so at
-    // most one is pending; teardown drains it (wakeup + await/wait) before destroy.
-    private Task? _inFlightOperation;
-
-    // The most recently submitted op's completion context (its TCS + rooting
-    // GCHandle). Tracked so the SYNCHRONOUS Dispose can fault its Task after destroy:
-    // its guarded close_with_timeout is rejected (no drain) while the op holds the
-    // core guard, and the following destroy cancels the op's callback — so without a
-    // fault the awaiter's Task would strand (ffi §B7). Dispose faults the Task ONLY
-    // (FaultTaskOnly); it does NOT free the GCHandle — the completion callback is the
-    // sole owner of that free, so a callback queued before destroy can still fire
-    // after it and recover a live handle (no use-after-free). DisposeAsync drains
-    // instead (the callback fires normally), so it does not use this field.
-    private OperationCompletionSource? _inFlightContext;
 
     private NativeConsumer(SafeConsumerHandle handle)
     {
@@ -236,12 +262,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Subscribes to <paramref name="topics"/> (async). The returned
     /// <see cref="Task"/> completes when the core resolves the op — successfully for
-    /// a <c>MockConsumer</c>, or faulted with a <see cref="KafkaException"/>.
+    /// a <c>MockConsumer</c>, or faulted with a <see cref="KafkaException"/>. A
+    /// concurrent second op is rejected by the core inline and faults the
+    /// <see cref="Task"/> with a <see cref="KafkaException"/> (ConcurrentModification,
+    /// ffi §B5) — the single-owner contract, delivered by the core.
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">A topic name is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">Another operation is already in flight.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     internal Task SubscribeAsync(
         IReadOnlyCollection<string> topics,
@@ -252,7 +280,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             throw new ArgumentNullException(nameof(topics));
         }
 
-        // Snapshot + validate BEFORE the guard / native (ffi §B5 preconditions).
+        // Snapshot + validate BEFORE native (ffi §B5 preconditions).
         string[] topicArray = new string[topics.Count];
         int index = 0;
         foreach (string topic in topics)
@@ -302,7 +330,6 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">Another operation is already in flight.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     internal Task SeekAsync(
         string topic,
@@ -329,12 +356,23 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Interrupts the in-flight op (Java <c>wakeup()</c>). Sync and cross-thread —
-    /// it <b>bypasses</b> the access guard by design (ffi §B5 / consumer-threading
-    /// §11). Best-effort: a no-op once closing/closed (the handle may be about to be
-    /// destroyed); the thread-safe closed check is the teardown guard, not a
-    /// per-call <c>SafeHandle</c> AddRef (per the N=5-deferred guidance).
+    /// Interrupts the in-flight op (Java <c>wakeup()</c>). Sync and cross-thread — the
+    /// consumer is single-owner, so this is the one method deliberately callable from
+    /// another thread (ffi §B5 / consumer-threading §11). Best-effort: a no-op once
+    /// closing/closed (the handle may be about to be destroyed). This <c>_closed</c>
+    /// check is strictly safer than Python (whose <c>wakeup</c> has no closed check at
+    /// all) and is kept as a deliberate divergence in the safe direction.
     /// </summary>
+    /// <remarks>
+    /// <b>Accepted residual (single-owner):</b> the closed-flag check and the
+    /// <c>DangerousGetHandle()</c> deref are not atomic, so a concurrent teardown that
+    /// runs between them could free the handle first — a check-then-use TOCTOU
+    /// (use-after-free) reachable only under cross-thread misuse. Accepted-by-design
+    /// under the not-thread-safe contract; the canonical <c>wakeup()</c> usage
+    /// (thread A blocked, thread B wakes it, thread A then disposes) does not race
+    /// wakeup against dispose. Any future hardening (per-call
+    /// <c>SafeHandle.DangerousAddRef</c>) renumbers to N≥7.
+    /// </remarks>
     internal void Wakeup()
     {
         if (Volatile.Read(ref _closed) != 0)
@@ -347,68 +385,64 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Reads the configured consumer group id — a representative <b>synchronous state
-    /// read</b> that participates in the access guard: a concurrent op makes this
-    /// throw <see cref="InvalidOperationException"/> ("not safe for multi-threaded
-    /// access", ffi §B5). Marshals a Category-3 owned metadata handle and frees it
-    /// (§B2).
+    /// read</b>. Marshals a Category-3 owned metadata handle and frees it (§B2).
     /// </summary>
+    /// <remarks>
+    /// <b>Concurrency (single-owner).</b> If the core's own access guard rejects
+    /// concurrent access it returns a <b>null</b> metadata handle; this maps to
+    /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
+    /// multi-threaded access."), mirroring the Python sibling's
+    /// <c>None → RuntimeError</c> (<c>_concurrent_error</c>) and the CLAUDE.md §3
+    /// idiom map (concurrent sync state read → <see cref="InvalidOperationException"/>).
+    /// <b>Accepted residual:</b> the same check-then-use handle TOCTOU vs teardown as
+    /// <see cref="Wakeup"/> (accepted-by-design; N≥7 if ever hardened).
+    /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">An operation is already in flight.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for
+    /// multi-threaded access).
+    /// </exception>
     internal string? GroupId()
     {
         ThrowIfClosed();
-        _guard.EnterStateRead();
+
+        IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle());
+        if (metadata == IntPtr.Zero)
+        {
+            // The core's own access guard rejected concurrent access (null handle).
+            // Surface it the Python way: a concurrent sync state read is an
+            // InvalidOperationException, not a silent null (ffi §B5, CLAUDE.md §3).
+            throw new InvalidOperationException(
+                "KafkaConsumer is not safe for multi-threaded access.");
+        }
+
         try
         {
-            IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle());
-            if (metadata == IntPtr.Zero)
-            {
-                // The core's own guard rejected concurrent access (should not happen
-                // while the managed state-read guard is held; defensive).
-                return null;
-            }
-
-            try
-            {
-                return Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(metadata));
-            }
-            finally
-            {
-                NativeMethods.ConsumerGroupMetadataDestroy(metadata);
-            }
+            return Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(metadata));
         }
         finally
         {
-            _guard.Release();
+            NativeMethods.ConsumerGroupMetadataDestroy(metadata);
         }
     }
 
     /// <summary>
     /// Graceful synchronous teardown (blocking fallback): <c>Consumer_close_with_timeout</c>
-    /// then releases the handle (→ <c>Consumer_destroy</c>), and finally faults any
-    /// pending in-flight op's <c>Task</c> so a fire-and-forget awaiter cannot strand.
-    /// Idempotent and safe under concurrent / double calls (the thread-safe closed
-    /// flag). The drain-first async teardown (<c>DisposeAsync</c>) is the primary path.
+    /// then releases the handle (→ <c>Consumer_destroy</c>). Idempotent and safe under
+    /// concurrent / double calls (the atomic closed flag). The async teardown
+    /// (<see cref="DisposeAsync"/>) is the primary path.
     /// </summary>
     /// <remarks>
-    /// <c>close_with_timeout</c> is a <em>guarded</em> sync op: while an async op is
-    /// genuinely in flight it holds the core access guard, so the close is rejected
-    /// (ConcurrentModification) and does <b>not</b> drain the op — the following
-    /// <c>Consumer_destroy</c> then cancels the op's future, so in the common case its
-    /// completion callback never fires. Without a fault, the awaiter's <c>Task</c>
-    /// would strand (ffi §B7). So, <em>after</em> destroy, this faults the op's
-    /// <c>Task</c> (<see cref="OperationCompletionSource.FaultTaskOnly"/>) — via
-    /// idempotent primitives, so a callback that fired before destroy makes it a
-    /// harmless no-op (no new race, not sync-over-async: it never waits on the op
-    /// <c>Task</c>). <b>It does not free the <c>GCHandle</c>:</b> the completion
-    /// callback is the sole owner of that free (aligning with the in-repo Python +
-    /// confluent-kafka-dotnet siblings). A completion job already queued before destroy
-    /// still fires afterward (the ABI drains queued dispatcher jobs without joining)
-    /// and must recover a live handle, so freeing it here would be a use-after-free
-    /// (Critic N=5 Finding 3). Accepted residual: if destroy cancels the op before its
-    /// callback is queued, that one op's <c>GCHandle</c> leaks — a rare, one-time,
-    /// teardown-only misuse-case leak; <c>DisposeAsync</c> drains (wakeup + await) so
-    /// the callback fires normally and there is no leak.
+    /// <b>Single-owner: no separate-op drain.</b> Under the not-thread-safe contract
+    /// the awaiter of an op is its disposer, so there is no concurrent submitter for
+    /// teardown to drain — <see cref="Dispose"/> simply closes gracefully then
+    /// destroys, matching the Python sibling (drain its <em>own</em> awaited op, then
+    /// bare <c>_destroy</c>). <b>Accepted residual:</b> an <em>unawaited</em> in-flight
+    /// op across a synchronous <see cref="Dispose"/> may strand its <see cref="Task"/>
+    /// and leak its per-op <see cref="GCHandle"/> once (the following
+    /// <c>Consumer_destroy</c> cancels the op, so its callback never fires). The M3/P1
+    /// fault machinery (<c>FaultTaskOnly</c>) that masked this is deliberately not
+    /// re-added; <see cref="DisposeAsync"/> on the awaiting task is the clean path.
     /// </remarks>
     public void Dispose()
     {
@@ -416,10 +450,6 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         {
             return;
         }
-
-        // Snapshot any pending op's context BEFORE teardown so it can be reclaimed
-        // after destroy cancels its callback (see the reclaim below).
-        OperationCompletionSource? pending = Volatile.Read(ref _inFlightContext);
 
         try
         {
@@ -438,30 +468,24 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // ReleaseHandle → Consumer_destroy, exactly once.
             _handle.Dispose();
         }
-
-        // Fault the pending in-flight op's Task so a fire-and-forget awaiter cannot
-        // strand (ffi §B7). Ordered AFTER destroy and built on idempotent primitives
-        // (TrySetException no-ops if completed), so a callback that fired before
-        // destroy makes this a no-op — race-safe, and NOT sync-over-async (no
-        // await/Wait on the op Task). This faults the Task ONLY: it does NOT free the
-        // GCHandle. The completion callback is the sole owner of that free — a job
-        // queued before destroy still fires afterward and must recover a live handle
-        // (freeing it here would be a use-after-free, Critic N=5 Finding 3). See the
-        // <remarks> for the accepted case-A residual leak.
-        pending?.FaultTaskOnly(new ObjectDisposedException(nameof(NativeConsumer)));
     }
 
     /// <summary>
-    /// Graceful <b>async</b> teardown (the primary path): drain the in-flight op
-    /// (<c>wakeup</c> + <c>await</c>), then <c>Consumer_close_async</c> (joins the
-    /// background task) via the completion bridge, then release the handle
-    /// (→ <c>Consumer_destroy</c>). Draining first is essential — a bare destroy
-    /// while an op is in flight cancels its callback (the callback never fires, so
-    /// the <c>Task</c> would hang and the <c>GCHandle</c> would leak, ffi §B7).
-    /// Idempotent and safe under concurrent / double calls (the thread-safe closed
-    /// flag). Best-effort: it swallows the in-flight op's fault and the close error
-    /// (surfacing the latter is the future <c>CloseAsync(TimeSpan)</c>'s job).
+    /// Graceful <b>async</b> teardown (the primary path): <c>Consumer_close_async</c>
+    /// (joins the background task via the completion bridge), then release the handle
+    /// (→ <c>Consumer_destroy</c>). Idempotent and safe under concurrent / double
+    /// calls (the atomic closed flag). Best-effort: it swallows the close error
+    /// (surfacing it is the future <c>CloseAsync(TimeSpan)</c>'s job).
     /// </summary>
+    /// <remarks>
+    /// <b>Single-owner: no separate-op drain.</b> Under the not-thread-safe contract
+    /// the awaiter of an op is its disposer, so <see cref="DisposeAsync"/> does not
+    /// wake+await a <em>separately-submitted</em> in-flight op — there is no concurrent
+    /// submitter to drain. It closes gracefully (<c>close_async</c> joins the bg task)
+    /// then destroys, matching the Python sibling's <c>close()</c>. The same accepted
+    /// unawaited-op residual as <see cref="Dispose"/> applies, but the clean path is
+    /// exactly to <c>await</c> the op and then <see cref="DisposeAsync"/>.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         if (!TryBeginClose())
@@ -469,28 +493,11 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             return;
         }
 
-        // Drain: wakeup (best-effort abort) + await the in-flight op so its callback
-        // fires (releasing the core guard + freeing its GCHandle) before we close.
-        // Call the native wakeup directly — the public Wakeup() no-ops once closed.
-        Task? pending = Volatile.Read(ref _inFlightOperation);
-        if (pending is not null)
-        {
-            NativeMethods.ConsumerWakeup(_handle.DangerousGetHandle());
-            try
-            {
-                await pending.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Drain: the op's own fault (e.g. a wakeup/seek error) is not the
-                // teardown's concern — it was already surfaced to that op's awaiter.
-            }
-        }
-
         try
         {
-            // Graceful async close (joins the bg task) via the same void bridge; no
-            // managed guard (the op is drained, so the core guard is free).
+            // Graceful async close (joins the bg task) via the void bridge. Under
+            // single-owner there is nothing to drain first: the awaiter of any op is
+            // this disposer, so the core guard is free for the close op.
             await CloseAsyncInternal().ConfigureAwait(false);
         }
         catch (KafkaException)
@@ -507,14 +514,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Bridges <c>Consumer_close_async</c> to a <see cref="Task"/> via the shared
-    /// completion callback, with <b>no</b> managed access guard (close is a
-    /// lifecycle op run after the in-flight op is drained). If the submitting
-    /// P/Invoke throws before native could fire the callback, the context is
-    /// abandoned (its <c>GCHandle</c> freed) here.
+    /// completion callback. If the submitting P/Invoke throws before native could
+    /// fire the callback, the context is abandoned (its <c>GCHandle</c> freed) here.
     /// </summary>
     private Task CloseAsyncInternal()
     {
-        OperationCompletionSource context = new OperationCompletionSource(guard: null);
+        OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
         try
@@ -532,23 +537,28 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Submits a void-result async op: enter the one-op guard, root the per-op
-    /// context via a <see cref="GCHandle"/>, wire cancellation, then run
+    /// Submits a void-result async op: root the per-op context via a
+    /// <see cref="GCHandle"/> (invariant #1), wire cancellation, then run
     /// <paramref name="submit"/> (which pins its args call-scoped and P/Invokes).
-    /// Ownership of the guard + <see cref="GCHandle"/> transfers to the completion
-    /// callback the moment native is entered; if <paramref name="submit"/> throws
-    /// before that, the context is abandoned (guard released, handle freed) here.
+    /// Ownership of the <see cref="GCHandle"/> transfers to the completion callback
+    /// (the sole owner of its free, invariant #2) the moment native is entered; if
+    /// <paramref name="submit"/> throws before that, the context is abandoned (handle
+    /// freed) here.
     /// </summary>
+    /// <remarks>
+    /// The consumer is single-owner: op serialization is the <b>Rust core's</b> job,
+    /// not a managed guard. A concurrent second op is rejected by the core inline
+    /// (it fires the callback on the caller thread with a ConcurrentModification
+    /// error), which the bridge surfaces as a faulted <see cref="Task"/> (ffi §B5) —
+    /// so there is no managed pre-check to throw here, and no in-flight tracking to
+    /// publish (which is why the M3/P1 publish window no longer exists).
+    /// </remarks>
     private Task SubmitVoidOperation(CancellationToken cancellationToken, NativeSubmit submit)
     {
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
-        // Reject a concurrent async op with a KafkaException (ConcurrentModification)
-        // BEFORE allocating anything — no leak on rejection.
-        _guard.EnterOperation();
-
-        OperationCompletionSource context = new OperationCompletionSource(_guard);
+        OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
         try
@@ -563,14 +573,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             throw;
         }
 
-        // Publish the context BEFORE the Task: a concurrent sync Dispose reads the
-        // context to fault its Task, so it must see a non-null context whenever it
-        // could see the Task. Faulting a long-completed op is a harmless no-op
-        // (idempotent — see OperationCompletionSource.FaultTaskOnly).
-        Task task = context.Task;
-        Volatile.Write(ref _inFlightContext, context);
-        Volatile.Write(ref _inFlightOperation, task);
-        return task;
+        return context.Task;
     }
 
     /// <summary>

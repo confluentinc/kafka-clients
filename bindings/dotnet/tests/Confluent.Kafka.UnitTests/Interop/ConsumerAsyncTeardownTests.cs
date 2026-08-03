@@ -23,13 +23,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Async-aware teardown (ffi-marshalling.md §B7): <c>DisposeAsync</c> drains the
-/// in-flight op (wakeup + await) then closes asynchronously before destroy;
-/// <c>Dispose</c> is the blocking fallback. A bare destroy before the in-flight
-/// callback fires would hang the <c>Task</c> and leak the <c>GCHandle</c>, so the
-/// key regression is that teardown with an op in flight <b>returns</b> (under
-/// <see cref="TestTimeout"/>). The thread-safe closed flag makes double / concurrent
-/// / mixed teardown safe, and use-after-dispose throws.
+/// Single-owner teardown (ffi-marshalling.md §B7): <c>DisposeAsync</c> closes
+/// asynchronously (<c>close_async</c> joins the bg task) before destroy;
+/// <c>Dispose</c> is the blocking fallback (<c>close_with_timeout → destroy</c>).
+/// Under the not-thread-safe contract the awaiter of an op is its disposer, so
+/// neither path drains a <em>separately-submitted</em> op; the regression these
+/// tests guard is that teardown <b>returns without hanging</b> even with an
+/// (unawaited) op still in flight — an accepted misuse case that may strand the op's
+/// <c>Task</c> + leak its <c>GCHandle</c> once, so the tests must NOT assert the op
+/// <c>Task</c> reaches a terminal state. The atomic closed flag makes double /
+/// concurrent / mixed teardown safe, and use-after-dispose throws.
 /// </summary>
 public sealed class ConsumerAsyncTeardownTests
 {
@@ -42,26 +45,14 @@ public sealed class ConsumerAsyncTeardownTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        // Submit and do NOT await: DisposeAsync must drain it (wakeup + await) and
-        // return, not hang on the never-fired-callback path.
-        Task op = consumer.SubscribeAsync(ProofTopic());
+        // Submit and do NOT await: under single-owner, DisposeAsync does NOT drain a
+        // separately-submitted op — it closes gracefully (close_async joins the bg
+        // task) then destroys. The regression is that teardown RETURNS without hanging
+        // even with an unawaited op in flight. The op's own Task is an accepted
+        // strand+leak residual (misuse case), so it is deliberately NOT observed here.
+        _ = consumer.SubscribeAsync(ProofTopic());
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
-
-        // The op resolved (or was drained); observing it must not hang either.
-        await TestTimeout.Run(
-            async () =>
-            {
-                try
-                {
-                    await op;
-                }
-                catch (KafkaException)
-                {
-                    // A drained op may fault; the point is that it completes.
-                }
-            },
-            s_deadline);
     }
 
     [Fact]
@@ -73,82 +64,36 @@ public sealed class ConsumerAsyncTeardownTests
     }
 
     [Fact]
-    public async Task Dispose_WithOpInFlight_ReturnsAndCompletesTheOpTask()
+    public void Dispose_WithOpInFlight_Returns()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        // OBSERVE the op Task — do NOT discard it. The sync Dispose's guarded
-        // close_with_timeout is rejected while the op holds the core guard, so it
-        // does not drain; the following destroy cancels the op's callback, which
-        // (before the strand fix) STRANDED this Task (never terminal). Dispose must
-        // now fault it deterministically (FaultTaskOnly) — without freeing the
-        // GCHandle (the callback is the sole owner of that free).
-        Task op = consumer.SubscribeAsync(ProofTopic());
+        // Submit and do NOT await. Under single-owner the sync Dispose does not drain
+        // a separately-submitted op — it closes gracefully (close_with_timeout) then
+        // destroys. The regression is that Dispose RETURNS without hanging even with
+        // an unawaited op in flight. The op's Task is an accepted strand+leak residual
+        // (misuse case), so it is deliberately NOT observed to a terminal state.
+        _ = consumer.SubscribeAsync(ProofTopic());
 
-        // The sync fallback returns without hanging (close_with_timeout → destroy).
         TestTimeout.Run(consumer.Dispose, s_deadline);
-
-        // The op Task must reach a TERMINAL state — RanToCompletion if it resolved
-        // before teardown, or Faulted (ObjectDisposedException) if Dispose faulted an
-        // op whose callback destroy cancelled. A stranded Task would hang here and
-        // the TestTimeout guard would fail the run fast (the strand can't hide).
-        await TestTimeout.Run(
-            async () =>
-            {
-                try
-                {
-                    await op;
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Dispose faulted an op whose callback was cancelled by destroy.
-                }
-                catch (KafkaException)
-                {
-                    // A drained/reclaimed op may fault with a KafkaException.
-                }
-            },
-            s_deadline);
-
-        Assert.True(op.IsCompleted);
     }
 
     [Fact]
-    public async Task Dispose_WithOpInFlight_Churned_EveryOpTaskCompletes()
+    public void Dispose_WithOpInFlight_Churned_ReturnsUnderChurn()
     {
-        // Churn create → submit → Dispose → observe under GC pressure. If FaultTaskOnly
-        // failed to fault the Task it would strand (the await below hangs → the guard
-        // fails fast). In the common Mock path the callback fires and frees the
-        // GCHandle itself (sole owner), so there is no leak; only the rare case where
-        // destroy cancels the op before its callback is queued leaks one handle (the
-        // accepted teardown-only residual — DisposeAsync avoids it). Aggressive GC +
-        // WaitForPendingFinalizers make a double-free / use-after-free on the
-        // straggler-callback path surface as a crash instead of hiding. Every op Task
-        // must reach a terminal state.
+        // Churn create → submit → Dispose under GC pressure. The regression is that
+        // teardown RETURNS without hanging every time (the TestTimeout guard fails
+        // fast on any hang). Aggressive GC + WaitForPendingFinalizers surface a
+        // double-free / use-after-free on the straggler-callback path as a crash
+        // instead of hiding. The unawaited op's Task is the accepted strand+leak
+        // residual (DisposeAsync on the awaiting task avoids it), so it is not
+        // observed here.
         for (int i = 0; i < 100; i++)
         {
             NativeConsumer consumer = NativeConsumer.CreateMock();
-            Task op = consumer.SubscribeAsync(ProofTopic());
+            _ = consumer.SubscribeAsync(ProofTopic());
 
             TestTimeout.Run(consumer.Dispose, s_deadline);
-
-            await TestTimeout.Run(
-                async () =>
-                {
-                    try
-                    {
-                        await op;
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                    }
-                    catch (KafkaException)
-                    {
-                    }
-                },
-                s_deadline);
-
-            Assert.True(op.IsCompleted);
 
             GC.Collect();
             GC.WaitForPendingFinalizers();
