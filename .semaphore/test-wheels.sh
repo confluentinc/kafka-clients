@@ -27,6 +27,19 @@
 
 set -eu
 
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 wheelhouse="${1:?Usage: $0 <wheelhouse-dir>}"
 PY_VERSIONS="3.10 3.11 3.12 3.13 3.14"
 
@@ -34,7 +47,7 @@ PY_VERSIONS="3.10 3.11 3.12 3.13 3.14"
 run_matrix() {
     base="$1"
     export PATH="$HOME/.local/bin:$PATH"
-    uv python install $PY_VERSIONS
+    retry uv python install $PY_VERSIONS
 
     # Neutral test dir so 'import producer' resolves to the installed wheel.
     testtmp=$(mktemp -d)
@@ -45,7 +58,7 @@ run_matrix() {
         uv venv --python "$py" "/tmp/v$py"
         vpy="/tmp/v$py/bin/python"
         uv pip install --python "$vpy" --no-index --find-links "$base/$wheelhouse" confluent-kafka4
-        uv pip install --python "$vpy" pytest pytest-asyncio
+        retry uv pip install --python "$vpy" pytest pytest-asyncio
         "$vpy" -c "import _confluentkafka; print('import OK: Python $py')"
         # asyncio_mode=auto is set here rather than read from pyproject.toml,
         # since tests run from a neutral dir without it (see above).
@@ -61,15 +74,16 @@ if [ "${IN_DOCKER:-0}" = "1" ]; then
     if ! command -v curl >/dev/null 2>&1; then
         if command -v apt-get >/dev/null 2>&1; then
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+            retry apt-get update -qq
+            retry apt-get install -y -qq curl ca-certificates
         elif command -v dnf >/dev/null 2>&1; then
-            dnf install -y -q curl
+            retry dnf install -y -q curl
         fi
     fi
 
     export HOME=/root
-    curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
-    sh /tmp/uv-install.sh
+    retry curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
+    retry sh /tmp/uv-install.sh
     run_matrix /io
     exit 0
 fi
@@ -77,8 +91,8 @@ fi
 if [ "$(uname -s)" = "Darwin" ]; then
     set -x
     if ! command -v uv >/dev/null 2>&1; then
-        curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
-        sh /tmp/uv-install.sh
+        retry curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
+        retry sh /tmp/uv-install.sh
     fi
     run_matrix "$PWD"
     exit 0
@@ -92,6 +106,7 @@ mkdir -p "$uvcache"
 
 for img in $DISTRO_IMAGES; do
     echo "== testing wheels on $img =="
+    retry docker pull "$img"
     docker run --rm \
         -e IN_DOCKER=1 \
         -e UV_CACHE_DIR=/uvcache/cache \

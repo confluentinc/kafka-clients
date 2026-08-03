@@ -104,9 +104,9 @@ blocks:
       jobs:
         - name: build
           commands:
-            - choco install -y --no-progress nasm cmake
             - 'try { Add-MpPreference -ExclusionPath "C:\ProgramData\chocolatey","$env:TEMP" -ErrorAction Stop; Write-Host "Defender exclusions added" } catch { Write-Host "WARN: no Defender exclusion (need admin?): $_" }'
-            - 'if (Test-Path "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin\cargo.exe") { Write-Host "rust-ms already installed" } else { $ok=$false; for ($i=1; $i -le 4; $i++) { choco install -y --no-progress --force rust-ms; if ($LASTEXITCODE -eq 0) { $ok=$true; break }; Write-Host "rust-ms attempt $i failed (exit $LASTEXITCODE); retrying in 20s"; Start-Sleep -Seconds 20 }; if (-not $ok) { throw "choco install rust-ms failed after 4 attempts" } }'
+            - '$ok=$false; for ($i=1; $i -le 5; $i++) { choco install -y --no-progress nasm cmake; if ((Test-Path "C:\Program Files\NASM\nasm.exe") -and (Test-Path "C:\Program Files\CMake\bin\cmake.exe")) { $ok=$true; break }; Write-Host "nasm/cmake attempt $i incomplete (choco feed may be down); retrying in 5s"; Start-Sleep -Seconds 5 }; if (-not $ok) { throw "choco install nasm/cmake failed after 5 attempts" }'
+            - 'if (Test-Path "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin\cargo.exe") { Write-Host "rust-ms already installed" } else { $ok=$false; for ($i=1; $i -le 5; $i++) { choco install -y --no-progress --force rust-ms; if (Test-Path "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin\cargo.exe") { $ok=$true; break }; Write-Host "rust-ms attempt $i incomplete (choco feed down or Defender lock); retrying in 5s"; Start-Sleep -Seconds 5 }; if (-not $ok) { throw "choco install rust-ms failed after 5 attempts" } }'
             - '$env:PATH = "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin;C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"; cargo --version; rustc --version; cargo build --features ffi --release'
             - New-Item -ItemType Directory -Force dist | Out-Null
             - Copy-Item target\release\confluent_kafka.dll dist\

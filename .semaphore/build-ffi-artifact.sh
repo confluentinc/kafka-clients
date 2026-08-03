@@ -31,6 +31,19 @@
 
 set -eu
 
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 if [ "${1:-}" = "--in-docker" ]; then
     set -x
 
@@ -40,17 +53,17 @@ if [ "${1:-}" = "--in-docker" ]; then
     git clone /io /build
     cd /build
 
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
-    sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal
+    retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+    retry sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal
     . "$HOME/.cargo/env"
 
     # aws-lc-rs (rustls crypto backend) build deps: cmake + perl always, nasm
     # only on x86_64.
     if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi
-    command -v cmake >/dev/null 2>&1 || "$PKG" install -y cmake
-    command -v perl  >/dev/null 2>&1 || "$PKG" install -y perl
+    command -v cmake >/dev/null 2>&1 || retry "$PKG" install -y cmake
+    command -v perl  >/dev/null 2>&1 || retry "$PKG" install -y perl
     if [ "$(uname -m)" = "x86_64" ]; then
-        command -v nasm >/dev/null 2>&1 || "$PKG" install -y nasm
+        command -v nasm >/dev/null 2>&1 || retry "$PKG" install -y nasm
     fi
 
     rm -f target/include/confluent_kafka.h
@@ -71,16 +84,16 @@ if [ "$(uname -s)" = "Darwin" ]; then
     set -x
 
     if ! command -v cargo >/dev/null 2>&1; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
-        sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal
+        retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+        retry sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal
     fi
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
     # aws-lc-rs (rustls crypto backend) build deps: cmake always, nasm only on
     # x86_64.
-    command -v cmake >/dev/null 2>&1 || brew install cmake
+    command -v cmake >/dev/null 2>&1 || retry brew install cmake
     if [ "$(uname -m)" = "x86_64" ]; then
-        command -v nasm >/dev/null 2>&1 || brew install nasm
+        command -v nasm >/dev/null 2>&1 || retry brew install nasm
     fi
 
     rm -f target/include/confluent_kafka.h
@@ -103,5 +116,6 @@ fi
 
 docker_image="${1:?Usage: $0 <docker-image>}"
 
+retry docker pull "$docker_image"
 exec docker run --rm -v "$PWD":/io -w /io "$docker_image" \
     sh /io/.semaphore/build-ffi-artifact.sh --in-docker

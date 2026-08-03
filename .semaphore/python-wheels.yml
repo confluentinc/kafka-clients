@@ -49,7 +49,7 @@ blocks:
       jobs:
         - name: build
           commands:
-            - python -m pip install cibuildwheel==3.2.1
+            - sh .semaphore/retry.sh python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-linux-${CK_ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
             - artifact pull workflow rust-linux-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
@@ -71,7 +71,7 @@ blocks:
       jobs:
         - name: build
           commands:
-            - python -m pip install cibuildwheel==3.2.1
+            - sh .semaphore/retry.sh python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-linux-${CK_ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
             - artifact pull workflow rust-linux-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
@@ -129,7 +129,7 @@ blocks:
       jobs:
         - name: build
           commands:
-            - python -m pip install cibuildwheel==3.2.1
+            - sh .semaphore/retry.sh python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-macos-${CK_ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
             - artifact pull workflow rust-macos-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
@@ -153,7 +153,7 @@ blocks:
       jobs:
         - name: build
           commands:
-            - python -m pip install cibuildwheel==3.2.1
+            - sh .semaphore/retry.sh python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
             - artifact pull workflow rust-macos-${CK_ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
             - artifact pull workflow rust-macos-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
@@ -211,7 +211,7 @@ blocks:
       jobs:
         - name: build
           commands:
-            - python -m pip install cibuildwheel==3.2.1
+            - 'for ($i=1; $i -le 5; $i++) { python -m pip install cibuildwheel==3.2.1; if ($LASTEXITCODE -eq 0) { break }; if ($i -eq 5) { throw "pip install cibuildwheel failed after 5 attempts" }; Start-Sleep -Seconds 5 }'
             - New-Item -ItemType Directory -Force target\include,target\release | Out-Null
             - artifact pull workflow rust-windows-${Env:CK_ARCH}/confluent_kafka.h --destination target\include\confluent_kafka.h --force
             - artifact pull workflow rust-windows-${Env:CK_ARCH}/confluent_kafka.lib --destination target\release\confluent_kafka.lib --force
@@ -239,7 +239,7 @@ blocks:
           commands:
             - artifact pull workflow artifacts/wheels-windows-${Env:CK_ARCH} --destination wheelhouse --force
             - Get-ChildItem wheelhouse
-            - python -m pip install pytest pytest-asyncio
+            - 'for ($i=1; $i -le 5; $i++) { python -m pip install pytest pytest-asyncio; if ($LASTEXITCODE -eq 0) { break }; if ($i -eq 5) { throw "pip install pytest failed after 5 attempts" }; Start-Sleep -Seconds 5 }'
             - python -m pip install --no-index --find-links wheelhouse confluent-kafka4
             - "python -c \"import _confluentkafka; print('import OK')\""
             - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
@@ -254,7 +254,7 @@ blocks:
       jobs:
         - name: build
           commands:
-            - python -m pip install build
+            - sh .semaphore/retry.sh python -m pip install build
             - python -m build -s --outdir sdist-out bindings/python
             - ls -l sdist-out/
             - artifact push workflow sdist-out --destination artifacts/sdist --force
@@ -269,17 +269,18 @@ blocks:
       jobs:
         - name: verify
           commands:
-            - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
-            - sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+            - sh .semaphore/retry.sh curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+            - sh .semaphore/retry.sh sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
             - source "$HOME/.cargo/env"
-            - sudo apt-get update -qq && sudo apt-get install -y -qq cmake nasm
+            - sh .semaphore/retry.sh sudo apt-get update -qq
+            - sh .semaphore/retry.sh sudo apt-get install -y -qq cmake nasm
             - artifact pull workflow artifacts/sdist --destination sdist-out --force
             - ls -l sdist-out/
             - python -m venv /tmp/sdistvenv
             - . /tmp/sdistvenv/bin/activate
-            - python -m pip install --upgrade pip
+            - sh .semaphore/retry.sh python -m pip install --upgrade pip
             - unset CONFLUENT_KAFKA_LIB_DIR
-            - python -m pip install -v sdist-out/*.tar.gz
+            - sh .semaphore/retry.sh python -m pip install -v sdist-out/*.tar.gz
             - "python -c \"import _confluentkafka; print('import OK from-source sdist')\""
             - "python -c \"from producer import KafkaProducer as P; [P({'bootstrap.servers':'localhost:9092','compression.type':c}).close() for c in ('gzip','snappy','lz4','zstd')]; P({'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('smoke OK')\""
 
