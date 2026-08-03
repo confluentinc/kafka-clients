@@ -399,3 +399,38 @@ records under a broker-side producer-state eviction.
     reachable on the idempotent path.
   - An authorization check that enumerates codes without
     `TransactionalIdAuthorizationFailed`.
+
+## 10. Deterministic encoding: sort where Java's `HashMap` order is unspecified
+
+Where Java groups wire data through a `HashMap` and then serialises it, the Rust
+translation MUST impose a deterministic order before emitting — topic name, then
+partition index, or the natural key for whatever the collection holds.
+
+**Why:** Java's `HashMap` iteration order is unspecified, so the byte encoding it
+produces for a given logical value is not stable. That is invisible in Java (the
+broker treats these as sets) but it blocks two things here: `definition-of-done.md`
+§3 requires byte-level wire tests against known vectors, which cannot assert on
+nondeterministic bytes; and it would make a future byte-diff against the Java
+client — the most direct proof of wire compatibility — impossible.
+
+Sorting yields the same logical value with a stable encoding, so it is
+behaviour-preserving on the wire and strictly more testable.
+
+**How to apply:**
+
+  - Any `HashMap`/`HashSet`-grouped collection that reaches a `write()` gets a
+    deterministic order, with the reason noted at the site.
+  - Already applied: `AddPartitionsToTxnRequestBuilder::build_txn_topic_collection`
+    and `AddPartitionsToTxnResponse::topic_collection_for_errors`.
+  - `TxnOffsetCommitRequest` groups offsets by topic the same way — it must
+    follow.
+  - Do NOT sort collections that are never serialised; the work buys nothing.
+  - Do NOT re-order collections whose order Java specifies, or where order is
+    semantically meaningful — in-flight batches are ordered by sequence and are
+    a `BTreeSet` for exactly that reason (rule 6).
+
+**Anti-patterns to flag in review:**
+
+  - A `HashMap` iterated directly into a `set_*` call on generated wire data.
+  - A byte-level test that passes only because the map happened to iterate in a
+    convenient order.

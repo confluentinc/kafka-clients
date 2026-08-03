@@ -951,3 +951,89 @@ Beyond the phase-count cost, the Milestone 9 FFI access-guard model has no story
 for an *open* transaction: a transaction spans `begin` → N×`send` → `commit`,
 while the binding is one-operation-in-flight. Needs design, not a mechanical
 extension.
+
+---
+
+## 10. Recorded translation deviations
+
+`definition-of-done.md` §7 requires every deviation from the Java source to be
+justified. Gathered here so a reviewer has one list to check rather than hunting
+through commit messages. Each is also documented at its own call site.
+
+### 10.1 `HashMap` iteration → sorted output, wherever Java's order is unspecified
+
+**Rule: where Java groups wire data through a `HashMap` and then serialises it,
+the Rust translation sorts before emitting.**
+
+Java's `HashMap` has unspecified iteration order, so the *byte encoding* it
+produces for a given logical value is not stable across runs. That is invisible
+in Java because the broker treats these collections as sets. It is a problem
+here for two reasons:
+
+  1. `definition-of-done.md` §3 requires byte-level wire tests against known
+     vectors, not only round-trips. A test cannot assert on bytes whose order is
+     nondeterministic.
+  2. A nondeterministic encoding makes any future byte-diff against the Java
+     client — the most direct way to prove wire compatibility — impossible.
+
+Sorting produces the same logical value with a stable encoding, so it is
+behaviour-preserving on the wire while being strictly more testable.
+
+**Applied so far (Phase 2):**
+
+| Site | Sorted by |
+|---|---|
+| `AddPartitionsToTxnRequestBuilder::build_txn_topic_collection` | topic name |
+| `AddPartitionsToTxnResponse::topic_collection_for_errors` | topic name, then partition index |
+
+**How to apply going forward:** any `HashMap`/`HashSet`-grouped collection that
+reaches a `write()` gets a deterministic order, and the reason is noted at the
+site. `TxnOffsetCommitRequest` (Phase 2) groups offsets by topic the same way and
+must follow this. Do NOT sort collections that are *not* serialised — there the
+extra work buys nothing.
+
+**Not applicable to** collections whose order Java specifies, or where order is
+semantically meaningful (in-flight batch ordering by sequence, for instance,
+which is already a `BTreeSet` for exactly that reason).
+
+### 10.2 Broker-side members omitted from translated request classes
+
+`AddPartitionsToTxnRequest` in Java carries `Builder.forBroker`,
+`normalizeRequest`, `allVerifyOnlyRequest`, `partitionsByTransaction`, and
+`errorResponseForTransaction`. All five construct or inspect a *received* v4+
+request, which only a broker does — verified by caller analysis over the whole
+Kafka tree: `core/.../KafkaApis.scala` and
+`server/.../AddPartitionsToTxnManager.java` only, nothing under
+`clients/src/main`.
+
+Omitted, consistent with §1.1's exclusion of `WriteTxnMarkers` and
+`EndTransactionMarker` from this client-only port. Translating them would add
+permanently unreachable code that `#![deny(warnings)]` forces us to mask with
+`#[allow(dead_code)]`, which then hides genuinely dead code later.
+
+The corresponding Java tests (`testBatchedRequests`, `testNormalizeRequest`, and
+the `version >= 4` half of `testConstructor`) are skipped for the same reason,
+recorded in a comment block in the Rust test module per DoD §3.
+
+### 10.3 Java `throws` on a missing lookup → `Option` / `Result`
+
+`AddPartitionsToTxnResponse::get_transaction_topic_results` returns
+`Option<&[..]>`. Java calls `find(..)` and dereferences the result, throwing on a
+missing transactional id; a Rust caller cannot catch that, so the absence is made
+explicit in the return type. Same treatment as `TxnPartitionMap::get`, which
+returns `Result` where Java throws `IllegalStateException` (CLAUDE.md §10.2).
+
+### 10.4 Phase 1 deviations (cross-reference)
+
+Recorded in full elsewhere; listed here for completeness:
+
+  - `TxnPartitionEntry` stores ordering keys rather than owning `ProducerBatch` —
+    this document's header and `.claude/rules/producer-transactions.md` §7.
+  - `TxnPartitionEntry::decrement_sequence` does not wrap — rules §8.
+  - `TransactionalRequestResult` composes `Notify` + `AtomicBool` in place of
+    `CountDownLatch` — rules §5.
+  - `TxnPartitionMap::get_mut` has no Java counterpart (Java references are
+    implicitly mutable) — commit `90732c4`.
+  - `ProducerConfig::explicitly_set` replaces Java's
+    `AbstractConfig.originals()` — commit `d14d1ec`.
+  - The five typed txn error structs deliberately not created — §1.1 and rules §9.
