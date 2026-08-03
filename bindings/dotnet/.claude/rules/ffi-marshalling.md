@@ -223,9 +223,10 @@ applies to both clients.
   - A `callbackTask`-style poll-loop thread — nothing to poll here.
   - Assuming thread-per-broker / native threads scaling with cluster size.
 
-**Tests required (both clients):** `Dispose` drains before destroying the handle —
-the producer joins the pump (§A1/§A7), the consumer wakes+awaits the in-flight op
-(§B1/§B7).
+**Tests required (both clients):** `Dispose` returns without hanging before
+destroying the handle — the producer joins the pump (§A1/§A7); the consumer closes
+gracefully — `close_(with_timeout|async)` → `Consumer_destroy`, with **no
+separate-op drain** (single-owner: the awaiter of an op is its disposer, §B1/§B7).
 
 ---
 
@@ -766,7 +767,7 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 
 | Handle | Category | Freed by |
 |---|---|---|
-| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: drain → `Consumer_close` → `Consumer_destroy` (destroy is **fire-and-forget** — cancels in-flight ops; §B7 + Rule) |
+| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is **fire-and-forget** — cancels in-flight ops, no bg-task join; §B7 + Rule |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
 | `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
@@ -791,10 +792,15 @@ const-ness decides, not the type name:
     == IntPtr.Zero`. The release path is **not** a bare destroy: `Consumer_destroy`
     is **fire-and-forget** — `shutdown_background` **cancels** in-flight async ops
     (their callbacks never fire) and it does **not** join the bg task (the graceful
-    join is `Consumer_close` / `await_join`, not destroy). So `Dispose` must
-    **drain/wakeup the in-flight op → `Consumer_close` (joins the bg task) →
-    `Consumer_destroy`**; a bare destroy hangs the `Task` and leaks the `GCHandle`
-    (§B7). Guard use-after-dispose with `ObjectDisposedException`.
+    join is `Consumer_close` / `await_join`, not destroy). So teardown routes
+    through the graceful **close before destroy**: `Dispose` =
+    **`Consumer_close_with_timeout` → `Consumer_destroy`**, `DisposeAsync` =
+    **`Consumer_close_async` → `Consumer_destroy`** — no separate-op drain (§B7).
+    Under single-owner the awaiter of an op *is* its disposer, so there is nothing
+    to drain; a bare `Consumer_destroy` on an **unawaited** op still strands the
+    `Task` and leaks the `GCHandle` once — the **accepted single-owner residual**
+    for that misuse case (Python parity, §B7). Guard use-after-dispose with
+    `ObjectDisposedException`.
   - **Transient error handle:** read the accessors (message before free), then
     `_destroy` in a `finally`; the managed `KafkaException` holds copied values,
     never the handle (§B5). `_destroy` is null-safe.
@@ -820,8 +826,11 @@ confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern). A per-message
 and borrowed views are not wrapped. The borrow-root discipline (Category 3
 outlives its Category 4 borrows) is what makes the receive-path zero-copy contract
 (§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` being fire-and-forget is why
-teardown routes through `Consumer_close` first — otherwise the in-flight op's
-callback is cancelled and its `Task` never completes.
+teardown routes through the graceful `Consumer_close` (`_with_timeout` / `_async`)
+first — a bare destroy skips the bg-task join. There is no separate-op drain:
+under single-owner the awaiter of an op is its disposer, so an *unawaited* op
+stranded + leaked once across teardown is an accepted residual (§B7), not
+something close drains away.
 
 **Anti-patterns:**
 
@@ -832,8 +841,11 @@ callback is cancelled and its `Task` never completes.
     element or byte slice from it is still in use (CLAUDE.md §6.4) — use-after-free.
   - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
     map/list), or freeing it twice.
-  - A bare `Consumer_destroy` without the drain → `Consumer_close` first — hangs
-    the `Task`, leaks the `GCHandle`.
+  - A bare `Consumer_destroy` without routing through `Consumer_close`
+    (`_with_timeout` / `_async`) first — skips the graceful bg-task join. (Under
+    single-owner, an *unawaited* op stranded + leaked once across teardown is the
+    accepted residual, §B7 — **not** something teardown drains away; do not re-add
+    a `Dispose`-side separate-op drain.)
 
 **Tests required:**
 
