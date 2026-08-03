@@ -104,15 +104,13 @@ blocks:
       jobs:
         - name: build
           commands:
-            - choco install -y --no-progress nasm cmake
+            - choco install -y --no-progress nasm cmake rust-ms
             - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"
-            - $env:RUSTUP_HOME = "$env:TEMP\rustup-$env:SEMAPHORE_JOB_ID"
-            - $env:CARGO_HOME = "$env:TEMP\cargo-$env:SEMAPHORE_JOB_ID"
-            - $env:RUSTUP_TOOLCHAIN = "stable"
-            - Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
-            - for ($i=1; $i -le 3; $i++) { .\rustup-init.exe -y --default-toolchain stable --profile minimal --no-modify-path; if ($LASTEXITCODE -eq 0) { break }; Write-Host "rustup-init attempt $i failed (exit $LASTEXITCODE); retrying in 15s"; Start-Sleep -Seconds 15 }
-            - $env:PATH = "$env:CARGO_HOME\bin;$env:PATH"
+            - $cargoBin = (Get-ChildItem "C:\Program Files\Rust*\bin\cargo.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+            - if (-not $cargoBin) { throw "cargo.exe not found after 'choco install rust-ms'" }
+            - $env:PATH = "$cargoBin;$env:PATH"
             - cargo --version
+            - rustc --version
             - cargo build --features ffi --release
             - New-Item -ItemType Directory -Force dist | Out-Null
             - Copy-Item target\release\confluent_kafka.dll dist\

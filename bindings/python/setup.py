@@ -74,7 +74,12 @@ def _find_prebuilt_lib_dir():
     uses the repo's ``target/release`` if a library is there (local dev)."""
     env_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR')
     if env_dir:
-        return env_dir
+        if _lib_present(env_dir):
+            return os.path.abspath(env_dir)
+        sys.stderr.write(
+            'confluent-kafka4: CONFLUENT_KAFKA_LIB_DIR=%s is set but no '
+            'libconfluent_kafka is there; falling back to a from-source build.\n'
+            % env_dir)
     default = os.path.join(_repo_root(), 'target', 'release')
     if _lib_present(default):
         return default
@@ -188,8 +193,14 @@ class build_ext(_build_ext):
             # (below) additionally covers Windows CI and local dev.
             ext.include_dirs.append(os.path.join(_repo_root(), 'target', 'include'))
             ext.library_dirs.append(prebuilt)
-            ext.libraries.append('confluent_kafka')
-            if sys.platform != 'win32':
+            if sys.platform == 'win32':
+                import_lib = os.path.join(prebuilt, 'confluent_kafka.dll.lib')
+                if os.path.exists(import_lib):
+                    ext.extra_objects.append(import_lib)
+                else:
+                    ext.libraries.append('confluent_kafka')
+            else:
+                ext.libraries.append('confluent_kafka')
                 # rpath rewritten by delocate/auditwheel during wheel repair.
                 ext.runtime_library_dirs.append(prebuilt)
         else:
@@ -209,6 +220,11 @@ class build_ext(_build_ext):
                 ext.extra_link_args += ['-framework', 'Security',
                                         '-framework', 'CoreFoundation']
             elif sys.platform == 'win32':
+                # TODO: this list is not yet CI-link-tested (no from-source Windows
+                # job exists). Regenerate authoritatively on Windows via
+                # `cargo rustc --features ffi --release -- --print native-static-libs`
+                # once Stage-A Windows builds; current aws-lc-rs/tokio/std may also
+                # need e.g. bcryptprimitives, synchronization, ncrypt, crypt32, secur32.
                 ext.libraries += ['ntdll', 'bcrypt', 'advapi32', 'userenv',
                                   'kernel32', 'ws2_32']
             else:

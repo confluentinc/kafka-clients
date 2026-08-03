@@ -40,8 +40,8 @@ if [ "${1:-}" = "--in-docker" ]; then
     git clone /io /build
     cd /build
 
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --profile minimal
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+    sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal
     . "$HOME/.cargo/env"
 
     # aws-lc-rs (rustls crypto backend) build deps: cmake + perl always, nasm
@@ -53,7 +53,9 @@ if [ "${1:-}" = "--in-docker" ]; then
         command -v nasm >/dev/null 2>&1 || "$PKG" install -y nasm
     fi
 
+    rm -f target/include/confluent_kafka.h
     cargo build --features ffi --release
+    test -f target/include/confluent_kafka.h
 
     lib=target/release/libconfluent_kafka.so
     echo "== LINKAGE =="; ldd "$lib" || true
@@ -69,8 +71,8 @@ if [ "$(uname -s)" = "Darwin" ]; then
     set -x
 
     if ! command -v cargo >/dev/null 2>&1; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain stable --profile minimal
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+        sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal
     fi
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
@@ -81,7 +83,9 @@ if [ "$(uname -s)" = "Darwin" ]; then
         command -v nasm >/dev/null 2>&1 || brew install nasm
     fi
 
+    rm -f target/include/confluent_kafka.h
     cargo build --features ffi --release
+    test -f target/include/confluent_kafka.h
 
     lib=target/release/libconfluent_kafka.dylib
     # Give the dylib an @rpath install name so the wheel build links against

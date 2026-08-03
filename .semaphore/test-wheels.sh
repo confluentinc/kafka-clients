@@ -68,14 +68,18 @@ if [ "${IN_DOCKER:-0}" = "1" ]; then
     fi
 
     export HOME=/root
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
+    sh /tmp/uv-install.sh
     run_matrix /io
     exit 0
 fi
 
 if [ "$(uname -s)" = "Darwin" ]; then
     set -x
-    command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+    if ! command -v uv >/dev/null 2>&1; then
+        curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
+        sh /tmp/uv-install.sh
+    fi
     run_matrix "$PWD"
     exit 0
 fi
