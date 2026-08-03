@@ -35,6 +35,29 @@ BATCH_DISPATCH = 0.02
 BACKPRESSURE_BOUND = 1000
 
 
+def _complete_pending(action):
+    """Poll a MockProducer completion (``complete_next`` / ``error_next``)
+    until it acts on a pending send.
+
+    The background batch thread dispatches sends to the mock asynchronously, so
+    a record is not necessarily pending the instant the test asks to complete
+    it. These calls return ``True`` only once a record is pending, so poll on
+    that return value rather than assuming a fixed dispatch delay.
+    """
+    deadline = time.monotonic() + FUTURE_TIMEOUT
+    while not action():
+        assert time.monotonic() < deadline, "no pending send appeared to complete"
+        time.sleep(0.005)
+
+
+async def _complete_pending_async(action):
+    """Async variant of :func:`_complete_pending`."""
+    deadline = time.monotonic() + FUTURE_TIMEOUT
+    while not action():
+        assert time.monotonic() < deadline, "no pending send appeared to complete"
+        await asyncio.sleep(0.005)
+
+
 # -- MockProducer lifecycle ---------------------------------------------------
 
 def test_create_mock_producer_auto_complete():
@@ -106,9 +129,8 @@ def test_multiple_sends_incrementing_offsets():
 def test_manual_complete_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
     assert not future.done()
-    p.complete_next()
+    _complete_pending(p.complete_next)
     meta = future.result(timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
@@ -119,8 +141,7 @@ def test_manual_complete_next():
 def test_manual_error_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
+    _complete_pending(lambda: p.error_next(2, "test error"))
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
@@ -134,8 +155,7 @@ def test_manual_error_next():
 def test_manual_error_next_null_message():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, None)
+    _complete_pending(lambda: p.error_next(2, None))
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     assert exc_info.value.code == 2
@@ -213,8 +233,7 @@ def test_clear():
 def test_kafka_error_properties():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "corrupt message")
+    _complete_pending(lambda: p.error_next(2, "corrupt message"))
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
@@ -400,9 +419,8 @@ async def test_async_multiple_sends_incrementing_offsets():
 async def test_async_manual_complete_next():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
-    await asyncio.sleep(BATCH_DISPATCH)
     assert not future.done()
-    p.complete_next()
+    await _complete_pending_async(p.complete_next)
     meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
@@ -413,8 +431,7 @@ async def test_async_manual_complete_next():
 async def test_async_manual_error_next():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
-    await asyncio.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
+    await _complete_pending_async(lambda: p.error_next(2, "test error"))
     with pytest.raises(KafkaError) as exc_info:
         await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     err = exc_info.value
