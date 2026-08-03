@@ -588,7 +588,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// under the not-thread-safe contract; the canonical <c>wakeup()</c> usage
     /// (thread A blocked, thread B wakes it, thread A then disposes) does not race
     /// wakeup against dispose. Any future hardening (per-call
-    /// <c>SafeHandle.DangerousAddRef</c>) renumbers to N≥7.
+    /// <c>SafeHandle.DangerousAddRef</c>) renumbers to N≥8 (M3/P3 took N=7).
     /// </remarks>
     internal void Wakeup()
     {
@@ -612,7 +612,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <c>None → RuntimeError</c> (<c>_concurrent_error</c>) and the CLAUDE.md §3
     /// idiom map (concurrent sync state read → <see cref="InvalidOperationException"/>).
     /// <b>Accepted residual:</b> the same check-then-use handle TOCTOU vs teardown as
-    /// <see cref="Wakeup"/> (accepted-by-design; N≥7 if ever hardened).
+    /// <see cref="Wakeup"/> (accepted-by-design; N≥8 if ever hardened — M3/P3 took N=7).
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
