@@ -205,8 +205,9 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_close_async</c> — graceful async close (default
     /// timeout; joins the background task). Uses the same void-result completion
-    /// callback and takes the core access guard, so any in-flight op must be drained
-    /// first (ffi §B7). The primary teardown path (<c>DisposeAsync</c>).
+    /// callback and takes the core access guard; under the single-owner model the
+    /// awaiter of an op is its disposer, so the guard is free at teardown — there is
+    /// no separate-op drain (ffi §B7). The primary teardown path (<c>DisposeAsync</c>).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerCloseAsync(

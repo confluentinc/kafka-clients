@@ -2,9 +2,10 @@
 
   <!--
     The Confluent.Kafka library — the P/Invoke binding over the Rust core's C ABI.
-    M1/P1 lands the interop FOUNDATION: the NativeMethods [DllImport] class + the
-    Utf8Marshal helpers under Internal/Interop/ (no SafeHandles, no completion
-    bridge, no public managed API yet — see design/history/M1).
+    Now holds the interop foundation (the NativeMethods [DllImport] class +
+    Utf8Marshal helpers under Internal/Interop/), the owned-handle SafeHandles, and
+    the consumer completion bridge (callback → TaskCompletionSource); the public
+    managed API is not landed yet — everything stays internal (see design/history/).
 
     TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): netstandard2.0 is the floor
     and satisfies net462 as well — no separate net462 target, because the binding
@@ -76,8 +77,9 @@
   <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) and IAsyncDisposable /
        ValueTask are built in on net8.0+ but need facade packages on the
        netstandard2.0 leg only (net462 rides ns2.0). Microsoft.Bcl.AsyncInterfaces
-       supplies IAsyncDisposable (DisposeAsync — the primary drain-first teardown,
-       CLAUDE.md §4 / ffi §B7) and transitively brings the ValueTask async builder. -->
+       supplies IAsyncDisposable (DisposeAsync — the primary close-first teardown,
+       no separate-op drain, CLAUDE.md §4 / ffi §B7) and transitively brings the
+       ValueTask async builder. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="System.Memory" Version="4.5.5" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
