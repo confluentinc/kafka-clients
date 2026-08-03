@@ -66,6 +66,9 @@ use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::deserializers::Deserializers;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_config::FetchConfig;
+#[cfg(test)]
+use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
 use crate::consumer::internals::fetch_utils::request_metadata_update;
 use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
 use crate::fetch_response_data::PartitionData;
@@ -108,6 +111,11 @@ where
     fetch_config: FetchConfig,
     deserializers: Arc<Deserializers<K, V>>,
     time: Arc<dyn FetchCollectorTime>,
+    /// Records per-partition lag / lead metrics. Phase M3 re-introduces the
+    /// `FetchMetricsManager` parameter Phase 7a dropped. The lag/lead sensors
+    /// are DEBUG-gated, so at the default INFO level this recording is a single
+    /// `should_record()` check (no work) per partition per poll.
+    metrics_manager: Arc<FetchMetricsManager>,
     /// Test-only injection point that forces [`Self::initialize`] to fail,
     /// translating Java's `FetchCollectorTest.testErrorInInitialize`
     /// anonymous-subclass override of `initialize()`. Rust `FetchCollector`
@@ -130,14 +138,14 @@ where
     /// Translates Java's
     /// `FetchCollector(LogContext, ConsumerMetadata, SubscriptionState,
     /// FetchConfig, Deserializers, FetchMetricsManager, Time)`. The
-    /// `LogContext` is dropped (we use the `log` crate) and the
-    /// `FetchMetricsManager` is dropped per Phase 7a's plan (no Rust
-    /// metrics framework in this milestone).
+    /// `LogContext` is dropped (we use the `log` crate). Phase M3 plumbs the
+    /// `FetchMetricsManager` (dropped by Phase 7a) for per-partition lag/lead.
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         fetch_config: FetchConfig,
         deserializers: Arc<Deserializers<K, V>>,
+        metrics_manager: Arc<FetchMetricsManager>,
         time: Arc<dyn FetchCollectorTime>,
     ) -> Self {
         Self {
@@ -146,6 +154,7 @@ where
             fetch_config,
             deserializers,
             time,
+            metrics_manager,
             #[cfg(test)]
             force_initialize_error: None,
         }
@@ -527,8 +536,28 @@ where
                     position_advanced = true;
                 }
 
-                // Metrics calls are dropped per Phase 7a plan (no metrics
-                // framework). Java records partition lag / lead here.
+                // Record per-partition lag / lead, mirroring Java's
+                // `FetchCollector` (`subscriptions.partitionLag` /
+                // `partitionLead` → `metricsManager.recordPartitionLag/Lead`).
+                // The record methods update the client-level INFO
+                // `records-lag-max` / `records-lead-min` sensors AND register +
+                // record the DETAILED per-partition sensors at INFO — full Java
+                // parity, no DEBUG gating (see `FetchMetricsManager`). This is
+                // per-partition per-poll, not per-record (Java's accepted
+                // per-fetch cost, to be measured in M8).
+                let (partition_lag, partition_lead) = {
+                    let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                    (
+                        guard.partition_lag(&tp, self.fetch_config.isolation_level).ok().flatten(),
+                        guard.partition_lead(&tp).ok().flatten(),
+                    )
+                };
+                if let Some(lag) = partition_lag {
+                    self.metrics_manager.record_partition_lag(&tp, lag);
+                }
+                if let Some(lead) = partition_lead {
+                    self.metrics_manager.record_partition_lead(&tp, lead);
+                }
 
                 let metadata = match OffsetAndMetadata::with_leader_epoch(cf.next_fetch_offset(), cf.last_epoch(), "") {
                     Ok(m) => m,
@@ -902,6 +931,14 @@ mod tests {
         TopicPartition::new(topic.to_string(), partition)
     }
 
+    /// Builds a throwaway per-response aggregator tracking only `partition`,
+    /// for tests that build a `CompletedFetch` but don't assert metric values.
+    fn agg_for(partition: &TopicPartition) -> Arc<FetchMetricsAggregator> {
+        let mut partitions = HashSet::new();
+        partitions.insert(partition.clone());
+        Arc::new(FetchMetricsAggregator::new(FetchMetricsManager::for_test(), partitions))
+    }
+
     fn make_records(starting_offset: i64, count: i32) -> Vec<u8> {
         let records: Vec<SimpleRecord> = (0..count)
             .map(|i| {
@@ -956,6 +993,7 @@ mod tests {
             subs.clone(),
             fetch_config.clone(),
             deserializers.clone(),
+            FetchMetricsManager::for_test(),
             time.clone(),
         );
 
@@ -984,11 +1022,13 @@ mod tests {
         if let Some(e) = error {
             partition_data.set_error_code(e.code());
         }
+        let aggregator = agg_for(&partition);
         CompletedFetch::new_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
             partition,
             partition_data,
+            aggregator,
             fetch_offset,
         )
     }
@@ -1119,6 +1159,7 @@ mod tests {
             h.subs.clone(),
             h.fetch_config.clone(),
             h.deserializers.clone(),
+            FetchMetricsManager::for_test(),
             h.time.clone(),
         );
         let partition = tp("topic-a", 0);
@@ -1359,11 +1400,13 @@ mod tests {
         } else {
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
         }
+        let aggregator = agg_for(&partition);
         CompletedFetch::new_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
             partition,
             partition_data,
+            aggregator,
             0,
         )
     }
@@ -1675,11 +1718,13 @@ mod tests {
         partition_data.set_high_watermark(1000);
         partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         partition_data.set_aborted_transactions(Some(vec![txn]));
+        let aggregator = agg_for(&partition);
         CompletedFetch::new_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
             partition,
             partition_data,
+            aggregator,
             fetch_offset,
         )
     }
@@ -1943,6 +1988,7 @@ mod tests {
             h.subs.clone(),
             h.fetch_config.clone(),
             deserializers,
+            FetchMetricsManager::for_test(),
             h.time.clone(),
         );
 

@@ -1058,10 +1058,10 @@ async fn test_async_consumer_position_respects_wakeup() {
     // Java: `CompletableFuture.runAsync(() -> { sleep(1s); consumer.wakeup(); })`
     // (`PlaintextConsumerTest.java:1501-1504`). Java's `Consumer` reference is
     // freely shareable across threads. The Rust equivalent obtains a
-    // `Send + 'static` `WakeupHandle` BEFORE the `&mut` borrow taken by
-    // `position_timeout`, then fires `wakeup()` from a spawned task — sound,
-    // no `unsafe`, no reference to the consumer crossing the task boundary.
-    let handle = consumer.wakeup_handle();
+    // `Clone + Send + Sync` `ConsumerHandle` BEFORE the `&mut` borrow taken
+    // by `position_timeout`, then fires `wakeup()` from a spawned task —
+    // sound, no `unsafe`, no reference to the consumer crossing the boundary.
+    let handle = consumer.handle();
     let waker = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         handle.wakeup();
@@ -1095,7 +1095,7 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     // Java (`PlaintextConsumerTest.java:1535-1538`): a cross-thread
     // `wakeup()` interrupts a blocking `position` even when the bootstrap
     // is unreachable. Obtain the shareable handle before the `&mut` borrow.
-    let handle = consumer.wakeup_handle();
+    let handle = consumer.handle();
     let waker = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         handle.wakeup();

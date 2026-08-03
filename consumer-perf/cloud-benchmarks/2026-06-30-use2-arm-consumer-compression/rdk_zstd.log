@@ -1,0 +1,58 @@
+======================================================================
+Consumer E2E Latency Benchmark - librdkafka (native C)
+======================================================================
+Bootstrap:   pkc-devcg1y1mn.us-east-2.aws.devel.cpdev.cloud:9092
+Topic:       cmp-bench-200p
+Group:       rdk_zstd-1782817269
+Throughput:  300000 msg/s
+Duration:    600 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      18000000 messages
+Interval:    30 s
+rdkafka ver: 2.13.0
+======================================================================
+
+>>> Subscribed; waiting for partition assignment (group.protocol=consumer)...
+%6|1782817269.477|GETSUBSCRIPTIONS|librdkafka-perf-c#consumer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to oZmevLSXT2eu6FvERF9g/Q
+    assigned 200 partition(s)
+    assigned after 1.0s
+>>> Settling to the live edge (polling until empty) before producer...
+    at live edge; starting producer now.
+
+>>> Measuring (warmup 18000000 msgs, then 600 s)...
+
+>>> first records arrived 44.2s after producer start
+    warmup complete (18000000 msgs); measuring now
+[interval 0] t=  30.0s msgs=4500330 thr=   150006 msg/s  avg=  9.77 p50=9 p99=18 p999=53 max=115 ms  cpu= 47.7% rss= 129.0MB
+[interval 1] t=  60.0s msgs=4500186 thr=   149997 msg/s  avg=  9.67 p50=9 p99=16 p999=32 max=80 ms  cpu= 61.9% rss= 135.0MB
+[interval 2] t=  90.0s msgs=4500175 thr=   150001 msg/s  avg=  9.75 p50=9 p99=18 p999=33 max=49 ms  cpu= 61.8% rss= 136.7MB
+[interval 3] t= 120.0s msgs=4500140 thr=   150002 msg/s  avg=  9.69 p50=9 p99=17 p999=32 max=76 ms  cpu= 62.1% rss= 137.4MB
+[interval 4] t= 150.0s msgs=4500155 thr=   149996 msg/s  avg=  9.74 p50=9 p99=17 p999=31 max=39 ms  cpu= 62.1% rss= 137.6MB
+[interval 5] t= 180.0s msgs=4500165 thr=   150002 msg/s  avg=  9.68 p50=9 p99=17 p999=31 max=41 ms  cpu= 61.9% rss= 137.8MB
+[interval 6] t= 210.0s msgs=4500165 thr=   149997 msg/s  avg=  9.68 p50=9 p99=16 p999=30 max=41 ms  cpu= 62.1% rss= 138.4MB
+[interval 7] t= 240.0s msgs=4500192 thr=   150002 msg/s  avg=  9.65 p50=9 p99=16 p999=30 max=41 ms  cpu= 61.8% rss= 138.5MB
+[interval 8] t= 270.0s msgs=4500421 thr=   150002 msg/s  avg=  9.68 p50=9 p99=16 p999=31 max=40 ms  cpu= 62.0% rss= 137.4MB
+[interval 9] t= 300.0s msgs=4500286 thr=   149997 msg/s  avg=  9.67 p50=9 p99=17 p999=34 max=113 ms  cpu= 62.2% rss= 139.0MB
+[interval 10] t= 330.0s msgs=4500522 thr=   150014 msg/s  avg=  9.85 p50=9 p99=20 p999=56 max=109 ms  cpu= 62.0% rss= 139.0MB
+[interval 11] t= 360.0s msgs=4500297 thr=   149992 msg/s  avg=  9.65 p50=9 p99=17 p999=31 max=48 ms  cpu= 62.2% rss= 138.3MB
+[interval 12] t= 390.0s msgs=4500324 thr=   150008 msg/s  avg=  9.72 p50=9 p99=17 p999=31 max=38 ms  cpu= 62.1% rss= 138.7MB
+[interval 13] t= 420.0s msgs=4500177 thr=   149995 msg/s  avg=  9.63 p50=9 p99=16 p999=28 max=36 ms  cpu= 62.1% rss= 138.9MB
+[interval 14] t= 450.0s msgs=4500316 thr=   149995 msg/s  avg=  9.78 p50=9 p99=18 p999=34 max=53 ms  cpu= 62.3% rss= 139.5MB
+[interval 15] t= 480.0s msgs=4500835 thr=   150019 msg/s  avg=  9.68 p50=9 p99=17 p999=31 max=47 ms  cpu= 62.1% rss= 141.9MB
+[interval 16] t= 510.0s msgs=4499771 thr=   149990 msg/s  avg=  9.69 p50=9 p99=16 p999=29 max=36 ms  cpu= 61.8% rss= 141.9MB
+[interval 17] t= 540.0s msgs=4500181 thr=   149986 msg/s  avg=  9.69 p50=9 p99=17 p999=29 max=42 ms  cpu= 62.1% rss= 142.4MB
+[interval 18] t= 570.0s msgs=4500863 thr=   150019 msg/s  avg=  9.72 p50=9 p99=17 p999=32 max=46 ms  cpu= 62.0% rss= 143.0MB
+
+======================================================================
+SUMMARY - librdkafka-c (warmup 18000000 excluded, group.protocol=consumer)
+======================================================================
+Measured messages: 90000343
+Duration:          600.00 s
+Throughput:        150001 msg/s  (146.48 MiB/s)
+Batch consume:     max_poll_records=500, 108000343 non-empty batches, 108000343 records, avg 1.0 records/batch
+Records/batch dist (post-warmup): n=90000343 min=1 mean=1.0 p50=1 p99=1 max=1
+E2E latency (ms):  min=2 avg=9.70 stddev=2.92 p50=9 p90=13 p95=14 p99=17 p99.9=32 max=115
+RSS (MB, current):  avg=138.4 min=129.0 max=143.0 (19 samples)
+======================================================================
+
+Results written to: /home/ec2-user/ccomp/rdk_zstd_d/rdk_zstd-1782817269

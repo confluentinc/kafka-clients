@@ -1,0 +1,39 @@
+>>> c-v2 / compression=none / warmup=120s dur=600s topic=cmp-bench-200p
+%6|1782814507.566|GETSUBSCRIPTIONS|rdkafka#producer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to lBOZHKZ8TSu/Hc0U41Ey9A
+SASL authentication enabled
+Key size: 0 bytes
+Value size: 2048 bytes
+Bootstrap servers: pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Enable idempotence: false
+Max in flight requests: 1000
+Compression type: none
+Buffer memory: 32 MB
+Batch size: 1024 KB
+Max request size: 8192 KB
+Linger ms: 5
+Using librdkafka producer (v2)
+Using topic name: cmp-bench-200p
+Producing 0 messages at 0 msg/s
+Running C sync producer performance test ...
+Warming up for 120 seconds ...
+Warmup complete.
+Starting measured interval at 1782814627375 ms
+Test duration reached, 601 seconds. Interrupting...
+End time: 1782815228438 ms
+Duration: 601062.93 ms
+Average CPU: 172.33 %
+Average RSS: 367566.73 KiB
+CPU efficiency: 1667.29 msg/(s * 1% CPU)
+Memory efficiency: 0.78 msg/(s * KB RSS)
+Average future queue size: 37378.31
+Max future queue size: 116958
+Average time: 0.00 ms
+Average rate msg/s: 287324.32 msg/s
+Average rate MiB/s: 561.18 MiB/s
+Average latency: 129.11 ms
+Max latency: 463.43 ms
+p99 latency: 254 ms
+Waiting for final metrics collection...
+Final CPU: 0.00 %
+Final RSS: 279908.00 KiB
+Done
