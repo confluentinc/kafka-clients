@@ -7,6 +7,55 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 3 / Phase 3 — "Poll + the receive path (owned-handle completion
+  bridge)": DONE (2026-08-03).** Proves the **result-returning** completion shape
+  end-to-end via `poll` — the owned-handle bridge that five sibling query ops reuse
+  later (`committed` / `offsetsForTimes` / `beginning|endOffsets` / `partitionsFor` /
+  `listTopics`). Delivered: `OperationCompletionSource<TResult>` (the void bridge kept
+  as the thin `OperationCompletionSource : <bool>` subclass, all 5 invariants intact);
+  the `poll_callback_t` trampoline on `ConsumerCallbacks` (`OnPoll`, free-exactly-once
+  in a `finally` on every path — batch destroy after copy-out, `KafkaError` via
+  `FromHandle`, per-op `GCHandle`); the **on-dispatcher copy-out** `ConsumerRecordsMarshal`
+  (§6.4 default — the native batch is created / copied-out / destroyed entirely inside
+  the callback, so no `SafeConsumerRecordsHandle`, no native-backed `ReadOnlyMemory`,
+  no leak-on-abandoned-`Task`); internal `ConsumerRecord` / `ConsumerRecords` /
+  `RecordHeader` (owned copies; **internal**, under `Internal/`); the receive-path
+  DllImports (`poll_async`, the `ConsumerRecords_t` / `ConsumerRecord_t` accessor set
+  incl. headers, `MockConsumer_add_record` / `_set_poll_error`, `Consumer_assign`); the
+  length-delimited `Utf8Marshal.PtrToString(ptr, len)` (§B3, never NUL-scan, un-defers
+  M1/P1 D4); `NativeConsumer.PollAsync`. Mode A (no Rust / header change). NO sync
+  `poll` DllImport (decision 5); NO public client type; `ConsumerRecord(s)` stay
+  **internal**. Additive on `prashah_dev_asyncbridge_poll_scaffolding` (new PR stacked
+  on #135). Approved plan + closed record:
+  `design/history/M3/P3-poll-receive-path/`.
+  - **Un-deferred → DONE this phase:** the **M3/P1 D1 wakeup-fault one-shot**. `poll` is
+    the only op that observes `wakeup()` broker-free, so `Wakeup()` → next `PollAsync`
+    faults with a Wakeup `KafkaException` **once**, then a subsequent poll succeeds
+    (`ConsumerPollWakeupCancelTests.Wakeup_ThenPoll_FaultsOnce_ThenReusable`) — Java's
+    one-shot `WakeupException` semantics, now **deterministic** (was D1-deferred as
+    "not reachable without a wakeup-observing op").
+  - **Remaining residuals (still deferred — each needs a Rust-core dependency, not a
+    .NET change):** (1) the **in-flight `CancellationToken` cancel** (token fires after
+    submit but while the poll is mid-flight) — the pre-canceled path is deterministic
+    and tested, but the mock poll runs to completion synchronously and exposes no block
+    hook, so the in-flight overlap is a genuine race; (2) the **M3/P2 D-Q4 concurrency
+    matrix** (a controllable-duration guard-holding op to force a submit→callback
+    overlap) — same non-blockable-mock ceiling; (3) a **full end-to-end header
+    round-trip** — `MockConsumer_add_record` carries no headers, so only the
+    empty-headers case is reachable (the §B3 length-delimited header-key *primitive* is
+    directly tested via the record topic + `Utf8MarshalLengthDelimitedTests`). All three
+    close when an FFI-exposed blockable mock poll (a `schedule_poll_task` / block hook)
+    or a header-carrying `add_record` lands — a Rust-core dependency requested from the
+    root `actor-executor`, reviewed by `kafka-critic`. Documented in
+    `COMMENTS.DONE.7.md` (the D-Q4 precedent).
+  - **Governance (N≥7 → N≥8 renumber):** M3/P3 **takes N=7**, so the STATUS /
+    `NativeConsumer` cross-thread **hardening** labels previously pre-labeled "N≥7"
+    (the `Wakeup()`/`GroupId()` handle TOCTOU vs teardown; the submit-vs-`destroy`
+    handle race) are renumbered to **N≥8**. `poll` makes the wakeup *behavior* testable
+    but does NOT make the cross-thread *races* reachable — the binding is still
+    internal-only, single-owner, with no public cross-thread `Wakeup()` caller — so
+    those items **stay deferred**, now "N≥8, whenever a public client makes `Wakeup()`
+    genuinely cross-thread." No dangling "N≥7" label remains in tracked source/STATUS.
 - **Milestone 3 / Phase 2 — "Single-owner alignment (drop the managed guard +
   in-flight tracking; keep the completion bridge)": DONE (2026-08-03).** Aligns the
   M3/P1 completion-bridge/teardown machinery to the in-repo Python sibling's
@@ -588,8 +637,8 @@ async bridge):
   Cross-thread `Wakeup()`/`GroupId()` TOCTOU vs teardown; plan-consistent
   (per-call AddRef deliberately declined) and not reachable while internal-only.
   **M3/P2 re-contextualized this as an accepted-by-design residual of the
-  single-owner model** (no longer a pending "N=6" fix; future hardening is N≥7) —
-  see "STATUS reconciliation (M3/P2)" below.
+  single-owner model** (no longer a pending "N=6" fix; future hardening is N≥8,
+  since M3/P3 took N=7) — see "STATUS reconciliation (M3/P2)" below.
 
 ## Review outcome (M2/P2)
 
@@ -743,8 +792,8 @@ N=6 is M3/P2 itself):
   cross-thread misuse. Python has the same, more exposed (its `wakeup` has no closed
   check at all). It is **not** a pending N=6 fix. If a *future* hardening is ever
   wanted (per-call `SafeHandle.DangerousAddRef`/`DangerousRelease` around the native
-  call, or a documented no-concurrent-teardown precondition), it renumbers to **N≥7**
-  — whenever the public client makes `Wakeup()` genuinely cross-thread.
+  call, or a documented no-concurrent-teardown precondition), it renumbers to **N≥8**
+  (M3/P3 took N=7) — whenever the public client makes `Wakeup()` genuinely cross-thread.
 - **Item 2 — op-submit vs concurrent teardown window: ELIMINATED by M3/P2.** The
   window existed because `SubmitVoidOperation` published `_inFlightContext` /
   `_inFlightOperation` *after* the native `submit(...)`, leaving a gap where a
@@ -753,7 +802,7 @@ N=6 is M3/P2 itself):
   window** — the race is structurally removed, not deferred. Any residual
   submit-vs-`destroy` *handle* race folds into the third accepted-by-design residual
   (`DangerousGetHandle()` in `SubmitVoidOperation` vs a concurrent `Consumer_destroy`,
-  cross-thread misuse only); any future hardening is **N≥7**.
+  cross-thread misuse only); any future hardening is **N≥8** (M3/P3 took N=7).
 
 **Accepted residuals (M3/P2, enumerated in the `NativeConsumer` class doc).** All
 three are explicitly accepted, misuse-only, not-reachable-while-internal (Python
