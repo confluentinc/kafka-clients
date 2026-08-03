@@ -557,6 +557,7 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
         "use crate::common::protocol::{{Field, Readable, Schema, SchemaType, Writable, RawTaggedField, Message, ApiMessage, ObjectSerializationCache, MessageSizeAccumulator, ByteBufferAccessor}};"
     )?;
     writeln!(file, "use crate::common::Uuid;")?;
+    writeln!(file, "use bytes::Bytes;")?;
     writeln!(file, "use std::fmt;")?;
     writeln!(file, "use std::hash::{{Hash, Hasher}};")?;
     writeln!(file)?;
@@ -3238,8 +3239,11 @@ fn generate_field_read(
         FieldType::String => {
             generate_string_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
-        FieldType::Bytes | FieldType::Records => {
+        FieldType::Bytes => {
             generate_bytes_read(file, &field_name, flexible_versions, indent, nullable)?;
+        },
+        FieldType::Records => {
+            generate_records_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
         FieldType::Array(element_type) => {
             generate_array_read(file, &field_name, element_type, flexible_versions, indent, nullable)?;
@@ -3444,14 +3448,12 @@ fn generate_bytes_read(
             writeln!(file, "{}        result.{} = None;", indent, field_name)?;
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let length = len - 1;", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}    }}", indent)?;
         } else {
             writeln!(file, "{}    let length = if len == 0 {{ 0 }} else {{ len - 1 }};", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
         }
         writeln!(file, "{}}} else {{", indent)?;
@@ -3460,14 +3462,12 @@ fn generate_bytes_read(
             writeln!(file, "{}    if len < 0 {{", indent)?;
             writeln!(file, "{}        result.{} = None;", indent, field_name)?;
             writeln!(file, "{}    }} else {{", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_array(len as usize)?;", indent)?;
             writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}    }}", indent)?;
         } else {
             writeln!(file, "{}    let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
         }
         writeln!(file, "{}}}", indent)?;
@@ -3477,14 +3477,91 @@ fn generate_bytes_read(
             writeln!(file, "{}if len < 0 {{", indent)?;
             writeln!(file, "{}    result.{} = None;", indent, field_name)?;
             writeln!(file, "{}}} else {{", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_array(len as usize)?;", indent)?;
             writeln!(file, "{}    result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}}}", indent)?;
         } else {
             writeln!(file, "{}let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
-            writeln!(file, "{}let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}let bytes = readable.read_array(length as usize)?;", indent)?;
+            writeln!(file, "{}result.{} = {}bytes{};", indent, field_name, some_wrap, some_close)?;
+        }
+    }
+    Ok(())
+}
+
+/// Generate read code for a `records` field, handling nullable fields.
+///
+/// Identical in structure to [`generate_bytes_read`] but reads via
+/// [`Readable::read_bytes_owned`], which returns a zero-copy refcounted
+/// [`bytes::Bytes`] slice of the source buffer when the reader supports it
+/// (e.g. `BytesReader` on the receive path — consumer-threading.md §27).
+fn generate_records_read(
+    file: &mut fs::File,
+    field_name: &str,
+    flexible_versions: Versions,
+    indent: &str,
+    nullable: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let some_wrap = if nullable { "Some(" } else { "" };
+    let some_close = if nullable { ")" } else { "" };
+
+    if !flexible_versions.empty() {
+        if flexible_versions.highest() == i16::MAX {
+            writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+        } else {
+            writeln!(
+                file,
+                "{}if version >= {} && version <= {} {{",
+                indent,
+                flexible_versions.lowest(),
+                flexible_versions.highest()
+            )?;
+        }
+        writeln!(file, "{}    let len = readable.read_unsigned_varint()?;", indent)?;
+        if nullable {
+            writeln!(file, "{}    if len == 0 {{", indent)?;
+            writeln!(file, "{}        result.{} = None;", indent, field_name)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let length = len - 1;", indent)?;
+            writeln!(
+                file,
+                "{}        let bytes = readable.read_bytes_owned(length as usize)?;",
+                indent
+            )?;
+            writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
+            writeln!(file, "{}    }}", indent)?;
+        } else {
+            writeln!(file, "{}    let length = if len == 0 {{ 0 }} else {{ len - 1 }};", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_bytes_owned(length as usize)?;", indent)?;
+            writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
+        }
+        writeln!(file, "{}}} else {{", indent)?;
+        writeln!(file, "{}    let len = readable.read_int()?;", indent)?;
+        if nullable {
+            writeln!(file, "{}    if len < 0 {{", indent)?;
+            writeln!(file, "{}        result.{} = None;", indent, field_name)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_bytes_owned(len as usize)?;", indent)?;
+            writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
+            writeln!(file, "{}    }}", indent)?;
+        } else {
+            writeln!(file, "{}    let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_bytes_owned(length as usize)?;", indent)?;
+            writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
+        }
+        writeln!(file, "{}}}", indent)?;
+    } else {
+        writeln!(file, "{}let len = readable.read_int()?;", indent)?;
+        if nullable {
+            writeln!(file, "{}if len < 0 {{", indent)?;
+            writeln!(file, "{}    result.{} = None;", indent, field_name)?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    let bytes = readable.read_bytes_owned(len as usize)?;", indent)?;
+            writeln!(file, "{}    result.{} = Some(bytes);", indent, field_name)?;
+            writeln!(file, "{}}}", indent)?;
+        } else {
+            writeln!(file, "{}let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
+            writeln!(file, "{}let bytes = readable.read_bytes_owned(length as usize)?;", indent)?;
             writeln!(file, "{}result.{} = {}bytes{};", indent, field_name, some_wrap, some_close)?;
         }
     }
@@ -4438,7 +4515,10 @@ fn field_type_to_rust(field_type: &FieldType) -> String {
         FieldType::Float64 => "f64".to_string(),
         FieldType::String => "String".to_string(),
         FieldType::Bytes => "Vec<u8>".to_string(),
-        FieldType::Records => "Vec<u8>".to_string(),
+        // The `records` wire field is a zero-copy refcounted buffer so the
+        // FetchResponse payload (and the producer batch on the write path) can
+        // travel without an intermediate copy (consumer-threading.md §27).
+        FieldType::Records => "Bytes".to_string(),
         FieldType::Array(element_type) => {
             format!("Vec<{}>", field_type_to_rust(element_type))
         },
@@ -4464,7 +4544,8 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
         if default.is_none() {
             match field.field_type() {
                 FieldType::String => return "Some(String::new())".to_string(),
-                FieldType::Bytes | FieldType::Records => return "Some(Vec::new())".to_string(),
+                FieldType::Bytes => return "Some(Vec::new())".to_string(),
+                FieldType::Records => return "Some(Bytes::new())".to_string(),
                 FieldType::Struct(struct_name) => {
                     return format!("Some({}::new())", struct_name);
                 },
@@ -4493,7 +4574,8 @@ fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>
                 if s == "null" {
                     match field_type {
                         FieldType::String => return "String::new()".to_string(),
-                        FieldType::Bytes | FieldType::Records => return "Vec::new()".to_string(),
+                        FieldType::Bytes => return "Vec::new()".to_string(),
+                        FieldType::Records => return "Bytes::new()".to_string(),
                         FieldType::Array(_) => return "Vec::new()".to_string(),
                         _ => {}, // Fall through
                     }
@@ -4521,10 +4603,8 @@ fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>
                             return s.to_string();
                         }
                     },
-                    FieldType::Float64 => {
-                        if s.parse::<f64>().is_ok() {
-                            return s.to_string();
-                        }
+                    FieldType::Float64 if s.parse::<f64>().is_ok() => {
+                        return s.to_string();
                     },
                     FieldType::Bool => {
                         if s == "true" {
@@ -4561,7 +4641,8 @@ fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>
         FieldType::Uint16 | FieldType::Uint32 => "0".to_string(),
         FieldType::Float64 => "0.0".to_string(),
         FieldType::String => "String::new()".to_string(),
-        FieldType::Bytes | FieldType::Records => "Vec::new()".to_string(),
+        FieldType::Bytes => "Vec::new()".to_string(),
+        FieldType::Records => "Bytes::new()".to_string(),
         FieldType::Array(_) => "Vec::new()".to_string(),
         FieldType::Uuid => "Uuid::zero()".to_string(),
         FieldType::Struct(name) => format!("{}::new()", name),

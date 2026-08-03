@@ -77,7 +77,6 @@
 //! - SKIP: `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForClassicCooperative` — classic-protocol-only
 //! - SKIP: `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForClassicEager` — classic-protocol-only
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -101,7 +100,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -109,21 +108,10 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 // ── Cluster config (Java: 3 brokers, KIP-848, no extra serverProperties) ─
 
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
-        "classic,consumer".to_string(),
-    );
-    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string());
-    props.insert("KAFKA_GROUP_CONSUMER_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
-    props.insert("KAFKA_GROUP_CONSUMER_MIN_HEARTBEAT_INTERVAL_MS".to_string(), "500".to_string());
-    props.insert("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string());
     // Auto-created topics get a single partition (Java's `topic`/`newTopic`
-    // both have a single relevant partition `(topic, 0)` in this suite).
-    props.insert("KAFKA_NUM_PARTITIONS".to_string(), "1".to_string());
-    let mut cfg = ClusterConfig::with_brokers(3);
-    cfg.server_properties = props;
-    cfg
+    // both have a single relevant partition `(topic, 0)` in this suite); the
+    // canonical helper supplies the shared KIP-848 broker tuning.
+    kip848_3_broker(1)
 }
 
 // ── Byte-array deserializer ───────────────────────────────────────────

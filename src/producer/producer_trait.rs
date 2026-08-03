@@ -23,9 +23,9 @@ use std::time::Duration;
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
+use crate::producer::Callback;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
-use crate::producer::internals::Callback;
 
 /// The interface for the [`KafkaProducer`](super::kafka_producer::KafkaProducer).
 ///

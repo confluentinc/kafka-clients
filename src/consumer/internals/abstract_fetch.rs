@@ -1412,7 +1412,7 @@ mod tests {
         let mut rpd = RespPartitionData::new();
         rpd.set_partition_index(0);
         rpd.set_high_watermark(COUNT as i64);
-        rpd.set_records(Some(records_bytes));
+        rpd.set_records(Some(bytes::Bytes::from(records_bytes)));
         let mut topic_resp = FetchableTopicResponse::new();
         topic_resp.set_topic("topic-a".to_string());
         topic_resp.set_partitions(vec![rpd]);
@@ -1523,7 +1523,7 @@ mod tests {
             let mut rpd = RespPartitionData::new();
             rpd.set_partition_index(p);
             rpd.set_high_watermark(4);
-            rpd.set_records(Some(bytes));
+            rpd.set_records(Some(bytes::Bytes::from(bytes)));
             partitions.push(rpd);
         }
         let mut topic_resp = FetchableTopicResponse::new();

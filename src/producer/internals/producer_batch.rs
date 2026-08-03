@@ -36,6 +36,7 @@ use crate::common::record::Record;
 use crate::common::record::RecordBatch;
 use crate::common::record::TimestampType;
 use crate::common::record::abstract_records;
+use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
 use crate::producer::record_metadata;
@@ -71,13 +72,6 @@ fn from_final_state(state: FinalState) -> u8 {
         FinalState::Succeeded => FINAL_STATE_SUCCEEDED,
     }
 }
-
-/// Type alias for the callback function.
-///
-/// In Java, `Callback.onCompletion(RecordMetadata, Exception)` is an interface with a single
-/// method. We use `FnOnce` because each callback is invoked exactly once when the batch
-/// completes, fails, or is aborted.
-pub type Callback = Box<dyn FnOnce(Option<&crate::producer::RecordMetadata>, Option<&KafkaError>) + Send + Sync>;
 
 /// A callback and the associated FutureRecordMetadata argument to pass to it.
 pub(crate) struct Thunk {

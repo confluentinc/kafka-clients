@@ -41,6 +41,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
     - Don't check for failing programming preconditions like NULLs on required parameters
       or parameters not following the function parameters preconditions.
+    - For async callbacks the name must be the name of the method in C plus `_callback` suffix, like
+      `kafka_producer_KafkaProducer_send_callback_t` or `kafka_producer_KafkaProducer_send_batch_callback_t`.
 
 
 3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.

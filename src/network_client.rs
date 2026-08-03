@@ -621,8 +621,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             let mut req = self.in_flight_requests.complete_next(&source);
 
             if let Some(payload_bytes) = payload {
-                // Parse the response
-                let mut buf = crate::common::protocol::ByteBufferAccessor::from_bytes(payload_bytes);
+                // Parse the response through a `Bytes`-backed reader so the wire
+                // `records` field can be handed out as an O(1) refcounted slice
+                // of the payload instead of being copied (§27, Phase 1).
+                // `Bytes::from(Vec<u8>)` adopts the existing allocation — no copy.
+                let mut buf = crate::common::protocol::BytesReader::new(bytes::Bytes::from(payload_bytes));
                 match ConcreteResponse::parse_response(&mut buf, &req.header) {
                     Ok(response) => {
                         // Handle throttle

@@ -43,7 +43,7 @@ use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::record::RecordBatch;
 
-use super::internals::Callback;
+use super::Callback;
 
 /// A mock of the producer interface for testing code that uses Kafka.
 ///
@@ -82,10 +82,8 @@ struct MockProducerInner<K, V> {
 /// Corresponds to Java's `MockProducer.Completion` inner class.
 struct Completion {
     offset: i64,
-    #[allow(dead_code)]
     metadata: RecordMetadata,
     result: Arc<ProduceRequestResult>,
-    #[allow(dead_code)]
     callback: Option<Callback>,
     topic_partition: TopicPartition,
 }
@@ -94,19 +92,28 @@ impl Completion {
     /// Complete this send with either a success or an error.
     ///
     /// Corresponds to Java's `Completion.complete(RuntimeException)`.
-    fn complete(&self, error: Option<KafkaError>) {
+    fn complete(self, error: Option<KafkaError>) {
+        let Completion { offset, metadata, result, callback, topic_partition } = self;
         if let Some(e) = error {
-            let tp = self.topic_partition.clone();
-            let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(move |_| Some(e.clone()));
-            self.result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
-            // In Java, callback is invoked here with error metadata.
-            // Callbacks are out of scope for now.
-            let _ = tp;
+            let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = {
+                let e = e.clone();
+                Arc::new(move |_| Some(e.clone()))
+            };
+            result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
+            result.done();
+            // Mirror Java's `Completion.complete`: fire the callback with the error.
+            if let Some(cb) = callback {
+                cb(None, Some(&e));
+            }
+            let _ = topic_partition;
         } else {
-            self.result.set(self.offset, RecordBatch::NO_TIMESTAMP, None);
-            // In Java, callback is invoked here with success metadata.
+            result.set(offset, RecordBatch::NO_TIMESTAMP, None);
+            result.done();
+            // Mirror Java's `Completion.complete`: fire the callback with the metadata.
+            if let Some(cb) = callback {
+                cb(Some(&metadata), None);
+            }
         }
-        self.result.done();
     }
 }
 

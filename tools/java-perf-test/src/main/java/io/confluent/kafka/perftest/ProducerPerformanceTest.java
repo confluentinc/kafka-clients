@@ -23,6 +23,14 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.errors.TopicExistsException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -60,6 +68,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   LINGER_MS               linger.ms
  *   COMPRESSION_TYPE        none / gzip / snappy / lz4 / zstd (default none)
  *   ENABLE_IDEMPOTENCE      true / false (default false)
+ *   USE_DEFAULTS            True / False (default False); omit all tuning knobs, use client defaults
  *   MAX_IN_FLIGHT           max.in.flight.requests.per.connection
  *   WARMUP_SECONDS          warmup duration (default 0)
  *   TEST_DURATION_SECONDS   measured interval (default 600)
@@ -92,11 +101,26 @@ public class ProducerPerformanceTest {
     private static final int MESSAGE_SIZE = KEY_SIZE + VALUE_SIZE;
     private static final String TOPIC_NAME = envOr("TOPIC_NAME", "test-topic");
     private static final long LIMIT_RPS = envLong("LIMIT_RPS", 0);
-    private static final int WARMUP_SECONDS = envInt("WARMUP_SECONDS", 0);
+    private static final int WARMUP_SECONDS = envInt("WARMUP_SECONDS", 120);
     private static final int TEST_DURATION_SECONDS = envInt("TEST_DURATION_SECONDS", 600);
     private static final long NUM_MESSAGES = envLong("NUM_MESSAGES", 0);
     private static final boolean DO_VERIFY = envBool("DO_VERIFY", true);
     private static final boolean VERIFY_CONSUMED = envBool("VERIFY_CONSUMED", false);
+    // When true (default), delete + re-create the topic before the run. -1
+    // partitions => broker default (RF is always broker default, so this works
+    // on Confluent Cloud where RF=1 is rejected).
+    private static final boolean CREATE_TOPIC = envBool("CREATE_TOPIC", true);
+    private static final int PARTITIONS = envInt("PARTITIONS", -1);
+    // Per-message p99 latency budget in ms (0 = off). Matches C/Rust.
+    private static final long P99_LIMIT_MS = envLong("P99_LIMIT_MS", 0);
+    private static final int MAX_LATENCY_MS = 10_000;
+    // Seconds to keep sampling after the measured interval, so the JSONL
+    // captures cooldown windows (carry measurement_end_ms). Matches C/Rust.
+    private static final int POST_TEST_AWAIT_SECONDS = 10;
+    // Latency histogram (ms) for the p99 computation; written only by the
+    // single recorder thread and read after it is joined, so no locking needed.
+    private static final long[] latencyHist = new long[MAX_LATENCY_MS + 2];
+    private static boolean latencyBudgetExceeded = false;
 
     public static void main(String[] args) throws Exception {
         installSignalHandler();
@@ -118,6 +142,10 @@ public class ProducerPerformanceTest {
 
         Properties producerConf = configurationFromEnv();
         printConfiguration(producerConf);
+
+        if (CREATE_TOPIC) {
+            recreateTopic(producerConf, TOPIC_NAME, PARTITIONS);
+        }
 
         // Pre-generate messages, just like the Python test.
         List<KeyValue> generated = generateMessages(10_000, KEY_SIZE, VALUE_SIZE);
@@ -169,6 +197,8 @@ public class ProducerPerformanceTest {
                 Math.max(1, (int) ((1L << 31) - 1) / Math.max(1, MESSAGE_SIZE / 4)));
 
             AtomicBoolean recording = new AtomicBoolean(true);
+            // Sample the handoff-queue depth each measured window (Little's Law check).
+            metrics.setQueueSizeSupplier(pending::size);
             Thread recorder = startRecorder(pending, recording, metrics, messageSize);
 
             long beforeMs = System.currentTimeMillis();
@@ -231,35 +261,65 @@ public class ProducerPerformanceTest {
             double rate = completedMessages / durationS;
             double mibRate = (completedMessages * (double) MESSAGE_SIZE) / (1024.0 * 1024.0) / durationS;
             double avgLatencyMs = completedMessages == 0 ? 0 : (double) totalLatencyMs / completedMessages;
+            long p99Ms = percentileFromHist(latencyHist, 0.99);
+
+            // CPU/RSS averaged over the measured interval only (collector-side).
+            int samples = metrics.totalExternalMetrics;
+            double avgCpu = samples > 0 ? metrics.totalCpu / samples : 0.0;
+            double avgRssKib = samples > 0 ? metrics.totalRss / samples / 1024.0 : 0.0;
 
             System.out.println();
             System.out.println("Duration: " + (afterMs - beforeMs) + " ms");
+            System.out.println("Average CPU: " + String.format("%.2f %%", avgCpu));
+            System.out.println("Average RSS: " + String.format("%.2f KiB", avgRssKib));
+            System.out.println("CPU efficiency: " + String.format("%.2f msg/(s * 1%% CPU)",
+                rate / (avgCpu > 0 ? avgCpu : 1.0)));
+            System.out.println("Memory efficiency: " + String.format("%.2f msg/(s * KB RSS)",
+                rate / (avgRssKib > 0 ? avgRssKib : 1.0)));
+            System.out.println("Average future queue size: " + String.format("%.2f", metrics.getAverageQueueSize()));
+            System.out.println("Max future queue size: " + metrics.getMaxQueueSize());
             System.out.println("Average rate msg/s: " + String.format("%.2f msg/s", rate));
             System.out.println("Average rate MiB/s: " + String.format("%.2f MiB/s", mibRate));
             System.out.println("Average latency: " + String.format("%.2f ms", avgLatencyMs));
             System.out.println("Max latency: " + maxLatencyMs + " ms");
+            System.out.println("p99 latency: " + p99Ms + " ms");
+            // Latency budget — only asserted when set (matches C/Rust).
+            if (P99_LIMIT_MS > 0 && p99Ms > P99_LIMIT_MS && !terminating) {
+                System.err.println("p99 latency " + p99Ms + " ms exceeds " + P99_LIMIT_MS + " ms budget");
+                latencyBudgetExceeded = true;
+            }
         }
 
         if (!terminating) {
             System.out.println("Performing garbage collection...");
             System.gc();
         }
+        // Post-test await: keep the collector sampling so the JSONL captures
+        // cooldown windows (they carry measurement_end_ms and are excluded from
+        // the measured statistics). Mirrors the C and Rust tests.
         System.out.println("Waiting for final metrics collection...");
+        if (!terminating) {
+            try {
+                Thread.sleep(POST_TEST_AWAIT_SECONDS * 1000L);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
         Map<String, Double> last = externalMetricsLastValues(metrics);
         System.out.printf("Final CPU: %.2f %%%n", last.get("last_cpu"));
         System.out.printf("Final RSS: %.2f KiB%n", last.get("last_rss") / 1024.0);
         metrics.stopCollecting();
         System.out.println("Done");
 
-        int exitCode = 0;
+        int exitCode = latencyBudgetExceeded ? 1 : 0;
         if (VERIFY_CONSUMED && !terminating && baselineEndOffsets != null) {
             long expected = warmupSent + measuredSent;
             System.out.println("Verifying consumed messages from topic '" + TOPIC_NAME
                 + "' starting at baseline offsets (expected = " + warmupSent + " warmup + "
                 + measuredSent + " measured = " + expected + ")");
             try {
-                exitCode = verifyConsumedMessages(producerConf, TOPIC_NAME,
-                    baselineEndOffsets, expected, KEY_SIZE > 0);
+                exitCode = Math.max(exitCode, verifyConsumedMessages(producerConf, TOPIC_NAME,
+                    baselineEndOffsets, expected, KEY_SIZE > 0));
             } catch (Exception e) {
                 System.out.println("Verification failed with exception: " + e.getMessage());
                 exitCode = 1;
@@ -282,40 +342,52 @@ public class ProducerPerformanceTest {
         conf.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, envOr("BOOTSTRAP_SERVERS", "localhost:9092"));
         conf.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         conf.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
-        conf.put(ProducerConfig.ACKS_CONFIG, "all");
-        conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
 
-        // Default batch.size mirrors Python: 1_000_000 bytes (~977 KB) when unset.
-        // BATCH_SIZE env value is interpreted in KB to match the Python harness.
-        long batchSizeBytes;
-        if (System.getenv("BATCH_SIZE") != null) {
-            batchSizeBytes = envLong("BATCH_SIZE", 977) * 1024L;
+        // With USE_DEFAULTS the client runs at its own defaults: only the
+        // bootstrap servers, the (mandatory) serializers and SASL credentials
+        // are set, and every performance-tuning knob is omitted. Mirrors the
+        // Python, C and Rust producer performance tests' USE_DEFAULTS behavior.
+        boolean useDefaults = "True".equals(System.getenv("USE_DEFAULTS"));
+        if (!useDefaults) {
+            conf.put(ProducerConfig.ACKS_CONFIG, "all");
+            conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
+
+            // batch.size: default 1 MiB (1024 KiB); env value is in KiB. Matches
+            // the C and Rust perf tests.
+            long batchSizeBytes;
+            if (System.getenv("BATCH_SIZE") != null) {
+                batchSizeBytes = envLong("BATCH_SIZE", 1024) * 1024L;
+            } else {
+                batchSizeBytes = 1024L * 1024L;
+            }
+            conf.put(ProducerConfig.BATCH_SIZE_CONFIG, Long.toString(batchSizeBytes));
+
+            // max.request.size: default batch*64, capped at 8 MiB; env is in KiB.
+            // Matches the C and Rust perf tests.
+            long maxRequestSizeBytes;
+            if (System.getenv("MAX_REQUEST_SIZE") != null) {
+                maxRequestSizeBytes = envLong("MAX_REQUEST_SIZE", 0) * 1024L;
+            } else {
+                maxRequestSizeBytes = batchSizeBytes * 64L;
+            }
+            maxRequestSizeBytes = Math.min(maxRequestSizeBytes, 8L * 1024 * 1024);
+            conf.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, Long.toString(maxRequestSizeBytes));
+
+            conf.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, envOr("COMPRESSION_TYPE", "none"));
+            conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, envOr("ENABLE_IDEMPOTENCE", "false"));
+
+            if (System.getenv("MAX_IN_FLIGHT") != null) {
+                conf.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+                    System.getenv("MAX_IN_FLIGHT"));
+            }
+            if (System.getenv("BUFFER_MEMORY") != null) {
+                conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
+                    Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
+            }
+            // linger.ms: default 5 (matches the C and Rust perf tests).
+            conf.put(ProducerConfig.LINGER_MS_CONFIG, envOr("LINGER_MS", "5"));
         } else {
-            batchSizeBytes = 1_000_000L;
-        }
-        conf.put(ProducerConfig.BATCH_SIZE_CONFIG, Long.toString(batchSizeBytes));
-
-        long maxRequestSizeBytes;
-        if (System.getenv("MAX_REQUEST_SIZE") != null) {
-            maxRequestSizeBytes = envLong("MAX_REQUEST_SIZE", 8 * 977) * 1024L;
-        } else {
-            maxRequestSizeBytes = batchSizeBytes * 8;
-        }
-        conf.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, Long.toString(maxRequestSizeBytes));
-
-        conf.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, envOr("COMPRESSION_TYPE", "none"));
-        conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, envOr("ENABLE_IDEMPOTENCE", "false"));
-
-        if (System.getenv("MAX_IN_FLIGHT") != null) {
-            conf.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
-                System.getenv("MAX_IN_FLIGHT"));
-        }
-        if (System.getenv("BUFFER_MEMORY") != null) {
-            conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
-                Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
-        }
-        if (System.getenv("LINGER_MS") != null) {
-            conf.put(ProducerConfig.LINGER_MS_CONFIG, System.getenv("LINGER_MS"));
+            System.out.println("USE_DEFAULTS: true (client defaults; tuning knobs omitted)");
         }
 
         // SASL
@@ -416,16 +488,14 @@ public class ProducerPerformanceTest {
                         System.out.println("Produce call resulted in exception: " + e.getMessage());
                     }
                     completedMessages++;
-                    if (completedMessages % 10_000 == 0) {
-                        // Equivalent to Python's "Completed messages: X. Rate so far: Y" line.
-                        // Suppressed by default to keep stderr clean; uncomment if needed.
-                    }
                     long latency = System.currentTimeMillis() - p.startTimeMs;
                     metrics.latency.addMeasurement(latency);
                     metrics.messages.addMeasurement(1);
                     metrics.bytes.addMeasurement(messageSize);
                     if (latency > maxLatencyMs) maxLatencyMs = latency;
                     totalLatencyMs += latency;
+                    int ms = (int) Math.min(Math.max(latency, 0), MAX_LATENCY_MS + 1);
+                    latencyHist[ms]++;
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     return;
@@ -579,6 +649,58 @@ public class ProducerPerformanceTest {
         return conf;
     }
 
+    /**
+     * Delete the topic (ignoring "does not exist"), wait 10s, re-create it, wait
+     * 10s — using the Java AdminClient. Partition count and replication factor
+     * use the broker default (Optional.empty) unless {@code partitions} &gt; 0,
+     * so this works on Confluent Cloud where RF=1 is rejected. The sleeps let the
+     * delete/create metadata propagate across the cluster.
+     */
+    private static void recreateTopic(Properties producerConf, String topic, int partitions)
+            throws InterruptedException {
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+            producerConf.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG));
+        // Reuse the producer's security/SASL config for the admin client.
+        for (String k : new String[]{"security.protocol", "sasl.mechanism", "sasl.jaas.config"}) {
+            if (producerConf.containsKey(k)) adminProps.put(k, producerConf.get(k));
+        }
+        try (Admin admin = Admin.create(adminProps)) {
+            System.out.println(">>> CREATE_TOPIC: deleting topic '" + topic + "' (ignored if absent) ...");
+            try {
+                admin.deleteTopics(Collections.singletonList(topic)).all().get();
+                System.out.println(">>> deleted '" + topic + "'");
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof UnknownTopicOrPartitionException) {
+                    System.out.println(">>> '" + topic + "' did not exist (ok)");
+                } else {
+                    throw new RuntimeException(e);
+                }
+            }
+            System.out.println(">>> waiting 10s after delete ...");
+            Thread.sleep(10_000);
+
+            String pdesc = partitions > 0 ? String.valueOf(partitions) : "broker-default";
+            System.out.println(">>> CREATE_TOPIC: creating topic '" + topic
+                + "' (partitions=" + pdesc + ", rf=broker-default) ...");
+            NewTopic newTopic = new NewTopic(topic,
+                partitions > 0 ? Optional.of(partitions) : Optional.<Integer>empty(),
+                Optional.<Short>empty());
+            try {
+                admin.createTopics(Collections.singletonList(newTopic)).all().get();
+                System.out.println(">>> created '" + topic + "'");
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof TopicExistsException) {
+                    System.out.println(">>> '" + topic + "' already exists (ok)");
+                } else {
+                    throw new RuntimeException(e);
+                }
+            }
+            System.out.println(">>> waiting 10s after create ...");
+            Thread.sleep(10_000);
+        }
+    }
+
     // === Utility helpers =====================================================
 
     private static Map<String, Double> externalMetricsLastValues(Metrics m) {
@@ -595,6 +717,20 @@ public class ProducerPerformanceTest {
         r.put("last_cpu", Double.parseDouble(cpu.get("average")));
         r.put("last_rss", Double.parseDouble(rss.get("average")));
         return r;
+    }
+
+    /** p-th percentile (0..1) latency in ms from the histogram (matches C/Rust). */
+    private static long percentileFromHist(long[] hist, double p) {
+        long total = 0;
+        for (long c : hist) total += c;
+        if (total == 0) return 0;
+        long target = (long) Math.ceil(total * p);
+        long cum = 0;
+        for (int i = 0; i < hist.length; i++) {
+            cum += hist[i];
+            if (cum >= target) return i;
+        }
+        return hist.length - 1;
     }
 
     private static void installSignalHandler() {

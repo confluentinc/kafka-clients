@@ -1,0 +1,141 @@
+version: v1.0
+name: Translation agent
+
+# Single CI pipeline that conditionally:
+#  - on the configured main branch (push, not PR) -> runs the narrowed
+#    sweep (closure check + cursor advance + create up to 10 new draft
+#    PRs). Sweep no longer dispatches dep-eval / plan / impl -- those
+#    are driven per-PR by the cascade below.
+#  - on a PR build whose head branch is NOT the main branch -> runs
+#    `translation-agent --pr <N>` cascade. The cascade reads the row's
+#    current status and runs the next applicable step:
+#      0 -> 1 (dep-eval) -> 2 (plan, stops at human gate)
+#      3 -> 4 (impl, only after `--plan-approve`)
+#  - on a PR build whose head branch IS the main branch -> SKIP both
+#    phases. We never want a human's PR-against-main review to also
+#    trigger a full sweep (which would publish new translation PRs
+#    mid-review) or a per-PR cascade (the PR isn't a translation
+#    PR managed by the orchestrator).
+#  - otherwise -> no-op
+#
+# A manual promotion ("Approve plan and implement") triggers
+# plan-approve.yml, which flips the PR's status from 2 (plan_created) to 3
+# (plan_approved) and immediately runs the implementation step.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-2
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      # When the Task is triggered manually with a "Run on branch" override,
+      # Semaphore exposes the desired branch as SEMAPHORE_GIT_BRANCH_CHECKOUT
+      # but `checkout` still lands on the build's original ref. Switch to the
+      # requested branch so submodule init + pip install operate against the
+      # right tree.
+      - |
+        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+          echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
+          # Semaphore's shallow single-branch clone doesn't create
+          # refs/remotes/origin/<other-branch>, so origin/<branch> isn't a
+          # valid start point. Use FETCH_HEAD (which the explicit fetch
+          # above does update) and -B so re-runs reset an existing local
+          # branch instead of failing.
+          git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
+        fi
+      - git submodule update --init --depth=1 kafka
+      - sem-version python 3.10
+      # `rust-toolchain.toml` pins the exact channel; running any rustc/cargo
+      # command inside the repo makes rustup auto-install that pinned
+      # version instead of a floating `stable` (which drifted ahead of the
+      # locally installed toolchain and broke lint parity -- see
+      # rust-toolchain.toml history).
+      - sudo apt install -y cmake rustup && rustc --version
+      - (cd tools/translation_agent && pip install -e '.[dev]')
+      # First sweep on a fresh project will have no artifact yet -- allow
+      # the pull to fail so the orchestrator can create the DB from scratch.
+      - artifact pull project translation_agent.db || true
+
+blocks:
+  - name: Run translation-agent
+    task:
+      env_vars:
+        # Override in the Semaphore project's "Environment Variables" or
+        # Secrets tab to track a different mainline branch. The sweep runs
+        # only when the build is for this exact branch.
+        - name: MAIN_BRANCH
+          value: master
+        # Path to the AK repo, relative to the translation_agent cwd set in
+        # the prologue (which is `tools/translation_agent`). Defaults to the
+        # `kafka` git submodule at the repo root.
+        - name: AK_REPO_PATH
+          value: ./kafka
+      jobs:
+        - name: "Sweep phase or PR planning or implementation (optional) followed by `make verify`"
+          commands:
+            - |
+              set -e
+              if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+                echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+                SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+              fi
+              echo "SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH}"
+              echo "SEMAPHORE_GIT_PR_BRANCH=${SEMAPHORE_GIT_PR_BRANCH}"
+              echo "SEMAPHORE_GIT_PR_NUMBER=${SEMAPHORE_GIT_PR_NUMBER}"
+              echo "MAIN_BRANCH=${MAIN_BRANCH}"
+              # Ensure all Python dependencies are installed
+              make
+              if [ "${SEMAPHORE_GIT_PR_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
+              elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                # The prologue's `artifact pull ... || true` lands the DB at
+                # repo-root `translation_agent.db`. If the artifact does not
+                # exist yet (no DB, or the artifact hub failed to serve it --
+                # e.g. a transient signed-URL error), skip the sweep and fall
+                # through to the `make verify` below instead of letting
+                # `_run_sweep`'s own strict pull raise and abort the job.
+                if [ -f translation_agent.db ]; then
+                  echo "On main branch (${MAIN_BRANCH}) -- running sweep"
+                  translation-agent \
+                    --ak-repo-path "${AK_REPO_PATH}" \
+                    --rust-branch "${MAIN_BRANCH}"
+                else
+                  echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep, running 'make verify' only"
+                fi
+              elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                # The prologue's `artifact pull ... || true` lands the DB at
+                # repo-root `translation_agent.db`. If the artifact does not
+                # exist yet (no DB), skip the translation-agent cascade and
+                # fall through to the `make verify` below -- a PR build with
+                # no orchestrator state to act on still validates the tree.
+                if [ -f translation_agent.db ]; then
+                  echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
+                  translation-agent \
+                    --ak-repo-path "${AK_REPO_PATH}" \
+                    --pr "${SEMAPHORE_GIT_PR_NUMBER}"
+                else
+                  echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade, running 'make verify' only"
+                fi
+              else
+                echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
+              fi
+              echo "PR build -- running 'make verify' directly in Semaphore env"
+              make verify
+
+promotions:
+  - name: Approve plan and implement
+    pipeline_file: plan-approve.yml
+  - name: Ask agent
+    pipeline_file: ask.yml
+    parameters:
+      env_vars:
+        - name: USER_COMMAND
+          required: true
+          description: "Free-text instruction passed verbatim to a sandboxed
+            claude. The agent's answer is posted as a PR comment with this
+            text quoted. At status 1 the agent answers only; at 2/3/4 the
+            agent may also produce git fixup commits which the orchestrator
+            pushes."
