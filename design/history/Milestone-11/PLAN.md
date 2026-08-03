@@ -773,3 +773,167 @@ Two things this estimate is asserting, both worth challenging at approval:
 
 Comparison anchor: Milestone 8 required 40 phase-numbers for the consumer
 (~1 000 Java test methods). This milestone is roughly one-fifth that scale.
+
+---
+
+## 9. Follow-ups (deferred work, tracked)
+
+Items discovered or decided during Milestone 11 that are deliberately **not**
+done inside it. Each records what, why deferred, and how to verify the fix.
+
+### 9.1 Code generator omits Java's non-default-at-unsupported-version guard
+
+**Status:** open. Found in Phase 2 while translating
+`RequestResponseTest.testInitProducerIdRequestVersions`.
+
+For a version-gated non-tagged field, Java's generated `write` emits two halves:
+
+```java
+if (_version >= 3) { _writable.writeLong(producerId); }
+else if (producerId != -1) {
+    throw new UnsupportedVersionException(
+        "Attempted to write a non-default producerId at version " + _version);
+}
+```
+
+This project's generator emits only the first. A non-default value at an
+unsupported version is therefore **silently dropped** rather than rejected: Java
+refuses to encode a message it cannot represent faithfully, while this port
+encodes a valid-but-different message and reports nothing. The wire result is a
+well-formed *older* request missing the caller's value, so the broker accepts it
+— there is no error anywhere in the path.
+
+**Scope:** systemic. Affects every version-gated non-tagged field across all 197
+generated message types, not only `InitProducerIdRequest`.
+
+**Severity:** a missing safety net rather than a live fault. The bad branch is
+only reached when client code sets a field without checking the negotiated
+version — itself a programming error. Java converts that error into an
+exception; here it becomes silent wire divergence. Worth fixing precisely
+because this milestone's guarantee (no duplicate records) depends on
+`producerId` reaching the broker.
+
+**Fix location:** `generator/src/lib.rs`, the field-write emission function
+(the `has_version_check` block around lines 1176-1187). Three pieces needed:
+
+  1. The "is this field at its default?" condition. `get_default_check`
+     (line ~1645) is close but was written for *tagged*-field semantics
+     ("should this be written?"), so it needs adapting rather than reusing
+     as-is.
+  2. The original spec field name for the message text — Java's wording is
+     `producerId`, not `producer_id`.
+  3. Emission of the `else if` branch where the code currently just closes the
+     version `if`.
+
+Estimated ~20-30 lines in one function.
+
+**Unknown, and the reason this is deferred:** enabling the check regenerates all
+197 message types with a new error path. Any existing code that sets a field and
+then serializes at a lower version starts failing. That count cannot be derived
+by reading — it must be measured by making the change locally and running the
+suite (~1 hour).
+
+**Test coverage:** exactly **one** Java test in the whole `clients` module
+asserts this behaviour (`RequestResponseTest.testInitProducerIdRequestVersions`),
+and it covers `InitProducerId`. Verified: none of the other Phase 2 pairs'
+dedicated test files contain such an assertion, so no further phases will
+surface additional skips from this gap.
+
+**How to verify the fix:** remove the `#[ignore]` from
+`test_init_producer_id_request_versions` in
+`src/common/requests/init_producer_id_request.rs`. The assertion is already
+correct and will pass once the generator is fixed. Do **not** weaken it to match
+current behaviour.
+
+**Do NOT bundle this into a transactions phase.** It touches every message type;
+mixing it with transaction work makes both changes hard to review and a failure
+ambiguous between the two.
+
+### 9.2 Migrate the Java base from 4.2.0 to 4.3.1
+
+**Status:** decided — do it **after** Milestone 11 completes, as its own work.
+
+Evaluated in full during this milestone. There are **no functional changes to
+transactions or idempotence** in 4.3.1: the wire protocol, the sequence-number
+logic, the state machine table, the class inventory, and the test counts
+(122/75/77/55) are all identical. What changed:
+
+  - `TransactionalRequestResult.await()` loses its no-arg overload; the timed
+    overload gains a third `expectedTimeoutReason` parameter appended to the
+    timeout message. **44 call sites** across `TransactionManagerTest`,
+    `SenderTest`, `KafkaProducerTest`, and `KafkaProducer`.
+  - `KafkaProducer.throwIfInPreparedState()` deleted as redundant — the manager
+    already rejected both guarded operations (invalid `PREPARED_TRANSACTION →
+    IN_TRANSACTION` transition; `maybeAddPartition`'s `currentState !=
+    IN_TRANSACTION` check). Operations stay rejected; only the message differs.
+  - `throwIfPendingState(String)` → `throwIfPendingState(TransactionOperation)`,
+    a new 4-value private enum. Messages byte-identical.
+  - Four timeout-reason constants added to `KafkaProducer`; one to `Sender` for
+    expired batches.
+  - `MockProducer`: javadoc only.
+  - `ProducerConfig`: import + javadoc only — **Phase 1 commit 8 is unaffected**.
+
+**Cost of deferring: ~1-1.5 days**, roughly 2% of the milestone. Low risk:
+deleting the no-arg method and adding a parameter makes **every** call site a
+compile error, so none can be missed.
+
+**Why after, not before:** test parity gets proven against one stable base
+first. If something breaks post-migration, the cause is unambiguous.
+
+**Accept:** Java line-number citations in commits and
+`.claude/rules/producer-transactions.md` are against 4.2.0. `TransactionManager`
+references shift by **+18** at 4.3.1 (`shouldPoisonStateOnInvalidTransition`
+287→305, `handleFailedBatch` 788→806). `TxnPartitionEntry` is unaffected (163
+unchanged). The rules file records its base version to keep citations
+unambiguous.
+
+### 9.3 `record` → `record.internal` visibility demotion
+
+**Status:** open, and **independent of transactions** — do not fold into 9.2.
+
+4.3.1 moved the entire `org.apache.kafka.common.record` package to
+`record.internal` (35 classes, ~7 500 lines; 83 client files re-imported). Only
+`TimestampType` remained public.
+
+CLAUDE.md §2 requires classes in an `internal` package to be `pub(crate)`.
+`src/common/record/` is currently `pub mod record` with **13 public
+re-exports**, so a faithful 4.3.1 base makes this a **breaking change to this
+crate's public API**. Blast radius in Rust today: 32 files, 100 reference lines.
+
+Verified safe: the C FFI does **not** expose these types. The `RecordBatch`
+matches in `src/ffi/producer.rs` are its own unrelated local structs
+(`RecordBatchCompletion`, `RecordBatchCallbackTarget`), so the C and Python
+bindings are unaffected.
+
+Deserves its own review because it is a public-API break unrelated to either
+transactions or the 4.3.1 semantic changes.
+
+### 9.4 Remove the `MILESTONE-11 GUARD`
+
+**Status:** open, already scheduled inside this milestone.
+
+`KafkaProducer::from_config` rejects explicit `enable.idempotence=true` and any
+`transactional.id` (`src/producer/kafka_producer.rs`, marked `MILESTONE-11
+GUARD:`). Remove the idempotence arm in **Phase 4** and the transactional arm in
+**Phase 6**, deleting the corresponding `test_guard_*` tests in the same commit.
+
+### 9.5 Critic review of Phase 1
+
+**Status:** open.
+
+Phase 1 shipped 8 commits with the Actor half of the workflow only; no Critic
+pass ran. Two plan corrections (§6.8, recorded in this document's header) were
+made on the implementer's own judgement and have not been independently checked.
+Phase 1 also carries no Java-parity test coverage for its five new types — no
+Java test file exists for any of them, so fidelity currently rests on a reading
+of the source until `TransactionManagerTest` lands in Phases 3/5. The six
+translated `ProducerConfig` tests are the exception and do pass.
+
+### 9.6 C FFI / Python / gRPC multilanguage harness for transactions
+
+**Status:** deferred to a follow-up milestone (§7.2).
+
+Beyond the phase-count cost, the Milestone 9 FFI access-guard model has no story
+for an *open* transaction: a transaction spans `begin` → N×`send` → `commit`,
+while the binding is one-operation-in-flight. Needs design, not a mechanical
+extension.
