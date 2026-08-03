@@ -94,33 +94,19 @@ public sealed class ConsumerPollWakeupCancelTests
             () => consumer.PollAsync(s_pollTimeout, cts.Token));
     }
 
-    [Fact]
-    public async Task Wakeup_DuringInFlightPoll_DoesNotCorrupt()
-    {
-        // wakeup() is cross-thread and bypasses the guard; firing it concurrently with a
-        // poll must not corrupt the bridge. Because the mock poll runs to completion
-        // instantly, the outcome is EITHER a Wakeup fault (flag seen) OR a normal empty
-        // success (poll finished first) — both are correct/Java-faithful. This asserts
-        // no corruption (the op always resolves under the hang guard), not a specific
-        // outcome; the deterministic one-shot behavior is covered above.
-        using NativeConsumer consumer = await MockReadyToPoll();
-
-        Task<ConsumerRecords> op = consumer.PollAsync(s_pollTimeout);
-        consumer.Wakeup();
-
-        try
-        {
-            await TestTimeout.Run(() => op, s_deadline);
-        }
-        catch (KafkaException)
-        {
-            // Wakeup fault — acceptable outcome (the flag was observed).
-        }
-
-        // The consumer remains reusable either way.
-        ConsumerRecords after = await TestTimeoutResult(consumer.PollAsync(s_pollTimeout));
-        Assert.Empty(after);
-    }
+    // NOTE (Critic N=7, Finding 1): a "wakeup fired during an in-flight poll" test was
+    // removed here. The mock poll checks-and-clears the wakeup flag in Step 4 and returns
+    // to completion synchronously (source-verified: src/consumer/mock_consumer.rs poll),
+    // and no block hook is exposed at the C ABI — so a Wakeup() call issued *after* the
+    // PollAsync() submit races the instant poll non-deterministically: when the poll wins,
+    // the one-shot flag is left set and leaks into the *next* poll, faulting it. There is
+    // no deterministic "in-flight" outcome to assert broker-free. The reachable, Java-
+    // faithful behavior — Wakeup() sets the one-shot flag, the NEXT poll faults once with
+    // a Wakeup KafkaException, then a subsequent poll succeeds (one-shot + reusable) — is
+    // fully and deterministically covered by Wakeup_ThenPoll_FaultsOnce_ThenReusable above,
+    // so this test was redundant as well as flaky. A genuinely in-flight wakeup becomes
+    // testable only when a blockable mock poll (an FFI-exposed schedule_poll_task / block
+    // hook) lands — a Rust-core dependency, not a .NET change (see COMMENTS.DONE.7.md).
 
     private static async Task<ConsumerRecords> TestTimeoutResult(Task<ConsumerRecords> op)
     {

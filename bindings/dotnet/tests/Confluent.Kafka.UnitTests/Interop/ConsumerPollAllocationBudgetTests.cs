@@ -33,19 +33,22 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// scaling the batch so per-poll fixed costs cancel out.
 /// </summary>
 /// <remarks>
-/// <b>Method (producer send-path allocation-test precedent).</b>
-/// <see cref="GC.GetAllocatedBytesForCurrentThread"/> deltas are JIT / TFM / warm-up
-/// sensitive, so we (1) warm up the whole poll path first, (2) measure the allocation
-/// of a <b>small</b> batch and a <b>large</b> batch, and (3) assert the <em>marginal
-/// per-record</em> cost (large − small, divided by the record delta) is within a
-/// budget derived from the owned copy sizes. Comparing two batch sizes cancels the
-/// per-poll fixed overhead (the <c>ConsumerRecords</c>/list objects, bridge
-/// bookkeeping), isolating the per-record cost; a native-backed view or a
-/// batch-traversal allocation would push the marginal cost above the budget. The
-/// measurement runs on the caller thread; the copy-out itself runs on the dispatcher
-/// thread, but this test's purpose is the total managed budget attributable to a poll,
-/// so it awaits on a thread whose allocation it can read and asserts scaling, which is
-/// robust to which thread does the copy.
+/// <b>Method (producer send-path allocation-test precedent; Critic N=7 Finding 2).</b>
+/// The copy-out runs on the core's foreign <b>dispatcher thread</b>, and the awaiter's
+/// continuation resumes on a <b>different</b> pool thread — so a per-thread counter
+/// (<c>GC.GetAllocatedBytesForCurrentThread</c>) bracketing the <c>await</c> measures
+/// neither thread's real allocation (the delta can even go negative). We therefore use
+/// the <b>process-wide</b> <see cref="GC.GetTotalAllocatedBytes(bool)"/> with
+/// <c>precise: true</c>, which captures the dispatcher-thread copy-out regardless of
+/// which thread ran it. To stay robust to JIT / TFM / warm-up noise and to any
+/// unrelated ambient allocation the process-wide counter also sees, we (1) warm up the
+/// whole poll path, then (2) measure a <b>small</b> and a <b>large</b> steady-state
+/// batch and assert the <em>marginal per-record</em> cost (large − small, over the
+/// record delta) is within a budget derived from the owned copy sizes. The marginal
+/// subtraction cancels the per-poll fixed overhead (the <c>ConsumerRecords</c>/list
+/// objects, bridge bookkeeping) <em>and</em> any per-poll ambient noise, isolating the
+/// per-record copy-out cost; a native-backed view or a second key/value-sized copy
+/// would push the marginal cost above the budget.
 /// </remarks>
 public sealed class ConsumerPollAllocationBudgetTests
 {
@@ -73,7 +76,7 @@ public sealed class ConsumerPollAllocationBudgetTests
         // Warm up the entire poll path (JIT, first-run allocations) before measuring.
         for (int i = 0; i < 5; i++)
         {
-            await PollBatch(recordCount: 8, key, value);
+            await MeasurePoll(recordCount: 8, key, value);
         }
 
         const int smallCount = 16;
@@ -94,23 +97,16 @@ public sealed class ConsumerPollAllocationBudgetTests
             "per-record copy would show up here.");
     }
 
+    /// <summary>
+    /// Sets up a consumer + records OUTSIDE the measured window, then brackets <b>only</b>
+    /// the <c>PollAsync</c> call — where the copy-out happens — with the process-wide
+    /// precise allocation counter. Consumer create / assign / seek / the per-record
+    /// <c>AddRecord</c> marshal loop / dispose are all excluded (none is copy-out;
+    /// Finding 2). The owned copy-out <see cref="ConsumerRecords"/> holds only managed
+    /// values (no native handle, no <c>IDisposable</c>); it stays rooted until after the
+    /// delta is read, then is discarded when the method returns.
+    /// </summary>
     private static async Task<long> MeasurePoll(int recordCount, byte[] key, byte[] value)
-    {
-        // Settle the heap so the delta reflects this poll's steady-state allocation.
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        ConsumerRecords records = await PollBatch(recordCount, key, value);
-        long after = GC.GetAllocatedBytesForCurrentThread();
-
-        // Touch the result so the JIT cannot elide the copy-out.
-        Assert.Equal(recordCount, records.Count);
-        return after - before;
-    }
-
-    private static async Task<ConsumerRecords> PollBatch(int recordCount, byte[] key, byte[] value)
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         try
@@ -122,7 +118,23 @@ public sealed class ConsumerPollAllocationBudgetTests
                 consumer.AddRecord(Topic, Partition, offset: i, key, value);
             }
 
-            return await consumer.PollAsync(s_pollTimeout);
+            // Settle the heap so the delta reflects this poll's steady-state allocation.
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            // Process-wide (precise) — the copy-out runs on the foreign dispatcher thread,
+            // so a per-thread counter would miss it (Finding 2). The marginal (large −
+            // small) subtraction in the caller cancels the fixed per-poll overhead and any
+            // ambient allocation this process-wide counter also sees, leaving the
+            // per-record copy-out cost.
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            ConsumerRecords records = await consumer.PollAsync(s_pollTimeout);
+            long after = GC.GetTotalAllocatedBytes(precise: true);
+
+            // Touch the result so the JIT cannot elide the copy-out.
+            Assert.Equal(recordCount, records.Count);
+            return after - before;
         }
         finally
         {
