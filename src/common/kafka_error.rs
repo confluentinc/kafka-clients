@@ -412,6 +412,10 @@ impl KafkaError {
     /// Corresponds to Java's `ConcurrentModificationException` thrown by
     /// `KafkaConsumer.acquire()` when the consumer is accessed from more
     /// than one thread.
+    pub fn concurrent_modification(message: impl Into<String>) -> Self {
+        Self::ConcurrentModification(message.into())
+    }
+
     /// Create a transaction aborted error with Java's default message.
     ///
     /// Corresponds to Java's no-arg `TransactionAbortedException()`, whose
@@ -425,10 +429,6 @@ impl KafkaError {
     /// Corresponds to Java's `TransactionAbortedException(String)`.
     pub fn transaction_aborted_with_message(message: impl Into<String>) -> Self {
         Self::TransactionAborted(message.into())
-    }
-
-    pub fn concurrent_modification(message: impl Into<String>) -> Self {
-        Self::ConcurrentModification(message.into())
     }
 
     /// Create a record batch too large error.

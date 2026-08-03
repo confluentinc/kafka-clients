@@ -377,10 +377,27 @@ impl<K, V> KafkaProducer<K, V> {
         ))
     }
 
-    /// Creates a `KafkaProducer` with a full sender task and network client.
+    /// Creates a `KafkaProducer` from pre-built collaborators and spawns the
+    /// sender task.
     ///
-    /// This corresponds to the primary public constructor in Java's KafkaProducer.
-    /// It creates the RecordAccumulator, Sender, and spawns the I/O background task.
+    /// [`Self::from_config`] is the user-facing constructor and the analogue of
+    /// Java's public `KafkaProducer` constructor; this is the injection seam it
+    /// delegates to, used directly only by tests that need a mock
+    /// [`KafkaClient`].
+    ///
+    /// Although marked `pub`, this is **not reachable from outside the crate**:
+    /// `metadata` and `accumulator` are `Arc`s of `ProducerMetadata` and
+    /// `RecordAccumulator`, both `pub(crate)` under
+    /// `producer::internals`, so an external caller cannot name or construct
+    /// them.
+    ///
+    /// MILESTONE-11 GUARD: that unreachability is why the idempotence /
+    /// transaction guard in [`Self::from_config`] is not duplicated here. The
+    /// approved plan asked for it in both constructors; it is omitted here
+    /// deliberately, because there is no external path to guard and adding it
+    /// would mean changing this function's return type to `Result` for the
+    /// benefit of in-crate test callers only. Revisit if this ever becomes
+    /// externally constructible.
     ///
     /// # Type Parameters
     ///

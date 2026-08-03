@@ -25,9 +25,9 @@ use crate::common::KafkaError;
 use crate::common::TopicPartition;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::kafka_trace;
 use crate::producer::internals::ProducerBatch;
-use crate::producer::internals::txn_partition_entry::{InFlightBatchKey, TxnPartitionEntry};
+use crate::producer::internals::{InFlightBatchKey, TxnPartitionEntry};
+use crate::{kafka_debug, kafka_trace};
 
 /// The per-partition sequence and offset bookkeeping for an idempotent or
 /// transactional producer.
@@ -131,8 +131,7 @@ impl TxnPartitionMap {
         batches: &mut [&mut ProducerBatch],
     ) -> Result<(), KafkaError> {
         self.get_mut(topic_partition)?
-            .start_sequences_at_beginning(new_producer_id_and_epoch, batches);
-        Ok(())
+            .start_sequences_at_beginning(new_producer_id_and_epoch, batches)
     }
 
     /// Drops the entry for `topic_partition`.
@@ -191,7 +190,7 @@ impl TxnPartitionMap {
             // OutOfOrderSequenceException.
             return Ok(());
         }
-        kafka_trace!(
+        kafka_debug!(
             self.log_context,
             "producerId: {}, send to partition {} failed fatally. Reducing future sequence numbers by {}",
             batch.producer_id(),

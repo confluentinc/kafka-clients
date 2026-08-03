@@ -954,6 +954,45 @@ mod tests {
             error.message(),
             "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6."
         );
+
+        // Invalid: exactly at the cap, idempotence explicitly off, transactional
+        // id set. Pins that the in-flight arm does not mask the transactional-id
+        // arm — the in-flight value is legal here, so the error must come from
+        // the transactional-id check.
+        let error = ProducerConfig::from_properties(&props_with(&[
+            ("max.in.flight.requests.per.connection", "5"),
+            ("enable.idempotence", "false"),
+            ("transactional.id", "transactionalId"),
+        ]))
+        .expect_err("transactional.id without idempotence must error even at the in-flight cap");
+        assert_eq!(
+            error.message(),
+            "Cannot set a transactional.id without also enabling idempotence."
+        );
+
+        // Invalid: above the cap with idempotence explicitly on. Pins that the
+        // in-flight arm fires regardless of how idempotence came to be enabled.
+        let error = ProducerConfig::from_properties(&props_with(&[
+            ("max.in.flight.requests.per.connection", "6"),
+            ("enable.idempotence", "true"),
+        ]))
+        .expect_err("explicit idempotence above the cap must error");
+        assert_eq!(
+            error.message(),
+            "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6."
+        );
+
+        // Invalid: above the cap with a transactional id. Pins that the in-flight
+        // arm fires ahead of the transactional-id arm.
+        let error = ProducerConfig::from_properties(&props_with(&[
+            ("max.in.flight.requests.per.connection", "6"),
+            ("transactional.id", "transactionalId"),
+        ]))
+        .expect_err("transactional producer above the cap must error");
+        assert_eq!(
+            error.message(),
+            "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6."
+        );
     }
 
     /// Translated from `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence`.

@@ -180,12 +180,20 @@ translation MUST preserve both the re-awaitability and the
 Required shape:
 
     pub(crate) struct TransactionalRequestResult {
-        notify: Arc<Notify>,
+        notify: Notify,
         error: Mutex<Option<KafkaError>>,
         completed: AtomicBool,
         acked: AtomicBool,
         operation: String,
     }
+
+`notify` is a plain `Notify`, **not** `Arc<Notify>`. The whole struct is held as
+`Arc<TransactionalRequestResult>`, because
+`handle_cached_transaction_request_result` must hand the *same* result object to
+both the caller and the pending-transition slot — an inner `Arc` would be
+redundant. Corollary for Phase 3: hold the result as
+`Arc<TransactionalRequestResult>`; that is what makes the "return the same
+result object" contract expressible.
 
 Do NOT use `tokio::sync::oneshot`.
 
@@ -244,6 +252,14 @@ be carried across.
     matching Java's comparator chain exactly.
   - Wherever Java rebuilds the `TreeSet`, the Rust code collects, mutates, and
     re-inserts under the new keys.
+  - **Membership must be invariant across the rebuild.** Java iterates its *own*
+    set and re-adds exactly those elements, so only the keys change. Drive the
+    rebuild from the tracked key set — never from a caller-supplied collection.
+    Rebuilding from the caller's collection lets it silently shrink or grow the
+    tracked set, and where the new sequence counter is derived from the elements
+    visited (`start_sequences_at_beginning`), a short collection silently rewinds
+    that counter. It surfaces only later, as a broker-side
+    `OUT_OF_ORDER_SEQUENCE_NUMBER`.
   - Keep the Java 58-61 comment explaining the 3-key rationale.
 
 ## 7. `TxnPartitionEntry` does not own `ProducerBatch`
@@ -277,6 +293,14 @@ behavioral gain.
   - `start_sequences_at_beginning` and `adjust_sequences_due_to_failed_batch`
     receive mutable access to the batches from the owner, and MUST iterate in
     key order to match Java's `TreeSet` iteration.
+  - The batches the owner supplies are a **lookup pool, not the membership
+    set** (rule 6). A supplied batch the entry does not track is ignored; a
+    tracked key with no supplied batch is an error. The two sets legitimately
+    differ: `Sender.failBatch` calls `handleFailedBatch` (`Sender.java:848`)
+    *before* `maybeRemoveAndDeallocateBatch` (`:854`), while `handleFailedBatch`
+    removes the batch from the txn map at `TransactionManager.java:790` and only
+    then calls `adjustSequencesDueToFailedBatch` at `:818` — so the failed batch
+    is already untracked while still owned by the Sender.
   - Record this as a justified deviation per `definition-of-done.md` §7 in any
     commit that touches these types — a Critic comparing field-by-field against
     Java will otherwise report the missing batch storage as a defect.
@@ -289,6 +313,9 @@ behavioral gain.
     to satisfy this type.
   - Iterating the batches in `HashMap` order rather than key order when
     resetting sequences.
+  - Assigning the tracked key set from a collection built out of the caller's
+    batches (`self.inflight_batches_by_sequence = <rebuilt from argument>`).
+  - Swallowing the error from a rebuild whose result feeds `next_sequence`.
 
 ## 8. `TxnPartitionEntry::decrement_sequence` does not wrap
 
@@ -312,3 +339,63 @@ than a clean local error.
   - `decrement_sequence` → plain subtraction, and return
     `Err(KafkaError)` (per CLAUDE.md §10.2, not `panic!`) when negative,
     preserving Java's message text. A test MUST assert the message.
+
+## 9. Flat error codes lose Java's exception hierarchy — two relations matter
+
+Phase 1 deliberately did not create typed error structs for the transaction
+exceptions, because none of them carries payload beyond a message and every wire
+code already exists in `src/common/protocol/errors.rs`. That decision stands.
+
+But it reasons about *payload*, and Java's transaction dispatch also reasons
+about *subtyping*. Two relations are load-bearing and MUST be preserved
+explicitly wherever the Java code uses `instanceof`:
+
+    UnknownProducerIdException          extends OutOfOrderSequenceException
+    TransactionalIdAuthorizationException extends AuthorizationException
+
+**Why:** `TransactionManager.handleFailedBatch` dispatches on the first relation:
+
+    :799  if (exception instanceof OutOfOrderSequenceException && !isTransactional())
+              → requestIdempotentEpochBumpForPartition
+    :806  else if (exception instanceof UnknownProducerIdException)
+              → resetSequenceForPartition
+
+Because `UnknownProducerIdException` **is** an `OutOfOrderSequenceException`, an
+`UnknownProducerId` error on an *idempotent* (non-transactional) producer matches
+the `:799` branch and takes the **epoch-bump** path. Only a *transactional*
+producer ever reaches `:806`.
+
+In Rust, `Errors::UnknownProducerId` (59) and
+`Errors::OutOfOrderSequenceNumber` (45) are unrelated enum values. A literal
+`match` translation of that `if / else if` chain routes the idempotent
+`UnknownProducerId` case to `reset_sequence_for_partition` instead of
+`request_idempotent_epoch_bump_for_partition` — a real divergence in the
+idempotent recovery path, and one that only manifests as duplicate or lost
+records under a broker-side producer-state eviction.
+
+**How to apply:**
+
+  - Treat `Errors::UnknownProducerId` as satisfying any
+    "is `OutOfOrderSequenceException`" test. Concretely, in Phase 5's
+    `handle_failed_batch`, the first arm must match **both** codes:
+
+        matches!(code, Errors::OutOfOrderSequenceNumber | Errors::UnknownProducerId)
+            && !self.is_transactional()
+
+    and the `UnknownProducerId`-only arm must come after it, guarded so it is
+    reachable only when transactional — mirroring the `if / else if` order.
+  - Same care for any `instanceof AuthorizationException` site: it matches
+    `TransactionalIdAuthorizationFailed` (53) as well as the other
+    authorization codes.
+  - Prefer a named helper (e.g. `fn is_out_of_order_sequence(code: Errors) -> bool`)
+    over open-coding the alternation at each site, so the relation is stated once
+    and is reviewable.
+
+**Anti-patterns to flag in review:**
+
+  - A `match` arm on `Errors::OutOfOrderSequenceNumber` alone where Java wrote
+    `instanceof OutOfOrderSequenceException`.
+  - An `Errors::UnknownProducerId` arm placed *before* the out-of-order arm, or
+    reachable on the idempotent path.
+  - An authorization check that enumerates codes without
+    `TransactionalIdAuthorizationFailed`.

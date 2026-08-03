@@ -19,7 +19,7 @@
 
 //! Per-partition idempotence/transaction bookkeeping.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
@@ -199,10 +199,13 @@ impl TxnPartitionEntry {
         &mut self,
         new_producer_id_and_epoch: ProducerIdAndEpoch,
         batches: &mut [&mut ProducerBatch],
-    ) {
+    ) -> Result<(), KafkaError> {
         let mut sequence = 0;
-        // Infallible, so the Result is discarded rather than propagated.
-        let _ = self.reset_sequence_numbers(batches, |batch| {
+        // Fallible: `reset_sequence_numbers` errors if `batches` is missing a
+        // batch this entry tracks. Propagated rather than discarded, because
+        // `next_sequence` below is derived from the batches actually visited —
+        // swallowing the error would silently rewind the sequence counter.
+        self.reset_sequence_numbers(batches, |batch| {
             batch.reset_producer_state(
                 new_producer_id_and_epoch.producer_id,
                 new_producer_id_and_epoch.epoch,
@@ -210,10 +213,11 @@ impl TxnPartitionEntry {
             );
             sequence += batch.record_count;
             Ok(())
-        });
+        })?;
         self.producer_id_and_epoch = new_producer_id_and_epoch;
         self.next_sequence = sequence;
         self.last_acked_sequence = Self::NO_LAST_ACKED_SEQUENCE_NUMBER;
+        Ok(())
     }
 
     /// Raises the last acknowledged sequence to `sequence` if it is higher,
@@ -265,22 +269,58 @@ impl TxnPartitionEntry {
         })
     }
 
-    /// Applies `reset` to every in-flight batch in key order, then rebuilds the
-    /// key set from the mutated batches.
+    /// Applies `reset` to every **tracked** in-flight batch in key order, then
+    /// rebuilds the key set from the mutated batches.
     ///
-    /// Java rebuilds the `TreeSet` here (154-161) because the sort key mutates.
-    /// The Rust equivalent rebuilds from the supplied batches, which also keeps
-    /// the key set consistent with them by construction.
+    /// Java (154-161) iterates **its own** `inflightBatchesBySequence` and
+    /// re-adds exactly those elements to a fresh `TreeSet`: membership is
+    /// invariant, only the sort keys change. This preserves that invariant.
+    ///
+    /// `batches` is a lookup **pool** supplied by the owner (see the type-level
+    /// deviation note), not the source of membership:
+    ///
+    ///   - a batch in `batches` that this entry does not track is **ignored**;
+    ///   - a tracked key with no matching batch in `batches` is an **error**.
+    ///
+    /// Driving membership from `batches` instead would let a caller silently
+    /// shrink or grow the tracked set. Because
+    /// [`Self::start_sequences_at_beginning`] derives `next_sequence` from the
+    /// batches it visits, a short slice would silently rewind the partition's
+    /// sequence counter — the exact corruption this type exists to prevent, and
+    /// one that surfaces only later as a broker-side
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER`.
+    ///
+    /// The mismatch is real rather than defensive: `Sender.failBatch` calls
+    /// `handleFailedBatch` (`Sender.java:848`) *before*
+    /// `maybeRemoveAndDeallocateBatch` (`:854`), while `handleFailedBatch`
+    /// removes the batch from the txn map at `TransactionManager.java:790` and
+    /// only then calls `adjustSequencesDueToFailedBatch` at `:818`. So at that
+    /// moment the failed batch is already untracked here but still present in
+    /// `Sender::in_flight_batches`.
     fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), KafkaError>
     where
         F: FnMut(&mut ProducerBatch) -> Result<(), KafkaError>,
     {
-        // Java iterates the TreeSet, so ordering is by key, not by the caller's
-        // arbitrary slice order.
-        batches.sort_by_key(|batch| Self::batch_key(batch));
+        // Index the pool by key. Stored as indices rather than `&mut` references
+        // so the borrow checker permits handing out one mutable batch at a time.
+        let mut pool: HashMap<InFlightBatchKey, usize> = HashMap::with_capacity(batches.len());
+        for (index, batch) in batches.iter().enumerate() {
+            pool.insert(Self::batch_key(batch), index);
+        }
+
+        // Iterate the tracked keys in order — Java's `TreeSet` iteration order.
+        let tracked: Vec<InFlightBatchKey> = self.inflight_batches_by_sequence.iter().copied().collect();
 
         let mut new_inflights = BTreeSet::new();
-        for batch in batches.iter_mut() {
+        for key in tracked {
+            let Some(&index) = pool.get(&key) else {
+                return Err(KafkaError::illegal_state(format!(
+                    "No in-flight batch supplied for tracked sequence {:?} on partition {}; \
+                     the caller must supply every batch this entry tracks",
+                    key, self.topic_partition
+                )));
+            };
+            let batch = &mut *batches[index];
             reset(batch)?;
             new_inflights.insert(Self::batch_key(batch));
         }
@@ -444,7 +484,9 @@ mod tests {
         entry.increment_sequence(9);
 
         let new_pid = ProducerIdAndEpoch::new(7, 2);
-        entry.start_sequences_at_beginning(new_pid, &mut [&mut b0, &mut b1, &mut b2]);
+        entry
+            .start_sequences_at_beginning(new_pid, &mut [&mut b0, &mut b1, &mut b2])
+            .expect("all tracked batches supplied");
 
         // Sequences restart at 0 and accumulate record counts in key order.
         assert_eq!(b0.base_sequence(), 0);
@@ -472,7 +514,9 @@ mod tests {
         entry.add_inflight_batch(&b1);
 
         // Deliberately reversed.
-        entry.start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 0), &mut [&mut b1, &mut b0]);
+        entry
+            .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 0), &mut [&mut b1, &mut b0])
+            .expect("all tracked batches supplied");
 
         assert_eq!(b0.base_sequence(), 0);
         assert_eq!(b1.base_sequence(), 3);
@@ -557,5 +601,115 @@ mod tests {
         assert_eq!(entry.next_sequence(), 6);
         entry.decrement_sequence(6).expect("should reach exactly zero");
         assert_eq!(entry.next_sequence(), 0);
+    }
+
+    // -- Membership invariant of `reset_sequence_numbers` --------------------
+    //
+    // Java's `resetSequenceNumbers` iterates its OWN set, so membership is
+    // invariant across the rebuild. These pin that the Rust version does the
+    // same and does not take membership from the caller's slice. Regression
+    // tests for Critic 41 finding 1.
+
+    /// A short slice must ERROR, not silently clear the tracked set. Before the
+    /// fix this passed while wiping the set and rewinding `next_sequence` to 0 —
+    /// the exact corruption this type exists to prevent.
+    #[test]
+    fn test_start_sequences_errors_when_a_tracked_batch_is_missing() {
+        let mut entry = TxnPartitionEntry::new(tp());
+        let mut b0 = batch(1, 0, 0, 3);
+        let b1 = batch(1, 0, 3, 2);
+        entry.add_inflight_batch(&b0);
+        entry.add_inflight_batch(&b1);
+        entry.increment_sequence(5);
+
+        // b1 is tracked but not supplied.
+        let error = entry
+            .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 0), &mut [&mut b0])
+            .expect_err("a tracked batch missing from the pool must error");
+        assert!(
+            error.message().contains("No in-flight batch supplied for tracked sequence"),
+            "got: {}",
+            error.message()
+        );
+        // State must be untouched — in particular next_sequence must NOT rewind.
+        assert_eq!(entry.next_sequence(), 5);
+        assert_eq!(entry.producer_id_and_epoch(), ProducerIdAndEpoch::NONE);
+    }
+
+    #[test]
+    fn test_empty_slice_errors_rather_than_clearing_a_tracked_set() {
+        let mut entry = TxnPartitionEntry::new(tp());
+        entry.add_inflight_batch(&batch(1, 0, 0, 3));
+        entry.increment_sequence(3);
+
+        assert!(
+            entry
+                .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 0), &mut [])
+                .is_err(),
+            "an empty pool must not silently clear a non-empty tracked set"
+        );
+        assert!(entry.has_inflight_batches(), "tracked set must survive the failed call");
+        assert_eq!(entry.next_sequence(), 3, "next_sequence must not rewind");
+    }
+
+    /// An empty tracked set with an empty pool is a legitimate no-op.
+    #[test]
+    fn test_empty_slice_is_fine_when_nothing_is_tracked() {
+        let mut entry = TxnPartitionEntry::new(tp());
+        entry
+            .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 1), &mut [])
+            .expect("no tracked batches means nothing to resolve");
+        assert_eq!(entry.next_sequence(), 0);
+        assert_eq!(entry.producer_id_and_epoch(), ProducerIdAndEpoch::new(7, 1));
+    }
+
+    /// Batches in the pool that this entry does not track must be IGNORED, not
+    /// inserted. This is the concrete Phase 4 shape: `Sender.failBatch` calls
+    /// `handleFailedBatch` (`Sender.java:848`) before removing the batch from
+    /// `Sender::in_flight_batches` (`:854`), while the txn map already dropped it
+    /// (`TransactionManager.java:790` then `:818`). So the pool legitimately
+    /// contains a batch the entry no longer tracks.
+    #[test]
+    fn test_untracked_batches_in_the_pool_are_ignored() {
+        let mut entry = TxnPartitionEntry::new(tp());
+        let mut surviving = batch(1, 0, 5, 4);
+        entry.add_inflight_batch(&surviving);
+        entry.increment_sequence(9);
+
+        // The failed batch: still owned by the Sender, already untracked here.
+        let mut failed = batch(1, 0, 2, 3);
+
+        entry
+            .adjust_sequences_due_to_failed_batch(2, 3, &mut [&mut failed, &mut surviving])
+            .expect("an untracked batch in the pool must be ignored, not shifted");
+
+        // Only the tracked batch was shifted.
+        assert_eq!(surviving.base_sequence(), 2);
+        // The untracked failed batch was left alone — before the fix it was
+        // re-inserted AND shifted to 2 - 3 = -1, producing a spurious error.
+        assert_eq!(failed.base_sequence(), 2);
+        assert_eq!(entry.next_sequence(), 6);
+        // And it was not re-added to the tracked set.
+        assert_eq!(entry.inflight_batches_by_sequence.len(), 1);
+        assert_eq!(entry.next_batch_by_sequence(), Some((1, 0, 2)));
+    }
+
+    /// Membership count is preserved across a rebuild regardless of pool size.
+    #[test]
+    fn test_membership_count_is_invariant_across_rebuild() {
+        let mut entry = TxnPartitionEntry::new(tp());
+        let mut b0 = batch(1, 0, 0, 1);
+        let mut b1 = batch(1, 0, 1, 1);
+        let mut extra = batch(9, 9, 9, 1); // never tracked
+        entry.add_inflight_batch(&b0);
+        entry.add_inflight_batch(&b1);
+        assert_eq!(entry.inflight_batches_by_sequence.len(), 2);
+
+        entry
+            .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 0), &mut [&mut extra, &mut b1, &mut b0])
+            .expect("superset pool is fine");
+
+        assert_eq!(entry.inflight_batches_by_sequence.len(), 2, "membership must be invariant");
+        assert_eq!(extra.base_sequence(), 9, "untracked batch must be untouched");
     }
 }
