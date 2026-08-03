@@ -23,6 +23,7 @@
 
 use std::io;
 
+use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
@@ -40,6 +41,7 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
+use super::AddPartitionsToTxnRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatRequest;
@@ -124,6 +126,8 @@ pub enum ConcreteRequest {
     OffsetFetch(OffsetFetchRequest),
     /// An InitProducerId request.
     InitProducerId(InitProducerIdRequest),
+    /// An AddPartitionsToTxn request.
+    AddPartitionsToTxn(AddPartitionsToTxnRequest),
 }
 
 impl ConcreteRequest {
@@ -143,6 +147,7 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
             Self::InitProducerId(r) => r.version(),
+            Self::AddPartitionsToTxn(r) => r.version(),
         }
     }
 
@@ -162,6 +167,7 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
             Self::InitProducerId(r) => r.api_key(),
+            Self::AddPartitionsToTxn(r) => r.api_key(),
         }
     }
 
@@ -187,6 +193,7 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::InitProducerId(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AddPartitionsToTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -260,6 +267,9 @@ impl ConcreteRequest {
             Self::InitProducerId(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::AddPartitionsToTxn(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -286,6 +296,7 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
             Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AddPartitionsToTxn(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -323,6 +334,7 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::InitProducerId(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AddPartitionsToTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -401,6 +413,10 @@ impl ConcreteRequest {
                 let data = InitProducerIdRequestData::read(readable, api_version)?;
                 Ok(Self::InitProducerId(InitProducerIdRequest::new(data, api_version)))
             },
+            ApiKeys::ADD_PARTITIONS_TO_TXN => {
+                let data = AddPartitionsToTxnRequestData::read(readable, api_version)?;
+                Ok(Self::AddPartitionsToTxn(AddPartitionsToTxnRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -425,6 +441,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
             Self::InitProducerId(r) => write!(f, "{r}"),
+            Self::AddPartitionsToTxn(r) => write!(f, "{r}"),
         }
     }
 }

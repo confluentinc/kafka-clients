@@ -20,6 +20,8 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod add_partitions_to_txn_request;
+pub mod add_partitions_to_txn_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod consumer_group_heartbeat_request;
@@ -57,6 +59,10 @@ pub mod transaction_result;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use add_partitions_to_txn_request::{
+    AddPartitionsToTxnRequest, AddPartitionsToTxnRequestBuilder, EARLIEST_BROKER_VERSION, LAST_CLIENT_VERSION,
+};
+pub use add_partitions_to_txn_response::{AddPartitionsToTxnResponse, V3_AND_BELOW_TXN_ID};
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
 pub use consumer_group_heartbeat_request::{
