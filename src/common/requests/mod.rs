@@ -29,6 +29,8 @@ pub mod fetch_request;
 pub mod fetch_response;
 pub mod find_coordinator_request;
 pub mod find_coordinator_response;
+pub mod init_producer_id_request;
+pub mod init_producer_id_response;
 pub mod list_offsets_request;
 pub mod list_offsets_response;
 pub mod metadata_request;
@@ -69,6 +71,8 @@ pub use find_coordinator_request::{
     CoordinatorType, FindCoordinatorRequest, FindCoordinatorRequestBuilder, MIN_BATCHED_VERSION,
 };
 pub use find_coordinator_response::FindCoordinatorResponse;
+pub use init_producer_id_request::{InitProducerIdRequest, InitProducerIdRequestBuilder};
+pub use init_producer_id_response::InitProducerIdResponse;
 pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
 pub use list_offsets_response::ListOffsetsResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};

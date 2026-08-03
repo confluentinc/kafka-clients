@@ -30,6 +30,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
@@ -44,6 +45,7 @@ use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
+use super::InitProducerIdRequest;
 use super::ListOffsetsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
@@ -120,6 +122,8 @@ pub enum ConcreteRequest {
     OffsetCommit(OffsetCommitRequest),
     /// An OffsetFetch request.
     OffsetFetch(OffsetFetchRequest),
+    /// An InitProducerId request.
+    InitProducerId(InitProducerIdRequest),
 }
 
 impl ConcreteRequest {
@@ -138,6 +142,7 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
             Self::OffsetFetch(r) => r.version(),
+            Self::InitProducerId(r) => r.version(),
         }
     }
 
@@ -156,6 +161,7 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::InitProducerId(r) => r.api_key(),
         }
     }
 
@@ -180,6 +186,7 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::InitProducerId(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -250,6 +257,9 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::InitProducerId(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -275,6 +285,7 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -311,6 +322,7 @@ impl ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::InitProducerId(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -385,6 +397,10 @@ impl ConcreteRequest {
                 let data = OffsetFetchRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
             },
+            ApiKeys::INIT_PRODUCER_ID => {
+                let data = InitProducerIdRequestData::read(readable, api_version)?;
+                Ok(Self::InitProducerId(InitProducerIdRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -408,6 +424,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::InitProducerId(r) => write!(f, "{r}"),
         }
     }
 }

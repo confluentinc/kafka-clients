@@ -32,6 +32,7 @@ use super::ApiVersionsResponse;
 use super::ConsumerGroupHeartbeatResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
+use super::InitProducerIdResponse;
 use super::ListOffsetsResponse;
 use super::MetadataResponse;
 use super::OffsetCommitResponse;
@@ -79,6 +80,8 @@ pub enum ConcreteResponse {
     OffsetCommit(OffsetCommitResponse),
     /// An OffsetFetch response.
     OffsetFetch(OffsetFetchResponse),
+    /// An InitProducerId response.
+    InitProducerId(InitProducerIdResponse),
 }
 
 impl ConcreteResponse {
@@ -97,6 +100,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::InitProducerId(r) => r.api_key(),
         }
     }
 
@@ -121,6 +125,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::InitProducerId(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -169,6 +174,9 @@ impl ConcreteResponse {
             Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::InitProducerId(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -193,6 +201,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -221,6 +230,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
             Self::OffsetCommit(r) => r.error_counts(),
             Self::OffsetFetch(r) => r.error_counts(),
+            Self::InitProducerId(r) => r.error_counts(),
         }
     }
 
@@ -241,6 +251,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
             Self::OffsetCommit(r) => r.throttle_time_ms(),
             Self::OffsetFetch(r) => r.throttle_time_ms(),
+            Self::InitProducerId(r) => r.throttle_time_ms(),
         }
     }
 
@@ -260,6 +271,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::InitProducerId(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -278,6 +290,7 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
             Self::OffsetCommit(r) => r.should_client_throttle(version),
             Self::OffsetFetch(r) => r.should_client_throttle(version),
+            Self::InitProducerId(r) => r.should_client_throttle(version),
         }
     }
 
@@ -374,6 +387,10 @@ impl ConcreteResponse {
                 let response = OffsetFetchResponse::parse(readable, version)?;
                 Ok(Self::OffsetFetch(response))
             },
+            ApiKeys::INIT_PRODUCER_ID => {
+                let response = InitProducerIdResponse::parse(readable, version)?;
+                Ok(Self::InitProducerId(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -397,6 +414,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::InitProducerId(r) => write!(f, "{r}"),
         }
     }
 }
