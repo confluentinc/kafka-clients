@@ -3,8 +3,22 @@
 This document captures the current architecture and design of the Confluent Kafka Rust client.
 It is intended to be updated after each manager agent loop completes a milestone or phase.
 
-**Last updated:** 2026-04-10
-**Status:** Milestone 1 complete, Milestone 3 (SSL/SASL) complete
+**Last updated:** 2026-08-03
+**Status:** Milestones 1-10 complete; Milestone 11 (producer idempotence and
+transactions) in progress.
+
+> **⚠ Scope of this document.** The architecture described below — network stack,
+> protocol framework, request/response layer, security, code generation — is
+> still accurate and still the foundation of the crate. But this document covers
+> **only Milestones 1 and 3**. It does not describe the producer, the consumer
+> (now the largest module), the C FFI, the language bindings, or the
+> multilanguage test harness. Do not read it as a scope or progress statement.
+>
+> Current scope: `design/history/MILESTONES.md` plus the per-phase
+> `design/history/Milestone-N/**/PLAN.md` files.
+> Current performance: `design/current/client-comparison-results.md` (kept
+> current).
+> Current module layout: `design/current/structure.md`.
 
 ---
 
@@ -13,7 +27,7 @@ It is intended to be updated after each manager agent loop completes a milestone
 A Rust Kafka client translated from the Java Kafka client (Apache Kafka 4.2), preserving the same
 architecture and logical structure while adapting to Rust idioms. All I/O is async via Tokio.
 
-**Crate stats:** ~100 source files, ~15,000 lines of library code, 579 unit tests + 16 integration tests.
+**Crate stats (2026-08-03):** 252 source files, ~146 000 lines under `src/`, ~2 264 passing tests, plus 197 generated wire-protocol message types. Per-area breakdown in `design/current/status.md`.
 
 ---
 
@@ -298,14 +312,19 @@ PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
 
 ## Milestone Progress
 
+> Only Milestones 1-3 are described here. Milestones 4-10 are complete and are
+> documented in `design/history/MILESTONES.md`; Milestone 11 is in progress with
+> its plan at `design/history/Milestone-11/PLAN.md`.
+
 ### Milestone 1 -- Basic PLAINTEXT Connection (complete)
 
 8 layers: core types, wire protocol, generated messages, request/response framework,
 network transport, selector/channel, network client, integration tests.
 
-### Milestone 2 -- Producer with Batching (not started)
+### Milestone 2 -- Producer with Batching (complete)
 
-Producer that accumulates messages into batches for Produce RPC.
+Producer that accumulates messages into batches for Produce RPC. Delivered;
+`src/producer/` is now 21 files / ~15 900 lines.
 
 ### Milestone 3 -- SSL + SASL Authentication (complete)
 

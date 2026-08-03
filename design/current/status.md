@@ -1,8 +1,47 @@
-# Current Status: Milestone 3 Complete (SSL + SASL Authentication)
+# Current Status: Milestones 1-10 complete; Milestone 11 in progress
 
-Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and SASL PLAIN authentication fully implemented with integration tests against real Kafka 4.2.0 broker. 454+ unit tests + 16 integration tests passing.
+**Last verified:** 2026-08-03
 
-## Completed Components
+| | |
+|---|---|
+| Complete | Milestones 1-10 (see `design/history/MILESTONES.md`) |
+| In progress | Milestone 11 — producer idempotence and transactions |
+| Source | 252 files, ~146 000 lines under `src/` |
+| Tests | ~2 264 passing (lib + protocol/message + consumer + producer suites) |
+| Java base | Apache Kafka 4.2.0 (`kafka/` submodule at `a18251b`) |
+
+Breakdown by area:
+
+| Area | Files | Lines |
+|---|---|---|
+| `src/common/` | 139 | 43 934 |
+| `src/consumer/` | 64 | 64 450 |
+| `src/producer/` | 21 | 15 894 |
+| `src/ffi/` | 4 | 7 743 |
+| root client layer (`src/*.rs`) | 22 | 14 025 |
+
+Plus 197 wire-protocol message types generated at build time from the official
+JSON definitions.
+
+Beyond the Rust crate: a C FFI, a CPython extension with sync and asyncio
+wrappers, and a gRPC harness that runs one shared set of integration scenarios
+against native Rust, Python, and C backends.
+
+## ⚠ Note on this document
+
+Everything below this heading describes **Milestones 1 and 3 only** and was
+written when those were the whole project. It is accurate for the network,
+protocol, and security layers it covers, but it is **not** a statement of current
+scope — it predates the producer (Milestone 2), the C FFI and bindings
+(Milestones 4, 9, 10), the performance work (Milestone 5), the multilanguage
+harness (Milestone 6), the translation agent (Milestone 7), and the entire
+consumer (Milestone 8), which is now the largest module in the crate.
+
+For current scope and progress use `design/history/MILESTONES.md` and the
+per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
+`design/current/client-comparison-results.md`, which is kept current.
+
+## Completed Components (Milestones 1 and 3 — historical detail)
 
 ### Layer 1 — Core Protocol Types (5 classes) ✓
 - **Node** (`common/node.rs`): Kafka broker representation
