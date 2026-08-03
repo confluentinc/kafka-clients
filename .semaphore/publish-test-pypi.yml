@@ -1,0 +1,67 @@
+version: v1.0
+name: publish-test-pypi
+
+# Stage C (part 1): publish to Test PyPI, then verify the release installs from
+# Test PyPI. Promoted from python-wheels.yml after the Packaging fan-in has
+# produced the consolidated `release/` artifact (all wheels + the sdist, flat).
+#
+# Modeled on confluent-kafka-python's .semaphore/publish-test-pypi.yml. The one
+# structural difference: our Packaging block already gathered every wheel + the
+# sdist into a single flat `release/` artifact, so we just `twine upload
+# release/*` -- no per-platform .tgz extraction or wheelhouse assembly.
+#
+# NOT PUBLISHING YET: the actual credential fetch (Vault) and `twine upload`
+# are COMMENTED OUT. As-is these blocks run a green dry-run -- pull `release/`,
+# list it, print what would be uploaded. To go live:
+#   1. Reserve the `confluent-kafka4` project name on test.pypi.org (and PyPI).
+#   2. Provision the Vault path + upload token (see the commented lines below).
+#   3. Uncomment the marked "ACTUAL PUBLISH" / "ACTUAL VERIFY" lines and delete
+#      the DRY-RUN echoes.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+blocks:
+  - name: "Publish to Test PyPI"
+    dependencies: []
+    run:
+      when: "tag =~ '.*'"
+    task:
+      jobs:
+        - name: Upload
+          commands:
+            - checkout
+            - sem-version python 3.11
+            - pip install twine
+            - artifact pull workflow release --destination release --force
+            - ls -l release/
+            # --- ACTUAL PUBLISH (disabled until we go live on Test PyPI) ---
+            # - . vault-setup
+            # - export TWINE_USERNAME=__token__
+            # - export TWINE_PASSWORD="$(vault kv get -format=json v1/ci/kv/pypi/test.pypi.org | jq -r '.data.data."confluent-kafka4"')"
+            # - twine upload --repository-url https://test.pypi.org/legacy/ --non-interactive release/*
+            - echo "DRY-RUN: publish disabled -- would 'twine upload --repository-url https://test.pypi.org/legacy/ release/*'"
+
+  - name: "Verify Test PyPI Release"
+    dependencies:
+      - "Publish to Test PyPI"
+    run:
+      when: "tag =~ '.*'"
+    task:
+      jobs:
+        - name: Verify
+          commands:
+            - checkout
+            - sem-version python 3.11
+            - export CK_VERSION=$(python -c "import tomllib; print(tomllib.load(open('bindings/python/pyproject.toml','rb'))['project']['version'])")
+            # --- ACTUAL VERIFY (disabled with publish) ---
+            # Install the just-published release from Test PyPI (falling back to
+            # real PyPI for the pure-Python build deps) and run the smoke tests.
+            # - pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "confluent-kafka4==$CK_VERSION"
+            # - python -c "import _confluentkafka; print('import OK')"
+            - echo "DRY-RUN: verify disabled -- would install confluent-kafka4==$CK_VERSION from Test PyPI and smoke-test it"
+
+promotions:
+  - name: "Publish to PyPI"
+    pipeline_file: publish-pypi.yml
