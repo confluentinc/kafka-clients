@@ -919,15 +919,29 @@ GUARD:`). Remove the idempotence arm in **Phase 4** and the transactional arm in
 
 ### 9.5 Critic review of Phase 1
 
-**Status:** open.
+**Status:** DONE (2026-08-03). Review in
+`design/history/Milestone-11/Phase-1/COMMENTS.DONE.41.md`; fixes in commit
+`0a8612e`; one partial false positive recorded in `COMMENTS.FP.md`.
 
-Phase 1 shipped 8 commits with the Actor half of the workflow only; no Critic
-pass ran. Two plan corrections (§6.8, recorded in this document's header) were
-made on the implementer's own judgement and have not been independently checked.
-Phase 1 also carries no Java-parity test coverage for its five new types — no
-Java test file exists for any of them, so fidelity currently rests on a reading
-of the source until `TransactionManagerTest` lands in Phases 3/5. The six
-translated `ProducerConfig` tests are the exception and do pass.
+8 findings. Seven fixed, one partially rejected. The material one was a latent
+Phase-4 bug: `TxnPartitionEntry::reset_sequence_numbers` took the tracked
+in-flight membership from the caller's slice rather than from its own set as Java
+does, so a short slice would silently clear the set and rewind the partition's
+sequence counter. Confirmed reachable — `Sender.failBatch` calls
+`handleFailedBatch` before removing the batch from `Sender::in_flight_batches`,
+so the two sets legitimately differ at the call moment. Fixed, with the
+membership invariant added to rules §6/§7 and 5 regression tests.
+
+Also produced a new forward-looking rule (§9): flat error codes lose
+`UnknownProducerIdException <: OutOfOrderSequenceException`, which
+`handleFailedBatch` dispatches on — a literal `if / else if` translation would
+misroute idempotent recovery. Recorded before Phase 5 needs it.
+
+**Still open from this item:** Phase 1 carries no *Java-parity* test coverage for
+four of its five new types, because no Java test file exists for any of them.
+Fidelity rests on a reading of the source until `TransactionManagerTest` lands in
+Phases 3/5. The six translated `ProducerConfig` tests are the exception and pass.
+The Critic verified both plan overrides (§6.8) as correct with the plan wrong.
 
 ### 9.6 C FFI / Python / gRPC multilanguage harness for transactions
 

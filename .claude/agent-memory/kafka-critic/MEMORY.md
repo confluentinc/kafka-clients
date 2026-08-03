@@ -60,3 +60,5 @@
 - [M8 Phase 33 CRM test-parity + prod fixes](review_m8_phase33.md) — per-RPC≠hot-path perf audit; supplier-collapse `||UnknownServerError` escape hatch under-asserts subclass; by-ref-vs-clone in autoCommitCallback; send-time member-info re-sync (CRM.java:889)
 - [M8 Phase 34 membership-reconcile parity](review_m8_phase34.md) — "WithFailed*/Anyway" test reusing success helper never hits err-arm; sticky bool vs verify(times(N)); discard park-point collapse; on_consumer_poll CAS-then-state fix CLEAN/perf-neutral
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
+- [M11 Phase 1 producer txn support types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors than planned; exception-hierarchy flattening; stranded doc comment
+- [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; `enable()`/`pin!` NOT required (corrects an earlier wrong note)

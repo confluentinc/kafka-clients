@@ -1,1 +1,4 @@
 - [Phase 8a.3 dropped](phase_8a3_dropped.md) — post-8a.2 perf collapse is broker-end, not a sub-phase; no NOTES.md addendum
+- [Milestone 11 — producer transactions](project_milestone_11.md) — scope, agent numbers 41–48, scope calls taken while planning (bindings deferred, WriteTxnMarkers out)
+- [Stale design/current docs](project_stale_design_docs.md) — `design/current/*` claims Milestone 3/~15k lines; real state lives in `design/history/`
+- [Plan review workflow](feedback_plan_review_workflow.md) — draft plans in-repo uncommitted; verify supplied gap analyses rather than trusting them
