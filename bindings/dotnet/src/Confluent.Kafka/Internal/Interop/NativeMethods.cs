@@ -240,4 +240,191 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerGroupMetadataDestroy(IntPtr meta);
+
+    // ---- Async poll (owned-handle completion, ffi §B6/§B7) — M3/P3 ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_poll_async</c> — polls for records asynchronously
+    /// (one-operation-in-flight). The completion fires via <paramref name="callback"/>
+    /// on the core's dispatcher thread: on success <c>records</c> is a non-null owned
+    /// <c>ConsumerRecords_t</c> (Category-3 borrow-root) and <c>error</c> is null; on
+    /// failure <c>records</c> is null and <c>error</c> is non-null. If the core rejects
+    /// at its own access guard the callback fires inline on the caller thread with a
+    /// <c>ConcurrentModification</c> error. The callback <b>takes ownership</b> of
+    /// whichever handle is non-null and frees it (records via
+    /// <see cref="ConsumerRecordsDestroy"/> after copy-out, error via
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>). <paramref name="userData"/> is
+    /// a <see cref="GCHandle"/> over the per-op context. The only <c>_async</c> fn
+    /// taking a timeout (<paramref name="timeoutMs"/>, Java <c>Duration</c> →
+    /// <c>int64_t</c> ms).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_poll_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerPollAsync(
+        IntPtr consumer,
+        long timeoutMs,
+        ConsumerCallbacks.PollCallback callback,
+        IntPtr userData);
+
+    // ---- ConsumerRecords_t — the owned poll batch (Category 3, ffi §B2) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecords_count</c> — the number of records in the
+    /// batch. Null-safe (→ 0).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerRecordsCount(IntPtr records);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecords_is_empty</c> — whether the batch is empty.
+    /// Null-safe (→ true).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_is_empty", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerRecordsIsEmpty(IntPtr records);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecords_get</c> — the record at <paramref name="index"/>,
+    /// <b>borrowed</b> (Category 4) and valid until the batch is destroyed, or
+    /// <see cref="IntPtr.Zero"/> if out of range. Never freed by the binding.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordsGet(IntPtr records, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecords_destroy</c> — frees the owned batch (the
+    /// Category-3 borrow-root; every borrowed record / byte / string slice from it is
+    /// invalidated). Null-safe (no-op). Called by the poll callback <b>after</b> the
+    /// copy-out completes.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordsDestroy(IntPtr records);
+
+    // ---- ConsumerRecord_t — borrowed view accessors (Category 4, ffi §B2/§B3/§B4) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_partition</c> — the record's partition.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerRecordPartition(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_offset</c> — the record's offset.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_offset", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ConsumerRecordOffset(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_timestamp</c> — the record's timestamp
+    /// (milliseconds since epoch, or <c>-1</c> = <c>NO_TIMESTAMP</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ConsumerRecordTimestamp(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_timestamp_type</c> — the timestamp type as its
+    /// numeric id (<c>-1</c> NoTimestampType / <c>0</c> CreateTime /
+    /// <c>1</c> LogAppendTime).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_timestamp_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerRecordTimestampType(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_topic</c> — the topic as a
+    /// <b>length-delimited</b>, NON-NUL-terminated <c>(ptr, out_len)</c> slice
+    /// borrowing into the batch (ffi §B3: marshal with
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr, int)"/> using
+    /// <paramref name="outLen"/>, NEVER a NUL-scan). Valid until the batch is
+    /// destroyed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordTopic(IntPtr record, out int outLen);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_key</c> — the key bytes as a
+    /// <c>(ptr, out_len)</c> pair borrowing into the batch, or
+    /// <c>(<see cref="IntPtr.Zero"/>, -1)</c> if the key is absent. Copied out into an
+    /// owned managed array during the callback (ffi §B4 copy-out).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordKey(IntPtr record, out int outLen);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_value</c> — the value bytes as a
+    /// <c>(ptr, out_len)</c> pair borrowing into the batch, or
+    /// <c>(<see cref="IntPtr.Zero"/>, -1)</c> if the value is absent (tombstone).
+    /// Copied out into an owned managed array during the callback (ffi §B4 copy-out).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordValue(IntPtr record, out int outLen);
+
+    // ---- ConsumerRecord_t headers (Category 4, in scope M3/P3 — internal only) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_header_count</c> — the number of headers on
+    /// the record.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_header_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerRecordHeaderCount(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_header_key</c> — the header key at
+    /// <paramref name="index"/> as a <b>length-delimited</b>, NON-NUL-terminated
+    /// <c>(ptr, out_len)</c> slice borrowing into the batch (ffi §B3: use
+    /// <paramref name="outLen"/>, NEVER a NUL-scan), or
+    /// <c>(<see cref="IntPtr.Zero"/>, -1)</c> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_header_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordHeaderKey(IntPtr record, int index, out int outLen);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_header_value</c> — the header value at
+    /// <paramref name="index"/> as a <c>(ptr, out_len)</c> pair borrowing into the
+    /// batch, or <c>(<see cref="IntPtr.Zero"/>, -1)</c> if out of range or the value is
+    /// null. Copied out into an owned managed array (ffi §B4 copy-out).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_header_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordHeaderValue(IntPtr record, int index, out int outLen);
+
+    // ---- Consumer_assign + MockConsumer broker-free drivers (ffi §B2, mock only) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_assign</c> — assigns the consumer to
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs from the parallel
+    /// arrays <paramref name="topics"/> (pinned NUL-terminated UTF-8 <c>const char*</c>
+    /// = <c>const char* const*</c>) and <paramref name="partitions"/>. Read
+    /// synchronously during the call (call-scoped pin, ffi §A4). Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_assign", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerAssign(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_add_record</c> — queues a record on a mock
+    /// consumer (mock only; errors on a real consumer). The record's partition must
+    /// already be assigned (via <see cref="ConsumerAssign"/>) or this errors.
+    /// <paramref name="key"/> / <paramref name="value"/> are <c>(ptr, len)</c> pairs;
+    /// pass <c>len &lt; 0</c> (or a null ptr) for an absent key/value. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_add_record", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerAddRecord(
+        IntPtr consumer,
+        IntPtr topic,
+        int partition,
+        long offset,
+        IntPtr key,
+        int keyLen,
+        IntPtr value,
+        int valueLen);
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_set_poll_error</c> — injects an
+    /// <c>illegal_state</c> error returned by the <b>next</b> poll on a mock consumer
+    /// (mock only; mirrors Java <c>setPollException</c>). Drives the FAILURE test
+    /// broker-free. <paramref name="message"/> is a pinned NUL-terminated UTF-8 buffer.
+    /// Returns a <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerSetPollError(IntPtr consumer, IntPtr message);
 }

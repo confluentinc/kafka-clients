@@ -79,4 +79,84 @@ internal static class ConsumerCallbacks
             context?.FreeGcHandle();
         }
     }
+
+    /// <summary>
+    /// The C signature for <c>kafka_consumer_Consumer_poll_callback_t</c>:
+    /// <c>void (*)(kafka_consumer_ConsumerRecords_t* records,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the <b>owned-handle</b>
+    /// completion shape (ffi-marshalling.md §B6/§B7). On success
+    /// <paramref name="records"/> is a non-null owned batch and <paramref name="error"/>
+    /// is null; on failure (incl. the inline core-guard rejection)
+    /// <paramref name="records"/> is null and <paramref name="error"/> is non-null. The
+    /// callback <b>takes ownership</b> of whichever handle is non-null and frees it.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void PollCallback(IntPtr records, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The single rooted instance passed to every <c>poll_async</c> submission. Rooted
+    /// for the process lifetime, so the native thunk never dangles (ffi §B6 keep-alive).
+    /// </summary>
+    internal static readonly PollCallback Poll = OnPoll;
+
+    /// <summary>
+    /// The poll completion trampoline. Runs on the core's foreign dispatcher thread
+    /// (or inline on the caller thread on a core-guard rejection). It performs the
+    /// batch <b>copy-out on this (dispatcher) thread</b> (the M3/P3 key decision) and
+    /// completes the awaiter with an owned <see cref="ConsumerRecords"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Free-exactly-once, every path (the phase's central correctness obligation).</b>
+    /// The <c>finally</c> — which also runs on the no-throw path — frees, on <b>every</b>
+    /// path (success / failure / inline core-rejection / no-throw / submit-threw is
+    /// handled by <c>AbandonBeforeSubmit</c> instead, since native never ran here):
+    /// <list type="number">
+    /// <item>the owned <c>ConsumerRecords_t</c> batch, <b>after</b> the copy-out —
+    /// via the null-safe <see cref="NativeMethods.ConsumerRecordsDestroy"/> (a no-op
+    /// when <paramref name="records"/> is null, i.e. failure / rejection);</item>
+    /// <item>the <c>KafkaError</c> on failure — inside <see cref="OperationCompletionSource{TResult}.Complete(IntPtr)"/>
+    /// via <see cref="KafkaException.FromHandle(IntPtr)"/>, which <c>_destroy</c>s it in
+    /// its own <c>finally</c>;</item>
+    /// <item>the per-op rooting <see cref="GCHandle"/> — via
+    /// <see cref="OperationCompletionSource{TResult}.FreeGcHandle"/> (idempotent).</item>
+    /// </list>
+    /// The batch destroy is safe only because the copy-out retains no borrowed pointer
+    /// (see <see cref="ConsumerRecordsMarshal"/>).
+    /// </remarks>
+    private static void OnPoll(IntPtr records, IntPtr error, IntPtr userData)
+    {
+        OperationCompletionSource<ConsumerRecords>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (OperationCompletionSource<ConsumerRecords>)handle.Target!;
+            if (error != IntPtr.Zero)
+            {
+                // Failure (records is null). Complete maps to KafkaException /
+                // OperationCanceledException and frees the error handle via FromHandle.
+                context.Complete(error);
+            }
+            else
+            {
+                // Success (records is a non-null owned borrow-root). Copy out on THIS
+                // (dispatcher) thread, then the finally destroys the batch — the whole
+                // §6.4 copy-out default.
+                ConsumerRecords marshalled = ConsumerRecordsMarshal.CopyOut(records);
+                context.CompleteWithResult(marshalled);
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary: never unwind into native. Surface via the Task; the
+            // finally still frees the batch + GCHandle if we recovered the context.
+            context?.TrySetException(exception);
+        }
+        finally
+        {
+            // Sole owner of BOTH frees, on EVERY path (ffi §B6). Destroy is null-safe,
+            // so it is a no-op when records is null (failure / inline rejection).
+            NativeMethods.ConsumerRecordsDestroy(records);
+            context?.FreeGcHandle();
+        }
+    }
 }

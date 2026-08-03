@@ -20,12 +20,34 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The per-operation bridge context for a void-result async consumer op
-/// (<c>kafka_consumer_Consumer_op_callback_t</c>, ffi-marshalling.md §B6/§B7): it
-/// couples a <see cref="TaskCompletionSource{TResult}"/> to the C completion
-/// callback and frees its own <see cref="GCHandle"/> exactly once.
+/// The per-operation bridge context for a <b>result-returning</b> async consumer op
+/// (an owned-handle completion, ffi-marshalling.md §B6/§B7): it couples a
+/// <see cref="TaskCompletionSource{TResult}"/> to the C completion callback and frees
+/// its own <see cref="GCHandle"/> exactly once. The <b>void</b>-result path
+/// (<c>op_callback_t</c>) is the specialization <see cref="OperationCompletionSource"/>
+/// (<c><typeparamref name="TResult"/> = bool</c>) below.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Generalized (M3/P3, PLAN decision 4).</b> M3/P1 shipped a void-only bridge;
+/// M3/P3 adds the owned-handle (result-returning) shape used by <c>poll</c> and the
+/// five future owned-handle ops (<c>committed</c> / <c>offsetsForTimes</c> /
+/// <c>beginning|endOffsets</c> / <c>partitionsFor</c> / <c>listTopics</c>). Rather
+/// than duplicate the 5-invariant machinery per op, the bridge is generalized to
+/// carry a result <typeparamref name="TResult"/>; the void path is expressed as
+/// <c>&lt;bool&gt;</c> (the thin <see cref="OperationCompletionSource"/> subclass),
+/// keeping every M3/P1+P2 call site and its observable semantics byte-for-byte
+/// (<see cref="Complete(IntPtr)"/> still maps null error → success, non-null →
+/// <see cref="KafkaException"/> / <see cref="OperationCanceledException"/>).
+/// </para>
+/// <para>
+/// <b>The marshalling lives in the trampoline, not here.</b> On success the
+/// callback (on the core's dispatcher thread) marshals the native result into an
+/// owned managed <typeparamref name="TResult"/> and hands it to
+/// <see cref="CompleteWithResult(TResult)"/>. This context does <b>no</b> native
+/// reads and stays result-type-agnostic — the copy-out (ffi §6.4) is the
+/// trampoline's job (see <c>ConsumerCallbacks</c>).
+/// </para>
 /// <para>
 /// <b>Rooting.</b> From submit until the callback fires — the whole op, not a
 /// synchronous call — this context is kept alive by a <see cref="GCHandle"/>
@@ -44,25 +66,27 @@ namespace Confluent.Kafka.Internal;
 /// </para>
 /// <para>
 /// <b>Who frees the <see cref="GCHandle"/>.</b> The completion callback
-/// (<see cref="Complete"/>) is the <b>sole owner</b> of the free on the normal path
-/// (invariant #2), matching the in-repo Python (<c>Py_DECREF</c> in the op
-/// trampoline) and confluent-kafka-dotnet (<c>gch.Free()</c> in the delivery-report
-/// callback) siblings: the callback frees; teardown drains — it never reclaims.
-/// <see cref="AbandonBeforeSubmit"/> frees it only when the submitting P/Invoke
-/// threw so native never ran and the callback can never fire. Both dispose the
-/// cancellation registration idempotently; the free itself is
-/// <see cref="Interlocked"/>-guarded, so it runs exactly once. Under the
-/// single-owner (not-thread-safe) model there is no teardown-side fault/reclaim of
-/// a separately-submitted op — the awaiter of an op is its disposer, so there is no
+/// (<see cref="Complete"/> / <see cref="CompleteWithResult"/>) is the <b>sole
+/// owner</b> of the free on the normal path (invariant #2), matching the in-repo
+/// Python (<c>Py_DECREF</c> in the op trampoline) and confluent-kafka-dotnet
+/// (<c>gch.Free()</c> in the delivery-report callback) siblings: the callback frees;
+/// teardown drains — it never reclaims. <see cref="AbandonBeforeSubmit"/> frees it
+/// only when the submitting P/Invoke threw so native never ran and the callback can
+/// never fire. Both dispose the cancellation registration idempotently; the free
+/// itself is <see cref="Interlocked"/>-guarded, so it runs exactly once. Under the
+/// single-owner (not-thread-safe) model there is no teardown-side fault/reclaim of a
+/// separately-submitted op — the awaiter of an op is its disposer, so there is no
 /// third path to free the handle.
 /// </para>
 /// </remarks>
-internal sealed class OperationCompletionSource
+/// <typeparam name="TResult">
+/// The already-marshalled managed result type (e.g. <c>ConsumerRecords</c> for poll,
+/// <c>bool</c> for the void path).
+/// </typeparam>
+internal class OperationCompletionSource<TResult>
 {
-    // A void result; the generic TaskCompletionSource is used because the
-    // non-generic TaskCompletionSource does not exist on the netstandard2.0 floor.
-    private readonly TaskCompletionSource<bool> _tcs =
-        new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<TResult> _tcs =
+        new TaskCompletionSource<TResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private GCHandle _gcHandle;
     private int _gcHandleFreed;
@@ -72,7 +96,7 @@ internal sealed class OperationCompletionSource
     private int _cancellationRequested;
 
     /// <summary>The awaitable completed by the C completion callback.</summary>
-    internal Task Task => _tcs.Task;
+    internal Task<TResult> Task => _tcs.Task;
 
     /// <summary>
     /// Records the <see cref="GCHandle"/> that roots this context for native. Set by
@@ -97,7 +121,7 @@ internal sealed class OperationCompletionSource
             _registration = cancellationToken.Register(
                 static state =>
                 {
-                    var (self, wake) = ((OperationCompletionSource, Action))state!;
+                    var (self, wake) = ((OperationCompletionSource<TResult>, Action))state!;
                     Interlocked.Exchange(ref self._cancellationRequested, 1);
                     wake();
                 },
@@ -106,16 +130,39 @@ internal sealed class OperationCompletionSource
     }
 
     /// <summary>
-    /// Completes the awaiter from the C callback. Maps a non-null
-    /// <paramref name="error"/> handle to a <see cref="KafkaException"/> via
-    /// <see cref="KafkaException.FromHandle"/> (which frees the handle exactly once),
-    /// and translates a fault to <see cref="OperationCanceledException"/> when the op
-    /// was canceled via its token. A concurrent op rejected by the <b>core</b>
-    /// arrives here (fired inline by the core with a <c>ConcurrentModification</c>
-    /// error) and faults the <c>Task</c> — the observable "concurrent async op →
-    /// <see cref="KafkaException"/>" contract (ffi §B5), now delivered by the core,
-    /// not a managed pre-check.
+    /// Completes the awaiter <b>successfully</b> with an already-marshalled managed
+    /// <paramref name="result"/> (the owned copy-out produced on the dispatcher
+    /// thread, ffi §6.4). Stops the cancellation registration first so a late
+    /// <c>wakeup()</c> is not fired after the op resolved. The result-returning analog
+    /// of the void path's success branch in <see cref="Complete(IntPtr)"/>.
     /// </summary>
+    internal void CompleteWithResult(TResult result)
+    {
+        // Stop the cancellation registration from firing wakeup() after the op has
+        // resolved (minimizes the intrinsic wakeup-vs-next-op race — CLAUDE.md /
+        // consumer-threading §11 documents this race as intentional/Java-faithful).
+        _registration.Dispose();
+        _tcs.TrySetResult(result);
+    }
+
+    /// <summary>
+    /// Completes the awaiter from the C callback on the <b>failure/cancel</b> path.
+    /// Maps a non-null <paramref name="error"/> handle to a
+    /// <see cref="KafkaException"/> via <see cref="KafkaException.FromHandle"/> (which
+    /// frees the handle exactly once), and translates a fault to
+    /// <see cref="OperationCanceledException"/> when the op was canceled via its
+    /// token. A concurrent op rejected by the <b>core</b> arrives here (fired inline by
+    /// the core with a <c>ConcurrentModification</c> error) and faults the <c>Task</c>
+    /// — the observable "concurrent async op → <see cref="KafkaException"/>" contract
+    /// (ffi §B5), now delivered by the core, not a managed pre-check.
+    /// </summary>
+    /// <remarks>
+    /// A <b>null</b> <paramref name="error"/> is the <b>void</b> success case (the
+    /// specialization <see cref="OperationCompletionSource"/> overrides how success is
+    /// realized). For a result-returning op the trampoline never calls this with a
+    /// null error — it calls <see cref="CompleteWithResult(TResult)"/> instead — so the
+    /// base intentionally leaves the null-error branch to the subclass.
+    /// </remarks>
     internal void Complete(IntPtr error)
     {
         // Stop the cancellation registration from firing wakeup() after the op has
@@ -139,8 +186,23 @@ internal sealed class OperationCompletionSource
         }
         else
         {
-            _tcs.TrySetResult(true);
+            // Null error = success. The base cannot fabricate a TResult, so it defers
+            // to the subclass (the void path completes with `true`); a
+            // result-returning op never reaches here with a null error (it uses
+            // CompleteWithResult). See OperationCompletionSource (the <bool> subclass).
+            CompleteWithSuccessNoResult();
         }
+    }
+
+    /// <summary>
+    /// Realizes the null-error (success) case of <see cref="Complete(IntPtr)"/> when
+    /// there is no marshalled result to carry. The result-returning base has no
+    /// natural <typeparamref name="TResult"/> value here, so it does nothing; the void
+    /// specialization overrides this to <c>TrySetResult(true)</c>. A result-returning
+    /// op never hits this path (it completes via <see cref="CompleteWithResult"/>).
+    /// </summary>
+    private protected virtual void CompleteWithSuccessNoResult()
+    {
     }
 
     /// <summary>
@@ -175,4 +237,24 @@ internal sealed class OperationCompletionSource
             _gcHandle.Free();
         }
     }
+}
+
+/// <summary>
+/// The <b>void</b>-result specialization of the completion bridge
+/// (<c>kafka_consumer_Consumer_op_callback_t</c>, ffi-marshalling.md §B6/§B7): a
+/// thin <c>OperationCompletionSource&lt;bool&gt;</c> whose <c>Task</c> is a plain
+/// <see cref="System.Threading.Tasks.Task"/> and whose null-error success completes
+/// with <c>true</c>. Every M3/P1+P2 call site (<c>new OperationCompletionSource()</c>,
+/// <c>context.Complete(error)</c>, <c>context.Task</c>) keeps working unchanged.
+/// </summary>
+internal sealed class OperationCompletionSource : OperationCompletionSource<bool>
+{
+    /// <summary>
+    /// The awaitable completed by the C completion callback, as a non-generic
+    /// <see cref="System.Threading.Tasks.Task"/> (the void-op surface M3/P1+P2 use).
+    /// </summary>
+    internal new Task Task => base.Task;
+
+    /// <inheritdoc/>
+    private protected override void CompleteWithSuccessNoResult() => CompleteWithResult(true);
 }
