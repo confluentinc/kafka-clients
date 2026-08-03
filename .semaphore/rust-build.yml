@@ -106,9 +106,10 @@ blocks:
           commands:
             - choco install -y --no-progress nasm cmake rust-ms
             - $env:PATH = "C:\Program Files\NASM;C:\Program Files\CMake\bin;$env:PATH"
-            - $cargoBin = (Get-ChildItem "C:\Program Files\Rust*\bin\cargo.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
-            - if (-not $cargoBin) { throw "cargo.exe not found after 'choco install rust-ms'" }
-            - $env:PATH = "$cargoBin;$env:PATH"
+            - $rustBin = "C:\ProgramData\chocolatey\lib\rust-ms\tools\bin"
+            - if (-not (Test-Path "$rustBin\cargo.exe")) { $rustBin = (Get-ChildItem "C:\ProgramData\chocolatey\lib\rust-ms" -Filter cargo.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName }
+            - if (-not $rustBin) { throw "cargo.exe not found after 'choco install rust-ms'" }
+            - $env:PATH = "$rustBin;$env:PATH"
             - cargo --version
             - rustc --version
             - cargo build --features ffi --release
