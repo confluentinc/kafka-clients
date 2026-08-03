@@ -1,0 +1,23 @@
+# Contents of the source distribution (sdist).
+#
+# The sdist is buildable from source: it carries the C extension sources, the
+# tinycthread header, and the vendored minimal Rust crate (staged into `rust/`
+# by the custom `sdist` command in setup.py) so that `pip install` can run
+# `cargo build --features ffi` when no prebuilt wheel is available.
+#
+# setup.py and pyproject.toml are always included by setuptools; py-modules
+# (producer.py, consumer.py) are included automatically from pyproject.toml.
+
+include _confluentkafka.c
+include tinycthread.c
+include tinycthread.h
+
+# Vendored Rust crate (root crate + generator with its 197 message specs).
+graft rust
+
+# Unit tests, so the sdist can be verified from source.
+graft test
+
+# Never ship build artifacts.
+prune rust/target
+global-exclude __pycache__ *.py[cod] *.so *.dylib *.a *.lib *.pyd
