@@ -139,6 +139,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr userData);
 
     /// <summary>
+    /// The submit shape shared by every owned-handle (result-returning) async op —
+    /// the poll analog of <see cref="NativeSubmit"/>. Takes the poll completion
+    /// callback (ffi §B6/§B7); the five future owned-handle ops reuse this shape.
+    /// </summary>
+    private delegate void NativeResultSubmit(
+        IntPtr consumer,
+        ConsumerCallbacks.PollCallback callback,
+        IntPtr userData);
+
+    /// <summary>
     /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> once
     /// closed (the use-after-dispose guard). Exposed for the interop tests, which
     /// drive the raw ABI against it; the public client will not expose the handle.
@@ -356,6 +366,213 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Polls for records (async) — the M3/P3 proof of the <b>owned-handle</b> completion
+    /// bridge (ffi §B6/§B7). The returned <see cref="Task{TResult}"/> resolves with an
+    /// owned <see cref="ConsumerRecords"/> (copied out of the native batch on the
+    /// dispatcher thread, §6.4) — a non-null result with <c>Count == 0</c> for an empty
+    /// poll — or faults with a <see cref="KafkaException"/> on failure (e.g. a
+    /// <c>MockConsumer</c> with an injected poll error). A concurrent second op is
+    /// rejected by the core inline and faults the <see cref="Task"/> with a
+    /// <see cref="KafkaException"/> (ConcurrentModification, ffi §B5).
+    /// </summary>
+    /// <param name="timeout">
+    /// The poll timeout (Java <c>Duration</c> → <c>int64_t</c> ms). Must be
+    /// non-negative.
+    /// </param>
+    /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<ConsumerRecords> PollAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        // Precondition BEFORE any P/Invoke (ffi §B5): a negative timeout is a
+        // programmer error, not a Kafka outcome.
+        if (timeout < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(timeout), timeout, "Timeout must not be negative.");
+        }
+
+        long timeoutMs = (long)timeout.TotalMilliseconds;
+
+        return SubmitOperation<ConsumerRecords>(cancellationToken, (consumer, callback, userData) =>
+            NativeMethods.ConsumerPollAsync(consumer, timeoutMs, callback, userData));
+    }
+
+    /// <summary>
+    /// Assigns the consumer to <paramref name="topicPartitions"/> (sync; works on both
+    /// the async and mock consumers). Used to make a partition eligible for
+    /// <see cref="AddRecord"/> on a <c>MockConsumer</c> — a broker-free driver. The
+    /// parallel <c>(topic, partition)</c> arrays are pinned call-scoped (ffi §A4).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="topicPartitions"/> or a topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core rejected the assignment.</exception>
+    internal void Assign(IReadOnlyList<(string Topic, int Partition)> topicPartitions)
+    {
+        if (topicPartitions is null)
+        {
+            throw new ArgumentNullException(nameof(topicPartitions));
+        }
+
+        int count = topicPartitions.Count;
+        int[] partitions = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            (string topic, int partition) = topicPartitions[i];
+            if (topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(topicPartitions));
+            }
+
+            if (partition < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(topicPartitions), partition, "Partition must not be negative.");
+            }
+
+            partitions[i] = partition;
+        }
+
+        ThrowIfClosed();
+
+        Utf8Marshal.PinnedUtf8String?[] pins = new Utf8Marshal.PinnedUtf8String?[count];
+        IntPtr[] pointers = new IntPtr[count];
+        IntPtr error;
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(topicPartitions[i].Topic);
+                pins[i] = pin;
+                pointers[i] = pin.Pointer;
+            }
+
+            error = NativeMethods.ConsumerAssign(_handle.DangerousGetHandle(), pointers, partitions, count);
+        }
+        finally
+        {
+            for (int i = 0; i < pins.Length; i++)
+            {
+                pins[i]?.Dispose();
+            }
+        }
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Queues a record on a <c>MockConsumer</c> (a broker-free driver; the partition
+    /// must already be assigned via <see cref="Assign"/>). <paramref name="key"/> /
+    /// <paramref name="value"/> are pinned call-scoped; a <see langword="null"/> array is
+    /// an absent key / tombstone value. Errors (via <see cref="KafkaException"/>) on a
+    /// real consumer or an unassigned partition.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core rejected the record (e.g. unassigned partition).</exception>
+    internal void AddRecord(
+        string topic,
+        int partition,
+        long offset,
+        byte[]? key,
+        byte[]? value)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        ThrowIfClosed();
+
+        IntPtr error;
+        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic))
+        {
+            // Call-scoped pins for the key/value byte arrays (ffi §A4): MockConsumer
+            // copies them into the record synchronously during the call. A null array
+            // → (IntPtr.Zero, -1) (absent); an empty array → a non-null pinned pointer
+            // + len 0 (a genuine empty key/value, distinct from absent).
+            GCHandle keyPin = default;
+            GCHandle valuePin = default;
+            try
+            {
+                (IntPtr keyPtr, int keyLen) = PinBytes(key, ref keyPin);
+                (IntPtr valuePtr, int valueLen) = PinBytes(value, ref valuePin);
+
+                error = NativeMethods.MockConsumerAddRecord(
+                    _handle.DangerousGetHandle(),
+                    topicPin.Pointer,
+                    partition,
+                    offset,
+                    keyPtr,
+                    keyLen,
+                    valuePtr,
+                    valueLen);
+            }
+            finally
+            {
+                if (keyPin.IsAllocated)
+                {
+                    keyPin.Free();
+                }
+
+                if (valuePin.IsAllocated)
+                {
+                    valuePin.Free();
+                }
+            }
+        }
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Injects an error to be returned by the <b>next</b> poll on a
+    /// <c>MockConsumer</c> (mirrors Java <c>setPollException</c>) — the broker-free
+    /// FAILURE driver. Errors (via <see cref="KafkaException"/>) on a real consumer.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="message"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core rejected the injection (e.g. real consumer).</exception>
+    internal void SetPollError(string message)
+    {
+        if (message is null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        ThrowIfClosed();
+
+        IntPtr error;
+        using (Utf8Marshal.PinnedUtf8String messagePin = Utf8Marshal.Pin(message))
+        {
+            error = NativeMethods.MockConsumerSetPollError(_handle.DangerousGetHandle(), messagePin.Pointer);
+        }
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
     /// Interrupts the in-flight op (Java <c>wakeup()</c>). Sync and cross-thread — the
     /// consumer is single-owner, so this is the one method deliberately callable from
     /// another thread (ffi §B5 / consumer-threading §11). Best-effort: a no-op once
@@ -371,7 +588,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// under the not-thread-safe contract; the canonical <c>wakeup()</c> usage
     /// (thread A blocked, thread B wakes it, thread A then disposes) does not race
     /// wakeup against dispose. Any future hardening (per-call
-    /// <c>SafeHandle.DangerousAddRef</c>) renumbers to N≥7.
+    /// <c>SafeHandle.DangerousAddRef</c>) renumbers to N≥8 (M3/P3 took N=7).
     /// </remarks>
     internal void Wakeup()
     {
@@ -395,7 +612,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <c>None → RuntimeError</c> (<c>_concurrent_error</c>) and the CLAUDE.md §3
     /// idiom map (concurrent sync state read → <see cref="InvalidOperationException"/>).
     /// <b>Accepted residual:</b> the same check-then-use handle TOCTOU vs teardown as
-    /// <see cref="Wakeup"/> (accepted-by-design; N≥7 if ever hardened).
+    /// <see cref="Wakeup"/> (accepted-by-design; N≥8 if ever hardened — M3/P3 took N=7).
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -574,6 +791,64 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return context.Task;
+    }
+
+    /// <summary>
+    /// Submits an owned-handle (result-returning) async op — the poll analog of
+    /// <see cref="SubmitVoidOperation"/>. Roots the per-op context via a
+    /// <see cref="GCHandle"/> (invariant #1), wires cancellation, then runs
+    /// <paramref name="submit"/> (which P/Invokes with the poll callback). Ownership of
+    /// the <see cref="GCHandle"/> transfers to the completion callback (the sole owner
+    /// of its free, invariant #2) the moment native is entered; if
+    /// <paramref name="submit"/> throws before that, the context is abandoned (handle
+    /// freed) here. The marshalling of the result happens in the callback on the
+    /// dispatcher thread (ffi §6.4), not here.
+    /// </summary>
+    private Task<TResult> SubmitOperation<TResult>(
+        CancellationToken cancellationToken,
+        NativeResultSubmit submit)
+    {
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        try
+        {
+            context.RegisterCancellation(cancellationToken, Wakeup);
+            submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Poll, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback will never fire → we own cleanup.
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
+    /// Pins a byte array call-scoped (ffi §A4) for a <c>(ptr, len)</c> ABI parameter,
+    /// returning its address and length. A <see langword="null"/> array →
+    /// <c>(<see cref="IntPtr.Zero"/>, -1)</c> (the ABI's absent sentinel); an empty
+    /// array → a non-null pinned pointer + length 0 (a genuine empty value). The pin is
+    /// written to <paramref name="pin"/> for the caller to free in a <c>finally</c>.
+    /// </summary>
+    private static (IntPtr Pointer, int Length) PinBytes(byte[]? data, ref GCHandle pin)
+    {
+        if (data is null)
+        {
+            return (IntPtr.Zero, -1);
+        }
+
+        pin = GCHandle.Alloc(data, GCHandleType.Pinned);
+
+        // AddrOfPinnedObject is non-null even for an empty array on current runtimes;
+        // the ABI accepts (non-null ptr, len 0) as an empty value (distinct from the
+        // (null, -1) absent case).
+        return (pin.AddrOfPinnedObject(), data.Length);
     }
 
     /// <summary>
