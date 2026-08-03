@@ -20,12 +20,16 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod add_offsets_to_txn_request;
+pub mod add_offsets_to_txn_response;
 pub mod add_partitions_to_txn_request;
 pub mod add_partitions_to_txn_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
+pub mod end_txn_request;
+pub mod end_txn_response;
 pub mod fetch_metadata;
 pub mod fetch_request;
 pub mod fetch_response;
@@ -59,6 +63,8 @@ pub mod transaction_result;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use add_offsets_to_txn_request::{AddOffsetsToTxnRequest, AddOffsetsToTxnRequestBuilder};
+pub use add_offsets_to_txn_response::AddOffsetsToTxnResponse;
 pub use add_partitions_to_txn_request::{
     AddPartitionsToTxnRequest, AddPartitionsToTxnRequestBuilder, EARLIEST_BROKER_VERSION, LAST_CLIENT_VERSION,
 };
@@ -71,6 +77,8 @@ pub use consumer_group_heartbeat_request::{
     REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
 };
 pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use end_txn_request::{EndTxnRequest, EndTxnRequestBuilder, LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2};
+pub use end_txn_response::EndTxnResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
 pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{

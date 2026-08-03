@@ -23,12 +23,14 @@
 
 use std::io;
 
+use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
 use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+use crate::end_txn_request_data::EndTxnRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::init_producer_id_request_data::InitProducerIdRequestData;
@@ -41,10 +43,12 @@ use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
+use super::AddOffsetsToTxnRequest;
 use super::AddPartitionsToTxnRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatRequest;
+use super::EndTxnRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::InitProducerIdRequest;
@@ -128,6 +132,10 @@ pub enum ConcreteRequest {
     InitProducerId(InitProducerIdRequest),
     /// An AddPartitionsToTxn request.
     AddPartitionsToTxn(AddPartitionsToTxnRequest),
+    /// An AddOffsetsToTxn request.
+    AddOffsetsToTxn(AddOffsetsToTxnRequest),
+    /// An EndTxn request.
+    EndTxn(EndTxnRequest),
 }
 
 impl ConcreteRequest {
@@ -148,6 +156,8 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => r.version(),
             Self::InitProducerId(r) => r.version(),
             Self::AddPartitionsToTxn(r) => r.version(),
+            Self::AddOffsetsToTxn(r) => r.version(),
+            Self::EndTxn(r) => r.version(),
         }
     }
 
@@ -168,6 +178,8 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => r.api_key(),
             Self::InitProducerId(r) => r.api_key(),
             Self::AddPartitionsToTxn(r) => r.api_key(),
+            Self::AddOffsetsToTxn(r) => r.api_key(),
+            Self::EndTxn(r) => r.api_key(),
         }
     }
 
@@ -194,6 +206,8 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::InitProducerId(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AddPartitionsToTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AddOffsetsToTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::EndTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -270,6 +284,12 @@ impl ConcreteRequest {
             Self::AddPartitionsToTxn(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::AddOffsetsToTxn(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::EndTxn(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -297,6 +317,8 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
             Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
             Self::AddPartitionsToTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AddOffsetsToTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::EndTxn(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -335,6 +357,8 @@ impl ConcreteRequest {
             Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::InitProducerId(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AddPartitionsToTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AddOffsetsToTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::EndTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -417,6 +441,14 @@ impl ConcreteRequest {
                 let data = AddPartitionsToTxnRequestData::read(readable, api_version)?;
                 Ok(Self::AddPartitionsToTxn(AddPartitionsToTxnRequest::new(data, api_version)))
             },
+            ApiKeys::ADD_OFFSETS_TO_TXN => {
+                let data = AddOffsetsToTxnRequestData::read(readable, api_version)?;
+                Ok(Self::AddOffsetsToTxn(AddOffsetsToTxnRequest::new(data, api_version)))
+            },
+            ApiKeys::END_TXN => {
+                let data = EndTxnRequestData::read(readable, api_version)?;
+                Ok(Self::EndTxn(EndTxnRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -442,6 +474,8 @@ impl std::fmt::Display for ConcreteRequest {
             Self::OffsetFetch(r) => write!(f, "{r}"),
             Self::InitProducerId(r) => write!(f, "{r}"),
             Self::AddPartitionsToTxn(r) => write!(f, "{r}"),
+            Self::AddOffsetsToTxn(r) => write!(f, "{r}"),
+            Self::EndTxn(r) => write!(f, "{r}"),
         }
     }
 }
