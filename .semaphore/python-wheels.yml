@@ -44,19 +44,19 @@ blocks:
         machine:
           type: s1-prod-ubuntu24-04-amd64-3
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: x64
       jobs:
         - name: build
           commands:
             - python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
-            - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
-            - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - artifact pull workflow rust-linux-${CK_ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
+            - artifact pull workflow rust-linux-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${CK_ARCH} --force
 
   - name: "Build wheels: Linux arm64"
     dependencies:
@@ -66,19 +66,19 @@ blocks:
         machine:
           type: s1-prod-ubuntu24-04-arm64-1
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: arm64
       jobs:
         - name: build
           commands:
             - python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
-            - artifact pull workflow rust-linux-${ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
-            - artifact pull workflow rust-linux-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - artifact pull workflow rust-linux-${CK_ARCH}/libconfluent_kafka.so --destination bindings/python/native/lib/libconfluent_kafka.so --force
+            - artifact pull workflow rust-linux-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS=-L$PWD/bindings/python/native/lib LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PWD/bindings/python/native/lib'
             - python -m cibuildwheel --platform linux --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-linux-${CK_ARCH} --force
 
   - name: "Verify wheels: Linux x64"
     dependencies:
@@ -88,12 +88,12 @@ blocks:
         machine:
           type: s1-prod-ubuntu24-04-amd64-3
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: x64
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow artifacts/wheels-linux-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-linux-${CK_ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -105,12 +105,12 @@ blocks:
         machine:
           type: s1-prod-ubuntu24-04-arm64-1
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: arm64
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow artifacts/wheels-linux-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-linux-${CK_ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -122,7 +122,7 @@ blocks:
         machine:
           type: s1-macos-15-amd64-6
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: x64
         - name: CIBW_ARCHS
           value: x86_64
@@ -131,12 +131,12 @@ blocks:
           commands:
             - python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
-            - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
-            - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - artifact pull workflow rust-macos-${CK_ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
+            - artifact pull workflow rust-macos-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=10.13'
             - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${CK_ARCH} --force
 
   - name: "Build wheels: macOS arm64"
     dependencies:
@@ -146,7 +146,7 @@ blocks:
         machine:
           type: s1-macos-15-arm64-8
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: arm64
         - name: CIBW_ARCHS
           value: arm64
@@ -155,12 +155,12 @@ blocks:
           commands:
             - python -m pip install cibuildwheel==3.2.1
             - mkdir -p bindings/python/native/lib bindings/python/native/include
-            - artifact pull workflow rust-macos-${ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
-            - artifact pull workflow rust-macos-${ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
+            - artifact pull workflow rust-macos-${CK_ARCH}/libconfluent_kafka.dylib --destination bindings/python/native/lib/libconfluent_kafka.dylib --force
+            - artifact pull workflow rust-macos-${CK_ARCH}/confluent_kafka.h --destination bindings/python/native/include/confluent_kafka.h --force
             - export CIBW_ENVIRONMENT='CFLAGS=-I$PWD/bindings/python/native/include CONFLUENT_KAFKA_LIB_DIR=$PWD/bindings/python/native/lib LDFLAGS="-L$PWD/bindings/python/native/lib -Wl,-headerpad_max_install_names" MACOSX_DEPLOYMENT_TARGET=11.0'
             - python -m cibuildwheel --platform macos --output-dir wheelhouse bindings/python
             - ls -l wheelhouse/
-            - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-macos-${CK_ARCH} --force
 
   - name: "Verify wheels: macOS x64"
     dependencies:
@@ -170,12 +170,12 @@ blocks:
         machine:
           type: s1-macos-15-amd64-6
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: x64
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow artifacts/wheels-macos-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-macos-${CK_ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -187,12 +187,12 @@ blocks:
         machine:
           type: s1-macos-15-arm64-8
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: arm64
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow artifacts/wheels-macos-${ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-macos-${CK_ARCH} --destination wheelhouse --force
             - ls -l wheelhouse/
             - sh .semaphore/test-wheels.sh wheelhouse
 
@@ -204,7 +204,7 @@ blocks:
         machine:
           type: s1-prod-windows
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: x64
         - name: CIBW_ARCHS
           value: AMD64
@@ -213,16 +213,16 @@ blocks:
           commands:
             - python -m pip install cibuildwheel==3.2.1
             - New-Item -ItemType Directory -Force target\include,target\release | Out-Null
-            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.h --destination target\include\confluent_kafka.h --force
-            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.lib --destination target\release\confluent_kafka.lib --force
-            - artifact pull workflow rust-windows-${Env:ARCH}/confluent_kafka.dll --destination target\release\confluent_kafka.dll --force
+            - artifact pull workflow rust-windows-${Env:CK_ARCH}/confluent_kafka.h --destination target\include\confluent_kafka.h --force
+            - artifact pull workflow rust-windows-${Env:CK_ARCH}/confluent_kafka.lib --destination target\release\confluent_kafka.lib --force
+            - artifact pull workflow rust-windows-${Env:CK_ARCH}/confluent_kafka.dll --destination target\release\confluent_kafka.dll --force
             - $env:CIBW_BEFORE_BUILD = "python -m pip install delvewheel"
             - $env:CIBW_REPAIR_WHEEL_COMMAND = "python -m delvewheel repair --add-path `"$PWD\target\release`" -w {dest_dir} {wheel}"
             - $env:CIBW_TEST_REQUIRES = "pytest pytest-asyncio"
             - $env:CIBW_TEST_COMMAND = "python -m pytest `"{project}\bindings\python\test\unit`" -o asyncio_mode=auto"
             - python -m cibuildwheel --platform windows --output-dir wheelhouse bindings\python
             - Get-ChildItem wheelhouse
-            - artifact push workflow wheelhouse --destination artifacts/wheels-windows-${Env:ARCH} --force
+            - artifact push workflow wheelhouse --destination artifacts/wheels-windows-${Env:CK_ARCH} --force
 
   - name: "Verify wheels: Windows x64"
     dependencies:
@@ -232,12 +232,12 @@ blocks:
         machine:
           type: s1-prod-windows
       env_vars:
-        - name: ARCH
+        - name: CK_ARCH
           value: x64
       jobs:
         - name: verify
           commands:
-            - artifact pull workflow artifacts/wheels-windows-${Env:ARCH} --destination wheelhouse --force
+            - artifact pull workflow artifacts/wheels-windows-${Env:CK_ARCH} --destination wheelhouse --force
             - Get-ChildItem wheelhouse
             - python -m pip install pytest pytest-asyncio
             - python -m pip install --no-index --find-links wheelhouse confluent-kafka4
