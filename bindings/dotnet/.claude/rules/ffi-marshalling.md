@@ -223,9 +223,10 @@ applies to both clients.
   - A `callbackTask`-style poll-loop thread — nothing to poll here.
   - Assuming thread-per-broker / native threads scaling with cluster size.
 
-**Tests required (both clients):** `Dispose` drains before destroying the handle —
-the producer joins the pump (§A1/§A7), the consumer wakes+awaits the in-flight op
-(§B1/§B7).
+**Tests required (both clients):** `Dispose` returns without hanging before
+destroying the handle — the producer joins the pump (§A1/§A7); the consumer closes
+gracefully — `close_(with_timeout|async)` → `Consumer_destroy`, with **no
+separate-op drain** (single-owner: the awaiter of an op is its disposer, §B1/§B7).
 
 ---
 
@@ -692,11 +693,12 @@ dispatcher thread.
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
      PollAsync → *_async(…, cb) ─────│──────►│     consumer bg task (ConsumerNetworkThread):
-       returns Task; guard acquired  │       │       NetworkClient + ONE async Selector
-   (NO .NET pump)                    │       │       ↕ multiplexes ALL brokers (event-driven)
+       returns Task (core guards)    │       │       NetworkClient + ONE async Selector
+   (NO .NET pump, NO managed guard)  │       │       ↕ multiplexes ALL brokers (event-driven)
      ◄── cb fires here (→ TCS) ──────│◄──────│     callback-dispatcher thread (1, native):
          on the dispatcher thread    │       │       fires completion callbacks
-   Dispose: wakeup+await → close     │       │   (created in KafkaConsumer_new, dropped on _destroy)
+   Dispose: close_(w/timeout|async)  │       │   (created in KafkaConsumer_new, dropped on _destroy)
+            → destroy (no drain)      │       │
 ```
 
 **Rule:**
@@ -708,21 +710,30 @@ dispatcher thread.
     `KafkaConsumer_new`, torn down by `Consumer_destroy`.
   - .NET side: caller thread(s) **only — no pump** (the ABI pushes completions,
     §B7). **No poll loop** — the core self-drives.
-  - **One operation in flight** per consumer — the access guard serializes ops
-    (concurrent → rejection, §B5), released just before the callback fires; the
-    completion callback runs on the **dispatcher thread (foreign)**, not the caller
-    → `RunContinuationsAsynchronously` + no-throw (§B6/§B7). `Consumer_wakeup`
-    bypasses the guard (§B5 / consumer-threading §11).
+  - **One operation in flight** per consumer, **single-owner / not thread-safe**
+    (M3/P2, Python-parity). The **Rust core's own access guard** serializes ops —
+    there is **no managed mirror**. A concurrent **async op** is rejected by the
+    core inline (it fires the callback on the caller thread with a
+    `ConcurrentModification` error) and surfaces as a **faulted `Task`** carrying a
+    `KafkaException` (§B5) — not a managed synchronous pre-check throw. A concurrent
+    **sync state read** surfaces as `InvalidOperationException` from the core's
+    null-handle rejection path (§B5). The completion callback runs on the
+    **dispatcher thread (foreign)**, not the caller → `RunContinuationsAsynchronously`
+    + no-throw (§B6/§B7). `Consumer_wakeup` is the one cross-thread call (§B5 /
+    consumer-threading §11).
 
 **Why:** Java's single-Selector NIO model on tokio (§0.3) — a fixed native thread
 count, no poll loop. The completion callback fires on the core's foreign
 dispatcher thread, so the TCS must use `RunContinuationsAsynchronously` (§B7) or
-the awaiter's continuation would run on — and stall — that thread.
+the awaiter's continuation would run on — and stall — that thread. Serialization is
+the core's job (single-owner); a managed guard mirroring it was an extra .NET-only
+layer, removed in M3/P2 to match the in-repo Python sibling.
 
 **Anti-patterns:**
 
-  - A binding-side lock to serialize concurrent ops — the consumer is
-    one-op-in-flight, so a concurrent op is **rejected** (§B5), not serialized.
+  - A binding-side lock **or a managed access guard** to serialize concurrent ops
+    — the consumer is single-owner, so the **core** rejects a concurrent op (§B5),
+    not a managed layer.
   - A TCS **without** `RunContinuationsAsynchronously` → the continuation runs
     **inline on the dispatcher thread** (stalls it / deadlocks, §B6/§B7).
   - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
@@ -730,11 +741,13 @@ the awaiter's continuation would run on — and stall — that thread.
 
 **Tests required:**
 
-  - A concurrent op → `InvalidOperationException` / `KafkaException`, not
-    corruption (§B5); the completion callback doesn't run its continuation inline
-    on the dispatcher.
-  - `Dispose` drains before destroying the handle — wakes+awaits the in-flight op,
-    then `Consumer_close` (§B7).
+  - A concurrent async op → a faulted `Task` (`KafkaException` /
+    ConcurrentModification), a concurrent sync state read →
+    `InvalidOperationException`, not corruption (§B5); the completion callback
+    doesn't run its continuation inline on the dispatcher.
+  - `Dispose` / `DisposeAsync` return without hanging even with an (unawaited) op in
+    flight — teardown is `close_(with_timeout|async)` → `Consumer_destroy` with **no
+    separate-op drain** (the awaiter is the disposer, §B7).
 
 ---
 
@@ -754,7 +767,7 @@ the awaiter's continuation would run on — and stall — that thread.
 
 | Handle | Category | Freed by |
 |---|---|---|
-| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: drain → `Consumer_close` → `Consumer_destroy` (destroy is **fire-and-forget** — cancels in-flight ops; §B7 + Rule) |
+| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is **fire-and-forget** — cancels in-flight ops, no bg-task join; §B7 + Rule |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
 | `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
@@ -779,10 +792,15 @@ const-ness decides, not the type name:
     == IntPtr.Zero`. The release path is **not** a bare destroy: `Consumer_destroy`
     is **fire-and-forget** — `shutdown_background` **cancels** in-flight async ops
     (their callbacks never fire) and it does **not** join the bg task (the graceful
-    join is `Consumer_close` / `await_join`, not destroy). So `Dispose` must
-    **drain/wakeup the in-flight op → `Consumer_close` (joins the bg task) →
-    `Consumer_destroy`**; a bare destroy hangs the `Task` and leaks the `GCHandle`
-    (§B7). Guard use-after-dispose with `ObjectDisposedException`.
+    join is `Consumer_close` / `await_join`, not destroy). So teardown routes
+    through the graceful **close before destroy**: `Dispose` =
+    **`Consumer_close_with_timeout` → `Consumer_destroy`**, `DisposeAsync` =
+    **`Consumer_close_async` → `Consumer_destroy`** — no separate-op drain (§B7).
+    Under single-owner the awaiter of an op *is* its disposer, so there is nothing
+    to drain; a bare `Consumer_destroy` on an **unawaited** op still strands the
+    `Task` and leaks the `GCHandle` once — the **accepted single-owner residual**
+    for that misuse case (Python parity, §B7). Guard use-after-dispose with
+    `ObjectDisposedException`.
   - **Transient error handle:** read the accessors (message before free), then
     `_destroy` in a `finally`; the managed `KafkaException` holds copied values,
     never the handle (§B5). `_destroy` is null-safe.
@@ -808,8 +826,11 @@ confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern). A per-message
 and borrowed views are not wrapped. The borrow-root discipline (Category 3
 outlives its Category 4 borrows) is what makes the receive-path zero-copy contract
 (§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` being fire-and-forget is why
-teardown routes through `Consumer_close` first — otherwise the in-flight op's
-callback is cancelled and its `Task` never completes.
+teardown routes through the graceful `Consumer_close` (`_with_timeout` / `_async`)
+first — a bare destroy skips the bg-task join. There is no separate-op drain:
+under single-owner the awaiter of an op is its disposer, so an *unawaited* op
+stranded + leaked once across teardown is an accepted residual (§B7), not
+something close drains away.
 
 **Anti-patterns:**
 
@@ -820,8 +841,11 @@ callback is cancelled and its `Task` never completes.
     element or byte slice from it is still in use (CLAUDE.md §6.4) — use-after-free.
   - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
     map/list), or freeing it twice.
-  - A bare `Consumer_destroy` without the drain → `Consumer_close` first — hangs
-    the `Task`, leaks the `GCHandle`.
+  - A bare `Consumer_destroy` without routing through `Consumer_close`
+    (`_with_timeout` / `_async`) first — skips the graceful bg-task join. (Under
+    single-owner, an *unawaited* op stranded + leaked once across teardown is the
+    accepted residual, §B7 — **not** something teardown drains away; do not re-add
+    a `Dispose`-side separate-op drain.)
 
 **Tests required:**
 
@@ -997,12 +1021,19 @@ shapes: **wakeup** and **concurrent use**.
     **`CancellationToken`** cancellation → **`OperationCanceledException`** (the
     .NET-native cancel, CLAUDE.md §3 — the analog of Python re-raising
     `CancelledError`).
-  - **Concurrent use** (the consumer is one-operation-in-flight) splits by
-    method: a sync **state read** (`Assignment` / `Subscription` / `Paused` /
-    `GroupMetadata`) → **`InvalidOperationException`** ("not safe for
-    multi-threaded access"); a concurrent **async op** (`PollAsync` /
-    `CommitAsync`) → **`KafkaException`** (ConcurrentModification). Mirrors
-    Python (`RuntimeError` for state reads, `KafkaError` for blocking ops).
+  - **Concurrent use** (the consumer is single-owner / one-operation-in-flight;
+    serialized by the **Rust core's** guard, not a managed one — M3/P2) splits by
+    method, and the split is enforced **core-side**, not by a managed pre-check: a
+    concurrent **async op** (`PollAsync` / `CommitAsync` / `SubscribeAsync` /
+    `SeekAsync`) is rejected by the core **inline** (it fires the completion callback
+    on the caller thread with a `ConcurrentModification` error), which the bridge
+    surfaces as a **faulted `Task`** carrying a **`KafkaException`** — *not* a
+    managed synchronous throw. A concurrent sync **state read** (`Assignment` /
+    `Subscription` / `Paused` / `GroupMetadata` / `GroupId`) → the core returns a
+    **null** handle, which the getter maps to **`InvalidOperationException`** ("not
+    safe for multi-threaded access"). Mirrors Python exactly (`RuntimeError` from
+    `_concurrent_error()` for state reads, `KafkaError`/ConcurrentModification for
+    ops).
 
 **Why:** a flat `KafkaException` matches what the ABI exposes and the Python
 sibling. Preconditions are a separate surface because they are programmer errors,
@@ -1010,7 +1041,12 @@ not Kafka outcomes — Java raises `IllegalArgument`/`IllegalState`, Python
 `ValueError`/`TypeError`, all before the native call; ours must too, *and must*
 because the ABI would otherwise panic. The wakeup and concurrent shapes mirror the
 Python sibling exactly (flat `KafkaError` "woke"; the `RuntimeError`/`KafkaError`
-concurrent split).
+concurrent split). The concurrent split is **delivered by the core**, not a managed
+guard: the async-op `KafkaException` arrives through the faulted `Task` (the core
+fires the callback inline with `ConcurrentModification`), and the state-read
+`InvalidOperationException` is thrown from the getter's null-handle path — there is
+no managed access guard to reject anything (M3/P2 removed it; the observable
+contract is unchanged, only its mechanism is now the core's).
 
 **Note — flat now, typed later.** The flat `KafkaException` is the *current*
 choice; a Java-style typed hierarchy can be added later **non-breakingly**
@@ -1119,8 +1155,9 @@ and the keep-alive spans the whole op (submit→fire), not a synchronous call.
 **Decision:** The consumer uses the ABI's *push* surface (settled — no pump):
 every async op (`Consumer_poll_async` / `commit_async` / `position_async` / …)
 takes a completion callback (§B6) that fires when the op resolves, so the callback
-*is* the bridge. One-operation-in-flight (nothing to batch). Bridges to `Task<T>`
-via a `TaskCompletionSource` built with `RunContinuationsAsynchronously`.
+*is* the bridge. Single-owner / one-operation-in-flight (nothing to batch),
+serialized by the **Rust core's** guard — **no managed guard** (M3/P2). Bridges to
+`Task<T>` via a `TaskCompletionSource` built with `RunContinuationsAsynchronously`.
 
 ```
 Caller thread                       Core: runtime worker ──▶ dispatcher thread (1/consumer)
@@ -1128,11 +1165,11 @@ Caller thread                       Core: runtime worker ──▶ dispatcher th
 PollAsync():                        worker task: poll(timeout).await   ← runs the op
   tcs = new TaskCompletionSource                 build (records | error)
   ud  = GCHandle.Alloc(tcs)  (§B6)                enqueue completion ──┐
-  Consumer_poll_async(…, cb, ud) ─► (guard held submit→op-complete)   ▼
-  return tcs.Task                   dispatcher:  release guard, then
+  Consumer_poll_async(…, cb, ud) ─► (core guard serializes ops)       ▼
+  return tcs.Task                   dispatcher:
   … await tcs.Task                    cb(records | error, ud): marshal + free handles (§B2)
      ◄── continuation on pool ─────   tcs.SetResult / SetException  (RunContinuationsAsync)
-                                    no pump · one op in flight
+                                    no pump · no managed guard · one op in flight
 ```
 
 **Rule:**
@@ -1143,44 +1180,63 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
   - The callback fires on a **dedicated callback-dispatcher thread** — the core
     runs the op on a runtime worker, then hands the completed op over a channel to
     that one thread, so callbacks are **serialized** on a single foreign thread
-    (guard-rejection fires inline on the caller; shutdown, inline on the worker).
-    It marshals the result (copy-out CLAUDE.md §6.4, or an error via `FromHandle`
-    §B5), frees the handles it owns (§B2 Category 3), and completes the TCS — with
-    **`RunContinuationsAsynchronously`** (essential: the continuation must not run
-    on that dispatcher thread), exactly once, on every path (incl. the inline
-    guard-rejection error).
-  - **One operation in flight** per consumer (the access guard) → at most one
-    pending `(callback, TCS)` at a time, no batching. The guard is **released just
-    before the callback fires** (held for the submit→op-complete window), so an
+    (the core's concurrent-rejection fires inline on the caller; shutdown, inline on
+    the worker). It marshals the result (copy-out CLAUDE.md §6.4, or an error via
+    `FromHandle` §B5), frees the handles it owns (§B2 Category 3), and completes the
+    TCS — with **`RunContinuationsAsynchronously`** (essential: the continuation must
+    not run on that dispatcher thread), exactly once, on every path (incl. the
+    inline core-rejection error). The completion callback is the **sole owner** of
+    the per-op `GCHandle` free (the only other path, `AbandonBeforeSubmit`, runs
+    only when the submitting P/Invoke threw so native never ran).
+  - **One operation in flight** per consumer, enforced by the **core's** access
+    guard (not a managed mirror) → at most one pending `(callback, TCS)` at a time,
+    no batching. The core releases its guard before firing the callback, so an
     `await`-then-resubmit from the continuation is safe — it won't hit the one-op
-    rejection.
+    rejection. A concurrent op submitted while one is in flight is rejected by the
+    core inline and surfaces as a **faulted `Task`** (`ConcurrentModification`, §B5).
   - **Cancellation** = `CancellationToken` → `wakeup()` (aborts the in-flight op)
     → the callback fires with a Wakeup error → the `Task` cancels/faults
     (best-effort; §B5, consumer-threading §11).
-  - **`Dispose`**: drain / `wakeup` the in-flight op → **`Consumer_close`**
-    (graceful — joins the bg task via `await_join`) → `Consumer_destroy`
-    (fire-and-forget free: it **cancels** any remaining in-flight op and does
-    **not** join, §B2). A bare `Consumer_destroy` hangs the `Task` + leaks the
-    `GCHandle`.
+  - **`Dispose` / `DisposeAsync` (single-owner teardown):** close gracefully then
+    destroy, with **no separate-op drain**. `DisposeAsync` → **`Consumer_close_async`**
+    (graceful — joins the bg task via `await_join`) → `Consumer_destroy`;
+    `Dispose` → **`Consumer_close_with_timeout`** → `Consumer_destroy`. Under
+    single-owner the **awaiter of an op is its disposer**, so there is no concurrent
+    submitter to drain — teardown never wakes+awaits a *separately-submitted* op.
+    `Consumer_destroy` is fire-and-forget (it **cancels** any remaining in-flight op
+    and does **not** join, §B2), so a bare `Consumer_destroy` on an **unawaited**
+    op still strands the `Task` + leaks the `GCHandle` — now the **accepted
+    single-owner residual** for a misuse case (Python parity: `close()` drains its
+    *own* awaited op, then bare `_destroy`). `DisposeAsync` on the awaiting task is
+    the clean, leak-free path.
 
 **Why:** the consumer op has nothing to batch (one op in flight) and the ABI
 already pushes a completion, so a pump would be pure overhead — the callback is
 the bridge. `RunContinuationsAsynchronously` is essential because the callback
 runs on the core's foreign dispatcher thread; without it the awaiter's
 continuation would run there and stall the core (or deadlock if it calls back in).
+Serialization is the **core's** job (single-owner) — M3/P2 removed the extra
+managed guard/in-flight tracking to match the in-repo Python sibling, which also
+eliminated the M3/P1 op-submit-vs-teardown publish window (no tracking fields → no
+window).
 
 **Anti-patterns:**
 
   - A TCS without `RunContinuationsAsynchronously` — the awaiter's continuation
     runs on the core's dispatcher/worker thread → stalls the core (or deadlocks if
     the continuation calls back into the consumer).
+  - A **managed access guard / in-flight tracking** mirroring the core (removed in
+    M3/P2) — the core serializes; a concurrent op faults the `Task`, a concurrent
+    state read throws `InvalidOperationException` (§B5).
   - Wrapping the *sync* variants (`Consumer_poll` + `block_on`) in a `Task.Run`
     per op — sync-over-async; the push ABI makes it needless.
   - Letting the callback throw (unwinds into native, §B6); completing the TCS
-    twice; or not freeing the result/error handle + the `GCHandle` on some path
-    (especially the inline guard-rejection error).
-  - `Consumer_destroy` before the in-flight op's callback fires (use-after-free);
-    a `Dispose` that doesn't `wakeup` + await the op.
+    twice; freeing the per-op `GCHandle` from **anywhere but** the callback (the
+    sole owner) / `AbandonBeforeSubmit` (native never ran) — a teardown-side free is
+    a use-after-free against a straggler callback.
+  - A teardown that wakes+awaits a *separately-submitted* op (there is no concurrent
+    submitter under single-owner) or that re-adds the M3/P1 `Dispose`-side
+    `FaultTaskOnly` machinery (the unawaited-op strand+leak is an accepted residual).
 
 **Tests required:**
 
@@ -1189,6 +1245,9 @@ continuation would run there and stall the core (or deadlock if it calls back in
   - `wakeup()` during an in-flight `poll` cancels/faults the `Task` **once**, then
     the consumer is reusable (§B5); a `CancellationToken` cancel →
     `OperationCanceledException`.
-  - A concurrent second op → `InvalidOperationException` (§B5).
-  - `Dispose` with an op in flight returns (doesn't hang) — the wakeup/join
-    regression.
+  - A concurrent async op → a faulted `Task` (`KafkaException` /
+    ConcurrentModification); a concurrent sync state read →
+    `InvalidOperationException` (§B5).
+  - `Dispose` / `DisposeAsync` return without hanging even with an (unawaited) op in
+    flight — the teardown-returns regression (`close_(with_timeout|async)` →
+    `destroy`, no separate-op drain).

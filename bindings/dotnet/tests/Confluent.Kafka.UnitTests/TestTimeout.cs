@@ -42,4 +42,26 @@ internal static class TestTimeout
         // Surface any exception thrown by the action on the caller's thread.
         task.GetAwaiter().GetResult();
     }
+
+    /// <summary>
+    /// Awaits <paramref name="action"/>'s <see cref="Task"/> under a hard deadline.
+    /// Throws <see cref="TimeoutException"/> if it does not complete in time (the
+    /// async completion-bridge / teardown hang guard, ffi §B7); otherwise the
+    /// action's own result / exception is observed by the final <c>await</c>. Every
+    /// awaited op and teardown in the async tests routes through this so a bridge or
+    /// drain hang fails the run fast instead of blocking it.
+    /// </summary>
+    internal static async Task Run(Func<Task> action, TimeSpan timeout)
+    {
+        Task task = action();
+        Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
+        if (winner != task)
+        {
+            throw new TimeoutException(
+                $"Operation did not complete within {timeout} — treated as a hang (fail fast).");
+        }
+
+        // Surface the action's result / exception.
+        await task.ConfigureAwait(false);
+    }
 }
