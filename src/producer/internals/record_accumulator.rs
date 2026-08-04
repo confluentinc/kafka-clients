@@ -671,7 +671,17 @@ impl RecordAccumulator {
     }
 
     /// Re-enqueue the given record batch in the accumulator.
-    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) {
+    ///
+    /// Translated from `reenqueue(ProducerBatch, long)` (Java 496). In
+    /// `Sender.completeBatch` we check whether the batch has reached
+    /// `deliveryTimeoutMs` or not, hence we do not do the delivery timeout check
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
+    /// Java's `IllegalStateException` escapes to `Sender.run`'s catch-and-log.
+    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), KafkaError> {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
         let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
@@ -680,7 +690,111 @@ impl RecordAccumulator {
             .entry(tp.partition())
             .or_insert_with(|| Mutex::new(VecDeque::new()));
         let mut deque = dq_entry.value().lock().unwrap();
-        deque.push_front(batch);
+        if self.transaction_manager.is_some() {
+            self.insert_in_sequence_order(&mut deque, batch)
+        } else {
+            deque.push_front(batch);
+            Ok(())
+        }
+    }
+
+    /// Inserts `batch` into `deque` at the position its base sequence requires.
+    ///
+    /// Translated from `insertInSequenceOrder(Deque<ProducerBatch>, ProducerBatch)`
+    /// (Java 552-592), with Java's comment at 542-551 reproduced below.
+    ///
+    /// We will have to do extra work to ensure the queue is in order when requests are being retried and there are
+    /// multiple requests in flight to that partition. If the first in flight request fails to append, then all the
+    /// subsequent in flight requests will also fail because the sequence numbers will not be accepted.
+    ///
+    /// Further, once batches are being retried, we are reduced to a single in flight request for that partition. So when
+    /// the subsequent batches come back in sequence order, they will have to be placed further back in the queue.
+    ///
+    /// Note that this assumes that all the batches in the queue which have an assigned sequence also have the current
+    /// producer id. We will not attempt to reorder messages if the producer id has changed, we will return an error
+    /// instead.
+    ///
+    /// Called with `deque`'s lock held, so the manager lock taken here observes
+    /// rules §3's deque → manager order.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalState`] with Java's message when the batch has no
+    /// sequence, or when it is not tracked as in flight. The second check is the one
+    /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
+    /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
+    /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:685`.
+    fn insert_in_sequence_order(
+        &self,
+        deque: &mut VecDeque<ProducerBatch>,
+        batch: ProducerBatch,
+    ) -> Result<(), KafkaError> {
+        // When we are re-enqueueing and have enabled idempotence, the re-enqueued batch must always have a sequence.
+        if batch.base_sequence() == RecordBatch::NO_SEQUENCE {
+            return Err(KafkaError::illegal_state(
+                "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled.",
+            ));
+        }
+
+        let has_inflight_batches = match &self.transaction_manager {
+            Some(transaction_manager) => {
+                transaction_manager.lock().unwrap().has_inflight_batches(&batch.topic_partition)
+            },
+            // Unreachable: both callers test `transaction_manager.is_some()` first.
+            None => false,
+        };
+        if !has_inflight_batches {
+            return Err(KafkaError::illegal_state(format!(
+                "We are re-enqueueing a batch which is not tracked as part of the in flight requests. \
+                 batch.topicPartition: {}; batch.baseSequence: {}",
+                batch.topic_partition,
+                batch.base_sequence()
+            )));
+        }
+
+        let should_reorder = deque
+            .front()
+            .is_some_and(|first| first.has_sequence() && first.base_sequence() < batch.base_sequence());
+        if should_reorder {
+            // The incoming batch can't be inserted at the front of the queue without violating the sequence ordering.
+            // This means that the incoming batch should be placed somewhere further back.
+            // We need to find the right place for the incoming batch and insert it there.
+            // We will only enter this branch if we have multiple inflights sent to different brokers and we need to
+            // retry the inflight batches.
+            //
+            // Since we reenqueue exactly one batch a time and ensure that the queue is ordered by sequence always, it
+            // is a simple linear scan of a subset of the in flight batches to find the right place in the queue each
+            // time.
+            let mut ordered_batches: Vec<ProducerBatch> = Vec::new();
+            while deque
+                .front()
+                .is_some_and(|first| first.has_sequence() && first.base_sequence() < batch.base_sequence())
+            {
+                ordered_batches.push(deque.pop_front().expect("just observed to be non-empty"));
+            }
+
+            kafka_debug!(
+                self.log_context,
+                "Reordered incoming batch with sequence {} for partition {}. It was placed in the queue at position {}",
+                batch.base_sequence(),
+                batch.topic_partition,
+                ordered_batches.len()
+            );
+            // Either we have reached a point where there are batches without a sequence (ie. never been drained
+            // and are hence in order by default), or the batch at the front of the queue has a sequence greater
+            // than the incoming batch. This is the right place to add the incoming batch.
+            deque.push_front(batch);
+
+            // Now we have to re insert the previously queued batches in the right order.
+            while let Some(ordered_batch) = ordered_batches.pop() {
+                deque.push_front(ordered_batch);
+            }
+
+            // At this point, the incoming batch has been queued in the correct place according to its sequence.
+        } else {
+            deque.push_front(batch);
+        }
+        Ok(())
     }
 
     /// Determine if the given partition leader has ready batches.
@@ -694,6 +808,7 @@ impl RecordAccumulator {
         backing_off: bool,
         backoff_attempts: i32,
         full: bool,
+        transaction_completing: bool,
         next_ready_check_delay_ms: i64,
         ready_nodes: &mut HashSet<Node>,
     ) -> i64 {
@@ -705,8 +820,12 @@ impl RecordAccumulator {
                 self.linger_ms as i64
             };
             let expired = waited_time_ms >= time_to_wait_ms;
-            let sendable =
-                full || expired || exhausted || self.closed.load(Ordering::Relaxed) || self.flush_in_progress();
+            let sendable = full
+                || expired
+                || exhausted
+                || self.closed.load(Ordering::Relaxed)
+                || self.flush_in_progress()
+                || transaction_completing;
             if sendable && !backing_off {
                 ready_nodes.insert(leader.clone());
                 return next_ready_check_delay_ms;
@@ -727,6 +846,7 @@ impl RecordAccumulator {
         now_ms: i64,
         topic: &Arc<str>,
         topic_info: &TopicInfo,
+        transaction_completing: bool,
         mut next_ready_check_delay_ms: i64,
         ready_nodes: &mut HashSet<Node>,
         unknown_leader_topics: &mut HashSet<Arc<str>>,
@@ -799,6 +919,7 @@ impl RecordAccumulator {
                     backing_off,
                     backoff_attempts,
                     full,
+                    transaction_completing,
                     next_ready_check_delay_ms,
                     ready_nodes,
                 );
@@ -826,6 +947,18 @@ impl RecordAccumulator {
         let mut next_ready_check_delay_ms = i64::MAX;
         let mut unknown_leader_topics = HashSet::new();
 
+        // Java reads `transactionManager.isCompleting()` inside `batchReady`
+        // (`RecordAccumulator.java:614`), i.e. once per batch. The value is
+        // partition-independent, so it is read once per `ready()` here: that avoids
+        // taking the manager lock per partition and removes the (Java-visible)
+        // possibility of two partitions in the same `ready()` pass disagreeing about
+        // it. Always `false` for an idempotent producer, since `COMMITTING_TRANSACTION`
+        // and `ABORTING_TRANSACTION` need a transactional id.
+        let transaction_completing = self
+            .transaction_manager
+            .as_ref()
+            .is_some_and(|transaction_manager| transaction_manager.lock().unwrap().is_completing());
+
         for entry in self.topic_info_map.iter() {
             let topic = entry.key();
             let topic_info = entry.value();
@@ -834,6 +967,7 @@ impl RecordAccumulator {
                 now_ms,
                 topic,
                 topic_info,
+                transaction_completing,
                 next_ready_check_delay_ms,
                 &mut ready_nodes,
                 &mut unknown_leader_topics,
@@ -879,18 +1013,153 @@ impl RecordAccumulator {
         should_backoff
     }
 
+    /// Whether the drain must stop at `first` for `tp`.
+    ///
+    /// Translated from `shouldStopDrainBatchesForPartition(ProducerBatch,
+    /// TopicPartition)` (Java 815-850). Returns `false` when idempotence is
+    /// disabled, matching Java's fall-through at `:849`.
+    ///
+    /// Called with `tp`'s deque lock held, so the manager lock taken here observes
+    /// rules §3's deque → manager order.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`TransactionManager::is_send_to_partition_allowed`] and
+    /// [`TransactionManager::first_in_flight_sequence`]. Java's equivalent
+    /// exceptions escape `drain` to `Sender.run`'s catch-and-log.
+    fn should_stop_drain_batches_for_partition(
+        &self,
+        first: &ProducerBatch,
+        tp: &TopicPartition,
+    ) -> Result<bool, KafkaError> {
+        let Some(transaction_manager) = &self.transaction_manager else {
+            return Ok(false);
+        };
+        let mut manager = transaction_manager.lock().unwrap();
+
+        if !manager.is_send_to_partition_allowed(tp)? {
+            return Ok(true);
+        }
+
+        let producer_id_and_epoch = manager.producer_id_and_epoch();
+        if !producer_id_and_epoch.is_valid() {
+            // We cannot send the batch until we have refreshed the producer id.
+            return Ok(true);
+        }
+
+        if !first.has_sequence() {
+            if manager.has_inflight_batches(tp) && manager.has_stale_producer_id_and_epoch(tp) {
+                // Don't drain any new batches while the partition has in-flight batches with a different epoch
+                // and/or producer ID. Otherwise, a batch with a new epoch and sequence number
+                // 0 could be written before earlier batches complete, which would cause out of sequence errors
+                return Ok(true);
+            }
+
+            if manager.has_unresolved_sequence(&first.topic_partition) {
+                // Don't drain any new batches while the state of previous sequence numbers
+                // is unknown. The previous batches would be unknown if they were aborted
+                // on the client after being sent to the broker at least once.
+                return Ok(true);
+            }
+        }
+
+        let first_in_flight_sequence = manager.first_in_flight_sequence(&first.topic_partition)?;
+        // If the queued batch already has an assigned sequence, then it is being retried.
+        // In this case, we wait until the next immediate batch is ready and drain that.
+        // We only move on when the next in line batch is complete (either successfully or due to
+        // a fatal broker error). This effectively reduces our in flight request count to 1.
+        Ok(first_in_flight_sequence != RecordBatch::NO_SEQUENCE
+            && first.has_sequence()
+            && first.base_sequence() != first_in_flight_sequence)
+    }
+
+    /// Assigns `batch`'s producer id, epoch and base sequence, and tracks it as in
+    /// flight.
+    ///
+    /// Translated from `RecordAccumulator.java:900-925`, the block between
+    /// `deque.pollFirst()` (`:898`) and `batch.close()` (`:930`). It **must** stay
+    /// here rather than move to the `Sender`: `Sender::send_producer_data` reads
+    /// `batch.records()`, which serialises the v2 batch header, so the producer
+    /// state has to be set before the batch leaves the accumulator.
+    ///
+    /// Called with `tp`'s deque lock held (rules §3: deque → manager).
+    ///
+    /// Java's guard is `producerIdAndEpoch != null && !batch.hasSequence()`.
+    /// `TransactionManager.producerIdAndEpoch()` never returns null — an unacquired
+    /// id is `ProducerIdAndEpoch.NONE`, not null — so the first conjunct is exactly
+    /// "a transaction manager exists", which is the `Option` test here. An invalid
+    /// id cannot reach this point either way, because
+    /// [`Self::should_stop_drain_batches_for_partition`] has already stopped the
+    /// drain for it.
+    ///
+    /// # Hot path
+    ///
+    /// Runs once per **batch** on the drain path, never per record. It allocates
+    /// nothing: `set_producer_state` writes four scalars, and the two
+    /// `TopicPartition` clones inside the manager happen only where Java also
+    /// inserts into a map (CLAUDE.md §11, DoD §10).
+    fn maybe_assign_producer_state(&self, batch: &mut ProducerBatch) -> Result<(), KafkaError> {
+        let Some(transaction_manager) = &self.transaction_manager else {
+            return Ok(());
+        };
+        if batch.has_sequence() {
+            // If the batch already has an assigned sequence, then we should not change the producer id and
+            // sequence number, since this may introduce duplicates. In particular, the previous attempt
+            // may actually have been accepted, and if we change the producer id and sequence here, this
+            // attempt will also be accepted, causing a duplicate.
+            return Ok(());
+        }
+
+        let mut manager = transaction_manager.lock().unwrap();
+        let is_transactional = manager.is_transactional();
+        let producer_id_and_epoch = manager.producer_id_and_epoch();
+
+        // If the producer id/epoch of the partition do not match the latest one
+        // of the producer, we update it and reset the sequence. This should be
+        // only done when all its in-flight batches have completed. This is guarantee
+        // in `shouldStopDrainBatchesForPartition`.
+        //
+        // The guard inside `maybe_update_producer_id_and_epoch` is
+        // `has_stale_producer_id_and_epoch && !has_inflight_batches`, so the entry
+        // tracks no batches whenever the rewrite runs and an empty pool is always
+        // correct here (rules §7).
+        manager.maybe_update_producer_id_and_epoch(&batch.topic_partition, &mut [])?;
+
+        // Additionally, we update the next sequence number bound for the partition, and also have
+        // the transaction manager track the batch so as to ensure that sequence ordering is maintained
+        // even if we receive out of order responses.
+        let sequence = manager.sequence_number(&batch.topic_partition);
+        batch.set_producer_state(
+            producer_id_and_epoch.producer_id,
+            producer_id_and_epoch.epoch,
+            sequence,
+            is_transactional,
+        );
+        manager.increment_sequence_number(&batch.topic_partition, batch.record_count)?;
+        kafka_debug!(
+            self.log_context,
+            "Assigned producerId {} and producerEpoch {} to batch with base sequence {} being sent to partition {}",
+            producer_id_and_epoch.producer_id,
+            producer_id_and_epoch.epoch,
+            batch.base_sequence(),
+            batch.topic_partition
+        );
+
+        manager.add_in_flight_batch(batch)
+    }
+
     fn drain_batches_for_one_node(
         &self,
         metadata_snapshot: &MetadataSnapshot,
         node: &Node,
         max_size: i32,
         now: i64,
-    ) -> Vec<ProducerBatch> {
+    ) -> Result<Vec<ProducerBatch>, KafkaError> {
         let mut size = 0i32;
         let parts = metadata_snapshot.cluster().partitions_for_node(node.id());
         let mut ready = Vec::new();
         if parts.is_empty() {
-            return ready;
+            return Ok(ready);
         }
 
         let mut drain_index = self.get_drain_index(node.id());
@@ -961,13 +1230,25 @@ impl RecordAccumulator {
                 }
 
                 if size + first.estimated_size_in_bytes() as i32 > max_size && !ready.is_empty() {
+                    // There is a rare case that a single batch size is larger than the
+                    // request size due to compression; in this case we will still
+                    // eventually send this batch in a single request.
+                    break;
+                } else if self.should_stop_drain_batches_for_partition(first, &tp)? {
                     break;
                 }
 
-                deque.pop_front().unwrap()
+                let mut batch = deque.pop_front().unwrap();
+                // Still inside `synchronized (deque)` in Java (:900-925), and still
+                // before `batch.close()` below, because closing serialises the v2
+                // batch header.
+                self.maybe_assign_producer_state(&mut batch)?;
+                batch
             };
 
             let mut batch = batch;
+            // The rest of the work is done outside the lock; close() is particularly
+            // expensive.
             batch.close();
             size += batch.estimated_size_in_bytes() as i32;
             batch.drained(now);
@@ -978,7 +1259,7 @@ impl RecordAccumulator {
             }
         }
         self.update_drain_index(node.id(), drain_index);
-        ready
+        Ok(ready)
     }
 
     fn get_drain_index(&self, node_id: i32) -> usize {
@@ -999,16 +1280,16 @@ impl RecordAccumulator {
         nodes: &HashSet<Node>,
         max_size: i32,
         now: i64,
-    ) -> HashMap<i32, Vec<ProducerBatch>> {
+    ) -> Result<HashMap<i32, Vec<ProducerBatch>>, KafkaError> {
         if nodes.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
         let mut batches = HashMap::new();
         for node in nodes {
-            let ready = self.drain_batches_for_one_node(metadata_snapshot, node, max_size, now);
+            let ready = self.drain_batches_for_one_node(metadata_snapshot, node, max_size, now)?;
             batches.insert(node.id(), ready);
         }
-        batches
+        Ok(batches)
     }
 
     /// Update node latency stats.
@@ -1374,8 +1655,12 @@ impl RecordAccumulator {
 
     /// Split a big batch and re-enqueue the resulting sub-batches.
     ///
-    /// Translated from `RecordAccumulator.splitAndReenqueue`.
-    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> usize {
+    /// Translated from `RecordAccumulator.splitAndReenqueue` (Java 511).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
+    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, KafkaError> {
         // Reset the estimated compression ratio to the initial value or the big batch compression
         // ratio, whichever is bigger. There are several different ways to do the reset. We chose
         // the most conservative one to ensure the split doesn't happen too often.
@@ -1404,10 +1689,20 @@ impl RecordAccumulator {
 
         while let Some(batch) = sub_batches.pop_back() {
             self.incomplete.add(Arc::clone(&batch.produce_future));
-            deque.push_front(batch);
+            // We treat the newly split batches as if they are not even tried
+            // (Java 528-537).
+            if let Some(transaction_manager) = &self.transaction_manager {
+                // We should track the newly created batches since they already have
+                // assigned sequences: `ProducerBatch::split` carries the producer
+                // state over to each sub-batch.
+                transaction_manager.lock().unwrap().add_in_flight_batch(&batch)?;
+                self.insert_in_sequence_order(&mut deque, batch)?;
+            } else {
+                deque.push_front(batch);
+            }
         }
 
-        num_split_batches
+        Ok(num_split_batches)
     }
 }
 
@@ -1485,6 +1780,73 @@ mod tests {
             PartitionerConfig::default(),
             pool,
             None,
+        )
+    }
+
+    /// Builds an idempotent (non-transactional) [`TransactionManager`] that has
+    /// already acquired `producer_id` / `epoch`.
+    ///
+    /// Mirrors `TransactionManagerTest.initializeTransactionManager(Optional.empty(), ..)`
+    /// followed by `initializeIdempotentProducerId`, minus the network round trip:
+    /// the pending `InitProducerId` is dequeued and its response fed straight back,
+    /// exactly as `Sender.java:472` and `NetworkClient.poll` would.
+    fn idempotent_transaction_manager(producer_id: i64, epoch: i16) -> Arc<Mutex<TransactionManager>> {
+        use crate::common::requests::InitProducerIdResponse;
+        use crate::init_producer_id_response_data::InitProducerIdResponseData;
+        use crate::producer::internals::{Caller, InFlightBatchPool, PendingRequests};
+
+        let mut manager = TransactionManager::new(
+            LogContext::empty(),
+            None,
+            60_000,
+            100,
+            Arc::new(crate::ApiVersions::new()),
+            false,
+        )
+        .expect("an idempotent manager is constructible");
+
+        let mut pool = InFlightBatchPool::new();
+        let mut pending = PendingRequests::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("an InitProducerId request is pending");
+        let mut data = InitProducerIdResponseData::new();
+        data.set_error_code(Errors::None.code())
+            .set_producer_id(producer_id)
+            .set_producer_epoch(epoch);
+        manager
+            .handle_response(
+                handler,
+                &crate::common::requests::ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data)),
+                &mut pending,
+            )
+            .expect("a successful InitProducerId response is handled");
+        assert!(manager.has_producer_id());
+        Arc::new(Mutex::new(manager))
+    }
+
+    /// An accumulator sharing `transaction_manager`, mirroring Java's
+    /// `createTestRecordAccumulator(txnManager, ..)` (Java 1666).
+    fn create_idempotent_test_accumulator(
+        batch_size: i32,
+        total_size: i64,
+        linger_ms: i32,
+        transaction_manager: Arc<Mutex<TransactionManager>>,
+    ) -> RecordAccumulator {
+        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
+        RecordAccumulator::new(
+            batch_size,
+            Compression::none(),
+            linger_ms,
+            100,
+            1000,
+            30000,
+            PartitionerConfig::default(),
+            pool,
+            Some(transaction_manager),
         )
     }
 
@@ -1641,7 +2003,7 @@ mod tests {
         let mut nodes = HashSet::new();
         nodes.insert(n1.clone());
         nodes.insert(n2.clone());
-        let batches = accum.drain(&metadata, &nodes, batch_size, now);
+        let batches = accum.drain(&metadata, &nodes, batch_size, now).expect("drain");
 
         // Each node should have at least one batch.
         let total: usize = batches.values().map(|v| v.len()).sum();
@@ -1777,13 +2139,13 @@ mod tests {
         // Drain the batch.
         let mut nodes = HashSet::new();
         nodes.insert(n1.clone());
-        let batches = accum.drain(&metadata, &nodes, i32::MAX, now);
+        let batches = accum.drain(&metadata, &nodes, i32::MAX, now).expect("drain");
         let node_batches = batches.get(&n1.id()).unwrap();
         assert_eq!(1, node_batches.len());
 
         // Re-enqueue.
         let batch = batches.into_values().next().unwrap().into_iter().next().unwrap();
-        accum.reenqueue(batch, now + 1);
+        accum.reenqueue(batch, now + 1).expect("reenqueue");
 
         // Should have the batch back.
         assert_eq!(1, accum.deque_size(&tp1()));
@@ -1825,7 +2187,7 @@ mod tests {
         // Drain with a 1024-byte size limit: should get only one batch.
         let mut nodes = HashSet::new();
         nodes.insert(n1.clone());
-        let batches = accum.drain(&metadata, &nodes, 1024, now);
+        let batches = accum.drain(&metadata, &nodes, 1024, now).expect("drain");
         let drained = batches.get(&n1.id()).unwrap();
         assert_eq!(
             1,
@@ -1944,7 +2306,9 @@ mod tests {
 
         let mut nodes_set = HashSet::new();
         nodes_set.insert(n1.clone());
-        let batches = accum.drain(&metadata, &nodes_set, i32::MAX, now + linger_ms as i64 + 1);
+        let batches = accum
+            .drain(&metadata, &nodes_set, i32::MAX, now + linger_ms as i64 + 1)
+            .expect("drain");
         assert_eq!(1, batches.len(), "Node1 should be the only ready node.");
         assert_eq!(
             1,
@@ -1954,7 +2318,7 @@ mod tests {
 
         // Reenqueue the batch
         let batch = batches.into_values().next().unwrap().into_iter().next().unwrap();
-        accum.reenqueue(batch, now);
+        accum.reenqueue(batch, now).expect("reenqueue");
 
         // Put message for partition 1 into accumulator
         accum
@@ -1965,7 +2329,9 @@ mod tests {
         assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
 
         // tp1 should backoff while tp2 should not
-        let batches = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now + linger_ms as i64 + 1);
+        let batches = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, now + linger_ms as i64 + 1)
+            .expect("drain");
         assert_eq!(1, batches.len(), "Node1 should be the only ready node.");
         let node_batches = batches.get(&0).unwrap();
         assert_eq!(1, node_batches.len(), "Node1 should only have one batch drained.");
@@ -1980,7 +2346,9 @@ mod tests {
             (retry_backoff_ms as f64 * (1.0 + crate::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
         let result = accum.ready(&metadata, now + upper_bound_backoff_ms + 1);
         assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
-        let batches = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now + upper_bound_backoff_ms + 1);
+        let batches = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, now + upper_bound_backoff_ms + 1)
+            .expect("drain");
         assert_eq!(1, batches.len(), "Node1 should be the only ready node.");
         let node_batches = batches.get(&0).unwrap();
         assert_eq!(1, node_batches.len(), "Node1 should only have one batch drained.");
@@ -2025,7 +2393,7 @@ mod tests {
         let result = accum.ready(&metadata, now);
 
         // drain and deallocate all batches
-        let mut results = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now);
+        let mut results = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
 
         for batch_list in results.values_mut() {
             for batch in batch_list.iter_mut() {
@@ -2087,12 +2455,16 @@ mod tests {
 
         // Test drain with muted partition
         accum.mute_partition(tp.clone());
-        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now_after_linger);
+        let drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, now_after_linger)
+            .expect("drain");
         assert_eq!(0, drained.get(&n1.id()).unwrap().len(), "No batch should have been drained");
 
         // Test drain without muted partition.
         accum.unmute_partition(&tp);
-        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now_after_linger);
+        let drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, now_after_linger)
+            .expect("drain");
         assert!(
             !drained.get(&n1.id()).unwrap().is_empty(),
             "The batch should have been drained."
@@ -2124,13 +2496,13 @@ mod tests {
             .await
             .unwrap();
         let ready_nodes = accum.ready(&metadata, now).ready_nodes;
-        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now);
+        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now).expect("drain");
         assert!(drained.is_empty());
 
         // Advance clock and send one batch out.
         let now_after_linger = now + linger_ms as i64 + 1;
         let ready_nodes = accum.ready(&metadata, now_after_linger).ready_nodes;
-        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_after_linger);
+        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_after_linger).expect("drain");
         assert_eq!(1, drained.len(), "A batch did not drain after linger");
 
         // Queue another batch and advance clock.
@@ -2142,7 +2514,7 @@ mod tests {
 
         // Now drain and check that accumulator picked up the drained batch.
         let ready_nodes = accum.ready(&metadata, now_advanced).ready_nodes;
-        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_advanced);
+        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_advanced).expect("drain");
         assert_eq!(1, drained.len(), "A batch did not drain after linger");
     }
 
@@ -2188,11 +2560,11 @@ mod tests {
             now += linger_ms as i64;
             let ready_nodes = accum.ready(&metadata, now).ready_nodes;
             assert!(ready_nodes.contains(&n1), "Our partition's leader should be ready");
-            let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now);
+            let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now).expect("drain");
             assert_eq!(1, drained.get(&n1.id()).unwrap().len(), "There should be only one batch.");
             now += rtt;
             let batch = drained.into_values().next().unwrap().into_iter().next().unwrap();
-            accum.reenqueue(batch, now);
+            accum.reenqueue(batch, now).expect("reenqueue");
 
             let tp = tp1();
             if mute {
@@ -2203,7 +2575,9 @@ mod tests {
 
             // test expiration
             now += delivery_timeout_ms as i64 - rtt;
-            accum.drain(&metadata, &HashSet::from([n1.clone()]), i32::MAX, now);
+            accum
+                .drain(&metadata, &HashSet::from([n1.clone()]), i32::MAX, now)
+                .expect("drain");
             let expired_batches = accum.expired_batches(now);
             assert_eq!(
                 if mute { 1 } else { 0 },
@@ -2229,7 +2603,9 @@ mod tests {
         let metadata = make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0))]);
 
         // Drain for node2, it should return 0 batches.
-        let batches = accum.drain(&metadata, &HashSet::from([n2.clone()]), 999999, now);
+        let batches = accum
+            .drain(&metadata, &HashSet::from([n2.clone()]), 999999, now)
+            .expect("drain");
         assert!(batches.get(&n2.id()).unwrap().is_empty(), "Node2 should have no batches");
     }
 
@@ -2367,7 +2743,7 @@ mod tests {
             let mut read = 0i32;
             while read < num_threads * msgs {
                 let nodes = accum_drain.ready(&metadata_drain, now).ready_nodes;
-                let mut batches = accum_drain.drain(&metadata_drain, &nodes, 5 * 1024, now);
+                let mut batches = accum_drain.drain(&metadata_drain, &nodes, 5 * 1024, now).expect("drain");
                 let mut drained_any = false;
                 if let Some(node_batches) = batches.get_mut(&n1.id()) {
                     for batch in node_batches.iter_mut() {
@@ -2465,12 +2841,12 @@ mod tests {
 
         // drain with batch_size limit: should get one batch per node
         let nodes_set = HashSet::from([n1.clone(), n2.clone()]);
-        let batches1 = accum.drain(&metadata, &nodes_set, batch_size, now);
+        let batches1 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
         let total1: usize = batches1.values().map(|v| v.len()).sum();
         assert_eq!(2, total1, "Should drain exactly one batch per node");
 
         // drain with max size: should get remaining batches
-        let batches2 = accum.drain(&metadata, &nodes_set, batch_size, now);
+        let batches2 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
         let total2: usize = batches2.values().map(|v| v.len()).sum();
         assert_eq!(2, total2, "Should drain remaining batches");
 
@@ -2491,7 +2867,7 @@ mod tests {
         accum.mute_partition(tp4.clone());
 
         // Drain: node2 should skip tp4 because it's muted
-        let batches4 = accum.drain(&metadata, &nodes_set, batch_size, now);
+        let batches4 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
         let n2_batches = batches4.get(&n2.id()).unwrap();
         for b in n2_batches {
             assert_ne!(3, b.topic_partition.partition(), "Muted partition 3 should not be drained");
@@ -2499,7 +2875,7 @@ mod tests {
 
         // Unmute and drain with max size
         accum.unmute_partition(&tp4);
-        let batches5 = accum.drain(&metadata, &nodes_set, i32::MAX, now);
+        let batches5 = accum.drain(&metadata, &nodes_set, i32::MAX, now).expect("drain");
         let total5: usize = batches5.values().map(|v| v.len()).sum();
         assert!(total5 >= 1, "Should drain remaining batches after unmute");
     }
@@ -2547,7 +2923,7 @@ mod tests {
         let result = accum.ready(metadata, now);
         if expected > 0 {
             assert!(result.ready_nodes.contains(leader), "Leader should be ready");
-            let batches = accum.drain(metadata, &result.ready_nodes, i32::MAX, now);
+            let batches = accum.drain(metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
             assert_eq!(
                 expected,
                 batches.get(&leader.id()).map_or(0, |v| v.len()),
@@ -2606,7 +2982,7 @@ mod tests {
 
         let mut i = 0;
         while (current_retry_backoff_ms as f64) < retry_backoff_max_ms as f64 * (1.0 - jitter) {
-            accum.reenqueue(batch, now);
+            accum.reenqueue(batch, now).expect("reenqueue");
             let lower_bound = (retry_backoff_ms as f64 * (exp_base as f64).powi(i) * (1.0 - jitter)) as i64;
             let upper_bound = (retry_backoff_ms as f64 * (exp_base as f64).powi(i) * (1.0 + jitter)) as i64;
             current_retry_backoff_ms = upper_bound;
@@ -2671,7 +3047,7 @@ mod tests {
         let mut batch = batches.into_values().next().unwrap().into_iter().next().unwrap();
 
         // Retry 1 - delay by retryBackoffMs +/- jitter
-        accum.reenqueue(batch, now);
+        accum.reenqueue(batch, now).expect("reenqueue");
         let lower_bound = (retry_backoff_ms as f64 * (1.0 - jitter)) as i64;
         let upper_bound = (retry_backoff_ms as f64 * (1.0 + jitter)) as i64;
         // Should back off
@@ -2682,7 +3058,7 @@ mod tests {
         batch = batches2.into_values().next().unwrap().into_iter().next().unwrap();
 
         // Retry 2 - delay by retryBackoffMs * 2 +/- jitter
-        accum.reenqueue(batch, now);
+        accum.reenqueue(batch, now).expect("reenqueue");
         let lower_bound = (retry_backoff_ms as f64 * exp_base as f64 * (1.0 - jitter)) as i64;
         let upper_bound = (retry_backoff_ms as f64 * exp_base as f64 * (1.0 + jitter)) as i64;
         drain_and_check_batch_amount(&metadata_cache, &n1, &accum, initial + lower_bound - 1, 0);
@@ -2691,7 +3067,7 @@ mod tests {
         batch = batches3.into_values().next().unwrap().into_iter().next().unwrap();
 
         // Retry 3 - after a leader change, backoff still applies based on attempts
-        accum.reenqueue(batch, now);
+        accum.reenqueue(batch, now).expect("reenqueue");
         let lower_bound = (retry_backoff_ms as f64 * (exp_base as f64).powi(2) * (1.0 - jitter)) as i64;
         let upper_bound = (retry_backoff_ms as f64 * (exp_base as f64).powi(2) * (1.0 + jitter)) as i64;
         drain_and_check_batch_amount(&metadata_cache_change, &n2, &accum, initial + lower_bound - 1, 0);
@@ -2700,7 +3076,7 @@ mod tests {
         batch = batches4.into_values().next().unwrap().into_iter().next().unwrap();
 
         // Retry 4 - capped to retryBackoffMaxMs
-        accum.reenqueue(batch, now);
+        accum.reenqueue(batch, now).expect("reenqueue");
         let lower_bound = (retry_backoff_ms as f64 * (exp_base as f64).powi(3) * (1.0 - jitter)) as i64;
         let upper_bound = retry_backoff_max_ms;
         drain_and_check_batch_amount(&metadata_cache_change, &n2, &accum, initial + lower_bound - 1, 0);
@@ -2743,7 +3119,7 @@ mod tests {
 
         let result = accum.ready(&metadata, now);
         assert!(!result.ready_nodes.is_empty());
-        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
         assert!(accum.has_undrained());
         assert!(accum.has_incomplete());
 
@@ -2812,7 +3188,7 @@ mod tests {
 
         let result = accum.ready(&metadata, now);
         assert!(!result.ready_nodes.is_empty());
-        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
         assert!(accum.has_undrained());
         assert!(accum.has_incomplete());
 
@@ -2879,29 +3255,35 @@ mod tests {
         batch.close();
 
         // Enqueue the batch
-        accum.reenqueue(batch, now);
+        accum.reenqueue(batch, now).expect("reenqueue");
 
         // Re-enqueueing counts as a second attempt, so the backoff delay needs to elapse
         let drain_time = now + 121;
         let result = accum.ready(&metadata, drain_time);
         assert!(!result.ready_nodes.is_empty(), "The batch should be ready");
-        let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, drain_time);
+        let mut drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, drain_time)
+            .expect("drain");
         assert_eq!(1, drained.get(&n1.id()).map_or(0, |v| v.len()));
 
         // Split and reenqueue
         let big_batch = drained.get_mut(&n1.id()).unwrap().remove(0);
-        accum.split_and_reenqueue(big_batch);
+        accum.split_and_reenqueue(big_batch).expect("split_and_reenqueue");
 
         // Drain the split batches
         let drain_time2 = drain_time + 101;
-        let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, drain_time2);
+        let mut drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, drain_time2)
+            .expect("drain");
         assert!(!drained.is_empty());
         let first_batch = drained.get_mut(&n1.id()).unwrap();
         assert!(!first_batch.is_empty());
         first_batch[0].complete(acked.load(std::sync::atomic::Ordering::SeqCst) as i64, 100);
         assert_eq!(1, acked.load(std::sync::atomic::Ordering::SeqCst));
 
-        let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, drain_time2);
+        let mut drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, drain_time2)
+            .expect("drain");
         assert!(!drained.is_empty());
         let second_batch = drained.get_mut(&n1.id()).unwrap();
         assert!(!second_batch.is_empty());
@@ -2940,7 +3322,7 @@ mod tests {
 
         // Drain and complete all batches so await_flush_completion can proceed
         let result = accum.ready(&metadata, now);
-        let mut results = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now);
+        let mut results = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
         for batch_list in results.values_mut() {
             for batch in batch_list.iter_mut() {
                 batch.complete(0, 100);
@@ -3052,9 +3434,9 @@ mod tests {
         big_batch.close();
 
         // Enqueue and drain
-        accum.reenqueue(big_batch, 0);
+        accum.reenqueue(big_batch, 0).expect("reenqueue");
         let result = accum.ready(&metadata, 0);
-        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, 0);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, 0).expect("drain");
 
         if let Some(batches) = drained.values().next()
             && let Some(batch) = batches.first()
@@ -3131,7 +3513,7 @@ mod tests {
             // We should have one batch ready.
             let nodes = accum.ready(&metadata, now).ready_nodes;
             assert_eq!(1, nodes.len(), "Should have 1 leader ready");
-            let drained_map = accum.drain(&metadata, &nodes, i32::MAX, 0);
+            let drained_map = accum.drain(&metadata, &nodes, i32::MAX, 0).expect("drain");
             let batch_list = drained_map.values().next().unwrap();
             assert_eq!(1, batch_list.len(), "Should have 1 batch ready");
             let actual_batch_size = batch_list[0].estimated_size_in_bytes() as i32;
@@ -3181,7 +3563,7 @@ mod tests {
         big_batch.close();
 
         // Add the batch to the accumulator
-        accum.reenqueue(big_batch, now);
+        accum.reenqueue(big_batch, now).expect("reenqueue");
 
         // Iteratively split batches
         let mut split_operations = 0;
@@ -3199,7 +3581,7 @@ mod tests {
             if result.ready_nodes.is_empty() {
                 break;
             }
-            let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now + 200);
+            let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now + 200).expect("drain");
             let batches = match drained.get_mut(&n1.id()) {
                 Some(b) if !b.is_empty() => b,
                 _ => break,
@@ -3212,7 +3594,7 @@ mod tests {
                 break;
             }
 
-            let num_split = accum.split_and_reenqueue(batch);
+            let num_split = accum.split_and_reenqueue(batch).expect("split_and_reenqueue");
             split_operations += 1;
 
             if num_split == 0 {
@@ -3228,5 +3610,345 @@ mod tests {
             split_operations < max_split_operations,
             "Should not hit the safety limit, indicating no infinite recursion"
         );
+    }
+
+    // =====================================================================
+    // Idempotence (Milestone 11 Phase 4)
+    //
+    // `RecordAccumulatorTest` has exactly one test that constructs a
+    // `TransactionManager` — `testRecordsDrainedWhenTransactionCompleting`
+    // (Java 976-1019) — and it is **not** translatable here: it stubs
+    // `isCompleting()` to `true` with Mockito, and `COMMITTING_TRANSACTION` /
+    // `ABORTING_TRANSACTION` are unreachable without a transactional id, which
+    // `TransactionManager::new` still refuses (Phase 5). The
+    // `transaction_completing` term it exercises *is* translated, in
+    // `RecordAccumulator::ready`. The test belongs to Phase 6, with the public
+    // `commit_transaction` / `abort_transaction` API that can reach the state.
+    //
+    // The tests below cover the accumulator half of the Phase-4 delta directly:
+    // `RecordAccumulator.java:900-925` (sequence assignment), `:815-850`
+    // (`shouldStopDrainBatchesForPartition`) and `:552-592`
+    // (`insertInSequenceOrder`). The end-to-end paths that combine them with the
+    // `Sender` are the three `TransactionManagerTest` methods in `sender.rs`.
+    // =====================================================================
+
+    const IDEMPOTENT_PRODUCER_ID: i64 = 13131;
+    const IDEMPOTENT_EPOCH: i16 = 1;
+
+    /// Appends one record to `tp1()` and returns the append result.
+    async fn append_one(accum: &RecordAccumulator, cluster: &Cluster, now: i64) {
+        accum
+            .append(TOPIC, 0, now, Some(&key()), Some(&value()), &[], None, 0, now, cluster)
+            .await
+            .expect("append should succeed");
+    }
+
+    /// `RecordAccumulator.java:900-925`: the drain assigns the producer id, epoch and
+    /// base sequence, advances the partition's next sequence by the record count, and
+    /// tracks the batch as in flight — all before `batch.close()` serialises the v2
+    /// header.
+    #[tokio::test]
+    async fn test_drain_assigns_producer_state_and_tracks_the_batch() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let cluster = metadata.cluster();
+        let now = 0i64;
+
+        append_one(&accum, cluster, now).await;
+        append_one(&accum, cluster, now).await;
+        assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1()), 0);
+
+        let result = accum.ready(&metadata, now);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        let batches = drained.get(&node1().id()).expect("node1 drained");
+        assert_eq!(batches.len(), 1, "both records share one batch");
+        let batch = &batches[0];
+
+        assert_eq!(batch.producer_id(), IDEMPOTENT_PRODUCER_ID);
+        assert_eq!(batch.producer_epoch(), IDEMPOTENT_EPOCH);
+        assert_eq!(batch.base_sequence(), 0);
+        assert!(batch.has_sequence());
+        assert!(
+            batch.is_closed(),
+            "the batch is closed after the producer state is set, not before"
+        );
+
+        let mut manager = transaction_manager.lock().unwrap();
+        assert_eq!(
+            manager.sequence_number(&tp1()),
+            batch.record_count,
+            "incrementSequenceNumber advances by the record count (Java 919)"
+        );
+        assert!(manager.has_inflight_batches(&tp1()), "addInFlightBatch ran (Java 924)");
+        assert_eq!(manager.first_in_flight_sequence(&tp1()).expect("tracked"), 0);
+    }
+
+    /// `RecordAccumulator.java:822-824`: nothing is drained until a producer id has
+    /// been acquired.
+    #[tokio::test]
+    async fn test_drain_stops_while_the_producer_id_is_invalid() {
+        // A manager that has *not* completed its InitProducerId.
+        let transaction_manager = Arc::new(Mutex::new(
+            TransactionManager::new(
+                LogContext::empty(),
+                None,
+                60_000,
+                100,
+                Arc::new(crate::ApiVersions::new()),
+                false,
+            )
+            .expect("an idempotent manager is constructible"),
+        ));
+        assert!(!transaction_manager.lock().unwrap().has_producer_id());
+
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let now = 0i64;
+        append_one(&accum, metadata.cluster(), now).await;
+
+        let result = accum.ready(&metadata, now);
+        assert!(!result.ready_nodes.is_empty(), "the node is ready; the drain is what stops");
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        assert!(
+            drained.get(&node1().id()).expect("node1 present").is_empty(),
+            "we cannot send the batch until we have refreshed the producer id"
+        );
+        assert!(accum.has_undrained());
+    }
+
+    /// `RecordAccumulator.java:826-839`: a partition with an unresolved sequence
+    /// drains nothing, so the state of the previous sequence numbers is not guessed
+    /// at.
+    #[tokio::test]
+    async fn test_drain_stops_for_a_partition_with_an_unresolved_sequence() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let now = 0i64;
+
+        // Drain one batch so the partition has a sequence, then mark it unresolved the
+        // way `Sender.failExpiredBatches` does for a batch that expired in retry.
+        append_one(&accum, metadata.cluster(), now).await;
+        let result = accum.ready(&metadata, now);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        let first = &drained.get(&node1().id()).expect("node1 drained")[0];
+        transaction_manager.lock().unwrap().mark_sequence_unresolved(first);
+        assert!(transaction_manager.lock().unwrap().has_unresolved_sequence(&tp1()));
+
+        // A brand new batch, i.e. one without a sequence, must not be drained.
+        append_one(&accum, metadata.cluster(), now).await;
+        let result = accum.ready(&metadata, now);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        assert!(drained.get(&node1().id()).expect("node1 present").is_empty());
+        assert!(accum.has_undrained());
+    }
+
+    /// `RecordAccumulator.java:841-847`: while a retried batch is at the head of the
+    /// in-flight set, only the batch whose base sequence matches it may be drained —
+    /// which reduces the partition to a single in-flight request.
+    #[tokio::test]
+    async fn test_drain_stops_for_a_retried_batch_out_of_sequence_order() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let now = 0i64;
+
+        // Two batches, drained one at a time so each gets its own sequence.
+        append_one(&accum, metadata.cluster(), now).await;
+        let result = accum.ready(&metadata, now);
+        let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        let first = drained.get_mut(&node1().id()).expect("drained").remove(0);
+        assert_eq!(first.base_sequence(), 0);
+
+        append_one(&accum, metadata.cluster(), now).await;
+        let result = accum.ready(&metadata, now);
+        let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        let second = drained.get_mut(&node1().id()).expect("drained").remove(0);
+        assert_eq!(second.base_sequence(), 1);
+
+        // The second batch is retried, so it goes back to the head of the deque while
+        // the first is still the lowest tracked sequence.
+        accum.reenqueue(second, now).expect("the batch is still tracked");
+        let result = accum.ready(&metadata, now + 1000);
+        let drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, now + 1000)
+            .expect("drain");
+        assert!(
+            drained.get(&node1().id()).expect("node1 present").is_empty(),
+            "sequence 1 must wait until sequence 0 completes"
+        );
+
+        // Once the first batch completes, the retry is drainable again.
+        transaction_manager
+            .lock()
+            .unwrap()
+            .remove_in_flight_batch(&first)
+            .expect("tracked");
+        let result = accum.ready(&metadata, now + 2000);
+        let drained = accum
+            .drain(&metadata, &result.ready_nodes, i32::MAX, now + 2000)
+            .expect("drain");
+        assert_eq!(drained.get(&node1().id()).expect("node1 drained").len(), 1);
+    }
+
+    /// `RecordAccumulator.java:553-560`: re-enqueueing rejects a batch with no
+    /// sequence, and one that is no longer tracked as in flight.
+    #[tokio::test]
+    async fn test_reenqueue_rejects_an_untracked_or_unsequenced_batch() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let now = 0i64;
+
+        // No sequence: the batch never went through the drain.
+        append_one(&accum, metadata.cluster(), now).await;
+        let mut deque_batch = {
+            let topic_info = accum.topic_info_map.get(TOPIC).expect("topic present");
+            let topic_info = Arc::clone(topic_info.value());
+            let deque = topic_info.batches.get(&0).expect("deque present");
+            deque.value().lock().unwrap().pop_front().expect("one batch")
+        };
+        deque_batch.close();
+        let error = accum
+            .reenqueue(deque_batch, now)
+            .expect_err("an idempotent re-enqueue requires a sequence");
+        assert_eq!(
+            error.message(),
+            "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled."
+        );
+
+        // Sequenced but untracked: this is the assertion rules §7 cites as Java's
+        // proof that `Sender.reenqueueBatch` leaves a batch tracked.
+        append_one(&accum, metadata.cluster(), now).await;
+        let result = accum.ready(&metadata, now);
+        let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        let batch = drained.get_mut(&node1().id()).expect("drained").remove(0);
+        transaction_manager
+            .lock()
+            .unwrap()
+            .remove_in_flight_batch(&batch)
+            .expect("tracked");
+        let base_sequence = batch.base_sequence();
+        let error = accum
+            .reenqueue(batch, now)
+            .expect_err("an untracked batch must not be re-enqueued");
+        assert_eq!(
+            error.message(),
+            format!(
+                "We are re-enqueueing a batch which is not tracked as part of the in flight requests. \
+                 batch.topicPartition: {}; batch.baseSequence: {}",
+                tp1(),
+                base_sequence
+            )
+        );
+    }
+
+    /// `RecordAccumulator.java:562-591`: a re-enqueued batch is inserted behind every
+    /// queued batch with a lower base sequence, not blindly at the front.
+    #[tokio::test]
+    async fn test_reenqueue_inserts_in_sequence_order() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let now = 0i64;
+
+        // Drain three batches so each carries sequence 0, 1 and 2.
+        let mut sequenced = Vec::new();
+        for _ in 0..3 {
+            append_one(&accum, metadata.cluster(), now).await;
+            let result = accum.ready(&metadata, now);
+            let mut drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+            sequenced.push(drained.get_mut(&node1().id()).expect("drained").remove(0));
+        }
+        assert_eq!(sequenced.iter().map(|b| b.base_sequence()).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        // Re-enqueue them out of order: 1, then 2, then 0.
+        let batch2 = sequenced.pop().expect("three batches");
+        let batch1 = sequenced.pop().expect("two batches");
+        let batch0 = sequenced.pop().expect("one batch");
+        accum.reenqueue(batch1, now).expect("tracked");
+        accum.reenqueue(batch2, now).expect("tracked");
+        accum.reenqueue(batch0, now).expect("tracked");
+
+        let topic_info = accum.topic_info_map.get(TOPIC).expect("topic present");
+        let topic_info = Arc::clone(topic_info.value());
+        let deque = topic_info.batches.get(&0).expect("deque present");
+        let deque = deque.value().lock().unwrap();
+        assert_eq!(
+            deque.iter().map(|b| b.base_sequence()).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the queue must stay ordered by base sequence"
+        );
+    }
+
+    /// `RecordAccumulator.java:530-536`: split sub-batches already carry sequences, so
+    /// they are tracked as in flight and inserted in sequence order rather than pushed
+    /// blindly to the front.
+    #[tokio::test]
+    async fn test_split_and_reenqueue_tracks_the_sub_batches() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let now = 0i64;
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 10, Arc::clone(&transaction_manager));
+
+        // A batch bigger than the accumulator's `batch.size`, built the way
+        // `test_split_and_reenqueue` does, so `split` produces more than one
+        // sub-batch. The producer state is assigned as the drain would
+        // (`RecordAccumulator.java:918`), which is the precondition
+        // `assignProducerStateToBatches` needs.
+        let builder = MemoryRecords::builder_with_buffer(
+            vec![0u8; 4096],
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let payload = vec![0u8; 1024];
+        for _ in 0..2 {
+            assert!(
+                big_batch.try_append(now, None, Some(&payload), &[], None, now).is_ok(),
+                "the buffer has room"
+            );
+        }
+        big_batch.set_producer_state(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH, 0, false);
+        big_batch.close();
+        {
+            let mut manager = transaction_manager.lock().unwrap();
+            // `sequence_number` creates the partition entry, exactly as the drain's
+            // own call at `RecordAccumulator.java:918` does.
+            assert_eq!(manager.sequence_number(&tp1()), 0);
+            manager
+                .increment_sequence_number(&tp1(), big_batch.record_count)
+                .expect("the entry exists");
+            manager.add_in_flight_batch(&big_batch).expect("the sequence is set");
+        }
+
+        // `Sender.completeBatch` removes the big batch from the txn map before
+        // splitting (`Sender.java:685-686`).
+        transaction_manager
+            .lock()
+            .unwrap()
+            .remove_in_flight_batch(&big_batch)
+            .expect("tracked");
+
+        let num_split = accum
+            .split_and_reenqueue(big_batch)
+            .expect("the sub-batches carry sequences and are tracked");
+        assert!(num_split > 1, "expected more than one sub-batch, got {num_split}");
+
+        let topic_info = accum.topic_info_map.get(TOPIC).expect("topic present");
+        let topic_info = Arc::clone(topic_info.value());
+        let deque = topic_info.batches.get(&0).expect("deque present");
+        let deque = deque.value().lock().unwrap();
+        assert_eq!(deque.len(), num_split);
+        let sequences: Vec<i32> = deque.iter().map(|b| b.base_sequence()).collect();
+        assert!(
+            sequences.windows(2).all(|w| w[0] < w[1]),
+            "sub-batches must be queued in increasing sequence order, got {sequences:?}"
+        );
+        assert!(deque.iter().all(|b| b.has_sequence()));
+        drop(deque);
+        assert!(transaction_manager.lock().unwrap().has_inflight_batches(&tp1()));
     }
 }

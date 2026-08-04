@@ -651,7 +651,7 @@ impl<C: KafkaClient> Sender<C> {
                     .expect("the slot was just observed to be occupied");
                 self.on_transactional_response(handler, response)?;
             } else {
-                self.handle_produce_responses(std::slice::from_ref(response), now);
+                self.handle_produce_responses(std::slice::from_ref(response), now)?;
             }
         }
         Ok(())
@@ -661,7 +661,15 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// In Java, this happens inside the `RequestCompletionHandler` callback.
     /// In Rust, we process responses after `client.poll()` returns.
-    fn handle_produce_responses(&mut self, responses: &[ClientResponse], now: i64) {
+    ///
+    /// # Errors
+    ///
+    /// Propagates a failure from `reenqueue` / `split_and_reenqueue`, both of which
+    /// re-insert an idempotent batch in sequence order. Java's
+    /// `IllegalStateException` from `insertInSequenceOrder` escapes the completion
+    /// callback, hence `client.poll` and `runOnce`, to `Sender.run`'s catch-and-log;
+    /// [`Self::run_once_logging_errors`] is the same boundary.
+    fn handle_produce_responses(&mut self, responses: &[ClientResponse], now: i64) -> Result<(), KafkaError> {
         for response in responses {
             let correlation_id = response.request_header().correlation_id();
             if let Some(pending) = self.pending_produce_responses.remove(&correlation_id) {
@@ -688,7 +696,7 @@ impl<C: KafkaClient> Sender<C> {
                         match action {
                             BatchAction::Reenqueue => {
                                 // RecordAccumulator::reenqueue calls batch.reenqueued() internally.
-                                self.accumulator.reenqueue(batch, now);
+                                self.accumulator.reenqueue(batch, now)?;
                             },
                             BatchAction::SplitAndReenqueue => {
                                 // split_and_reenqueue takes ownership, splits the batch,
@@ -696,7 +704,7 @@ impl<C: KafkaClient> Sender<C> {
                                 // front of the deque. After splitting, the original batch's
                                 // produce future is completed with RECORD_BATCH_TOO_LARGE
                                 // by ProducerBatch::split → finalize_split_batches.
-                                self.accumulator.split_and_reenqueue(batch);
+                                self.accumulator.split_and_reenqueue(batch)?;
                             },
                             BatchAction::Done => {},
                         }
@@ -704,6 +712,7 @@ impl<C: KafkaClient> Sender<C> {
                 }
             }
         }
+        Ok(())
     }
 
     // -- The `transactionManager != null` block of `runOnce` -----------------
@@ -1245,9 +1254,9 @@ impl<C: KafkaClient> Sender<C> {
         result.ready_nodes = ready_nodes;
 
         // Create produce requests
-        let mut batches = self
-            .accumulator
-            .drain(&metadata_snapshot, &result.ready_nodes, self.max_request_size, now);
+        let mut batches =
+            self.accumulator
+                .drain(&metadata_snapshot, &result.ready_nodes, self.max_request_size, now)?;
 
         // Build the produce requests BEFORE moving batches into in-flight tracking,
         // since send_produce_request needs to read from the batches.

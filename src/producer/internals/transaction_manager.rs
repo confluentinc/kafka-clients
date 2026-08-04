@@ -1124,6 +1124,31 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Whether the accumulator may drain batches for `topic_partition`.
+    ///
+    /// Translated from `isSendToPartitionAllowed(TopicPartition)` (Java 466),
+    /// called from `RecordAccumulator.shouldStopDrainBatchesForPartition`
+    /// (`RecordAccumulator.java:818`) — which Phase 4 translates, hence this method
+    /// arriving now rather than with the rest of the transactional entry points.
+    ///
+    /// # Errors
+    ///
+    /// The transactional arm needs `partitionsInTransaction` (Phase 5) and is
+    /// unreachable while [`Self::new`] refuses a transactional id: Java's
+    /// `!isTransactional()` short-circuits before the set is read.
+    pub(crate) fn is_send_to_partition_allowed(&self, topic_partition: &TopicPartition) -> Result<bool, KafkaError> {
+        if self.has_fatal_error() {
+            return Ok(false);
+        }
+        if !self.is_transactional() {
+            return Ok(true);
+        }
+        Err(KafkaError::unsupported_version(format!(
+            "Checking whether {topic_partition} is part of the ongoing transaction is not yet implemented in \
+             this client (Milestone 11, Phase 5)."
+        )))
+    }
+
     // -- Producer id lifecycle ---------------------------------------------
 
     /// Get the current producer id and epoch without blocking. Callers must use [`ProducerIdAndEpoch::is_valid`] to
