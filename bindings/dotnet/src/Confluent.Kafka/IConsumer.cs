@@ -22,7 +22,7 @@ namespace Confluent.Kafka;
 /// <summary>
 /// A Kafka consumer — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.consumer.Consumer</c>, implemented by
-/// <c>KafkaConsumer</c> (the real KIP-848 client) and <c>MockConsumer</c>
+/// <see cref="KafkaConsumer"/> (the real KIP-848 client) and <see cref="MockConsumer"/>
 /// (a broker-free test helper). The C#-idiomatic <c>I</c> prefix marks the interface
 /// (Framework Design Guidelines / analyzer CA1715); the <c>Async</c> suffix marks the
 /// <see cref="Task"/>-returning members. Methods that <b>block</b> in Java's
