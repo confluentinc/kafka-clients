@@ -20,8 +20,10 @@ exceptions that test matches. Java therefore always recovers to `UNINITIALIZED`,
 which is why the table admits `UNINITIALIZED ← ABORTABLE_ERROR` (`:165`).
 
 As shipped, Phase 3 had translated the three methods that *enter* the state and
-none that *leave* it, so an authorization failure produced an inescapable state in
-which `maybe_add_partition` rejected every send forever.
+none that *leave* it, so the translated state machine had no exit from
+`ABORTABLE_ERROR` at all — from Phase 4, once the Sender wires the manager into
+`runOnce`, an authorization failure would have had `maybe_add_partition` reject
+every subsequent send forever. (Phase-tense corrected under Issue 7's audit.)
 
 **Fixed** in `src/producer/internals/transaction_manager.rs`:
 
@@ -402,3 +404,118 @@ rather than as disagreement: the Critic corrected its own pass-1 `:1420` citatio
 here (Issue 4b) and withdrew its own pass-1 resolution (b), which is the second and
 third self-correction across the two passes — the record is more trustworthy for
 it, and neither self-correction changed a conclusion I had acted on incorrectly.
+
+---
+
+# Pass 3 — resolved (Issue 7)
+
+## Issue 7 (RESOLVED) — `close`'s *replacement* justification was also false
+
+**Verdict: correct, conceded in full, and I re-derived it rather than taking it on
+trust.** `Sender.run()` (Java 241-304) is:
+
+```
+245  while (running)                                                    { runOnce(); }
+258  while (!forceClose && (undrained || inFlight || pendingTxnRequests)) { runOnce(); }
+267  while (!forceClose && txnManager != null && hasOngoingTransaction()) { runOnce(); }
+287  if (forceClose) { 292 transactionManager.close(); 295 accumulator.abortIncompleteBatches(); }
+298  this.client.close();
+303  log.debug("Shutdown of Kafka producer I/O thread has completed.");
+```
+
+`close()` at `:292` is inside `if (forceClose)` at `:287`, after all three loops,
+and is followed only by `abortIncompleteBatches` and `client.close()`. Verified it
+is the only call site in the entire client:
+`grep -rn "transactionManager.close()" kafka/clients/src/main/java/` returns one
+line. And both post-shutdown loops are `!forceClose`-guarded, so once `forceClose`
+is set **no `runOnce` runs at all** — the thing I credited the `FATAL_ERROR`
+transition with preventing is already prevented by the loop guards, with or without
+`close`.
+
+Also verified the two supporting claims I now restate: `KafkaProducer.close` joins
+the I/O thread (`KafkaProducer.java:1423`, `:1441`), and `throwIfProducerClosed`
+(`:956-959`) rejects on `!sender.isRunning()` before any public call could reach
+`maybeFailWithError`. So the `FATAL_ERROR` `close` writes has no reader on the
+idempotent path at all.
+
+Java names the real intent at `Sender.java:288-289`: "fail all the incomplete
+transactional requests and batches and **wake up the threads waiting on the
+futures**" — exactly the hanging-future mechanism Issue 5 had me retract for this
+path and bound to Phase 6.
+
+**Fixed** at all four sites the finding names — `transaction_manager.rs`'s `close`
+doc, PLAN §Phase-3's added-methods bullet, PLAN §9.15's `close` paragraph, and
+§9.15's Correction block, which no longer claims the decision "stands on the
+`FATAL_ERROR` effect". The justification is now the one that survives, stated as
+such: unscheduled in every phase (the plan gap that dropped
+`authenticationFailed`), twelve lines, no Phase-5 dependency beyond the always-null
+`pendingTransition` branch, call site reachable idempotently
+(`transactionManager != null` holds at `:290`), and **behavioural payoff in Phase 6
+on the transactional path — none on the idempotent path**. The "not urgent before
+Phase 6" framing from the Issue-5 fix is kept; the finding is right that it was the
+accurate half. §9.15's Correction block now records both wrong claims side by side,
+because the instructive artefact is the pattern rather than either claim.
+
+**Why this happened, named in the records.** Issue 5's fix identified the true
+mechanism, correctly retracted it for the idempotent path, and correctly bounded it
+to Phase 6 — and then reached for a *different* present-tense idempotent mechanism
+instead of concluding there is none. The pull toward finding a payoff in the
+current phase produced both wrong answers. That is now written into
+§9.15's lesson list as a third item and into agent-memory lesson 1 as a "third
+half", with the operational rule: phrase such claims in the tense of the phase that
+makes them true, and grep the phase's own records for "stops / prevents / would
+leave" before declaring it done.
+
+## Audit for a third instance, as the coordinator asked
+
+I grepped this phase's records for present-tense behavioural verbs
+(`stops|prevents|would leave|observable effect|rejected forever`) across
+`transaction_manager.rs`, `PLAN.md` and the agent-memory note. Result: **no third
+false claim, but two imprecise ones of the same family, both corrected.**
+
+  1. **§Phase-3's bullet for `transition_to_uninitialized` / `fail_pending_requests`**
+     said "an idempotent producer that hits an authorization failure can enter
+     `ABORTABLE_ERROR` and never leave it, so every subsequent send is rejected
+     forever" — present tense, although in Phase 3 nothing reaches `ABORTABLE_ERROR`
+     in production either, because `on_complete` has no caller until Phase 4. Not
+     *false* (it is a true statement about the translated unit, and it is how both
+     the Critic and the coordinator framed Issue 1), but imprecise in exactly the way
+     under discussion. Reworded to "the translated state machine has no exit from
+     `ABORTABLE_ERROR` at all, so from Phase 4 … would reject every subsequent send
+     forever". Same correction applied to §9.15's lesson 2, to agent-memory lesson 1,
+     and to this file's own Issue-1 section.
+
+     Worth stating plainly: **all four methods pulled into Phase 3 have their
+     behavioural payoff in Phase 4 or 6**, because all four Java call sites are in
+     `Sender`. Only `close`'s record ever claimed otherwise, but the pattern is
+     general and the records now say so.
+
+  2. **The struct doc's "Send-path allocations" section** opened with "The methods
+     the drain path reaches …", describing a wiring that does not exist until
+     Phase 4. The load-bearing content (per-batch not per-record; no allocation Java
+     does not also make) is a property of the methods and was accurate — the Critic
+     adjudicated it sound under DoD §10 — but the tense implied a live path. Now
+     prefaced with "Nothing here is on a live path yet — Phase 4 wires the manager
+     into `RecordAccumulator`'s drain and `Sender::run_once`. The budget below is
+     therefore a property of the methods, stated so Phase 4 inherits it", and the two
+     verbs are future.
+
+Everything else checked out: the remaining hits are claims about **Java's** control
+flow (`maybeFailWithError` rejecting sends once `hasError()`; `throwIfPendingState`
+being inert; `Sender.java:325`'s recovery; the `:333-335` return census), each
+verified against the source and, in three cases, independently re-derived by the
+Critic. Those are phase-independent by construction.
+
+## Verification after the pass-3 fix
+
+`cargo build`, `cargo test`, `cargo xtask format-check`, `cargo xtask lint` and
+`make verify-sandbox`: exit codes in the session summary, captured without pipes.
+
+## Nothing rejected in pass 3
+
+Issue 7 is correct in every particular. I checked the loop structure, the
+`!forceClose` guards, the single call site, `ioThread.join` and
+`throwIfProducerClosed` directly before conceding, and found no counter-argument to
+offer. This is the fourth Critic self-correction-or-catch in the loop that changed a
+record for the better; the third round on one justification is my error, not the
+review's.

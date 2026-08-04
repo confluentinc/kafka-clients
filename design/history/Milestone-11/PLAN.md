@@ -287,16 +287,20 @@ a named test needs it, not as scope creep:
 - `transition_to_uninitialized` (756) and `fail_pending_requests` (944) — the
   **exit** from `ABORTABLE_ERROR`, reached from
   `Sender.shouldHandleAuthorizationError` (`Sender.java:351-360`). Without them
-  an idempotent producer that hits an authorization failure can enter
-  `ABORTABLE_ERROR` and never leave it, so every subsequent send is rejected
+  the translated state machine has no exit from `ABORTABLE_ERROR` at all, so from
+  Phase 4 — when the `Sender` wires the manager into `runOnce` — an idempotent
+  producer that hit an authorization failure would reject every subsequent send
   forever. Both were listed under Phase 5; that listing is removed. Added after
   Critic 43 issue 1 — see §9.15.
 - `authentication_failed` (939) and `close` (949) — the other two methods that
   fail the pending-request queue. Both were **unscheduled in every phase**, both
-  are reachable for a purely idempotent producer, and neither needs Phase-5 state
-  beyond the `pendingTransition` branch. `close`'s observable effect idempotently
-  is the `FATAL_ERROR` transition, which stops a force-closing producer from
-  going on to acquire a new producer id. Reasoning in §9.15.
+  have a call site reachable for a purely idempotent producer, and neither needs
+  Phase-5 state beyond the `pendingTransition` branch. Neither has any
+  behavioural payoff *in Phase 3* — like the two above, their Java call sites are
+  in `Sender.runOnce` / `Sender.run`, which Phases 4 and 6 translate. `close`'s
+  payoff is specifically Phase 6 and transactional (waking the threads blocked in
+  `result.await`, per `Sender.java:288-289`); on the idempotent path it has none.
+  Reasoning in §9.15.
 - `maybe_add_partition` (437, idempotent arm) and `maybe_transition_to_error_state`
   (764, idempotent arm) — `testFailIfNotReadyForSendIdempotentProducer` and
   `testFailIfNotReadyForSendIdempotentProducerFatalError` (both named under
@@ -1685,35 +1689,67 @@ idempotently: `maybeSendAndPollTransactionalRequest` takes the
 
 `close` (949) was also unscheduled everywhere. It is not reachable *from*
 `ABORTABLE_ERROR` — it is the `forceClose` shutdown path at
-`Sender.java:287-293`, i.e. Phase 6 — but it is reachable for a purely idempotent
-producer. Its observable effect on that path is the `FATAL_ERROR` transition,
-which is why it is worth translating: a force-closing producer must not go on to
-acquire a new producer id, and `FATAL_ERROR` stops `Sender.runOnce` at `:318`
-before `bumpIdempotentEpochAndResetIdIfNeeded` can enqueue one. (The transition
-happens **inside** the loop, so an empty queue means no transition at all —
-Java's behaviour, preserved.) Both landed in Phase 3 rather than left for their
-call sites, on the grounds that they were unscheduled, are twelve lines each and
-need no Phase-5 state.
+`Sender.java:287-293`, i.e. Phase 6 — but its call site is reachable for a purely
+idempotent producer (`transactionManager != null` holds at `:290`). **On the
+idempotent path it has no observable effect whatever**, and the scope decision
+rests on that being acceptable, not on a payoff:
 
-> **Correction (Critic 43 issue 5).** An earlier revision justified pulling
-> `close` forward by claiming that omitting it would leave a pending
-> `InitProducerId`'s `TransactionalRequestResult` never completed — a hanging
-> future under CLAUDE.md §5. **That mechanism does not exist on the idempotent
-> path.** The handler is built inside `bumpIdempotentEpochAndResetIdIfNeeded`
-> (Java 663-676), which returns `void` and never lets the result escape; the only
-> method that hands a `TransactionalRequestResult` to a caller is
-> `initializeTransactions` via `handleCachedTransactionRequestResult`, whose first
-> statement is `ensureTransactional()` (Java 1266). On the Rust side
-> `await_result` / `await_result_timeout` have no production call site at all —
+  - unscheduled in every phase — the same plan gap that dropped
+    `authenticationFailed`;
+  - twelve lines, with no Phase-5 dependency beyond the always-null
+    `pendingTransition` branch;
+  - behavioural payoff in **Phase 6**, on the transactional path.
+
+Java names that payoff two lines above the call (`Sender.java:288-289`): "fail all
+the incomplete transactional requests and batches and *wake up the threads
+waiting on the futures*" — i.e. the threads blocked in
+`result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`), which is a path
+that only exists once `initializeTransactions` does.
+
+Nothing else in `close` is observable idempotently. The `FATAL_ERROR` it writes is
+never read: `close()` is the Sender task's **terminal act**. Its sole call site
+(`Sender.java:292`, the only one in the whole client) sits inside
+`if (forceClose)` at `:287`, after all three `run()` loops (`:245`, `:258`,
+`:267`), followed only by `accumulator.abortIncompleteBatches()` (`:295`) and
+`client.close()` (`:298`). Both post-shutdown loops are `!forceClose`-guarded, so
+once `forceClose` is set **no `runOnce` executes at all**. (The transition happens
+**inside** the loop, so an empty queue means no transition at all — Java's
+behaviour, preserved.)
+
+> **Corrections (Critic 43 issues 5 and 7).** `close`'s justification was wrong
+> twice, in two different ways, and both are recorded rather than silently edited
+> — a scope expansion defended by a mechanism that does not exist cannot be
+> reviewed, and this one was the Actor's own initiative.
+>
+> *Issue 5.* The first revision claimed that omitting `close` would leave a
+> pending `InitProducerId`'s `TransactionalRequestResult` never completed — a
+> hanging future under CLAUDE.md §5. **That mechanism does not exist on the
+> idempotent path.** The handler is built inside
+> `bumpIdempotentEpochAndResetIdIfNeeded` (Java 663-676), which returns `void` and
+> never lets the result escape; the only method that hands a
+> `TransactionalRequestResult` to a caller is `initializeTransactions` via
+> `handleCachedTransactionRequestResult`, whose first statement is
+> `ensureTransactional()` (Java 1266). On the Rust side `await_result` /
+> `await_result_timeout` have no production call site at all —
 > `TxnRequestHandler::result()` is read only from tests and the `#[cfg(test)]`
-> door. The hanging-future concern becomes real in **Phase 6**, on the
-> **transactional** path, where `KafkaProducer.initTransactions` does
-> `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`); `close`'s
-> queue-failing loop is what unblocks that await on a force close. The scope
-> decision stands on the `FATAL_ERROR` effect and the scheduling gap, not on the
-> retracted claim. Recorded rather than silently edited, for the same reason the
-> retraction above is: a scope expansion defended by a mechanism that does not
-> exist cannot be reviewed, and this one was the Actor's own initiative.
+> door. Correctly bounded to Phase 6 above.
+>
+> *Issue 7.* The second revision then claimed the `FATAL_ERROR` transition "stops
+> `Sender.runOnce` at `:318` before `bumpIdempotentEpochAndResetIdIfNeeded` can
+> enqueue one". **There is no `runOnce` after `close()`** — see the loop structure
+> above. Worse, the thing that transition was credited with preventing is already
+> prevented by the `!forceClose` guards at `:258` and `:267`, with or without
+> `close`. This claim was refuted by the twenty lines of `Sender.run` immediately
+> around the call site the same sentence cited.
+>
+> **The instructive part is the pattern, not either claim.** Issue 5's fix
+> identified the true mechanism (waking blocked awaits), correctly retracted it
+> for the idempotent path, and correctly bounded it to Phase 6 — and then reached
+> for a *different* present-tense idempotent mechanism instead of concluding there
+> is none. The pull toward finding some payoff in the current phase produced both
+> wrong answers. "No behavioural payoff until Phase 6, and that is fine because
+> the method was unscheduled, is twelve lines, and needs no Phase-5 state" was
+> always the sufficient and true justification.
 
 All nine `State` variants are declared (see §Phase-3), so the arithmetic
 "4 of 9" no longer appears in the code either way.
@@ -1743,11 +1779,18 @@ All nine `State` variants are declared (see §Phase-3), so the arithmetic
      state, not only the entry points that look like they own it.
   2. The correction itself was then applied only half way: to the writers that
      *enter* the newly-reachable state, not the one that *leaves* it. A state a
-     client can enter and not exit is worse than a state it never reaches — this
-     shipped an inescapable `ABORTABLE_ERROR` in which every send was rejected
-     forever. Enumerating exit paths is now a suggested `definition-of-done.md`
-     clause, recorded in `COMMENTS.DONE.43.md` for the `agent-roles.md` §2
-     process.
+     client can enter and not exit is worse than a state it never reaches — the
+     translated state machine had no exit from `ABORTABLE_ERROR`, so from Phase 4
+     an authorization failure would have rejected every subsequent send forever.
+     Enumerating exit paths is now a suggested `definition-of-done.md` clause,
+     recorded in `COMMENTS.DONE.43.md` for the `agent-roles.md` §2 process.
+  3. Three rounds were then spent on one justification (`close`'s), because each
+     correction reached for a *different* present-tense behavioural payoff instead
+     of concluding there is none. Both replacements were false; the surviving
+     reason — unscheduled, small, no later-phase dependency, payoff in Phase 6 —
+     had been sufficient all along. A record that overstates *when* an effect
+     materialises is the same class of defect as one that overstates *whether* it
+     exists, and it is harder to spot because the mechanism is real, just not yet.
 
 ---
 

@@ -410,7 +410,12 @@ impl fmt::Debug for TxnRequestHandler {
 ///
 /// # Send-path allocations
 ///
-/// The methods the drain path reaches — [`Self::sequence_number`],
+/// Nothing here is on a live path yet — Phase 4 wires the manager into
+/// `RecordAccumulator`'s drain and `Sender::run_once`. The budget below is
+/// therefore a property of the methods, stated so Phase 4 inherits it rather than
+/// re-deriving it.
+///
+/// The methods the drain path will reach — [`Self::sequence_number`],
 /// [`Self::increment_sequence_number`], [`Self::add_in_flight_batch`],
 /// [`Self::maybe_update_producer_id_and_epoch`] — run once per **batch**, not
 /// per record, and allocate no more than Java: a `TopicPartition` clone only
@@ -420,7 +425,7 @@ impl fmt::Debug for TxnRequestHandler {
 /// Two methods collect a `Vec` of partition keys where Java iterates its
 /// collection in place ([`Self::bump_idempotent_producer_epoch`] and
 /// [`Self::maybe_resolve_sequences`]), because the loop bodies need `&mut self`.
-/// Both run once per `Sender.runOnce`, i.e. per network poll, and only over
+/// Both will run once per `Sender.runOnce`, i.e. per network poll, and only over
 /// partitions in an error state.
 pub(crate) struct TransactionManager {
     log_context: LogContext,
@@ -781,32 +786,48 @@ impl TransactionManager {
     ///
     /// # Why this landed in Phase 3 rather than with its call site in Phase 6
     ///
-    /// Not reachable from [`State::AbortableError`] — this is the forced-shutdown
-    /// path — but reachable for a purely idempotent producer, and it was
-    /// unscheduled in every phase of the plan, which is the same gap that left
-    /// [`Self::authentication_failed`] out. Twelve lines, and its only Phase-5
-    /// dependency is the `pendingTransition` branch that is always null
-    /// idempotently.
+    /// **On the idempotent path this method has no observable effect at all**, and
+    /// the reason it is here is scheduling, not behaviour:
     ///
-    /// Its observable effect on the idempotent path is the [`State::FatalError`]
-    /// transition, which is what makes it worth translating: a force-closing
-    /// producer must not go on to acquire a new producer id, and `FATAL_ERROR`
-    /// stops `Sender.runOnce` at `:318` before
-    /// [`Self::bump_idempotent_epoch_and_reset_id_if_needed`] can enqueue one.
-    /// Note the transition happens **inside** the loop, so an empty queue means no
-    /// transition at all — Java's behaviour, preserved.
+    ///   - It was unscheduled in every phase of the plan — the same gap that left
+    ///     [`Self::authentication_failed`] out (Critic 43 issue 1).
+    ///   - Twelve lines, and its only Phase-5 dependency is the
+    ///     `pendingTransition` branch that is always null idempotently.
+    ///   - Its call site is reachable for an idempotent producer:
+    ///     `transactionManager != null` holds at `Sender.java:290`.
     ///
-    /// It does **not** prevent a hanging future on this path, contrary to what an
-    /// earlier revision of this comment claimed (Critic 43 issue 5). Nothing
-    /// awaits an idempotent `InitProducerId` result: the handler is built inside
+    /// Its **behavioural** payoff is Phase 6 and transactional. Java states it two
+    /// lines above the call (`Sender.java:288-289`): "fail all the incomplete
+    /// transactional requests and batches and *wake up the threads waiting on the
+    /// futures*". Those threads are `KafkaProducer.initTransactions` &c. blocked in
+    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`) — a path that
+    /// only exists once `initializeTransactions` does, in Phase 5/6.
+    ///
+    /// Nothing awaits an idempotent `InitProducerId` result, so there is no
+    /// hanging future to prevent here: the handler is built inside
     /// `bumpIdempotentEpochAndResetIdIfNeeded` (Java 663-676) and its
     /// [`TransactionalRequestResult`] never leaves it, because the only method
     /// that hands a result to a caller is `initializeTransactions` via
     /// `handleCachedTransactionRequestResult`, whose first statement is
-    /// `ensureTransactional()` (Java 1266). The hanging-future concern is real
-    /// from Phase 6 on the **transactional** path, where
-    /// `KafkaProducer.initTransactions` does `result.await(maxBlockTimeMs, ..)`
-    /// (`KafkaProducer.java:654`).
+    /// `ensureTransactional()` (Java 1266).
+    ///
+    /// The [`State::FatalError`] this writes is also never read on the idempotent
+    /// path: `close()` is the Sender task's terminal act. Its only call site
+    /// (`Sender.java:292`) sits inside `if (forceClose)` at `:287`, *after* all
+    /// three `run()` loops, and both post-shutdown loops (`:258`, `:267`) are
+    /// `!forceClose`-guarded, so once `forceClose` is set no `runOnce` executes at
+    /// all. Only `accumulator.abortIncompleteBatches()` (`:295`) and
+    /// `client.close()` (`:298`) follow.
+    ///
+    /// Note the transition happens **inside** the loop, so an empty queue means no
+    /// transition at all — Java's behaviour, preserved.
+    ///
+    /// Two earlier revisions of this comment claimed a present-tense idempotent
+    /// payoff — first a hanging future (Critic 43 issue 5), then the `FATAL_ERROR`
+    /// transition stopping a subsequent `runOnce` at `:318` (issue 7). Both were
+    /// false, the second refuted by the twenty lines of `Sender.run` around the
+    /// call site it cited. Recorded because the pull toward inventing a
+    /// present-tense payoff is what produced both.
     pub(crate) fn close(&mut self, caller: Caller) -> Result<(), KafkaError> {
         let shutdown_error = KafkaError::with_message(Errors::UnknownServerError, "The producer closed forcefully");
         for index in 0..self.pending_requests.len() {

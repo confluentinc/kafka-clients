@@ -26,9 +26,10 @@ at-least-once. Phase 3 is the state machine; Phase 4 wires it to the send path.
    and that code is what an idempotent producer gets when it lacks
    `IdempotentWrite`.
 
-   *Exits:* the first fix added only the three methods that enter the state and
-   shipped an inescapable `ABORTABLE_ERROR` — `maybe_add_partition` rejected
-   every send forever. Critic 43 issue 1 found it. `Sender.java:325` →
+   *Exits:* the first fix added only the three methods that enter the state, so
+   the translated state machine had no exit from `ABORTABLE_ERROR` — from Phase 4,
+   once the Sender wires it in, `maybe_add_partition` would reject every send
+   forever. Critic 43 issue 1 found it. `Sender.java:325` →
    `shouldHandleAuthorizationError` (`:351-360`) → `failPendingRequests` +
    `maybeAbortBatches` + `transitionToUninitialized` is Java's recovery, and it
    always fires idempotently because the only entry sets `lastError` to exactly
@@ -43,6 +44,17 @@ at-least-once. Phase 3 is the state machine; Phase 4 wires it to the send path.
    Recorded as PLAN §9.15; a DoD clause for this is proposed in
    `COMMENTS.DONE.43.md`. Same failure shape as §9.8 (shared blind spot,
    invisible to repetition).
+
+   *Third half, learned the hard way over three rounds:* when a method is pulled
+   into a phase earlier than its call site, **do not reach for a present-tense
+   behavioural payoff**. `close`'s justification was wrong twice — first a hanging
+   future, then a `FATAL_ERROR` transition "stopping a later `runOnce`" — because
+   each time the instinct was to find some effect *in this phase* rather than
+   conclude there is none. There often is none, and "unscheduled anywhere, N lines,
+   no later-phase dependency, call site reachable, payoff in phase M" is a complete
+   justification on its own. Phrase such claims in the tense of the phase that
+   makes them true, and grep the phase's own records for "stops/prevents/would
+   leave" before declaring the phase done.
 
 2. **When a plan clause contradicts itself, prefer the faithful translation and
    say so in the PLAN.** "only the 4 reachable states" + "the full 9-variant

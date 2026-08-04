@@ -97,3 +97,40 @@ fix had just written. Where to look next time:
    crate's stated convention (bare `KafkaException` → `Errors::UnknownServerError`,
    per `maybe_fail_with_error`) — a harness value nothing asserts against Java is
    the one that gets copied.
+
+## Pass 3 — the replacement justification was also false
+
+Only one finding, and it is heuristic 6 recurring: `close`'s hanging-future
+reason was retracted correctly and **replaced** with "`FATAL_ERROR` stops
+`Sender.runOnce` at `:318` before a new producer id can be requested", which is
+refuted by the twenty lines around the call site the same sentence cites.
+`transactionManager.close()` (`Sender.java:292`) sits inside `if (forceClose)` at
+`:287`, *after* all three `runOnce` loops (`:245`, `:258`, `:267`), followed only
+by `client.close()` at `:298` — and the two post-shutdown loops are themselves
+`!forceClose`-guarded, so once `forceClose` is set no `runOnce` runs at all.
+Java's comment at `:288-289` names the real intent ("wake up the threads waiting
+on the futures"), i.e. the very mechanism just retracted for the idempotent path.
+
+8. **When a fix *replaces* a retracted justification rather than deleting it,
+   audit the replacement as hard as the original — harder, because the retraction
+   now leans on it.** Two rounds, two false mechanisms in the same doc comment.
+   The specific trap: a claim of the form "state X prevents later step Y" needs
+   the *call ordering* traced, not just X and Y verified to exist. Read the whole
+   enclosing method (`Sender.run`, 60 lines) rather than the cited fragment
+   (`:287-293`).
+
+   Corollary for scope decisions: when a method's only payoff is in a later
+   phase, "it was unscheduled in every phase and costs twelve lines" is a
+   complete and honest reason. Pressure to supply a *behavioural* reason for the
+   current phase is what manufactured both false mechanisms.
+
+**Verified sound in pass 3 (don't re-check):** the deliberately-kept single
+`:1420` in PLAN deviation 7 is an inoculation note, not a survivor; `onComplete`
+spans `:1406-1428` and its `synchronized` block is `:1421-1423`, covering
+`handleResponse` alone. The `:333-335` predicate
+`has_in_flight_request() || (has_pending_requests() && !has_error())` is the
+*full* disjunction on Phase-3-reachable states, not an approximation — Java's
+`nextRequest` returns null at `:900`, `:904`, `:910`, `:925`, and both omitted
+paths are `isEndTxn()`-gated. Return census of
+`maybeSendAndPollTransactionalRequest` confirmed: one `return false` (`:474`), six
+`return true` (`:463`, `:487`, `:492`, `:497`, `:510`, `:516`).
