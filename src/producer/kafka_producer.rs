@@ -720,13 +720,19 @@ impl<K, V> KafkaProducer<K, V> {
                 // will refuse to dequeue batches from the accumulator until they have
                 // been added to the transaction (`KafkaProducer.java:1040-1046`).
                 //
-                // `result.partition` is the resolved partition, which Java reads back
-                // as `appendCallbacks.topicPartition()`.
+                // `result.topic_partition` is what Java reads back as
+                // `appendCallbacks.topicPartition()`. It is borrowed, not rebuilt:
+                // constructing it here from `topic: &str` would allocate a `String` and
+                // an `Arc<str>` and copy the topic name twice on **every** record, which
+                // CLAUDE.md §11 forbids on the send path. The accumulator interns one
+                // `Arc<str>` per topic and hands the `TopicPartition` back, so this costs
+                // nothing. (Critic 44 issue 1.)
                 if let Some(transaction_manager) = &self.transaction_manager {
-                    let tp = TopicPartition::new(topic.to_string(), result.partition);
                     // `Caller::App`: this runs on the application task.
-                    if let Err(error) = transaction_manager.lock().unwrap().maybe_add_partition(&tp) {
-                        return self.handle_api_exception(error, topic, result.partition, None);
+                    if let Err(error) = transaction_manager.lock().unwrap().maybe_add_partition(&result.topic_partition)
+                    {
+                        let partition = result.topic_partition.partition();
+                        return self.handle_api_exception(error, topic, partition, None);
                     }
                 }
 
@@ -2120,6 +2126,96 @@ mod tests {
             partitions.len() >= 2,
             "Expected multiple partitions for different keys, got: {:?}",
             partitions
+        );
+    }
+
+    /// `definition-of-done.md` §10 / CLAUDE.md §11: enabling idempotence must not add
+    /// a single per-record heap allocation to the send path.
+    ///
+    /// This is the audit clause aimed at the public `send` entry point.
+    /// `RecordAccumulator::drain` has its own budget test
+    /// (`test_drain_allocations_do_not_scale_with_the_record_count`), but that
+    /// measures the wrong layer: Critic 44 issue 1 was a `String` + `Arc<str>`
+    /// allocation per record in `KafkaProducer::do_send_bytes`, one call *above* it.
+    ///
+    /// Measured as a delta between a producer that holds a `TransactionManager` and
+    /// one that does not, over a steady-state append (batch already created, topic
+    /// info already interned). Pinning an absolute count would break on unrelated
+    /// refactors; the delta is exactly the cost the transaction wiring adds, and it
+    /// must be zero.
+    #[tokio::test]
+    async fn test_send_allocations_do_not_grow_when_idempotence_is_enabled() {
+        async fn steady_state_send_allocations(with_transaction_manager: bool) -> usize {
+            let transaction_manager = if with_transaction_manager {
+                let manager = TransactionManager::new(
+                    LogContext::empty(),
+                    None,
+                    60_000,
+                    100,
+                    Arc::new(ApiVersions::new()),
+                    false,
+                )
+                .expect("an idempotent manager is constructible");
+                Some(Arc::new(Mutex::new(manager)))
+            } else {
+                None
+            };
+            let metadata = create_metadata_with_topic(TOPIC, 1);
+            // A large batch so every send below appends to the same batch.
+            let accumulator = Arc::new(RecordAccumulator::new(
+                1024 * 1024,
+                Compression::none(),
+                5,
+                100,
+                1000,
+                120_000,
+                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                Arc::new(BufferPool::new(32 * 1024 * 1024, 1024 * 1024)),
+                transaction_manager.clone(),
+            ));
+            let config = ProducerConfig::default();
+            let producer = KafkaProducer::<String, String>::new(
+                &config,
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+                Arc::clone(&metadata),
+                accumulator,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Notify::new()),
+                None,
+                default_time_provider(),
+                transaction_manager,
+            );
+            let cluster = metadata.fetch();
+
+            // Warm up: create the topic info, the deque and the batch.
+            for _ in 0..4 {
+                producer
+                    .do_send_bytes(TOPIC, Some(0), Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .await
+                    .expect("append should succeed");
+            }
+
+            {
+                let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+                crate::test_alloc_tracker::AllocTrackingGuard::reset();
+                producer
+                    .do_send_bytes(TOPIC, Some(0), Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .await
+                    .expect("append should succeed");
+                let count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+                assert!(count > 0, "the tracker must actually be measuring");
+                count
+            }
+        }
+
+        let without = steady_state_send_allocations(false).await;
+        let with = steady_state_send_allocations(true).await;
+        assert_eq!(
+            without, with,
+            "enabling idempotence must add no per-record allocation to the send path; \
+             got {without} without a TransactionManager vs {with} with one"
         );
     }
 

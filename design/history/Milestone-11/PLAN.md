@@ -2167,11 +2167,20 @@ Each is documented at its call site as well.
    manager lock, because building it locks deques and is pure waste on the common
    path. Java needs no equivalent because its entry can reach the batches itself.
 
-6. **`RecordAppendResult::partition`.** Java reports the resolved partition through
-   `AppendCallbacks.setPartition` (`KafkaProducer.java:1606`) and reads it back as
-   `appendCallbacks.topicPartition()` for `maybeAddPartition`. The Rust `append`
-   takes a plain completion `Callback`, not an `AppendCallbacks` trait object, so
-   there is nowhere else for it to go.
+6. **`RecordAppendResult::topic_partition`.** Java reports the resolved partition
+   through `AppendCallbacks.setPartition` (`KafkaProducer.java:1606`) and reads it
+   back as `appendCallbacks.topicPartition()` for `maybeAddPartition`. The Rust
+   `append` takes a plain completion `Callback`, not an `AppendCallbacks` trait
+   object, so there is nowhere else for it to go.
+
+   It carries the whole `TopicPartition`, not the index. Carrying only the index
+   (the first shape, corrected after Critic 44 issue 1) forced
+   `KafkaProducer::do_send_bytes` to rebuild it from `topic: &str`, which allocates a
+   `String` *and* an `Arc<str>` and copies the topic name twice **per record** on the
+   default path — CLAUDE.md §11's named anti-pattern. The accumulator already interns
+   one `Arc<str>` per topic, so producing it there costs a refcount increment.
+   Measured: the mutation restoring the old construction moves the steady-state
+   per-send allocation count from 2 to 4.
 
 7. **`PendingProduceRequest` records each batch's `Arc<ProduceRequestResult>`.**
    Java's callback closes over the batches themselves; identity by `Arc::ptr_eq` is

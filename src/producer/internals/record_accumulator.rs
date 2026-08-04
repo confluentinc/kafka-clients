@@ -78,17 +78,30 @@ pub struct RecordAppendResult {
     pub new_batch_created: bool,
     /// The number of bytes appended.
     pub appended_bytes: i32,
-    /// The partition the record was actually appended to.
+    /// The topic-partition the record was actually appended to.
     ///
-    /// Java reports this through `RecordAccumulator.AppendCallbacks.setPartition`
-    /// (`KafkaProducer.java:1606`), which the accumulator calls once the built-in
-    /// partitioner has resolved `UNKNOWN_PARTITION`; `KafkaProducer.doSend` then
-    /// reads it back as `appendCallbacks.topicPartition()` to pass to
+    /// Java reports the resolved partition through
+    /// `RecordAccumulator.AppendCallbacks.setPartition` (`KafkaProducer.java:1606`),
+    /// which the accumulator calls once the built-in partitioner has resolved
+    /// `UNKNOWN_PARTITION`; `KafkaProducer.doSend` then reads it back as
+    /// `appendCallbacks.topicPartition()` to pass to
     /// `transactionManager.maybeAddPartition` (`:1045`). The Rust `append` takes a
     /// plain completion `Callback` rather than an `AppendCallbacks` trait object, so
-    /// the resolved partition is reported here instead. It is never
+    /// it is reported here instead. Its partition is never
     /// `record_metadata::UNKNOWN_PARTITION`, which is what Java asserts at `:1038`.
-    pub partition: i32,
+    ///
+    /// # Why the whole `TopicPartition` and not just the index
+    ///
+    /// Because the caller needs one, and this is the only place that can produce it
+    /// without allocating. The accumulator interns one `Arc<str>` per topic
+    /// (`get_or_create_topic_info`), so building it here costs a single refcount
+    /// increment, whereas `KafkaProducer::do_send_bytes` rebuilding it from the
+    /// `&str` would allocate a `String` *and* an `Arc<str>` and copy the topic name
+    /// twice — per record, on the default path, which CLAUDE.md §11 names as an
+    /// anti-pattern ("identifiers cloned on every message ... prefer `Arc<str>`")
+    /// and `definition-of-done.md` §10 asks the send-path audit to catch. Carrying
+    /// the index alone was exactly that regression; see Critic 44 issue 1.
+    pub topic_partition: TopicPartition,
 }
 
 /// The set of nodes that have at least one complete record batch in the
@@ -433,6 +446,7 @@ impl RecordAccumulator {
                     headers,
                     callback,
                     &mut deque,
+                    topic,
                     effective_partition,
                     now_ms,
                 )?;
@@ -489,6 +503,7 @@ impl RecordAccumulator {
                     headers,
                     callback,
                     &mut deque,
+                    topic,
                     effective_partition,
                     now_ms,
                 )?;
@@ -545,8 +560,10 @@ impl RecordAccumulator {
         debug_assert!(partition != record_metadata::UNKNOWN_PARTITION);
 
         let records_builder = self.records_builder(buffer);
+        // Both the batch and the append result carry this; `TopicPartition` holds an
+        // `Arc<str>`, so the clone is a refcount increment, not a copy.
         let tp = TopicPartition::new(Arc::clone(topic), partition);
-        let mut batch = ProducerBatch::new(tp, records_builder, now_ms);
+        let mut batch = ProducerBatch::new(tp.clone(), records_builder, now_ms);
 
         let future = batch
             .try_append(timestamp, key, value, headers, callback, now_ms)
@@ -563,7 +580,7 @@ impl RecordAccumulator {
             batch_is_full,
             new_batch_created: true,
             appended_bytes: estimated_size,
-            partition,
+            topic_partition: tp,
         }
     }
 
@@ -616,6 +633,7 @@ impl RecordAccumulator {
         headers: &[RecordHeader],
         callback: Option<Callback>,
         deque: &mut VecDeque<ProducerBatch>,
+        topic: &Arc<str>,
         partition: i32,
         now_ms: i64,
     ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
@@ -639,7 +657,9 @@ impl RecordAccumulator {
                             batch_is_full,
                             new_batch_created: false,
                             appended_bytes,
-                            partition,
+                            // Refcount increment on the accumulator's interned
+                            // `Arc<str>`; no allocation on the per-record path.
+                            topic_partition: TopicPartition::new(Arc::clone(topic), partition),
                         }),
                         None, // callback was consumed
                     ));
