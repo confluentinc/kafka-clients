@@ -140,6 +140,11 @@ struct FutureResponse {
     disconnected: bool,
     /// Whether to simulate an unsupported version error.
     is_unsupported_request: bool,
+    /// A custom version-mismatch message to deliver (mirrors the message a real
+    /// `NetworkClient` attaches when a request builder throws at build time,
+    /// e.g. the `NoBatched*` exceptions). When set, the delivered
+    /// `ClientResponse` carries this exact `version_mismatch` string.
+    version_mismatch_message: Option<String>,
 }
 
 /// A mock network client for use in testing code.
@@ -339,6 +344,21 @@ impl MockClient {
             response_body: None,
             disconnected: false,
             is_unsupported_request: true,
+            version_mismatch_message: None,
+        });
+    }
+
+    /// Prepare a version-mismatch response carrying a custom message, mirroring
+    /// the `ClientResponse` a real `NetworkClient` synthesizes when a request
+    /// builder throws an `UnsupportedVersionException` (including the
+    /// `NoBatched*` subclasses) at build time.
+    pub fn prepare_version_mismatch_response(&mut self, message: impl Into<String>) {
+        self.future_responses.push_back(FutureResponse {
+            node: None,
+            response_body: None,
+            disconnected: false,
+            is_unsupported_request: true,
+            version_mismatch_message: Some(message.into()),
         });
     }
 
@@ -354,6 +374,7 @@ impl MockClient {
             response_body: Some(response),
             disconnected,
             is_unsupported_request: is_unsupported_version,
+            version_mismatch_message: None,
         });
     }
 
@@ -462,7 +483,9 @@ impl KafkaClient for MockClient {
             let header = request.make_header(version).expect("Failed to create header");
             let callback = request.take_callback();
 
-            let version_mismatch = if future_resp.is_unsupported_request {
+            let version_mismatch = if let Some(message) = future_resp.version_mismatch_message {
+                Some(message)
+            } else if future_resp.is_unsupported_request {
                 Some(format!("Api {} with version {}", request.api_key().name(), version))
             } else {
                 None
