@@ -177,7 +177,9 @@ impl TxnPartitionMap {
     /// i.e. a confirmed fatal status such as `MessageTooLarge`.
     ///
     /// `batches` must be the *remaining* in-flight batches for the partition,
-    /// supplied by their owner — see
+    /// supplied from **both** owners (the Sender's in-flight map and the
+    /// accumulator's deque — a reenqueued batch stays tracked but lives in the
+    /// latter) — see
     /// `.claude/rules/producer-transactions.md` §7.
     pub(crate) fn adjust_sequences_due_to_failed_batch(
         &mut self,

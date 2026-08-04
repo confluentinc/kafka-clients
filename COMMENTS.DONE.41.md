@@ -1,3 +1,298 @@
+# Critic 41 — Milestone 11 Phase 1: REVIEW LOOP CLOSED
+
+Three Critic passes per `agent-roles.md` steps 2-6. Converged clean on pass 3.
+
+| Pass | Findings | Outcome |
+|---|---|---|
+| 1 | 8 | 7 fixed (`0a8612e`), 1 partially rejected (`COMMENTS.FP.md`) |
+| 2 | 1 | Fixed (`363a7c7`) — the reenqueue path; the pass-1 audit was wrong |
+| 3 | **0** | **Clean. Phase 1 signed off.** |
+
+## Pass 2 — the finding that mattered
+
+The pass-1 fix for finding 1 added an error when a tracked key has no matching
+batch in the caller's pool, justified by an audit claiming no reachable Java flow
+hits that state. The audit was wrong: `Sender.reenqueueBatch`
+(`Sender.java:750-752`) does not call `transactionManager.removeInFlightBatch`,
+unlike the split path at `:685`, so a retried batch leaves the Sender's map while
+staying tracked. Java asserts this at `RecordAccumulator.java:558-560`. Erroring
+there would have broken idempotent recovery outright.
+
+Writing the regression test then exposed a **second** defect in the pass-1 fix:
+it resolved and mutated in one pass, leaving already-visited batches rewritten
+when a later key was missing. Now resolves every key before mutating.
+
+## Pass 3 — clean, with three disclosures
+
+The Critic recorded three items it judged **not** to be findings, so the judgement
+is visible rather than implicit: the archived PLAN header's "sole owner" phrase
+(deferred to the corrected rules), `TxnPartitionMap`'s singular "their owner"
+phrasing, and `adjust_sequences_due_to_failed_batch` decrementing `next_sequence`
+before the missing-key error (precisely scoped, and mirrors Java).
+
+The first two were tightened anyway in the closing commit — cheap, and they sit
+exactly where Phase 4 will read.
+
+It also disclosed that the small Java line-number offsets in its own pass-2
+write-up were its error, not the Actor's; the submodule is unchanged at `a18251b`.
+
+---
+
+# Full pass-3 report
+
+# Critic 41 — Milestone 11 Phase 1, third pass (fix verification)
+
+Commit reviewed: `363a7c7` — "fixup! Phase 1: address Critic 41 second-pass
+finding — reenqueue path". Java contract: `kafka/` submodule at Apache Kafka
+4.2.0. I confirmed the submodule has not moved: `git submodule status` and
+`git ls-tree HEAD kafka` both report `a18251bae0b825c69794a50dffd4c3100cf5ca5b`
+(4.2.0), the same commit the first two passes were reviewed against.
+
+Verified locally at `363a7c7`: `cargo test --lib` 2194 passed / 0 failed /
+1 ignored (22 in `txn_partition_entry`, including the new test),
+`cargo xtask format-check` clean, `cargo xtask lint` clean.
+
+# NO FINDINGS
+
+The second-pass finding is fully resolved, the second defect it exposed is
+correctly fixed, and I found nothing new. Details of what I verified follow, then
+two disclosures that are explicitly **not** findings — recorded because the
+coordinator asked pointed questions about them and full disclosure is more useful
+than silence.
+
+---
+
+## 1. Documentation corrections — verified
+
+**The "sole owner" claim is gone from every place that governs behaviour.**
+I grepped the repo (excluding `kafka/` and the COMMENTS files). Three sites
+previously carried it; all three are corrected:
+
+  - `.claude/rules/producer-transactions.md` §7 — now "takes ownership", followed
+    by a dedicated paragraph headed "**Ownership alternates — the Sender's map is
+    NOT the permanent sole owner.**"
+  - `txn_partition_entry.rs:48-56` (type-level doc) — "takes ownership" plus
+    "Ownership **alternates**: on the retry path it moves back to the
+    accumulator's deque while the batch stays tracked here, so a tracked batch
+    lives in either owner. Callers assembling the batch pool must draw from both".
+  - `txn_partition_entry.rs:294-320` (`reset_sequence_numbers` doc) — rewritten to
+    document **both** mismatch directions under explicit sub-headings
+    ("Pool ⊃ tracked", "Tracked ⊃ one owner"), where before it documented only the
+    first.
+
+**The corrected text does state the invariant a Phase 3-6 reviewer needs.** It is
+actionable in three distinct ways, which is what I was looking for:
+
+  - It names the mechanism (`Sender.reenqueueBatch` calls
+    `accumulator.reenqueue(..)` then `maybeRemoveFromInflightBatches(..)` **without**
+    `transactionManager.removeInFlightBatch`), and contrasts it with the split path
+    that does — so a reviewer can check the Rust equivalent rather than take it on
+    faith.
+  - It cites Java's own assertion of the invariant
+    (`RecordAccumulator.insertInSequenceOrder`), which is the strongest available
+    evidence and is stronger than my second-pass write-up cited.
+  - It states the obligation as a **MUST** on the caller ("Phase 4 MUST assemble
+    the pool from **both** owners") and adds a matching anti-pattern: "Building the
+    lookup pool from `Sender::in_flight_batches` alone, omitting reenqueued batches
+    sitting in the accumulator's deque." That anti-pattern is the checkable form —
+    a Critic reviewing Phase 4 can grep for the pool construction and compare.
+
+**The `:655` / `:652-653` reasoning is accurately represented**, and so is every
+other Java citation in the commit and the docs. I re-derived all of them with
+`grep -n` rather than by eye this time:
+
+| Cited | Authoritative | Verdict |
+|---|---|---|
+| `TransactionManager.java:655` (`startSequencesAtBeginning`) | `:655` | exact |
+| `:652-653` (the "rewrite all in-flight sequences" comment) | comment at `:653`, loop `:654` | range covers it |
+| `Sender.java:750-752` (`reenqueueBatch` body) | signature `:750`, the two cited statements `:751`/`:752` | exact |
+| `Sender.java:685` (split-path `removeInFlightBatch`) | guard `:685`, call `:686` | covers the two-line guard |
+| `RecordAccumulator.java:558-560` (the assertion) | `if` at `:558`, `throw` at `:559-560` | exact |
+| `Sender.java:848` / `:854` (`handleFailedBatch` before dealloc) | `:848` / `:854` | exact |
+| `TransactionManager.java:790` / `:818` / `:1058` | all as cited | exact |
+
+Worth recording for the archive: the slight offsets in **my own** second-pass
+write-up (`:846`, `:684-685`, `:556-558`, `:749-753`) were my error from counting
+inside `sed` output, not a submodule difference. The Actor's numbers are the
+correct ones.
+
+## 2. The atomicity fix — verified
+
+`reset_sequence_numbers` (`txn_partition_entry.rs:324-369`) now runs a resolve
+pass over `tracked` that returns `Err` on the first unresolvable key, then a
+separate mutation pass over the resolved indices.
+
+**Is the error path atomic? Any way to mutate a batch and still return `Err`?**
+There are exactly two `Err` exits, and the split puts them on opposite sides of
+the mutation boundary:
+
+  - The missing-key `return Err(...)` (`:353-357`) is now unreachable from any
+    point after a mutation — the resolve loop touches only `pool`, `tracked` and
+    `resolved`, none of which is a batch. **Atomic with respect to the caller's
+    batches, and with respect to the entry** (`inflight_batches_by_sequence` is
+    assigned only at `:368`, after the mutation loop; `start_sequences_at_beginning`
+    assigns `producer_id_and_epoch` / `next_sequence` / `last_acked_sequence` only
+    after the `?` at `:220`).
+  - `reset(batch)?` (`:365`) can fire mid-mutation. For
+    `start_sequences_at_beginning` the closure is infallible (`Ok(())` at `:219`),
+    so this cannot fire there at all. For
+    `adjust_sequences_due_to_failed_batch` it is the negative-sequence rejection —
+    the deliberately non-atomic path.
+
+**Can the `resolved` indices go stale?** No, and this is structurally guaranteed
+rather than incidental:
+
+  - `batches: &mut [&mut ProducerBatch]` is a slice — fixed length, so no element
+    can be added or removed.
+  - `reset: FnMut(&mut ProducerBatch)` receives a single batch, never the slice, so
+    it cannot reorder or resize it. Both concrete closures capture only locals
+    (`sequence`; `base_sequence` / `record_count` / a cloned `topic_partition`) and
+    call `batch.reset_producer_state(..)`.
+  - The first-pass `batches.sort_by_key(..)` — the one thing that *did* permute the
+    slice — was removed when the pool index was introduced. Nothing permutes the
+    slice now.
+  - The borrow checker enforces it independently: while `&mut *batches[index]` is
+    live, nothing else can reach `batches`.
+
+I also checked that `resolved` cannot contain a duplicate index, which would
+double-mutate one batch: `tracked` keys are unique (`BTreeSet`), and each pool
+index is inserted exactly once under exactly one key, so index→key is injective
+over the reachable entries. (Had it not been, sequential `&mut` reborrows would
+still be sound, just semantically wrong.)
+
+**Is the non-atomic negative-sequence path the right call?** Yes — I re-read the
+Java to confirm rather than accept the claim.
+`TxnPartitionEntry.resetSequenceNumbers` (`:154-161`):
+
+    TreeSet<ProducerBatch> newInflights = new TreeSet<>(PRODUCER_BATCH_COMPARATOR);
+    for (ProducerBatch inflightBatch : inflightBatchesBySequence) {
+        resetSequence.accept(inflightBatch);   // throws here on element k
+        newInflights.add(inflightBatch);
+    }
+    inflightBatchesBySequence = newInflights;  // skipped
+
+When the lambda throws on element *k*, elements 1..k-1 have already had
+`resetProducerState` applied, `newInflights` is discarded, the field is not
+swapped, and `nextSequence` was already decremented by `decrementSequence` at
+`:140`. Java is non-atomic in exactly the way described, so `reset(batch)?`
+firing mid-loop is the faithful translation. If this had been "fixed" to be
+atomic it *would* have been a new divergence — the Actor's reasoning is right and
+inverting it would have been the error.
+
+**Does the change alter the success path?** No. The resolve pass cannot fail when
+every key resolves, and it produces indices in `tracked` order — the same order
+the single loop used — so the mutation sequence, the resulting `new_inflights`,
+and the assignment are bit-identical to before. The only difference is one
+`Vec<usize>` allocation of length `|tracked|`. That is not a hot-path concern
+under CLAUDE.md §11 / DoD §10: `reset_sequence_numbers` runs per epoch bump or per
+fatally-failed batch, not per record or per drain.
+
+## 3. The regression test — verified, and it is genuinely discriminating
+
+`test_reenqueued_batch_stays_tracked_and_must_be_supplied`
+(`txn_partition_entry.rs:738-787`).
+
+**It models the scenario faithfully.** Two batches tracked for one partition:
+`still_in_flight` = `(pid 1, epoch 0, base 0, 2 records)` and `reenqueued` =
+`(pid 1, epoch 0, base 2, 3 records)`, with `next_sequence` driven to 5. That is a
+consistent post-drain state — sequences 0-1 and 2-4 assigned contiguously, counter
+at 5 — not an arbitrary arrangement. Half one supplies only the Sender's batch and
+asserts the error plus untouched entry state; half two supplies both owners'
+batches and asserts success.
+
+**The asserted base sequences (0 and 2) are what Java produces.** Java's
+`startSequencesAtBeginning` (`:116-125`) starts `sequence` at 0, iterates the
+`TreeSet` in comparator order — here `(1,0,0)` then `(1,0,2)` — and for each calls
+`resetProducerState(newProducerIdAndEpoch, sequence)` then
+`sequence += recordCount`. So the first batch gets base 0, the second gets base
+0+2 = 2, and `nextSequence` ends at 2+3 = 5. The test asserts exactly 0, 2 and 5,
+plus `producer_id_and_epoch == (7,1)` and two tracked keys. Correct on every value.
+
+**It would catch a regression to the non-atomic version**, and I traced why
+precisely. Under the non-atomic body, half one resolves `(1,0,0)`, rewrites
+`still_in_flight` to `(7,1,0)`, then hits the missing `(1,0,2)` and errors — so
+half one's own assertions still pass, because the entry's fields are assigned only
+after the `?`. The failure surfaces in half two: `still_in_flight` is now keyed
+`(7,1,0)` while the entry still tracks `(1,0,0)`, so the tracked key no longer
+resolves and the `.expect(..)` panics. That is precisely the failure the commit
+message reports having hit while writing the test.
+
+One detail worth calling out as good design rather than accident: the test puts
+the **missing** key second. Had `reenqueued` been the lower-keyed batch, half one
+would error on the very first key before mutating anything, half two would pass,
+and the test would *not* distinguish the atomic from the non-atomic version. The
+chosen ordering is what makes it a real regression test.
+
+---
+
+# Disclosures — examined and judged not to be findings
+
+Recorded so the judgement is visible rather than implicit. I applied the same bar
+I used on the first pass, which excludes precision nits that do not affect
+correctness and where the authoritative source is right.
+
+**(a) One "sole owner" phrase survives in an archived plan.**
+`design/history/Milestone-11/PLAN.md:15-16` still reads "`Sender::in_flight_batches`
+(`sender.rs:122`) is already its sole owner after `drain()` moves it out of
+`RecordAccumulator`". Not a finding: the paragraph exists to justify why
+`BTreeMap<_, ProducerBatch>` is unimplementable — a conclusion that holds whichever
+owner currently holds the batch, since neither permits a second owner of a
+non-`Clone` type — it lives under `design/history/` as an archived record, and it
+explicitly states it is "superseded by `.claude/rules/producer-transactions.md` §7
+and §8" and closes with "see rules file §7". The reader is routed to the corrected
+authority. Flagging this would be manufacturing a finding.
+
+**(b) `TxnPartitionMap`'s two pass-through doc comments still say "supplied by
+their owner" (singular).** `txn_partition_map.rs:121-122` and `:179-181`. These are
+the methods Phase 4 calls directly, so I considered this seriously — the phrase
+"the in-flight batches for the partition" is ambiguous in exactly the way that
+caused this round, and `Sender::in_flight_batches` is literally named that. I judged
+it below the bar because: the statement is not false (for a reenqueued batch, "their
+owner" *is* the accumulator); both lines explicitly redirect to
+`.claude/rules/producer-transactions.md` §7, which is now correct and carries the
+explicit anti-pattern; and the delegate's own doc
+(`TxnPartitionEntry::reset_sequence_numbers`) spells out both owners at length. The
+governing rule and the anti-pattern are what a Phase-4 review will check against,
+and both are right. Tightening the two lines would be a small improvement, not a
+correction — worth folding into any future edit of that file, not worth another
+round.
+
+**(c) `adjust_sequences_due_to_failed_batch` mutates `next_sequence` before the
+missing-key error can fire.** `self.decrement_sequence(record_count)?` runs at
+`:252`, before `reset_sequence_numbers`. So on a missing-key error from *that*
+entry point, `next_sequence` is already decremented even though no batch was
+touched. Not a finding, and not an overclaim by the Actor: both the in-code comment
+(`:338-339`) and the commit message scope the guarantee precisely to "the caller's
+batches untouched", which is exactly what holds. The ordering mirrors Java
+(`TxnPartitionEntry.java:140` decrements before `resetSequenceNumbers`), Java has no
+missing-key error to compare against, and the resulting state is no worse than the
+state Java reaches via its own negative-sequence throw — which `Sender.failBatch`
+swallows at `:849-851` in both languages.
+
+---
+
+# Sign-off
+
+**Phase 1 can be signed off.**
+
+All eight original findings are closed: seven fixed and independently re-verified
+across passes two and three, and finding 2 correctly rejected on reachability
+grounds with the accepted documentation half fixed. The second-pass finding is
+fixed, and the second defect it exposed — the non-atomic error path — is fixed
+correctly, with the one path that *should* stay non-atomic left non-atomic for the
+right reason. The new regression test covers the matrix cell the first-pass audit
+wrongly declared unreachable and genuinely discriminates against the defect it was
+written for.
+
+`cargo test --lib` 2194 passed, `cargo xtask format-check` and `cargo xtask lint`
+clean. DoD gate 9 (`make verify`) remains unrun for the C and Python suites, which
+need Docker and a virtualenv — unchanged from the first pass and independent of
+this commit.
+
+---
+
+# Passes 1 and 2 (archived earlier)
+
 # Critic 41 — Milestone 11 Phase 1 review: RESOLVED
 
 All 8 findings addressed in commit `0a8612e`. Seven fixed; finding 2 partially

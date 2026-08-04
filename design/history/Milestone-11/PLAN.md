@@ -13,10 +13,12 @@ contact with the Rust source and are superseded by
 
   - `BTreeMap<(i64, i16, i32), ProducerBatch>` is **not implementable**.
     `ProducerBatch` is not `Clone`, and `Sender::in_flight_batches`
-    (`sender.rs:122`) is already its sole owner after `drain()` moves it out of
+    (`sender.rs:122`) takes ownership after `drain()` moves it out of
     `RecordAccumulator` (`record_accumulator.rs:128`). Java relies on GC-shared
     references. `TxnPartitionEntry` therefore stores ordering *keys* only — see
-    rules file §7.
+    rules file §7. (Ownership **alternates**: on the retry path it returns to the
+    accumulator's deque while the batch stays tracked. Corrected in rules §7 after
+    Critic 41's second pass; the conclusion above is unaffected.)
   - "Phase 1 reuses `decrement_sequence`" is **wrong**. Java's
     `TxnPartitionEntry.decrementSequence` (163-173) does plain subtraction and
     throws on negative; it does not call `DefaultRecordBatch.decrementSequence`.
@@ -948,29 +950,51 @@ GUARD:`). Remove the idempotence arm in **Phase 4** and the transactional arm in
 
 ### 9.5 Critic review of Phase 1
 
-**Status:** DONE (2026-08-03). Review in
-`design/history/Milestone-11/Phase-1/COMMENTS.DONE.41.md`; fixes in commit
-`0a8612e`; one partial false positive recorded in `COMMENTS.FP.md`.
+**Status:** DONE — review loop **closed** 2026-08-04. Three Critic passes per
+`agent-roles.md` steps 2-6, converged clean on pass 3. Archived at
+`design/history/Milestone-11/Phase-1/COMMENTS.DONE.41.md`; one partial false
+positive in `COMMENTS.FP.md`.
 
-8 findings. Seven fixed, one partially rejected. The material one was a latent
-Phase-4 bug: `TxnPartitionEntry::reset_sequence_numbers` took the tracked
-in-flight membership from the caller's slice rather than from its own set as Java
-does, so a short slice would silently clear the set and rewind the partition's
-sequence counter. Confirmed reachable — `Sender.failBatch` calls
-`handleFailedBatch` before removing the batch from `Sender::in_flight_batches`,
-so the two sets legitimately differ at the call moment. Fixed, with the
-membership invariant added to rules §6/§7 and 5 regression tests.
+| Pass | Findings | Fixes |
+|---|---|---|
+| 1 | 8 | `0a8612e` (7 fixed) + `6aeb30c` (validation); 1 partially rejected |
+| 2 | 1 | `363a7c7` |
+| 3 | **0** | — signed off |
 
-Also produced a new forward-looking rule (§9): flat error codes lose
-`UnknownProducerIdException <: OutOfOrderSequenceException`, which
-`handleFailedBatch` dispatches on — a literal `if / else if` translation would
-misroute idempotent recovery. Recorded before Phase 5 needs it.
+**Pass 1's material finding:** `TxnPartitionEntry::reset_sequence_numbers` took
+its tracked in-flight membership from the caller's slice rather than its own set,
+so a short slice silently cleared tracking and rewound the partition's sequence
+counter.
 
-**Still open from this item:** Phase 1 carries no *Java-parity* test coverage for
-four of its five new types, because no Java test file exists for any of them.
-Fidelity rests on a reading of the source until `TransactionManagerTest` lands in
-Phases 3/5. The six translated `ProducerConfig` tests are the exception and pass.
-The Critic verified both plan overrides (§6.8) as correct with the plan wrong.
+**Pass 2 caught the fix being wrong twice over.** The pass-1 fix added a
+missing-batch error justified by an audit claiming the state was unreachable. The
+audit was wrong: `Sender.reenqueueBatch` (`Sender.java:750-752`) does not call
+`transactionManager.removeInFlightBatch` — unlike the split path at `:685` — so a
+retried batch leaves the Sender's map while **staying tracked**, and Java asserts
+this at `RecordAccumulator.java:558-560`. Erroring there would have broken
+idempotent recovery, which is the very path `bumpIdempotentProducerEpoch` →
+`startSequencesAtBeginning` (`:655`) serves. Rules §7's "sole owner" claim was
+therefore false and is corrected: **ownership alternates**, and Phase 4 must
+assemble the batch pool from both the Sender's map and the accumulator's deque.
+
+Writing that regression test then exposed a *second* defect in the pass-1 fix —
+it resolved and mutated in one pass, leaving already-visited batches rewritten
+when a later key was missing. Now resolves every key before mutating anything.
+
+**Two rules-file additions came out of the loop:** §9 (the
+`UnknownProducerId <: OutOfOrderSequence` subtype relation that flat error codes
+lose) and §11 (version-gated field checks apply only to non-`ignorable` fields).
+
+**Still open from this item, and inherent rather than a gap:** four of the five
+Phase 1 types have no *Java-parity* test coverage, because Kafka has no test file
+for any of them. Fidelity rests on source reading plus Rust-authored tests until
+`TransactionManagerTest` lands in Phases 3/5. The six translated `ProducerConfig`
+tests are the exception and pass. The Critic verified both Phase 1 plan overrides
+(§6.8) as correct with the plan wrong.
+
+**Lesson for later phases:** two of the three passes found a real defect, and the
+second one was in the *fix* for the first. Do not treat a single Critic pass as
+sufficient — `agent-roles.md` step 6 loops back to step 2 for a reason.
 
 ### 9.6 C FFI / Python / gRPC multilanguage harness for transactions
 
