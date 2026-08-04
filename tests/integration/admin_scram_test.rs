@@ -46,6 +46,11 @@ use confluent_kafka::admin::{
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::retry_on_exception_with_timeout;
+
+/// How long to retry a SCRAM read-back before failing. Mirrors the `5000L` that
+/// `ClientQuotasRequestTest` passes to `TestUtils.retryOnExceptionWithTimeout`.
+const SCRAM_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -85,22 +90,39 @@ async fn test_upsert_describe_delete_scram_credential_round_trips() {
     // 2. Describe (only our user) and assert the mechanism + iterations round
     //    trip. The salted password is NEVER returned by the broker, so it is
     //    not (and cannot be) asserted.
-    let described = admin
-        .describe_user_scram_credentials(std::slice::from_ref(&user), DescribeUserScramCredentialsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("describe SCRAM credentials");
+    //
+    //    Credential changes reach the brokers asynchronously, so the whole
+    //    read-back is retried (Java: `TestUtils.retryOnExceptionWithTimeout`).
+    retry_on_exception_with_timeout(SCRAM_PROPAGATION_TIMEOUT, || async {
+        let described = admin
+            .describe_user_scram_credentials(std::slice::from_ref(&user), DescribeUserScramCredentialsOptions::new())
+            .all()
+            .get()
+            .await
+            .map_err(|e| format!("describe SCRAM credentials: {e}"))?;
 
-    let description = described.get(&user).expect("our user should have a credential");
-    assert_eq!(description.name(), user);
-    assert_eq!(
-        description.credential_infos().len(),
-        1,
-        "expected exactly one credential: {description:?}"
-    );
-    assert_eq!(description.credential_infos()[0].mechanism(), mechanism);
-    assert_eq!(description.credential_infos()[0].iterations(), iterations);
+        let description = described.get(&user).ok_or("our user should have a credential")?;
+        if description.name() != user {
+            return Err(format!("unexpected name: {}", description.name()));
+        }
+        if description.credential_infos().len() != 1 {
+            return Err(format!("expected exactly one credential: {description:?}"));
+        }
+        if description.credential_infos()[0].mechanism() != mechanism {
+            return Err(format!(
+                "unexpected mechanism: {:?}",
+                description.credential_infos()[0].mechanism()
+            ));
+        }
+        if description.credential_infos()[0].iterations() != iterations {
+            return Err(format!(
+                "unexpected iterations: {}",
+                description.credential_infos()[0].iterations()
+            ));
+        }
+        Ok(())
+    })
+    .await;
 
     // 3. Delete the credential.
     let deletion: UserScramCredentialAlteration = UserScramCredentialDeletion::new(&user, mechanism).into();
@@ -113,17 +135,23 @@ async fn test_upsert_describe_delete_scram_credential_round_trips() {
 
     // 4. Describe again: our user no longer has any credential. `users()`
     //    filters out RESOURCE_NOT_FOUND, so the described-users list for our
-    //    single requested user is now empty.
-    let users_after = admin
-        .describe_user_scram_credentials(std::slice::from_ref(&user), DescribeUserScramCredentialsOptions::new())
-        .users()
-        .get()
-        .await
-        .expect("describe after delete");
-    assert!(
-        !users_after.contains(&user),
-        "credential should be gone after delete, but user still listed: {users_after:?}"
-    );
+    //    single requested user is now empty. Retried — the deletion propagates
+    //    asynchronously too.
+    retry_on_exception_with_timeout(SCRAM_PROPAGATION_TIMEOUT, || async {
+        let users_after = admin
+            .describe_user_scram_credentials(std::slice::from_ref(&user), DescribeUserScramCredentialsOptions::new())
+            .users()
+            .get()
+            .await
+            .map_err(|e| format!("describe after delete: {e}"))?;
+        if users_after.contains(&user) {
+            return Err(format!(
+                "credential should be gone after delete, but user still listed: {users_after:?}"
+            ));
+        }
+        Ok(())
+    })
+    .await;
 
     admin.close(Duration::from_secs(5)).await;
 }

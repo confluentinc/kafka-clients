@@ -25,9 +25,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterPartitionReassignmentsOptions, CreateTopicsOptions, DescribeClusterOptions,
-    ElectLeadersOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, NewPartitionReassignment, NewTopic,
-    OffsetSpec, new_admin_client,
+    Admin, AdminClientConfig, AlterPartitionReassignmentsOptions, DescribeClusterOptions, ElectLeadersOptions,
+    ListOffsetsOptions, ListPartitionReassignmentsOptions, NewPartitionReassignment, OffsetSpec, new_admin_client,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -36,6 +35,7 @@ use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, Produce
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -92,12 +92,7 @@ async fn test_list_offsets_earliest_latest_max_timestamp() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_list_offsets");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     let num_records = 10;
     produce_records(ctx.bootstrap_servers(), &topic, 0, num_records).await;
 
@@ -166,12 +161,7 @@ async fn test_elect_preferred_leaders() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_elect_leaders");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
     let result = admin.elect_leaders(
@@ -216,12 +206,7 @@ async fn test_alter_and_list_partition_reassignments() {
 
     let topic = ctx.topic("admin_reassignments");
     // Replication factor 1: a single replica we can move between brokers.
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
 

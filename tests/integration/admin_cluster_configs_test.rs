@@ -24,15 +24,36 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, ConfigEntry, CreateTopicsOptions,
-    DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions, ListConfigResourcesOptions, NewTopic, OpType,
-    new_admin_client,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, ConfigEntry, DeleteTopicsOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, ListConfigResourcesOptions, OpType, new_admin_client,
 };
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::{create_topic, retry_on_exception_with_timeout};
+
+/// How long to retry a config read-back before failing. Mirrors the `5000L`
+/// that `ClientQuotasRequestTest` passes to
+/// `TestUtils.retryOnExceptionWithTimeout`.
+const CONFIG_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads `retention.ms` for `resource`. `Ok(None)` means the entry is absent;
+/// `Err` means the describe itself failed (retryable by the caller).
+async fn retention_ms(admin: &dyn Admin, resource: &ConfigResource) -> Result<Option<String>, String> {
+    let described = admin
+        .describe_configs(std::slice::from_ref(resource), DescribeConfigsOptions::new())
+        .values()
+        .get(resource)
+        .ok_or("resource missing from describe_configs result")?
+        .get()
+        .await
+        .map_err(|e| format!("describe configs: {e}"))?;
+    Ok(described
+        .get("retention.ms")
+        .and_then(|entry| entry.value().map(str::to_string)))
+}
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -77,12 +98,10 @@ async fn test_describe_configs_topic_returns_defaults() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_describe_topic_config");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    // Creates the topic and waits for its metadata to reach the brokers, so the
+    // describes below cannot race creation. Mirrors Java's
+    // `TestUtils.createTopicWithAdmin`.
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
     let result = admin.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
@@ -108,12 +127,10 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_alter_topic_config");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    // Creates the topic and waits for its metadata to reach the brokers, so the
+    // describes below cannot race creation. Mirrors Java's
+    // `TestUtils.createTopicWithAdmin`.
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
 
@@ -131,18 +148,18 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
         .await
         .expect("set retention.ms");
 
-    // describe_configs confirms the new value.
-    let described = admin
-        .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
-        .values()[&resource]
-        .get()
-        .await
-        .expect("describe after set");
-    assert_eq!(
-        described.get("retention.ms").and_then(|e| e.value()),
-        Some("123456789"),
-        "retention.ms should reflect the set value"
-    );
+    // Config changes reach the brokers asynchronously, so retry the read-back
+    // until it holds (Java: `TestUtils.retryOnExceptionWithTimeout` around the
+    // describe-and-assert).
+    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+        let value = retention_ms(admin.as_ref(), &resource).await?;
+        if value.as_deref() == Some("123456789") {
+            Ok(())
+        } else {
+            Err(format!("retention.ms should reflect the set value, got {value:?}"))
+        }
+    })
+    .await;
 
     // DELETE retention.ms reverts it to the default.
     let delete_op = AlterConfigOp::new(ConfigEntry::new("retention.ms".to_string(), None), OpType::Delete);
@@ -155,18 +172,24 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
         .await
         .expect("delete retention.ms");
 
-    let described = admin
-        .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
-        .values()[&resource]
-        .get()
-        .await
-        .expect("describe after delete");
-    let entry = described.get("retention.ms").expect("retention.ms still present as a default");
-    assert_ne!(
-        entry.value(),
-        Some("123456789"),
-        "retention.ms should no longer be the custom value after delete"
-    );
+    // Likewise retry the post-delete read-back. `retention.ms` must still be
+    // present (as the broker default) but no longer hold the custom value.
+    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+        let described = admin
+            .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
+            .values()
+            .get(&resource)
+            .ok_or("resource missing from describe_configs result")?
+            .get()
+            .await
+            .map_err(|e| format!("describe after delete: {e}"))?;
+        let entry = described.get("retention.ms").ok_or("retention.ms still present as a default")?;
+        if entry.value() == Some("123456789") {
+            return Err("retention.ms should no longer be the custom value after delete".to_string());
+        }
+        Ok(())
+    })
+    .await;
 
     admin
         .delete_topics(TopicCollection::of_topic_names(vec![topic]), DeleteTopicsOptions::new())
@@ -216,12 +239,10 @@ async fn test_list_config_resources_lists_resources() {
 
     // Create a topic so at least one TOPIC config resource is listable.
     let topic = ctx.topic("admin_list_config_resources");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    // Creates the topic and waits for its metadata to reach the brokers, so the
+    // describes below cannot race creation. Mirrors Java's
+    // `TestUtils.createTopicWithAdmin`.
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     // An empty type set requests all supported config-resource types.
     let resources = admin
@@ -286,16 +307,21 @@ async fn test_list_client_metrics_resources_lists_subscription() {
         .await
         .expect("create client-metrics subscription");
 
-    let listings = admin
-        .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("list client metrics resources");
-    assert!(
-        listings.iter().any(|l| l.name() == subscription),
-        "expected the created subscription {subscription:?} in {listings:?}"
-    );
+    // The new subscription becomes visible to the listing asynchronously.
+    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+        let listings = admin
+            .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
+            .all()
+            .get()
+            .await
+            .map_err(|e| format!("list client metrics resources: {e}"))?;
+        if listings.iter().any(|l| l.name() == subscription) {
+            Ok(())
+        } else {
+            Err(format!("expected the created subscription {subscription:?} in {listings:?}"))
+        }
+    })
+    .await;
 
     // Delete the subscription so the broker is left clean.
     let delete_ops = vec![AlterConfigOp::new(
