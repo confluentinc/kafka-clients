@@ -72,8 +72,8 @@ public sealed class ConsumerPollReceivePathTests
         Assert.Equal(42, record.Offset);
         Assert.NotNull(record.Key);
         Assert.NotNull(record.Value);
-        Assert.Equal(key, record.Key!.Value.ToArray());
-        Assert.Equal(value, record.Value!.Value.ToArray());
+        Assert.Equal(key, record.Key);
+        Assert.Equal(value, record.Value);
         Assert.Empty(record.Headers);
     }
 
@@ -93,8 +93,8 @@ public sealed class ConsumerPollReceivePathTests
 
         ConsumerRecord record = Assert.Single(records);
         Assert.Equal(nonAsciiTopic, record.Topic);
-        Assert.Equal(key, record.Key!.Value.ToArray());
-        Assert.Equal(value, record.Value!.Value.ToArray());
+        Assert.Equal(key, record.Key);
+        Assert.Equal(value, record.Value);
     }
 
     [Fact]
@@ -123,8 +123,8 @@ public sealed class ConsumerPollReceivePathTests
         ConsumerRecord record = Assert.Single(records);
         Assert.NotNull(record.Key);
         Assert.NotNull(record.Value);
-        Assert.Empty(record.Key!.Value.ToArray());
-        Assert.Empty(record.Value!.Value.ToArray());
+        Assert.Empty(record.Key!);
+        Assert.Empty(record.Value!);
     }
 
     [Fact]
@@ -257,7 +257,7 @@ public sealed class ConsumerPollReceivePathTests
         GC.WaitForPendingFinalizers();
 
         ConsumerRecord record = Assert.Single(records);
-        Assert.Equal(value, record.Value!.Value.ToArray());
+        Assert.Equal(value, record.Value);
         Assert.Equal(Topic, record.Topic);
     }
 
