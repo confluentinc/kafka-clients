@@ -160,6 +160,22 @@ pub struct MockClient {
     future_responses: VecDeque<FutureResponse>,
     /// Nodes served by this mock client.
     nodes: Vec<Node>,
+    /// When set, [`Self::least_loaded_node`] reports no node while a request is in
+    /// flight, simulating `max.in.flight.requests.per.connection = 1`.
+    ///
+    /// The analogue of the anonymous `MockClient` subclass in
+    /// `SenderTest.createMockClientWithMaxFlightOneMetadataPending`
+    /// (`SenderTest.java:3956-3973`), which overrides `leastLoadedNode` to return
+    /// `null` unless a `canSendMore` flag is set. Rust cannot subclass a concrete
+    /// struct, so the override becomes a flag.
+    max_in_flight_one: bool,
+    /// Java's `canSendMore`: recomputed as `inFlightRequestCount() < 1` on every
+    /// [`Self::poll`], and read by [`Self::least_loaded_node`].
+    ///
+    /// The snapshot semantics are load-bearing, not incidental: Java's helper sends a
+    /// request and *then* polls until `leastLoadedNode` turns null, which only
+    /// terminates because the flag lags a poll behind the in-flight count.
+    can_send_more: bool,
     /// Whether the client is active.
     active: AtomicBool,
     /// Wakeup handle shared with callers of [`wakeup_notify`](Self::wakeup_notify),
@@ -179,9 +195,19 @@ impl MockClient {
             responses: VecDeque::new(),
             future_responses: VecDeque::new(),
             nodes,
+            max_in_flight_one: false,
+            can_send_more: true,
             active: AtomicBool::new(true),
             wakeup: Arc::new(Notify::new()),
         }
+    }
+
+    /// Makes [`KafkaClient::least_loaded_node`] report no node while a request is in
+    /// flight, simulating `max.in.flight.requests.per.connection = 1`.
+    ///
+    /// See [`Self::max_in_flight_one`].
+    pub fn set_max_in_flight_one(&mut self, max_in_flight_one: bool) {
+        self.max_in_flight_one = max_in_flight_one;
     }
 
     fn connection_state(&mut self, id_string: &str) -> &mut MockConnectionState {
@@ -521,6 +547,11 @@ impl KafkaClient for MockClient {
     }
 
     async fn poll(&mut self, _timeout: i64, now: i64) -> Vec<ClientResponse> {
+        // Java 3970: `canSendMore = inFlightRequestCount() < 1`, recomputed before the
+        // superclass poll so the flag a later `leastLoadedNode` reads is this poll's
+        // snapshot.
+        self.can_send_more = self.in_flight_request_count() < 1;
+
         // Check timeout of pending requests
         while let Some(request) = self.requests.front() {
             let elapsed = now.saturating_sub(request.created_time_ms()).max(0);
@@ -549,6 +580,9 @@ impl KafkaClient for MockClient {
     }
 
     fn least_loaded_node(&self, now: i64) -> LeastLoadedNode {
+        if self.max_in_flight_one && !self.can_send_more {
+            return LeastLoadedNode::new(None, false);
+        }
         for node in &self.nodes {
             let backing_off = self
                 .connections

@@ -2168,6 +2168,7 @@ mod tests {
     use crate::common::record::TimestampType;
     use crate::common::requests::ConcreteResponse;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
+    use crate::common::utils::ProducerIdAndEpoch;
     use crate::mock_client::MockClient;
     use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
     use crate::producer::internals::BufferPool;
@@ -2414,6 +2415,28 @@ mod tests {
             metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
 
             Self { sender, accumulator, metadata, time, tp0, tp1, transaction_manager }
+        }
+
+        /// Re-publishes the topic metadata with `tp0` at `tp0_leader_epoch` and `tp1` at
+        /// epoch 0, mirroring the `metadataUpdateWithIds(1, .., tp -> epoch)` calls in
+        /// `SenderTest.testProducerBatchRetriesWhenPartitionLeaderChanges`
+        /// (Java 3325-3338).
+        fn update_metadata_with_leader_epochs(&self, tp0_leader_epoch: i32) {
+            let mut topic_partition_counts = HashMap::new();
+            topic_partition_counts.insert(TOPIC_NAME.to_string(), 2);
+            let tp0 = self.tp0.clone();
+            let metadata_response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+                "kafka-cluster",
+                1,
+                &HashMap::new(),
+                &topic_partition_counts,
+                &|tp| {
+                    if *tp == tp0 { Some(tp0_leader_epoch) } else { Some(0) }
+                },
+                &topic_ids(),
+            );
+            self.metadata
+                .update_with_current_request_version(&metadata_response, false, self.time.milliseconds());
         }
 
         /// The shared transaction manager, for tests that assert on manager state.
@@ -5683,6 +5706,185 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
     }
 
+    /// Translated from `SenderTest.testIdempotentInitProducerIdWithMaxInFlightOne`
+    /// (Java 657-682).
+    ///
+    /// With one node and `max.in.flight = 1`, an unrelated request already in flight
+    /// makes `leastLoadedNode` report nothing, so `InitProducerId` cannot be sent yet.
+    /// It must be **re-queued** rather than dropped or failed
+    /// (`Sender.java:493-498`), and go out once the node frees up — which takes several
+    /// polls, hence the test's name.
+    ///
+    /// # Where this differs from Java, and why it is still the same test
+    ///
+    /// Java overrides `MockClient.leastLoadedNode` in an anonymous subclass
+    /// (`createMockClientWithMaxFlightOneMetadataPending`, Java 3956-3986). Rust cannot
+    /// subclass a concrete struct, so the override is a flag —
+    /// `MockClient::set_max_in_flight_one` — with the same `canSendMore` snapshot
+    /// semantics. Java's out-of-band request is a `Metadata` request; a `Produce`
+    /// request is used here because the `Sender`'s response dispatch ignores both
+    /// equally (neither correlation id is in `pending_produce_responses` nor the
+    /// transactional slot), and the property under test is node availability, not the
+    /// request's type.
+    #[tokio::test]
+    async fn test_idempotent_init_producer_id_with_max_in_flight_one() {
+        const PRODUCER_ID: i64 = 123_456;
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+
+        // Occupy the single in-flight slot with a request the Sender did not send, the
+        // way Java's helper leaves a metadata request pending.
+        ctx.sender.client_mut().set_max_in_flight_one(true);
+        let now = ctx.time.milliseconds();
+        assert!(ctx.sender.client_mut().ready(&node, now).await);
+        let mut data = ProduceRequestData::new();
+        data.set_acks(ACKS_ALL);
+        data.set_timeout_ms(REQUEST_TIMEOUT);
+        let occupying_request = ctx.sender.client_mut().new_client_request(
+            node.id_string(),
+            Box::new(ProduceRequestBuilder::new(data)),
+            now,
+            true,
+        );
+        ctx.sender.client_mut().send(occupying_request, now);
+        // Java polls until `leastLoadedNode` turns null; the flag lags a poll behind the
+        // in-flight count, so exactly one poll is needed.
+        ctx.sender.client_mut().poll(0, now).await;
+        assert!(
+            ctx.sender.client().least_loaded_node(now).node().is_none(),
+            "no node can accept a request while one is in flight"
+        );
+
+        // The InitProducerId is enqueued but cannot be sent.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
+        assert!(
+            ctx.sender.has_pending_requests(),
+            "the InitProducerId must be re-queued, not dropped (Sender.java:495)"
+        );
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // Answer the occupying request; the node is available again on the next poll.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Java's `waitForProducerId` spins up to five `runOnce` calls.
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, 0));
+        for _ in 0..5 {
+            if ctx.transaction_manager().lock().unwrap().has_producer_id() {
+                break;
+            }
+            ctx.sender.run_once().await.expect("run_once");
+        }
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert!(manager.has_producer_id());
+        assert_eq!(manager.producer_id_and_epoch(), ProducerIdAndEpoch::new(PRODUCER_ID, 0));
+    }
+
+    /// Translated from
+    /// `SenderTest.testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails`
+    /// (Java 1998-2082).
+    ///
+    /// Three batches, two in flight in parallel. The second comes back
+    /// `UNKNOWN_PRODUCER_ID` with `logStartOffset > lastAckedOffset`, which resets the
+    /// partition's sequence state and bumps the epoch. The **third**, already in flight
+    /// under the old sequence, must then be retried too rather than failed, and must not
+    /// be re-sent until the second completes — at most one request may be in flight
+    /// while retrying.
+    ///
+    /// # What this does *not* isolate
+    ///
+    /// Neither this test nor Java's distinguishes which of `canRetry`'s two
+    /// `UNKNOWN_PRODUCER_ID` sub-arms retries the third batch: after the reset both
+    /// `sequenceHasBeenReset()` (`TransactionManager.java:1980-1986`) and
+    /// `lastAckedOffset < logStartOffset` (`:1990-2010`) hold, and both return `true`.
+    /// Confirmed by mutation: disabling the `sequenceHasBeenReset()` arm leaves this
+    /// test green, because the truncation arm then answers instead. The arm order is
+    /// still faithful to Java; it is the *test* that cannot tell them apart, and saying
+    /// so here is cheaper than a reader inferring coverage that is not there.
+    #[tokio::test]
+    async fn test_unknown_producer_error_should_be_retried_for_future_batches_when_first_fails() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 1000, 10);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 1000);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1000));
+
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+
+        // The third request goes out in parallel with the second.
+        let request3 = ctx.append_to_accumulator_with(&tp0, 0, "k3", "v3").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 3);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert!(!request2.is_done());
+        assert!(!request3.is_done());
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::UnknownProducerId, -1, 1010);
+        ctx.sender.run_once().await.expect("run_once"); // reset the sequences, retry
+        ctx.sender.run_once().await.expect("run_once"); // bump the epoch and retry request 2
+
+        // The partition's sequence state is reset, because the broker lost it.
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!request2.is_done());
+        assert!(!request3.is_done());
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+
+        // The original response for the third request. Its expected sequence is still
+        // the one it was originally assigned.
+        send_idempotent_producer_response(&mut ctx, None, 2, &tp0, Errors::UnknownProducerId, -1, 1010);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 1011, 1010);
+        // Receive response 2; request 3 is not sent, since at most one may be in flight
+        // while retrying.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(request2.is_done());
+        assert!(!request3.is_done());
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1011);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1011));
+
+        ctx.sender.run_once().await.expect("run_once"); // resend request 3
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::None, 1012, 1010);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(request3.is_done());
+        assert_eq!(request3.get().await.expect("succeeds").offset(), 1012);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1012));
+    }
+
     /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
     /// (Java 2182-2219).
     ///
@@ -6047,6 +6249,94 @@ mod tests {
         assert!(drained.iter().all(|batch| batch.has_sequence()));
     }
 
+    /// Translated from `SenderTest.testProducerBatchRetriesWhenPartitionLeaderChanges`
+    /// (Java 3307-3391).
+    ///
+    /// A retriable failure schedules the batch for retry. Discovering a **new leader
+    /// epoch** must let it go out immediately, skipping the retry backoff
+    /// (`RecordAccumulator.shouldBackoff`, Java 796-813, whose
+    /// `hasLeaderChanged` term is what suppresses the wait); a retry to the *same*
+    /// leader must wait the backoff, and go out once it has elapsed.
+    ///
+    /// # Reclassified: this is not an idempotence test
+    ///
+    /// It was on Phase 4's `SenderTest` list because the string `transactionManager`
+    /// appears in its body — as the literal `null` argument at Java 3316 and 3320. Both
+    /// the accumulator and the `Sender` are built **without** a transaction manager, so
+    /// it is neither idempotent nor transactional. It is translated here anyway rather
+    /// than argued out of scope: it is the only end-to-end cover for the leader-change
+    /// backoff skip, which `record_accumulator.rs`'s
+    /// `test_exponential_retry_backoff_leader_change` exercises only at the accumulator
+    /// level.
+    #[tokio::test]
+    async fn test_producer_batch_retries_when_partition_leader_changes() {
+        // Java 3312-3320: `lingerMs = 0`, `retryBackoffMs = 10`,
+        // `retryBackoffMaxMs = 100`, `retries = 10`, and no transaction manager.
+        let mut ctx = SenderTestContext::with_transaction_state(
+            false,
+            10,
+            None,
+            Some(SenderTestTimeouts {
+                request_timeout_ms: REQUEST_TIMEOUT,
+                delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
+                accumulator_retry_backoff_ms: 10,
+                sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+            }),
+        );
+        let tp0 = ctx.tp0.clone();
+        let retry_backoff_max_ms = 100i64;
+
+        // Seed metadata with leader epochs, tp0 at 100 and tp1 at 0.
+        let mut tp0_leader_epoch = 100;
+        ctx.update_metadata_with_leader_epochs(tp0_leader_epoch);
+
+        // Produce a batch; it comes back with a retriable error and is scheduled for
+        // retry.
+        let future_is_produced = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send the produce request
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "We should have a single produce request in flight."
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(ctx.sender.client().has_in_flight_requests());
+        let response = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!future_is_produced.is_done(), "Produce request should not be done.");
+
+        // A new leader epoch is discovered, so the batch retries immediately, skipping
+        // the backoff.
+        tp0_leader_epoch += 1;
+        ctx.update_metadata_with_leader_epochs(tp0_leader_epoch);
+        ctx.sender.run_once().await.expect("run_once"); // send the produce request immediately
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(ctx.sender.client().has_in_flight_requests());
+        let response = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!future_is_produced.is_done(), "Produce request should not be done.");
+
+        // A subsequent retry to the *same* leader waits the backoff period.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+
+        // After waiting longer than the backoff period, the batch is retried again.
+        ctx.time.sleep(2 * retry_backoff_max_ms);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(ctx.sender.client().has_in_flight_requests());
+        let offset = 999;
+        let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(future_is_produced.is_done(), "Request to tp0 successfully done");
+        assert_eq!(future_is_produced.get().await.expect("succeeds").offset(), offset);
+    }
+
     // =====================================================================
     // `SenderTest.java` accounting (`definition-of-done.md` §3)
     //
@@ -6057,7 +6347,8 @@ mod tests {
     // tests — `testCancelInFlightRequestAfterFatalError` — was the test that would
     // have caught the buffer-pool leak of issue 2.
     //
-    // TRANSLATED IN PHASE 4 (25): `testInitProducerIdRequest` (618),
+    // TRANSLATED IN PHASE 4 (28): `testInitProducerIdRequest` (618),
+    // `testIdempotentInitProducerIdWithMaxInFlightOne` (664),
     // `testClusterAuthorizationExceptionInInitProducerIdRequest` (714),
     // `testIdempotenceWithMultipleInflights` (761),
     // `testIdempotenceWithMultipleInflightsRetriedInOrder` (810),
@@ -6081,9 +6372,14 @@ mod tests {
     // `testCancelInFlightRequestAfterFatalError` (2181),
     // `testUnsupportedForMessageFormatInProduceRequest` (2221),
     // `testUnsupportedVersionInProduceRequest` (2243),
+    // `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` (1998),
     // `testSequenceNumberIncrement` (2263), `testRetryWhenProducerIdChanges` (2305),
     // `testBumpEpochWhenOutOfOrderSequenceReceived` (2340),
-    // `testTooLargeBatchesAreSafelyRemoved` (3004, `#[ignore]`d on PLAN §9.18).
+    // `testTooLargeBatchesAreSafelyRemoved` (3004, `#[ignore]`d on PLAN §9.18),
+    // `testProducerBatchRetriesWhenPartitionLeaderChanges` (3307 — reclassified: it
+    //   builds both the accumulator and the `Sender` with `transactionManager = null`
+    //   (Java 3316, 3320), so it is neither idempotent nor transactional; translated
+    //   anyway, as the only end-to-end cover for the leader-change backoff skip).
     //
     // TRANSACTIONAL — not expressible while `TransactionManager::new` refuses a
     // transactional id; Phases 5 and 6 own them:
@@ -6133,21 +6429,8 @@ mod tests {
     //     split panics — PLAN §9.18, with `test_too_large_batches_are_safely_removed`
     //     as the reproducer.
     //
-    // NOT YET WRITTEN — no missing surface, and no blocker other than this phase's
-    // remaining budget. Stated plainly rather than dressed as a deferral:
-    //   `testIdempotentInitProducerIdWithMaxInFlightOne` (664) — needs a
-    //     metadata-pending mock-client setup (`createMockClientWithMaxFlightOneMetadataPending`).
-    //   `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` (2000)
-    //     — a longer variant of the two `UNKNOWN_PRODUCER_ID` tests above, over three
-    //     batches.
-    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) — leader-change
-    //     retry bookkeeping; overlaps `should_backoff`'s
-    //     `has_leader_changed_for_the_ongoing_retry` arm, which
-    //     `record_accumulator.rs`'s `test_exponential_retry_backoff_leader_change`
-    //     already covers on the accumulator side.
-    // These three are the residual `SenderTest` debt of Phase 4. They are *not*
-    // assigned to Phase 8, whose scope is `TransactionManagerTest` only; PLAN §9.19
-    // owns them.
+    // Nothing else is owed. Every method in the file is in one of the three groups
+    // above; PLAN §9.19 carries the same list.
     //
     /// A response with no body at all is fatal
     /// (`TransactionManager.java:1424-1425`).
