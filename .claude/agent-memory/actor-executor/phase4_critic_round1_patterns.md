@@ -84,6 +84,44 @@ Java's test cannot tell them apart either — so the honest fix is to say so in 
 not to strengthen the test past Java. Overstating what a test covers is the same class
 of defect as overstating when an effect materialises (PLAN §9.15's lesson).
 
+## 8. A completeness claim over a list needs the command that checks it, not prose
+
+Two review rounds were spent on one accounting comment: it lost an entry while asserting
+"nothing else is owed", and its prose counts drifted from the lists beside them. What
+finally held: state the scope criterion, ship the two shell commands that (a) derive the
+scope set from the Java file and (b) extract the enumerated entries from the Rust file,
+and show `comm` over both. Then every count is read off a list instead of maintained
+next to one.
+
+Two traps when writing such a command into the comment it checks:
+
+  - a `sed` range whose end pattern is a phrase the embedded command itself contains
+    terminates at the command, not at the block. Prefer a shape-based `grep`
+    (`` `test[A-Za-z]+` \([0-9]+ ``) over a range.
+  - an `awk` that tracks "current method" must reset at the method's closing brace
+    (`/^    }$/{n=""}`), or helper methods after a test get attributed to it. Without
+    the reset the count was 54 instead of 52.
+
+Also: if the artifact newly claims a citation convention ("line numbers are the
+declaration line"), apply it to every citation in the file by script and re-run the
+audit — 32 of 32 header ranges in `sender.rs` were off by one or two lines, several
+pointing at a blank line.
+
+## 9. Java's `close()` notifies nothing — do not reach for it as a justification
+
+`NetworkClient.close()` is `selector.close(); metadataUpdater.close();
+telemetrySender.close();` (`NetworkClient.java:736-746`). It never walks
+`inFlightRequests` and never calls `completeResponses`, and `Selector.close()` uses
+`CloseMode.DISCARD_NO_NOTIFY` (`Selector.java:886-892`, mode at `:96`). Anything the
+producer still held is abandoned; the leak is invisible only because the `BufferPool` is
+built inside `KafkaProducer`'s constructor (`:438`) and dies with it.
+
+**Why:** this was the third invented justification for the same shutdown release loop
+across two review passes, and Phase 3's `close()` took three rounds for the same reason.
+**How to apply:** when the honest ground is "Java leaks this and our explicit release is
+a deliberate improvement", write that. Check whether Java's own shutdown path would in
+fact release it before claiming that it does.
+
 ## Incidental
 
 Two `.lock()` calls in one expression deadlock a non-reentrant `std::sync::Mutex`
