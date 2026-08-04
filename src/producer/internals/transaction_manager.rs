@@ -646,6 +646,78 @@ impl TransactionManager {
         self.current_state == State::AbortableError
     }
 
+    /// Whether an `EndTxn` is in progress.
+    ///
+    /// Corresponds to `isCompleting()` (Java 518).
+    ///
+    /// Scheduled nowhere in the plan, added here because `Sender.run`'s
+    /// shutdown loop calls it (`Sender.java:268`) and that call site is reachable
+    /// for a purely idempotent producer — see [`Self::has_ongoing_transaction`].
+    /// Always `false` idempotently: neither `COMMITTING_TRANSACTION` nor
+    /// `ABORTING_TRANSACTION` is reachable without a transactional id.
+    pub(crate) fn is_completing(&self) -> bool {
+        self.current_state == State::CommittingTransaction || self.current_state == State::AbortingTransaction
+    }
+
+    /// Whether an `EndTxn(ABORT)` is in progress.
+    ///
+    /// Corresponds to `isAborting()` (Java 526). Called from
+    /// `maybeSendAndPollTransactionalRequest` (`Sender.java:468`), which Phase 4
+    /// translates. Always `false` idempotently, for the same reason as
+    /// [`Self::is_completing`].
+    pub(crate) fn is_aborting(&self) -> bool {
+        self.current_state == State::AbortingTransaction
+    }
+
+    /// Whether a transaction is considered ongoing.
+    ///
+    /// Corresponds to `hasOngoingTransaction()` (Java 1010): "transactions are
+    /// considered ongoing once started until completion or a fatal error".
+    ///
+    /// # This is reachable for an idempotent producer
+    ///
+    /// The third disjunct is [`Self::has_abortable_error`], and `ABORTABLE_ERROR`
+    /// *is* reachable without a transactional id (PLAN §9.15:
+    /// `InitProducerIdHandler.handleResponse` calls `abortableError` for
+    /// `CLUSTER_AUTHORIZATION_FAILED` at Java 1524-1528 without testing
+    /// `isTransactional()`). So both of this method's Java call sites are live for
+    /// an idempotent producer:
+    ///
+    ///   - `Sender.hasPendingTransactionalRequests()` (`Sender.java:234`), which
+    ///     gates the first shutdown loop at `:258`;
+    ///   - the second shutdown loop's own condition at `:267`, whose body calls
+    ///     `beginAbort()` — see [`Self::begin_abort`] for what Java does with the
+    ///     `IllegalStateException` that produces.
+    pub(crate) fn has_ongoing_transaction(&self) -> bool {
+        self.current_state == State::InTransaction || self.is_completing() || self.has_abortable_error()
+    }
+
+    /// Begins aborting the transaction.
+    ///
+    /// Translated from `beginAbort()` (Java 361), whose body is wrapped in
+    /// `handleCachedTransactionRequestResult(.., "abortTransaction")` and so begins
+    /// with `ensureTransactional()` (Java 1266).
+    ///
+    /// Phase 4 needs it because `Sender.run`'s shutdown loop calls it at
+    /// `Sender.java:273`, inside a `try`/`catch` that force-closes the producer if
+    /// it throws (`:274-278`). For every producer this client can build today the
+    /// `ensureTransactional()` guard is what throws, so translating that guard is
+    /// what makes the shutdown path behave as Java's does; the rest of the body
+    /// (`transitionTo(ABORTING_TRANSACTION)`, `beginCompletingTransaction`, the
+    /// `EndTxn` handler) is Phase 6 and is unreachable while [`Self::new`] refuses
+    /// a transactional id.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalState`] on a non-transactional producer, with Java's
+    /// message.
+    pub(crate) fn begin_abort(&mut self) -> Result<(), KafkaError> {
+        self.ensure_transactional()?;
+        Err(KafkaError::unsupported_version(
+            "Aborting a transaction is not yet implemented in this client (Milestone 11, Phase 6).",
+        ))
+    }
+
     /// The current state. Visible for testing, as Java's package-private field
     /// access is.
     #[cfg(test)]

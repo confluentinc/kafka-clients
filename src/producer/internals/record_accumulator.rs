@@ -49,7 +49,7 @@ use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::IncompleteBatches;
 use crate::producer::internals::ProducerBatch;
-use crate::producer::internals::TransactionManager;
+use crate::producer::internals::{InFlightBatchPool, TransactionManager};
 use crate::producer::record_metadata;
 
 /// Partitioner configuration for the built-in partitioner.
@@ -120,6 +120,14 @@ impl NodeLatencyStats {
         Self { ready_time_ms: now_ms, drain_time_ms: now_ms }
     }
 }
+
+/// A borrowed handle on one partition's batch deque, as
+/// [`TopicInfo::batches`] hands it out.
+///
+/// A named alias only because the tuple it appears in inside
+/// [`RecordAccumulator::with_in_flight_batch_pool`] is otherwise too complex for
+/// `clippy::type_complexity`.
+type PartitionDequeRef<'a> = dashmap::mapref::one::Ref<'a, i32, Mutex<VecDeque<ProducerBatch>>>;
 
 /// Per topic info.
 ///
@@ -1116,24 +1124,60 @@ impl RecordAccumulator {
     /// Abort all incomplete batches.
     pub fn abort_incomplete_batches(&self) {
         loop {
-            self.abort_batches();
+            // Java's no-argument `abortBatches()` (Java 1145-1147) supplies this
+            // reason; Rust has no overloading, so it is inlined at the two call
+            // sites that used it.
+            self.abort_batches(Self::producer_closed_forcefully_error());
             if !self.appends_in_progress() {
                 break;
             }
         }
-        self.abort_batches();
+        self.abort_batches(Self::producer_closed_forcefully_error());
         self.topic_info_map.clear();
     }
 
-    fn abort_batches(&self) {
+    /// The reason Java's no-argument `abortBatches()` passes (Java 1146).
+    fn producer_closed_forcefully_error() -> KafkaError {
+        KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
+    }
+
+    /// Abort all incomplete batches (whether they have been sent or not).
+    ///
+    /// Translated from `abortBatches(RuntimeException)` (Java 1152).
+    ///
+    /// `pub(crate)` because `Sender.maybeAbortBatches` (`Sender.java:535`) calls it
+    /// with the transaction manager's `lastError`.
+    ///
+    /// # Deviation: driven by the deques, not by `incomplete`
+    ///
+    /// Java iterates `incomplete.copyAll()`, which returns the `ProducerBatch`es
+    /// themselves and therefore also covers batches already drained into the
+    /// `Sender`. Rust's [`IncompleteBatches`] tracks
+    /// [`ProduceRequestResult`](super::ProduceRequestResult)s rather than batches,
+    /// because a `ProducerBatch` has exactly one owner (rules §7), so this can only
+    /// reach the batches the accumulator still owns. The `Sender`'s share is aborted
+    /// by `Sender::maybe_abort_batches`, which documents why dropping them
+    /// un-aborted would leave their futures pending forever.
+    ///
+    /// Java's tail (`:1160-1167`) *is* translated: each aborted batch is removed
+    /// from `incomplete`, and deallocated unless it is still marked in flight
+    /// (KAFKA-19012 — the pooled buffer may still be in use by the network client,
+    /// in which case `Sender::complete_batch` / `fail_batch` deallocates it when the
+    /// response arrives). Without that tail `has_incomplete()` would stay true
+    /// forever and `Sender.maybeAbortBatches` would re-abort on every `runOnce`.
+    pub(crate) fn abort_batches(&self, reason: KafkaError) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
                 let mut deque = deque_ref.value().lock().unwrap();
                 while let Some(mut batch) = deque.pop_front() {
                     batch.abort_record_appends();
-                    let reason = KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
-                    batch.abort(reason);
+                    batch.abort(reason.clone());
+                    if batch.is_inflight() {
+                        self.complete_batch(&batch);
+                    } else {
+                        self.complete_and_deallocate_batch(&mut batch);
+                    }
                 }
             }
         }
@@ -1196,25 +1240,136 @@ impl RecordAccumulator {
 
     /// Abort any batches which have not been drained.
     ///
-    /// Translated from `RecordAccumulator.abortUndrainedBatches`.
+    /// Translated from `RecordAccumulator.abortUndrainedBatches` (Java 1174).
+    ///
+    /// Java's predicate at `:1179` forks on whether idempotence is enabled:
+    ///
+    /// ```java
+    /// if ((transactionManager != null && !batch.hasSequence()) ||
+    ///     (transactionManager == null && !batch.isClosed()))
+    /// ```
+    ///
+    /// With a transaction manager, "undrained" means *no sequence assigned yet* —
+    /// a drained batch has one (`drainBatchesForOneNode` assigns it at Java 918),
+    /// and a *re-enqueued* batch keeps its sequence and so must not be aborted here
+    /// even though the accumulator owns it again (rules §7). Without one it means
+    /// "not yet closed". This is reachable idempotently:
+    /// `maybeSendAndPollTransactionalRequest` calls it whenever
+    /// `hasAbortableError()` (`Sender.java:466-467`), which PLAN §9.15 shows an
+    /// idempotent producer can reach.
     pub fn abort_undrained_batches(&self, reason: KafkaError) {
+        let has_transaction_manager = self.transaction_manager.is_some();
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
                 let mut deque = deque_ref.value().lock().unwrap();
-                // Abort only batches that haven't been drained (i.e., not closed).
                 let mut i = 0;
                 while i < deque.len() {
-                    if !deque[i].is_closed() {
+                    let undrained = if has_transaction_manager {
+                        !deque[i].has_sequence()
+                    } else {
+                        !deque[i].is_closed()
+                    };
+                    if undrained {
                         let mut batch = deque.remove(i).unwrap();
                         batch.abort_record_appends();
                         batch.abort(reason.clone());
+                        // Java 1187. Without this the batch stays in `incomplete`
+                        // forever, so `has_incomplete()` never falls back to false.
+                        self.complete_and_deallocate_batch(&mut batch);
                     } else {
                         i += 1;
                     }
                 }
             }
         }
+    }
+
+    /// Runs `f` with an [`InFlightBatchPool`] for `partitions`, assembled from
+    /// **both** owners of the in-flight batches: this accumulator's per-partition
+    /// deques and `sender_batches`, i.e. `Sender::in_flight_batches`.
+    ///
+    /// # Why this exists
+    ///
+    /// Java's `TxnPartitionEntry` holds live references to the in-flight batches,
+    /// so `bumpIdempotentProducerEpoch` (Java 645) can rewrite them without any
+    /// help from their owners. Rust cannot: the entry tracks ordering keys only
+    /// (`.claude/rules/producer-transactions.md` §7), so the batches have to come
+    /// from whoever owns them — and **ownership alternates**. `Sender.reenqueueBatch`
+    /// (`Sender.java:750-752`) hands a batch back to the accumulator *without*
+    /// calling `removeInFlightBatch`, so a tracked batch may be sitting in a deque
+    /// here while other tracked batches sit in `Sender::in_flight_batches`. Rules §7
+    /// names "building the lookup pool from `Sender::in_flight_batches` alone" as an
+    /// anti-pattern for exactly this reason: it would make
+    /// `bump_idempotent_epoch_and_reset_id_if_needed` fail to rewrite a reenqueued
+    /// batch's sequence, and idempotent recovery is the very path that call serves.
+    ///
+    /// # Locking
+    ///
+    /// Every requested partition's deque lock is held for the duration of `f`,
+    /// because the `&mut ProducerBatch` references borrow from inside the deques.
+    /// `f` then takes the `TransactionManager` lock, preserving rules §3's
+    /// **deque → manager** order. Only the partitions queued for an epoch-bump
+    /// rewrite are locked, and only when a bump is actually pending — see
+    /// `TransactionManager::client_side_epoch_bump_required`.
+    ///
+    /// Partitions with no topic entry, no deque and no Sender-side batches are
+    /// simply absent from the pool; [`InFlightBatchPool`] documents an absent
+    /// partition and an empty one as equivalent.
+    ///
+    /// # Why the merge happens here rather than in the caller's closure
+    ///
+    /// Every `&mut ProducerBatch` in the pool must share one lifetime, and the
+    /// shortest is the deque `MutexGuard`s' — which exist only inside this function.
+    /// A caller that tried to extend the pool from its own map inside `f` would have
+    /// to unify a borrow of itself with a lifetime local to this call, which does not
+    /// type-check. Passing the second owner in lets both borrows be reduced to the
+    /// guard lifetime at one place.
+    pub(crate) fn with_in_flight_batch_pool<R>(
+        &self,
+        partitions: &[TopicPartition],
+        sender_batches: &mut HashMap<TopicPartition, Vec<ProducerBatch>>,
+        f: impl FnOnce(&mut InFlightBatchPool<'_>) -> R,
+    ) -> R {
+        // Pass 1: own an `Arc<TopicInfo>` per requested partition, which releases
+        // the outer `DashMap` shard guard immediately.
+        let topics: Vec<(&TopicPartition, Arc<TopicInfo>)> = partitions
+            .iter()
+            .filter_map(|tp| {
+                self.topic_info_map
+                    .get(tp.topic())
+                    .map(|topic_info| (tp, Arc::clone(topic_info.value())))
+            })
+            .collect();
+        // Pass 2: borrow the per-partition deque mutexes out of the (now immutable)
+        // `topics`. The `Ref` guards must outlive the `MutexGuard`s below, so they
+        // need their own binding.
+        let deques: Vec<(&TopicPartition, PartitionDequeRef<'_>)> = topics
+            .iter()
+            .filter_map(|(tp, topic_info)| topic_info.batches.get(&tp.partition()).map(|deque| (*tp, deque)))
+            .collect();
+        // Pass 3: lock every deque (rules §3: before the manager lock, which `f`
+        // takes).
+        let mut guards: Vec<(&TopicPartition, std::sync::MutexGuard<'_, VecDeque<ProducerBatch>>)> =
+            deques.iter().map(|(tp, deque)| (*tp, deque.value().lock().unwrap())).collect();
+        // Pass 4: hand out `&mut` references into the locked deques, then merge the
+        // Sender's own in-flight batches for the same partitions (rules §7:
+        // ownership alternates, so the pool must draw from both).
+        let mut pool: InFlightBatchPool<'_> = HashMap::with_capacity(guards.len());
+        for (tp, guard) in guards.iter_mut() {
+            pool.insert((*tp).clone(), guard.iter_mut().collect());
+        }
+        // Driven by one `iter_mut` over the Sender's map rather than a `get_mut` per
+        // requested partition: repeated `get_mut` calls in a loop cannot be proven
+        // disjoint while the references escape into `pool`. `partitions` is the
+        // epoch-bump set, i.e. only partitions in an error state, so the membership
+        // test is over a handful of entries.
+        for (topic_partition, batches) in sender_batches.iter_mut() {
+            if partitions.contains(topic_partition) {
+                pool.entry(topic_partition.clone()).or_default().extend(batches.iter_mut());
+            }
+        }
+        f(&mut pool)
     }
 
     /// Split a big batch and re-enqueue the resulting sub-batches.

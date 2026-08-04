@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 
 use crate::client_response::ClientResponse;
 use crate::common::KafkaError;
@@ -43,6 +43,8 @@ use crate::produce_request_data::{PartitionProduceData, ProduceRequestData, Topi
 
 use crate::common::utils::LogContext;
 
+use super::Caller;
+use super::InFlightBatchPool;
 use super::PendingRequests;
 use super::ProducerBatch;
 use super::ProducerMetadata;
@@ -89,6 +91,52 @@ pub(crate) fn is_authorization_error_handled_by_sender(error: &KafkaError) -> bo
         error.error(),
         Errors::TransactionalIdAuthorizationFailed | Errors::ClusterAuthorizationFailed
     )
+}
+
+/// Which `catch` block in Java handles a failure raised by `runOnce`'s
+/// `transactionManager != null` block.
+///
+/// Java distinguishes the two by exception *type*: `catch (AuthenticationException e)`
+/// at `Sender.java:336` calls `transactionManager.authenticationFailed(e)` **and
+/// then falls through to `sendProducerData`**, while anything else propagates to
+/// `Sender.run`'s `catch (Exception e)` at `:248`, which only logs. `KafkaError` is
+/// flat, so the distinction is carried structurally instead — the same approach
+/// `common::network::authentication_error` already takes for the transport's
+/// `io::Error` boundary, and for the same reason: an error *kind* cannot express
+/// "this was a genuine authentication failure".
+enum TransactionPhaseError {
+    /// Java's `AuthenticationException`, raised by `awaitNodeReady` →
+    /// `NetworkClientUtils.awaitReady`.
+    Authentication(KafkaError),
+    /// Everything else.
+    Other(KafkaError),
+}
+
+impl TransactionPhaseError {
+    /// The wrapped error, for `Sender.run`'s log statement.
+    fn into_error(self) -> KafkaError {
+        match self {
+            Self::Authentication(error) | Self::Other(error) => error,
+        }
+    }
+}
+
+/// Suspends the Sender task for `duration_ms`, translating Java's
+/// `time.sleep(retryBackoffMs)` (`Sender.java:501`, `:525`).
+///
+/// Java blocks the Sender thread; CLAUDE.md §9.1 makes that an `.await` here. Both
+/// call sites exist to prevent a tight retry loop and neither holds a
+/// `TransactionManager` guard (rules §4).
+///
+/// Note for tests: Java's `MockTime.sleep` advances a virtual clock, so a Java test
+/// passes through instantly. Tokio's timer is real unless the test opts into
+/// `#[tokio::test(start_paused = true)]`, which auto-advances when the runtime is
+/// idle. That is a difference in test *duration* only — the Sender's own clock is
+/// the injected `time_provider` either way.
+async fn sleep_ms(duration_ms: i64) {
+    if duration_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(duration_ms as u64)).await;
+    }
 }
 
 /// Format the error from a `PartitionResponse` in a user-friendly string.
@@ -382,6 +430,21 @@ impl<C: KafkaClient> Sender<C> {
         }
     }
 
+    /// Whether there are transactional requests that must still be flushed before
+    /// shutdown can proceed.
+    ///
+    /// Translated from `Sender.hasPendingTransactionalRequests()` (Java 233-235).
+    /// Reachable for a purely idempotent producer — see
+    /// [`TransactionManager::has_ongoing_transaction`].
+    fn has_pending_transactional_requests(&self) -> bool {
+        match &self.transaction_manager {
+            Some(transaction_manager) => {
+                self.has_pending_requests() && transaction_manager.lock().unwrap().has_ongoing_transaction()
+            },
+            None => false,
+        }
+    }
+
     /// The main run loop for the sender task.
     ///
     /// Translated from `Sender.run()`.
@@ -390,7 +453,7 @@ impl<C: KafkaClient> Sender<C> {
 
         // Main loop, runs until close is called
         while self.running.load(Ordering::Acquire) {
-            self.run_once().await;
+            self.run_once_logging_errors().await;
         }
 
         kafka_debug!(
@@ -398,15 +461,62 @@ impl<C: KafkaClient> Sender<C> {
             "Beginning shutdown of Kafka producer I/O task, sending remaining records."
         );
 
-        // We stopped accepting requests but there may still be requests in the
-        // accumulator or waiting for acknowledgment. Wait until these are completed.
+        // Okay we stopped accepting requests but there may still be requests in the
+        // transaction manager, accumulator or waiting for acknowledgment. Wait until
+        // these are completed.
         while !self.force_close.load(Ordering::Acquire)
-            && (self.accumulator.has_undrained() || self.client.in_flight_request_count() > 0)
+            && ((self.accumulator.has_undrained() || self.client.in_flight_request_count() > 0)
+                || self.has_pending_transactional_requests())
         {
-            self.run_once().await;
+            self.run_once_logging_errors().await;
+        }
+
+        // Abort the transaction if any commit or abort didn't go through the
+        // transaction manager's queue (Java 266-285).
+        while !self.force_close.load(Ordering::Acquire) && self.has_ongoing_transaction() {
+            if !self.is_completing() {
+                kafka_info!(self.log_context, "Aborting incomplete transaction due to shutdown");
+                // It is possible for the transaction manager to return errors when
+                // aborting. Catch these so as not to interfere with the rest of the
+                // shutdown logic.
+                if let Err(error) = self.begin_abort() {
+                    kafka_error!(
+                        self.log_context,
+                        "Error in kafka producer I/O task while aborting transaction when during closing: {}",
+                        error
+                    );
+                    // Force close in case the transaction manager is in error states.
+                    self.force_close.store(true, Ordering::Release);
+                }
+            }
+            self.run_once_logging_errors().await;
         }
 
         if self.force_close.load(Ordering::Acquire) {
+            // We need to fail all the incomplete transactional requests and batches
+            // and wake up the tasks waiting on the futures.
+            if let Some(transaction_manager) = self.transaction_manager.clone() {
+                kafka_debug!(
+                    self.log_context,
+                    "Aborting incomplete transactional requests due to forced shutdown"
+                );
+                // Java does not guard this call (`Sender.java:292`) and cannot fail
+                // it: `close()` only ever targets `FATAL_ERROR`, which is always a
+                // valid transition, and always supplies an error. Logged rather than
+                // unwrapped so an unreachable failure cannot panic the task
+                // (CLAUDE.md §10.1).
+                if let Err(error) = transaction_manager
+                    .lock()
+                    .unwrap()
+                    .close(&mut self.pending_requests, Caller::Sender)
+                {
+                    kafka_error!(
+                        self.log_context,
+                        "Error while aborting incomplete transactional requests: {}",
+                        error
+                    );
+                }
+            }
             kafka_debug!(self.log_context, "Aborting incomplete batches due to forced shutdown");
             self.accumulator.abort_incomplete_batches();
         }
@@ -416,26 +526,135 @@ impl<C: KafkaClient> Sender<C> {
         kafka_debug!(self.log_context, "Shutdown of Kafka producer I/O task has completed.");
     }
 
+    /// Runs one iteration and logs any failure, translating `Sender.run`'s three
+    /// `catch (Exception e) { log.error("Uncaught error in kafka producer I/O
+    /// thread: ", e); }` blocks (Java 248-250, 261-263, 282-284).
+    async fn run_once_logging_errors(&mut self) {
+        if let Err(error) = self.run_once().await {
+            kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {}", error);
+        }
+    }
+
+    /// Whether a transaction is considered ongoing, or `false` when idempotence is
+    /// disabled.
+    ///
+    /// The `transactionManager != null && transactionManager.hasOngoingTransaction()`
+    /// conjunction of `Sender.java:267`.
+    fn has_ongoing_transaction(&self) -> bool {
+        self.transaction_manager
+            .as_ref()
+            .is_some_and(|transaction_manager| transaction_manager.lock().unwrap().has_ongoing_transaction())
+    }
+
+    /// `transactionManager.isCompleting()` (`Sender.java:268`).
+    fn is_completing(&self) -> bool {
+        self.transaction_manager
+            .as_ref()
+            .is_some_and(|transaction_manager| transaction_manager.lock().unwrap().is_completing())
+    }
+
+    /// `transactionManager.beginAbort()` (`Sender.java:273`).
+    fn begin_abort(&self) -> Result<(), KafkaError> {
+        match &self.transaction_manager {
+            Some(transaction_manager) => transaction_manager.lock().unwrap().begin_abort(),
+            // Unreachable: the enclosing loop is gated on `has_ongoing_transaction`.
+            None => Ok(()),
+        }
+    }
+
     /// Run a single iteration of sending.
     ///
-    /// Translated from `Sender.runOnce()`.
+    /// Translated from `Sender.runOnce()` (Java 310-346).
     ///
     /// In Java, `runOnce` calls `client.poll()` which invokes callbacks on
     /// completed requests. The Sender's produce response callback calls
     /// `handleProduceResponse()`. In Rust, we cannot capture `&mut self` in a
     /// callback, so instead we process the responses returned by `poll()`
-    /// directly.
-    async fn run_once(&mut self) {
-        // No transaction manager in this phase
+    /// directly — see [`Self::poll_and_dispatch`].
+    ///
+    /// # Errors
+    ///
+    /// Java's `runOnce` throws and `Sender.run` catches-and-logs; the Rust
+    /// equivalent returns the error and [`Self::run_once_logging_errors`] logs it
+    /// at the same point.
+    async fn run_once(&mut self) -> Result<(), KafkaError> {
+        if self.transaction_manager.is_some() {
+            match self.run_transaction_phase().await {
+                // Java 322 / 326 / 334 — `runOnce` returns without producing.
+                Ok(true) => return Ok(()),
+                Ok(false) => {},
+                Err(TransactionPhaseError::Authentication(error)) => {
+                    // Java 336-340. This is already logged as an error, but
+                    // propagated here to perform any clean ups. Note Java's `catch`
+                    // does **not** return: execution continues to `sendProducerData`
+                    // at `:343`, which this `match` arm preserves by falling through.
+                    kafka_trace!(
+                        self.log_context,
+                        "Authentication exception while processing transactional request: {}",
+                        error
+                    );
+                    self.authentication_failed(&error)?;
+                },
+                Err(other) => return Err(other.into_error()),
+            }
+        }
+
         let current_time_ms = (self.time_provider)();
-        let poll_timeout = self.send_producer_data(current_time_ms).await;
+        let poll_timeout = self.send_producer_data(current_time_ms).await?;
+        self.poll_and_dispatch(poll_timeout, current_time_ms).await
+    }
 
-        let responses = self.client.poll(poll_timeout, current_time_ms).await;
+    /// `transactionManager.authenticationFailed(e)` (`Sender.java:339`).
+    fn authentication_failed(&mut self, error: &KafkaError) -> Result<(), KafkaError> {
+        match self.transaction_manager.clone() {
+            Some(transaction_manager) => transaction_manager.lock().unwrap().authentication_failed(
+                &mut self.pending_requests,
+                error,
+                Caller::Sender,
+            ),
+            // Unreachable: only the transaction block raises this error.
+            None => Ok(()),
+        }
+    }
 
-        // Process any produce responses (equivalent to Java's callback-based
-        // handleProduceResponse invoked from within poll/completeResponses)
-        let now = (self.time_provider)();
-        self.handle_produce_responses(&responses, now);
+    /// Polls the network client and dispatches every completed response.
+    ///
+    /// This is the Rust stand-in for Java's `client.poll(..)`, which invokes each
+    /// request's `RequestCompletionHandler` from inside the poll. Every Java
+    /// `client.poll` call site — `runOnce`'s at `:345`, the fatal-error one at
+    /// `:322`, and the three inside `maybeSendAndPollTransactionalRequest` — can
+    /// therefore complete *both* produce and transactional requests, so they all go
+    /// through here rather than only the one in `runOnce`.
+    ///
+    /// The poll future is awaited to completion and never raced in a
+    /// `tokio::select!` (rules §4 / `consumer-threading.md` §10: it is not
+    /// cancel-safe).
+    async fn poll_and_dispatch(&mut self, timeout: i64, now: i64) -> Result<(), KafkaError> {
+        let responses = self.client.poll(timeout, now).await;
+        let dispatch_time_ms = (self.time_provider)();
+        self.handle_client_responses(&responses, dispatch_time_ms)
+    }
+
+    /// Dispatches each completed response to the handler that requested it,
+    /// preserving arrival order as Java's callback invocation does.
+    fn handle_client_responses(&mut self, responses: &[ClientResponse], now: i64) -> Result<(), KafkaError> {
+        for response in responses {
+            let correlation_id = response.request_header().correlation_id();
+            let is_transactional = self
+                .pending_transactional_response
+                .as_ref()
+                .is_some_and(|(pending_correlation_id, _)| *pending_correlation_id == correlation_id);
+            if is_transactional {
+                let (_, handler) = self
+                    .pending_transactional_response
+                    .take()
+                    .expect("the slot was just observed to be occupied");
+                self.on_transactional_response(handler, response)?;
+            } else {
+                self.handle_produce_responses(std::slice::from_ref(response), now);
+            }
+        }
+        Ok(())
     }
 
     /// Process all produce responses from a poll cycle.
@@ -482,6 +701,429 @@ impl<C: KafkaClient> Sender<C> {
                             BatchAction::Done => {},
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // -- The `transactionManager != null` block of `runOnce` -----------------
+
+    /// Runs `runOnce`'s transaction block (`Sender.java:311-341`).
+    ///
+    /// Returns `Ok(true)` when `runOnce` must return without producing in this
+    /// iteration. The block has **four** early exits and their order is
+    /// load-bearing:
+    ///
+    ///   - `:322` fatal error — abort the batches, poll, return;
+    ///   - `:326` abortable error whose cause is an authorization failure —
+    ///     recover to `UNINITIALIZED` and return, *before* `:331` can attempt
+    ///     `ABORTABLE_ERROR → INITIALIZING` (an attempt Java never makes; see
+    ///     PLAN §9.15);
+    ///   - `:334` `maybeSendAndPollTransactionalRequest` returned `true`, i.e. a
+    ///     transactional request was sent, awaited or re-queued;
+    ///   - the `AuthenticationException` catch at `:336`, which is *not* an early
+    ///     exit — Java falls through to `sendProducerData`.
+    ///
+    /// No `TransactionManager` guard is held across any `.await` (rules §4): each
+    /// step acquires, reads or mutates, and drops before the next await point. That
+    /// is looser than Java, where the Sender thread's view is stable simply because
+    /// it is the only writer — every re-acquire below is a place where that implicit
+    /// consistency could break, which is why each one reads the minimum it needs.
+    async fn run_transaction_phase(&mut self) -> Result<bool, TransactionPhaseError> {
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(false);
+        };
+
+        // Sender.java:313
+        transaction_manager
+            .lock()
+            .unwrap()
+            .maybe_resolve_sequences()
+            .map_err(TransactionPhaseError::Other)?;
+
+        // Sender.java:315-318 — read `lastError` and the error state together, so
+        // the two cannot disagree the way separate acquisitions could.
+        let (last_error, has_fatal_error, has_abortable_error) = {
+            let manager = transaction_manager.lock().unwrap();
+            (
+                manager.last_error().cloned(),
+                manager.has_fatal_error(),
+                manager.has_abortable_error(),
+            )
+        };
+
+        // Sender.java:318-323 — do not continue sending if the transaction manager
+        // is in a failed state.
+        if has_fatal_error {
+            if let Some(error) = &last_error {
+                // The manager guard is released above, so this takes the deque locks
+                // with no manager lock held — rules §3's order is unaffected.
+                self.maybe_abort_batches(error);
+            }
+            let now = (self.time_provider)();
+            self.poll_and_dispatch(self.retry_backoff_ms, now)
+                .await
+                .map_err(TransactionPhaseError::Other)?;
+            return Ok(true);
+        }
+
+        // Sender.java:325-327 → shouldHandleAuthorizationError (:351-360).
+        if has_abortable_error
+            && let Some(error) = &last_error
+            && is_authorization_error_handled_by_sender(error)
+        {
+            self.handle_authorization_error(error).map_err(TransactionPhaseError::Other)?;
+            return Ok(true);
+        }
+
+        // Sender.java:329-331 — check whether we need a new producerId. If so, we
+        // will enqueue an InitProducerId request which will be sent below.
+        self.bump_idempotent_epoch_and_reset_id_if_needed()
+            .map_err(TransactionPhaseError::Other)?;
+
+        // Sender.java:333-335
+        if self.maybe_send_and_poll_transactional_request().await? {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The side-effecting half of `Sender.shouldHandleAuthorizationError`
+    /// (`Sender.java:354-356`); the `instanceof` half is
+    /// [`is_authorization_error_handled_by_sender`].
+    ///
+    /// Java's three statements, in order: fail the pending requests with an
+    /// `AuthenticationException` wrapping the cause, abort the batches, then
+    /// transition to `UNINITIALIZED` so the user does not need to instantiate the
+    /// producer again (`Sender.java:348-350`).
+    fn handle_authorization_error(&mut self, error: &KafkaError) -> Result<(), KafkaError> {
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(());
+        };
+        // Java wraps the cause in `new AuthenticationException(exception)`
+        // (`Sender.java:354`). Java's `AuthenticationException` base class carries no
+        // wire code — only its subclasses do — so it maps to
+        // `Errors::UnknownServerError`, the convention `maybe_fail_with_error` and
+        // `TransactionManager::close` already use for a codeless Java exception. NOT
+        // `SaslAuthenticationFailed`: the cause here is a cluster or transactional-id
+        // authorization failure and nothing about it is SASL.
+        let authentication_error = KafkaError::fatal(Errors::UnknownServerError, error.message());
+        transaction_manager.lock().unwrap().fail_pending_requests(
+            &mut self.pending_requests,
+            &authentication_error,
+            Caller::Sender,
+        )?;
+        // The guard from the statement above is released at the `;`, so the deque
+        // locks this takes are still acquired with no manager lock held (rules §3).
+        self.maybe_abort_batches(error);
+        transaction_manager.lock().unwrap().transition_to_uninitialized(Caller::Sender)
+    }
+
+    /// `transactionManager.bumpIdempotentEpochAndResetIdIfNeeded()`
+    /// (`Sender.java:331`), with the in-flight batch pool rules §7 requires.
+    ///
+    /// # Assembling the pool from **both** owners
+    ///
+    /// `bump_idempotent_producer_epoch` rewrites the in-flight sequences of every
+    /// partition in `partitions_to_rewrite_sequences`, and it needs the actual
+    /// batches because `TxnPartitionEntry` tracks ordering keys only (rules §7).
+    /// Those batches live in **either** owner: the Sender's
+    /// [`Self::in_flight_batches`], or the accumulator's deques once
+    /// `reenqueueBatch` (`Sender.java:750-752`) has handed one back *without*
+    /// untracking it. Drawing from only one owner is the anti-pattern rules §7
+    /// names: a reenqueued batch would keep its old epoch's sequence and the broker
+    /// would answer `OUT_OF_ORDER_SEQUENCE_NUMBER` on the very path this call exists
+    /// to recover.
+    ///
+    /// The pool is assembled only when a bump is actually pending, because building
+    /// it locks the accumulator's deques for the partitions involved. On the common
+    /// path the manager is consulted once and an empty pool is passed — which the
+    /// callee never reads, since its loop is over an empty set.
+    fn bump_idempotent_epoch_and_reset_id_if_needed(&mut self) -> Result<(), KafkaError> {
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(());
+        };
+
+        // Only an epoch bump reads the pool. `partitions_to_rewrite_sequences` is
+        // written solely by the Sender task (through `handle_failed_batch`,
+        // `can_retry` and `maybe_resolve_sequences`, the last of which already ran
+        // this iteration at `:313`), so reading it here and using it below cannot
+        // race.
+        let partitions: Vec<TopicPartition> = {
+            let manager = transaction_manager.lock().unwrap();
+            if manager.client_side_epoch_bump_required() {
+                manager.partitions_to_rewrite_sequences().iter().cloned().collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        if partitions.is_empty() {
+            let mut pool = InFlightBatchPool::new();
+            return transaction_manager
+                .lock()
+                .unwrap()
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut self.pending_requests, Caller::Sender);
+        }
+
+        let accumulator = Arc::clone(&self.accumulator);
+        let pending_requests = &mut self.pending_requests;
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
+            // Deque locks are held by `with_in_flight_batch_pool` for the duration of
+            // this closure, so taking the manager lock here is the deque → manager
+            // order rules §3 mandates.
+            transaction_manager
+                .lock()
+                .unwrap()
+                .bump_idempotent_epoch_and_reset_id_if_needed(pool, pending_requests, Caller::Sender)
+        })
+    }
+
+    /// Sends or awaits the next transactional request.
+    ///
+    /// Translated from `Sender.maybeSendAndPollTransactionalRequest()`
+    /// (Java 456-518). Returns `true` if a transactional request is sent or polled,
+    /// or if a `FindCoordinator` request is enqueued — i.e. exactly when `runOnce`
+    /// must return at `:334`. Java has one `return false` (`:474`, empty queue) and
+    /// six `return true`.
+    async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, TransactionPhaseError> {
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(false);
+        };
+
+        // Java 460-464: as long as there are outstanding transactional requests, we
+        // simply wait for them to return.
+        if self.has_in_flight_request() {
+            let now = (self.time_provider)();
+            self.poll_and_dispatch(self.retry_backoff_ms, now)
+                .await
+                .map_err(TransactionPhaseError::Other)?;
+            return Ok(true);
+        }
+
+        // Java 466-470.
+        let abort_reason = {
+            let manager = transaction_manager.lock().unwrap();
+            if manager.has_abortable_error() {
+                manager.last_error().cloned()
+            } else if manager.is_aborting() {
+                Some(KafkaError::transaction_aborted())
+            } else {
+                None
+            }
+        };
+        if let Some(reason) = abort_reason {
+            self.accumulator.abort_undrained_batches(reason);
+        }
+
+        // Java 472-474.
+        let has_incomplete = self.accumulator.has_incomplete();
+        let mut next_request_handler = match transaction_manager
+            .lock()
+            .unwrap()
+            .next_request(&mut self.pending_requests, has_incomplete)
+        {
+            Some(handler) => handler,
+            None => return Ok(false),
+        };
+
+        // Java 479-482. `coordinatorType()` is null for a non-transactional
+        // `InitProducerId` (Java 1482-1488), so the idempotent path always takes
+        // the least-loaded-node branch; `TransactionManager::coordinator` and the
+        // whole FindCoordinator subsystem arrive in Phase 5.
+        let coordinator_type = transaction_manager.lock().unwrap().coordinator_type(&next_request_handler);
+        if coordinator_type.is_some() {
+            return Err(TransactionPhaseError::Other(KafkaError::unsupported_version(
+                "Routing a transactional request to a coordinator is not yet implemented in this client \
+                 (Milestone 11, Phase 5).",
+            )));
+        }
+        let now = (self.time_provider)();
+        let target_node = self.client.least_loaded_node(now).node().cloned();
+
+        let Some(target_node) = target_node else {
+            // Java 493-498. `coordinatorType` is `None` on every reachable path
+            // here, so this is the final `else`: no nodes available.
+            kafka_trace!(
+                self.log_context,
+                "No nodes available to send requests, will poll and retry when until a node is ready."
+            );
+            transaction_manager
+                .lock()
+                .unwrap()
+                .retry(&mut self.pending_requests, next_request_handler);
+            let now = (self.time_provider)();
+            self.poll_and_dispatch(self.retry_backoff_ms, now)
+                .await
+                .map_err(TransactionPhaseError::Other)?;
+            return Ok(true);
+        };
+
+        // Java 483-488.
+        match self.await_node_ready(&target_node).await {
+            Ok(true) => {},
+            Ok(false) => {
+                kafka_trace!(
+                    self.log_context,
+                    "Target node {} not ready within request timeout, will retry when node is ready.",
+                    target_node
+                );
+                self.maybe_find_coordinator_and_retry(next_request_handler).await?;
+                return Ok(true);
+            },
+            // Java's `awaitNodeReady` throws `IOException`, caught at :511, and
+            // `AuthenticationException`, which escapes to `runOnce`'s catch at :336.
+            // `network_client_utils::await_ready` folds both into `io::Error`; the
+            // authentication case is the one it builds with
+            // `ErrorKind::PermissionDenied` from `client.authentication_error`
+            // (`network_client_utils.rs:96-98`).
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(TransactionPhaseError::Authentication(KafkaError::fatal(
+                    Errors::UnknownServerError,
+                    error.to_string(),
+                )));
+            },
+            Err(error) => {
+                // Java 511-516: we break here so that we pick up the FindCoordinator
+                // request immediately.
+                kafka_debug!(
+                    self.log_context,
+                    "Disconnect from {} while trying to send request {:?}. Going to back off and retry: {}",
+                    target_node,
+                    next_request_handler,
+                    error
+                );
+                self.maybe_find_coordinator_and_retry(next_request_handler).await?;
+                return Ok(true);
+            },
+        }
+
+        // Java 500-501.
+        if next_request_handler.is_retry() {
+            sleep_ms(next_request_handler.retry_backoff_ms()).await;
+        }
+
+        // Java 503-510.
+        let current_time_ms = (self.time_provider)();
+        // Java hands the builder itself to `newClientRequest`, keeping the handler's
+        // own reference alive for a possible retry. This crate only exposes builders
+        // as `Box<dyn RequestBuilder>` at that boundary, so the builder is cloned
+        // instead — once per transactional request, i.e. once per producer lifetime on
+        // the idempotent path, and never on a per-record or per-batch path.
+        let request_builder = next_request_handler.request_builder().clone();
+        let request_debug = if log::log_enabled!(log::Level::Debug) {
+            format!("{:?}", next_request_handler)
+        } else {
+            String::new()
+        };
+        let client_request = self.client.new_client_request_with_timeout(
+            target_node.id_string(),
+            Box::new(request_builder),
+            current_time_ms,
+            true,
+            self.request_timeout_ms,
+            // Java attaches `nextRequestHandler` itself as the completion handler; a
+            // Rust callback cannot capture `&mut self`, so the handler is parked in
+            // `pending_transactional_response` and matched by correlation id in
+            // `handle_client_responses` (CLAUDE.md §9.2).
+            None,
+        );
+        let correlation_id = client_request.correlation_id();
+        kafka_debug!(
+            self.log_context,
+            "Sending transactional request {} to node {} with correlation ID {}",
+            request_debug,
+            target_node,
+            correlation_id
+        );
+        self.pending_transactional_response = Some((correlation_id, next_request_handler));
+        self.client.send(client_request, current_time_ms);
+        self.set_in_flight_correlation_id(correlation_id);
+        let now = (self.time_provider)();
+        self.poll_and_dispatch(self.retry_backoff_ms, now)
+            .await
+            .map_err(TransactionPhaseError::Other)?;
+        Ok(true)
+    }
+
+    /// Looks the coordinator up if the request needs one, otherwise backs off, and
+    /// re-enqueues the request either way.
+    ///
+    /// Translated from `Sender.maybeFindCoordinatorAndRetry()` (Java 520-530).
+    async fn maybe_find_coordinator_and_retry(
+        &mut self,
+        next_request_handler: TxnRequestHandler,
+    ) -> Result<(), TransactionPhaseError> {
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(());
+        };
+        let needs_coordinator = transaction_manager.lock().unwrap().needs_coordinator(&next_request_handler);
+        if needs_coordinator {
+            // Java 522 calls `transactionManager.lookupCoordinator(..)`. Unreachable
+            // for an idempotent producer, whose `coordinatorType()` is null; Phase 5
+            // adds it with the FindCoordinator handler.
+            return Err(TransactionPhaseError::Other(KafkaError::unsupported_version(
+                "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
+            )));
+        }
+        // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
+        // loop when no node is available.
+        sleep_ms(self.retry_backoff_ms).await;
+        self.metadata.request_update(false);
+
+        transaction_manager
+            .lock()
+            .unwrap()
+            .retry(&mut self.pending_requests, next_request_handler);
+        Ok(())
+    }
+
+    /// Waits for `node` to become ready, up to `request.timeout.ms`.
+    ///
+    /// Translated from `Sender.awaitNodeReady(Node, CoordinatorType)`
+    /// (Java 563-574). Java's `handleCoordinatorReady()` branch fires only for
+    /// `CoordinatorType.TRANSACTION`, which the idempotent path never reaches
+    /// (`coordinatorType()` is null), so it arrives with the rest of the coordinator
+    /// subsystem in Phase 5.
+    async fn await_node_ready(&mut self, node: &crate::common::Node) -> std::io::Result<bool> {
+        let request_timeout_ms = self.request_timeout_ms as i64;
+        crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms).await
+    }
+
+    /// Aborts every incomplete batch, translating `Sender.maybeAbortBatches`
+    /// (Java 532-538).
+    ///
+    /// Must not be called while the `TransactionManager` guard is held: it takes the
+    /// accumulator's per-partition deque locks, and rules §3 fixes the order as
+    /// deque → manager.
+    fn maybe_abort_batches(&mut self, error: &KafkaError) {
+        if !self.accumulator.has_incomplete() {
+            return;
+        }
+        kafka_error!(self.log_context, "Aborting producer batches due to fatal error: {}", error);
+        let accumulator = Arc::clone(&self.accumulator);
+        accumulator.abort_batches(error.clone());
+
+        // Java's `inFlightBatches.clear()` (`Sender.java:536`) merely drops the
+        // Sender's references, because `abortBatches` has already aborted those
+        // batches: it iterates `incomplete.copyAll()`, which returns the batches
+        // themselves and so covers drained ones too. Rust's `IncompleteBatches`
+        // tracks `ProduceRequestResult`s rather than batches (a `ProducerBatch` has
+        // one owner, rules §7), so the accumulator cannot reach the Sender's share.
+        // Dropping them un-aborted would leave every one of their record futures
+        // pending forever, which CLAUDE.md §5 forbids — so they are aborted here,
+        // with the same reason and the same in-flight/deallocate fork Java applies
+        // (`RecordAccumulator.java:1160-1167`).
+        for (_, mut batches) in self.in_flight_batches.drain() {
+            for batch in batches.iter_mut() {
+                batch.abort_record_appends();
+                batch.abort(error.clone());
+                if batch.is_inflight() {
+                    // KAFKA-19012: the pooled buffer may still be in use by the
+                    // network client, so it is deallocated when the response arrives.
+                    accumulator.complete_batch(batch);
+                } else {
+                    accumulator.complete_and_deallocate_batch(batch);
                 }
             }
         }
@@ -557,8 +1199,15 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Send producer data.
     ///
-    /// Translated from `Sender.sendProducerData()`.
-    async fn send_producer_data(&mut self, now: i64) -> i64 {
+    /// Translated from `Sender.sendProducerData()` (Java 379-454).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a failure from the accumulator's drain, which assigns producer
+    /// ids, epochs and sequence numbers when idempotence is enabled. Java lets the
+    /// corresponding `IllegalStateException` escape `runOnce` to `Sender.run`'s
+    /// catch-and-log; [`Self::run_once_logging_errors`] is the same boundary.
+    async fn send_producer_data(&mut self, now: i64) -> Result<i64, KafkaError> {
         let metadata_snapshot = self.metadata.fetch_metadata_snapshot();
 
         // Get the list of partitions with data ready to send
@@ -644,7 +1293,7 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         self.send_produce_requests(request_data, now);
-        poll_timeout
+        Ok(poll_timeout)
     }
 
     fn fail_expired_batches(&mut self, expired_batches: &mut [ProducerBatch], now: i64, deallocate_buffer: bool) {
@@ -1734,8 +2383,8 @@ mod tests {
         let tp0 = ctx.tp0.clone();
         let future = ctx.append_to_accumulator(&tp0).await;
 
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         assert_eq!(
             ctx.sender.client().in_flight_request_count(),
@@ -1748,12 +2397,12 @@ mod tests {
         let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0, "All requests completed.");
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
         assert!(!ctx.sender.client().has_in_flight_requests());
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done(), "Request should be completed");
 
         let metadata = future.get().await.expect("Future should succeed");
@@ -1770,8 +2419,8 @@ mod tests {
         let tp0 = ctx.tp0.clone();
         let future = ctx.append_to_accumulator(&tp0).await;
 
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert!(ctx.sender.client().has_in_flight_requests());
@@ -1781,7 +2430,7 @@ mod tests {
         let response = ctx.produce_response(&tp0, -1, Errors::TopicAuthorizationFailed, 0);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done());
 
         let result = future.get().await;
@@ -1801,8 +2450,8 @@ mod tests {
 
         // Send first ProduceRequest
         let future = ctx.append_to_accumulator(&tp0).await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
 
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
@@ -1810,16 +2459,16 @@ mod tests {
         let response = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, -1);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await; // expire the batch
+        ctx.sender.run_once().await.expect("run_once"); // expire the batch
         assert!(future.is_done());
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
 
-        ctx.sender.run_once().await; // receive first response and do not reenqueue
+        ctx.sender.run_once().await.expect("run_once"); // receive first response and do not reenqueue
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
 
-        ctx.sender.run_once().await; // run again and must not send anything
+        ctx.sender.run_once().await.expect("run_once"); // run again and must not send anything
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
     }
@@ -1838,8 +2487,8 @@ mod tests {
         let future2 = ctx.append_to_accumulator(&tp0).await;
 
         // Send request
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
 
         // Return a MESSAGE_TOO_LARGE error
@@ -1849,14 +2498,14 @@ mod tests {
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
 
         // Expire the batch and process the response
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(future1.is_done());
         assert!(future2.is_done());
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
 
         // Run again and must not split big batch and resend anything
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
     }
@@ -1872,8 +2521,8 @@ mod tests {
 
         // Send first ProduceRequest
         let future = ctx.append_to_accumulator(&tp0).await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(
             ctx.sender.in_flight_batches(&ctx.tp0).len(),
@@ -1886,7 +2535,7 @@ mod tests {
 
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
 
-        ctx.sender.run_once().await; // receive first response
+        ctx.sender.run_once().await.expect("run_once"); // receive first response
         assert_eq!(
             ctx.sender.in_flight_batches(&ctx.tp0).len(),
             0,
@@ -1911,8 +2560,8 @@ mod tests {
 
         // Send first ProduceRequest
         ctx.append_to_accumulator(&tp0).await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
 
@@ -1920,7 +2569,7 @@ mod tests {
 
         // Send second ProduceRequest
         ctx.append_to_accumulator(&tp0).await;
-        ctx.sender.run_once().await; // must not send request because the partition is muted
+        ctx.sender.run_once().await.expect("run_once"); // must not send request because the partition is muted
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
 
@@ -1929,11 +2578,11 @@ mod tests {
         let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await; // receive response (offset=0)
+        ctx.sender.run_once().await.expect("run_once"); // receive response (offset=0)
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
 
-        ctx.sender.run_once().await; // Drain the second request only this time
+        ctx.sender.run_once().await.expect("run_once"); // Drain the second request only this time
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
     }
@@ -1948,14 +2597,14 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         let response = ctx.produce_response(&tp0, 0, Errors::InvalidRequest, 0);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender.run_once().await.expect("run_once");
 
         assert!(future.is_done());
         let result = future.get().await;
@@ -1974,16 +2623,16 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         let error_message = "testCustomErrorMessage";
         let response =
             ctx.produce_response_with_message(&tp0, 0, Errors::InvalidRequest, 0, -1, Some(error_message.to_string()));
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender.run_once().await.expect("run_once");
 
         assert!(future.is_done());
         let result = future.get().await;
@@ -2015,8 +2664,8 @@ mod tests {
         let future2 = ctx.append_to_accumulator_with(&tp1, ctx.time.milliseconds(), "k2", "v2").await;
 
         // Send request
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once");
         // Note: Both partitions may go in same or separate requests depending on node assignment
         assert!(ctx.sender.client().in_flight_request_count() >= 1);
 
@@ -2026,7 +2675,7 @@ mod tests {
 
         // Successfully expire both batches
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert_eq!(
             ctx.sender.in_flight_batches(&ctx.tp0).len(),
             0,
@@ -2061,7 +2710,7 @@ mod tests {
 
         let future = ctx.append_to_accumulator(&tp0).await;
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(ctx.metadata.contains_topic(tp0.topic()), "Topic not added to metadata");
 
         // Update metadata
@@ -2078,17 +2727,17 @@ mod tests {
         ctx.metadata
             .update_with_current_request_version(&metadata_response, false, ctx.time.milliseconds());
 
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0, "Request completed.");
         assert!(!ctx.sender.client().has_in_flight_requests());
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done(), "Request should be completed");
 
         assert!(ctx.metadata.contains_topic(tp0.topic()), "Topic not retained in metadata list");
@@ -2115,8 +2764,8 @@ mod tests {
             futures.push(ctx.append_to_accumulator(&tp0).await);
         }
 
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
 
@@ -2157,7 +2806,7 @@ mod tests {
         let response = ConcreteResponse::Produce(ProduceResponse::new(data));
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
 
         for (index, future) in futures.iter().enumerate() {
             assert!(future.is_done(), "Future {} should be done", index);
@@ -2192,8 +2841,8 @@ mod tests {
 
         // --- Successful retry ---
         let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         let dest = ctx
             .sender
@@ -2222,14 +2871,14 @@ mod tests {
         // the batch is in sender.in_flight_batches until the disconnect response is processed
         assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
 
-        ctx.sender.run_once().await; // receive error (disconnect response triggers reenqueue)
+        ctx.sender.run_once().await.expect("run_once"); // receive error (disconnect response triggers reenqueue)
         // Advance time past the retry backoff (accounting for jitter up to 20%)
         // so the reenqueued batch becomes sendable.
         let backoff_with_jitter = (RETRY_BACKOFF_MS as f64 * 1.3) as i64;
         ctx.time.sleep(backoff_with_jitter);
         // In Rust's MockClient, ready() transitions Disconnected -> Connecting -> Connected
         // in a single call, so one additional run_once is enough to reconnect + drain + send.
-        ctx.sender.run_once().await; // reconnect + resend
+        ctx.sender.run_once().await.expect("run_once"); // reconnect + resend
 
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
         assert!(ctx.sender.client().has_in_flight_requests());
@@ -2239,7 +2888,7 @@ mod tests {
         let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
         ctx.sender.client_mut().respond(response);
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done(), "Request should have retried and completed");
         let metadata = future.get().await.expect("Future should succeed");
         assert_eq!(offset, metadata.offset());
@@ -2247,7 +2896,7 @@ mod tests {
 
         // --- Unsuccessful retry (exhausted retries) ---
         let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
         assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
 
         for i in 0..=(max_retries as usize) {
@@ -2260,14 +2909,14 @@ mod tests {
                 .destination()
                 .to_string();
             ctx.sender.client_mut().disconnect_by_id(&dest);
-            ctx.sender.run_once().await; // receive error
+            ctx.sender.run_once().await.expect("run_once"); // receive error
             assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
             ctx.time.sleep(backoff_with_jitter); // advance past retry backoff (with jitter margin)
-            ctx.sender.run_once().await; // reconnect + resend
+            ctx.sender.run_once().await.expect("run_once"); // reconnect + resend
             assert_eq!(if i > 0 { 0 } else { 1 }, ctx.sender.in_flight_batches(&ctx.tp0).len());
         }
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done());
         let result = future.get().await;
         assert!(result.is_err());
@@ -2308,8 +2957,8 @@ mod tests {
 
         // Send the first message to tp1.
         ctx.append_to_accumulator_with(&tp1, 0, "key1", "value1").await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
         assert!(ctx.sender.client().has_in_flight_requests());
@@ -2321,7 +2970,7 @@ mod tests {
 
         // With guarantee_message_order, the second message should not be sent
         // because tp1 is muted.
-        ctx.sender.run_once().await; // should not send because muted
+        ctx.sender.run_once().await.expect("run_once"); // should not send because muted
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
 
         // Complete the first request
@@ -2331,8 +2980,8 @@ mod tests {
         // Sender receives the response for the previous send and unmutes
         // the partition. But the drain happens at the start of run_once,
         // so we need another cycle to actually drain and send the new batch.
-        ctx.sender.run_once().await; // receive response, unmute
-        ctx.sender.run_once().await; // drain the second batch and send
+        ctx.sender.run_once().await.expect("run_once"); // receive response, unmute
+        ctx.sender.run_once().await.expect("run_once"); // drain the second batch and send
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
         assert!(ctx.sender.client().has_in_flight_requests());
         assert_eq!(1, ctx.sender.in_flight_batches(&tp1).len());
@@ -2349,8 +2998,8 @@ mod tests {
 
         // Send first ProduceRequest
         let future = ctx.append_to_accumulator(&tp0).await;
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
         assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
         assert!(
@@ -2360,10 +3009,10 @@ mod tests {
 
         ctx.time.sleep(REQUEST_TIMEOUT as i64);
 
-        ctx.sender.run_once().await; // times out the request
+        ctx.sender.run_once().await.expect("run_once"); // times out the request
         assert!(future.is_done());
 
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
         assert_eq!(0, ctx.sender.client().in_flight_request_count());
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
     }
@@ -2381,14 +3030,14 @@ mod tests {
 
         ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
 
-        ctx.sender.run_once().await; // connect
-        ctx.sender.run_once().await; // send produce request
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
 
         // Advance time beyond delivery timeout
         ctx.time.sleep(ctx.accumulator.delivery_timeout_ms() as i64 + 1);
 
         // Run once more - this should detect the expired batch
-        ctx.sender.run_once().await;
+        ctx.sender.run_once().await.expect("run_once");
 
         // The in-flight batch should be expired and removed
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
@@ -2485,8 +3134,8 @@ mod tests {
             .await
             .expect("append should succeed");
 
-        sender.run_once().await; // connect
-        sender.run_once().await; // send
+        sender.run_once().await.expect("run_once"); // connect
+        sender.run_once().await.expect("run_once"); // send
         assert_eq!(
             1,
             sender.client().in_flight_request_count(),
@@ -2506,7 +3155,7 @@ mod tests {
 
         // Time passes, but we don't have anything to send.
         time.sleep(10);
-        sender.run_once().await;
+        sender.run_once().await.expect("run_once");
         assert_eq!(
             1,
             sender.client().in_flight_request_count(),
@@ -2538,7 +3187,7 @@ mod tests {
             )
             .await
             .expect("append should succeed");
-        sender.run_once().await;
+        sender.run_once().await.expect("run_once");
         assert_eq!(
             1,
             sender.client().in_flight_request_count(),
@@ -2555,7 +3204,7 @@ mod tests {
         // Time passes, we keep trying to send, but the node is not ready.
         time.sleep(10);
         let time2_updated = time.milliseconds();
-        sender.run_once().await;
+        sender.run_once().await.expect("run_once");
         assert_eq!(
             1,
             sender.client().in_flight_request_count(),
@@ -2572,7 +3221,7 @@ mod tests {
         // Finally, time passes beyond the throttle and the node is ready.
         time.sleep(100);
         let time3 = time.milliseconds();
-        sender.run_once().await;
+        sender.run_once().await.expect("run_once");
         assert_eq!(
             2,
             sender.client().in_flight_request_count(),
@@ -2710,6 +3359,205 @@ mod tests {
 
         assert!(!ctx.sender.has_in_flight_request());
         assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+    }
+
+    // =====================================================================
+    // `runOnce`'s `transactionManager != null` block (`Sender.java:311-341`)
+    //
+    // One test per exit, driving the real `run_once`. Before Phase 4 the only
+    // model of this block was `transaction_manager.rs`'s
+    // `run_manager_transaction_phase` harness, which models `:333-335` as a
+    // predicate; these are what PLAN §Phase-4 means by "replaces the predicate
+    // with the real call".
+    // =====================================================================
+
+    /// Builds an `InitProducerId` response body for the mock client to return.
+    fn init_producer_id_response(error: Errors, producer_id: i64, epoch: i16) -> ConcreteResponse {
+        use crate::common::requests::InitProducerIdResponse;
+        use crate::init_producer_id_response_data::InitProducerIdResponseData;
+
+        let mut data = InitProducerIdResponseData::new();
+        data.set_error_code(error.code())
+            .set_producer_id(producer_id)
+            .set_producer_epoch(epoch)
+            .set_throttle_time_ms(0);
+        ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data))
+    }
+
+    /// `Sender.java:318-323`: a fatal transaction-manager error aborts the batches
+    /// and returns without producing.
+    #[tokio::test]
+    async fn test_run_once_returns_on_a_fatal_transaction_manager_error() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let future = ctx.append_to_accumulator(&tp0).await;
+        assert!(ctx.accumulator.has_incomplete());
+
+        let fatal_error = KafkaError::with_message(Errors::UnknownServerError, "fatal for the test");
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .transition_to_fatal_error(fatal_error, Caller::App)
+            .expect("FATAL_ERROR is always a valid target");
+
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            0,
+            "runOnce must return at :322 without reaching sendProducerData"
+        );
+        assert!(future.is_done(), "maybeAbortBatches (:320) aborts the incomplete batches");
+        let error = future.get().await.expect_err("the batch is aborted with the fatal error");
+        assert_eq!(error.message(), "fatal for the test");
+        assert!(!ctx.accumulator.has_incomplete());
+    }
+
+    /// `Sender.java:325-327` → `shouldHandleAuthorizationError` (`:351-360`): an
+    /// idempotent producer that hit `CLUSTER_AUTHORIZATION_FAILED` recovers to
+    /// `UNINITIALIZED` and can send again.
+    ///
+    /// This is the exit PLAN §9.16 records as having been missing from Phase 3's
+    /// first attempt: without it one authorization failure wedges the producer.
+    #[tokio::test]
+    async fn test_run_once_recovers_an_idempotent_producer_from_an_authorization_error() {
+        let mut ctx = SenderTestContext::idempotent();
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::ClusterAuthorizationFailed, -1, -1));
+
+        // Iteration 1 enqueues, sends and completes the InitProducerId, whose
+        // authorization arm (`TransactionManager.java:1524-1528`) lands the manager
+        // in ABORTABLE_ERROR.
+        ctx.sender.run_once().await.expect("run_once");
+        {
+            let manager = ctx.transaction_manager();
+            let manager = manager.lock().unwrap();
+            assert!(manager.has_abortable_error());
+            assert_eq!(
+                manager.last_error().expect("recorded").error(),
+                Errors::ClusterAuthorizationFailed
+            );
+        }
+
+        // Iteration 2 intercepts at :325 and recovers.
+        ctx.sender.run_once().await.expect("run_once");
+        {
+            let manager = ctx.transaction_manager();
+            let mut manager = manager.lock().unwrap();
+            assert!(!manager.has_error(), "the state must be escapable");
+            assert!(
+                manager.last_error().is_none(),
+                "transitionToUninitialized clears lastError (Java 761)"
+            );
+            manager
+                .maybe_add_partition(&ctx.tp0)
+                .expect("sends are accepted again once the error is cleared");
+        }
+
+        // Iteration 3 asks for a fresh producer id, proving the producer is usable.
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 13131, 1));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+    }
+
+    /// `Sender.java:333-335`: while an `InitProducerId` is pending or in flight,
+    /// `maybeSendAndPollTransactionalRequest` returns `true` and `runOnce` never
+    /// reaches `sendProducerData` at `:344`.
+    #[tokio::test]
+    async fn test_run_once_returns_without_producing_while_init_producer_id_is_pending() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let future = ctx.append_to_accumulator(&tp0).await;
+
+        // No prepared response: the InitProducerId is sent and stays in flight.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "the one request in flight is the InitProducerId"
+        );
+        assert_eq!(
+            *ctx.sender.client().requests().front().expect("in flight").api_key(),
+            crate::common::protocol::ApiKeys::INIT_PRODUCER_ID
+        );
+        assert!(ctx.sender.has_in_flight_request());
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "sendProducerData (:344) is not reached in this iteration"
+        );
+
+        // The second iteration takes the `hasInFlightRequest()` exit at :460-463 and
+        // still does not produce.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+        assert!(!future.is_done());
+    }
+
+    /// Falling through past `Sender.java:335` to `sendProducerData` at `:344` once a
+    /// producer id is held and nothing is pending.
+    #[tokio::test]
+    async fn test_run_once_produces_once_a_producer_id_is_held() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        ctx.append_to_accumulator(&tp0).await;
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 13131, 1));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the iteration that acquires the producer id returns at :334"
+        );
+
+        // Nothing pending and nothing in flight, so the block falls through.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            *ctx.sender.client().requests().front().expect("in flight").api_key(),
+            crate::common::protocol::ApiKeys::PRODUCE
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+    }
+
+    /// `Sender.java:266-296`: an idempotent producer still in `ABORTABLE_ERROR` when
+    /// the Sender shuts down force-closes instead of spinning.
+    ///
+    /// `hasOngoingTransaction()` is true for an idempotent producer in that state
+    /// (`TransactionManager.java:1012`), so the second shutdown loop is entered and
+    /// calls `beginAbort()`, whose `ensureTransactional()` guard rejects it; Java's
+    /// `catch` sets `forceClose`, which is the only thing that ends the loop.
+    #[tokio::test]
+    async fn test_shutdown_force_closes_when_begin_abort_is_rejected() {
+        let mut ctx = SenderTestContext::idempotent();
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::ClusterAuthorizationFailed, -1, -1));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_abortable_error());
+
+        // Stop the main loop without force-closing, so `run()` proceeds to the
+        // shutdown loops with the abortable error outstanding.
+        ctx.sender.running.store(false, Ordering::Release);
+        assert!(!ctx.sender.force_close.load(Ordering::Acquire));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), ctx.sender.run())
+            .await
+            .expect("run() must terminate rather than spin on hasOngoingTransaction()");
+
+        assert!(
+            ctx.sender.force_close.load(Ordering::Acquire),
+            "the rejected beginAbort must force-close (Sender.java:274-278)"
+        );
+        // The `runOnce` in the loop body still executes, and it is what recovers the
+        // state — pinning the body order (abort attempt, then runOnce).
+        assert!(!ctx.transaction_manager().lock().unwrap().has_abortable_error());
     }
 
     /// A response with no body at all is fatal
