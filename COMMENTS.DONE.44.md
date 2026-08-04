@@ -1,3 +1,223 @@
+# Critic 44 - Milestone 11 Phase 4 - pass 3 RESOLVED
+
+One finding, conceded and fixed. Nothing disputed.
+
+| Issue | Severity | Resolution |
+|---|---|---|
+| 10 - a `Translated from` header credits the sibling method's line range | Missing requirement (records) | header now reads `(Java 715-735 - the produce-request variant is at Java 2159-2179)`; verified 715 is the declaration (714 is `@Test`) and 715..735 the brace extent |
+
+**Why it escaped the pass-2 sweep**, more narrowly than the brief framed it. Two causes,
+both needed:
+
+  1. The rewrite and the audit shared one regex that required the range to *close* the
+     parenthesis (`\((?:Java )?(\d+)-(\d+)\)`). This header's range is followed by a
+     clause inside the same parentheses, so it was in neither the rewritten nor the
+     audited set. The pass-2 "0 mismatches" therefore held over a set of 33, not 34.
+  2. Even inside the audited set, a rewrite keyed on method name cannot repair a range
+     belonging to a different method - only comparing name against range catches that,
+     which is the Critic's point.
+
+Re-audited with a broadened matcher (first `(Java A-B` within 200 chars of the name, paren
+need not close): **34 citations, 1 mismatch, now fixed.** The one remaining difference is
+deliberate and not a defect: `update_metadata_with_leader_epochs`'s doc cites
+`(Java 3325-3339)`, the specific `metadataUpdateWithIds` calls it mirrors, while the test's
+own header cites the whole method at `3308-3394`. A sub-range citation on a helper is
+narrower on purpose.
+
+The accounting block's convention line now records both the header scope and this failure
+mode, so the next sweep does not repeat either.
+
+Verification was scoped down deliberately: `cargo build` 0, `cargo test` 0 (2283 unit
+passed, 0 failed, 2 ignored; all other targets green), `cargo xtask format-check` 0,
+`cargo xtask lint` 0. The change is one doc line in a test header plus a comment in the
+accounting block - no executable path, no wire format, no send path - so the Docker-backed
+integration suite and the serial `producer_perf_test` runs would exercise nothing this
+diff can affect. Both were green on the immediately preceding commit.
+
+The pass-3 rule suggestion is recorded verbatim below and deliberately **not** acted on:
+`agent-roles.md` 2 routes rule changes through the process, not the Actor.
+
+---
+
+# Critic 44 — Milestone 11 Phase 4, pass 3
+
+Reviewed `521b36e..625c931` (`86a2b6c` + a memory commit) against `Sender.java`,
+`SenderTest.java`, `NetworkClient.java`, `Selector.java`, `KafkaProducer.java`
+(Apache Kafka 4.2). Numbering continues from pass 2.
+
+**One finding.** Issues 6, 8 and 9 are fully resolved. Issue 7's accounting is
+resolved and is now self-verifying — the residual is a single citation in a
+`Translated from` header that the fix's own normalisation did not reach.
+
+## Verified resolved
+
+- **Issue 6 — the restored test is a literal translation and it pins the arm it
+  claims to.** `test_epoch_bump_on_out_of_order_sequence_for_next_batch_when_batch_in_flight_fails`
+  matches Java 1105-1228 statement for statement: every `assertPartitionState`
+  (11), both `hasStaleProducerIdAndEpoch` assertions and the `assertFalse` at the
+  end, every `sendIdempotentProducerResponse` with the same
+  `(epoch, sequence, tp, error, offset, logStartOffset)` tuple, and the same
+  `runOnce` counts including the double call after the `OUT_OF_ORDER_SEQUENCE_NUMBER`
+  response. Nothing weakened, nothing added.
+
+  The "no production defect hid behind the omission" claim holds structurally:
+  `86a2b6c` changes production code in exactly two hunks — the close-time comment
+  (`sender.rs:592-618`) and the unmute deletion (`:1479-1499`) — and every other
+  hunk is inside `mod tests`, so the restored test passes against unchanged
+  production logic. I re-ran it and its sibling: both green.
+
+  The mutation claim also holds on derivation. With `retries = 1`, tp1's second
+  `NOT_LEADER_OR_FOLLOWER` leaves `attempts() == 1`, so
+  `let adjust = batch.attempts() < self.retries` (`sender.rs:1749`) is `false` and
+  `handle_failed_batch`'s `else if adjust_sequence_numbers` arm does not fire —
+  which is what makes the immediately following
+  `assert_partition_state(.., tp1, PRODUCER_ID, 0, 2, Some(0))` plus
+  `has_stale_producer_id_and_epoch(tp1)` true. Forcing `adjust = true` would call
+  `request_idempotent_epoch_bump_for_partition(tp1)`, so the next `run_once` bumps
+  to epoch 2 and the later `assert_partition_state(.., tp1, PRODUCER_ID, 1, 1, None)`
+  fails. The arm carries Java's own comment (the contract) and the test carries the
+  observable consequence, so the two genuinely pin each other.
+
+- **Issue 7 — the accounting is rebuilt and reproducible.** I ran both shipped
+  commands over this tree: `/tmp/java.txt` has **52** lines, `/tmp/rust.txt` has
+  **54**, `comm -23` is **empty**, and `comm -13` yields exactly
+  `testNoBufferReuseWhenBatchExpires` and
+  `testProducerBatchRetriesWhenPartitionLeaderChanges` — precisely what the block
+  claims. Both are marked `**outside the 52**` where they appear, each with its
+  reason. Independently: the three groups hold 33 / 18 / 3 entries (= 54), every
+  name is unique, no name is in two groups, and **all 54** entry line numbers are
+  the `public void` declaration line, matching the block's own
+  "Line numbers are the `public void` declaration line throughout". The
+  reclassification is corrected and names its own earlier error, and
+  `testUnresolvedSequencesAreNotFatal`'s manager citation is now `SenderTest.java:1537`
+  (correct). PLAN §9.19 agrees with the block on the three blocked entries and on
+  the 33 + 18 + 3 = 54, 54 − 2 = 52 derivation.
+
+  The header normalisation: I checked **all 34** `Translated from …
+  SenderTest.<name> … (Java A-B)` citations mechanically against each method's
+  declaration and closing-brace lines. **32 match exactly.** The deliberate
+  sub-range survived and is now correct: `update_metadata_with_leader_epochs`'s
+  `(Java 3325-3339)` brackets the leader-epoch comment, the two epoch locals and
+  the first `metadataUpdateWithIds(..)` call through its closing `}));` at 3339 —
+  the old `3325-3338` stopped one line short at the inner `}`. The 34th is issue 10
+  below.
+
+- **Issue 8 — the unmute is gone, and the pin has teeth.** `fail_expired_batches`
+  now unmutes in neither arm; `complete_batch_for` (`sender.rs:1789`) holds the
+  only unmute, matching Java's single `unmutePartition` site — I confirmed
+  `grep -n unmutePartition Sender.java` returns exactly one line, `:737`, and that
+  the mute block is `:419-425` with the `mutePartition` call at `:423` (the cited
+  `:418-424` brackets it). `test_expiring_an_undrained_batch_does_not_unmute_the_partition`
+  builds the A/B/C arrangement the finding described and it is genuinely three
+  batches: a 16 KiB value against a 16 KiB `batch_size` fills each batch on its
+  first record, and the test asserts `deque_size == 2` for B and C before the
+  expiry. The timing lands as required — A and B at `created_ms = 1000`, C at
+  2400, expiry check at 2600 with `DELIVERY_TIMEOUT_MS = 1500`, so A and B are
+  expired and C is not. The load-bearing assertion is the *second* `run_once` after
+  the expiry: `in_flight_request_count() == 1` with C still queued. Pre-fix that
+  would read 2, because C is full and unbacked-off and the only thing keeping it
+  undrained is the mute. The test then shows A's response releasing the mute and C
+  going out. Real mutation teeth.
+
+- **Issue 9 — the record now describes Java correctly.** I re-verified every claim:
+  `NetworkClient.close()` is `selector.close(); metadataUpdater.close();
+  telemetrySender.close();` (`NetworkClient.java:736-746`) with no
+  `inFlightRequests` walk and no `completeResponses`; `Selector.close(String id)`
+  (`:886-892`) closes with `CloseMode.DISCARD_NO_NOTIFY` and even carries the
+  comment "There is no disconnect notification for local close"; the mode is
+  defined at `Selector.java:96` as "discard any outstanding receives, no disconnect
+  notification"; and the `BufferPool` is constructed inline in `KafkaProducer`'s
+  constructor at `KafkaProducer.java:438`, reachable only through the accumulator.
+  So there is genuinely no release path in Java, and neither the comment nor
+  §10.6 8b now asserts any Java mechanism that does not exist — both frame the
+  Rust release as a deliberate improvement and say why it matters (it is what makes
+  `available_memory()` usable as the oracle in the two leak tests).
+
+## Adjudication: the `!has_inflight_batches` guard is not a gap worth filing
+
+The Actor's reasoning is sound, and I would add one supporting point it did not
+make.
+
+Java documents the redundancy itself: `maybeUpdateProducerIdAndEpoch`'s own comment
+says "This should be only done when all its in-flight batches have completed. This
+is guarantee in `shouldStopDrainBatchesForPartition`" — so Java also carries a
+condition its sole production caller has already established. The Rust caller is
+the same one (`maybe_assign_producer_state`), and the gate that makes the second
+conjunct unreachable **is** pinned: `run_epoch_bump_with_a_healthy_partition`
+asserts `deque_size(&tp1) == 1` under the comment "New tp1 batches must not be
+drained while tp1 has in-flight requests using the old epoch —
+`shouldStopDrainBatchesForPartition`'s stale-epoch gate" (`sender.rs:4432-4436`).
+
+The point that makes it clearly not a gap: in this port the guard is also what
+licenses the `&mut []` pool argument at `record_accumulator.rs:1166`. If the guard
+were dropped and the entry did track batches, `start_sequences_at_beginning` →
+`reset_sequence_numbers` returns `Err` for a tracked key with no supplied batch
+(rules §7, `txn_partition_entry.rs:208-212`) — the drain propagates it and
+`run_once_logging_errors` logs it. So the mutation fails loudly rather than
+corrupting sequences silently, which is the property that makes an unpinned
+defensive check acceptable. No finding.
+
+---
+
+## Issue 10: one `Translated from` header credits the wrong Java method's line range
+
+- **File**: `src/producer/internals/sender.rs:5691-5695`
+- **Severity**: Missing Requirement (records)
+- **Java Reference**: `SenderTest.java:715-735`
+  (`testClusterAuthorizationExceptionInInitProducerIdRequest`) vs `:2159-2179`
+  (`testClusterAuthorizationExceptionInProduceRequest`)
+- **Description**: The header reads
+
+      /// Translated from
+      /// `SenderTest.testClusterAuthorizationExceptionInInitProducerIdRequest`
+      /// (Java 2158-2179 — the `InitProducerId` variant at Java 714-735): …
+
+  `2158-2179` is not that method. It is
+  `testClusterAuthorizationExceptionInProduceRequest` — `@Test` at 2158,
+  declaration 2159, closing brace 2179 — which is a *different* test with the
+  opposite outcome (cluster authorization on a produce request is **fatal**; on
+  `InitProducerId` it is **abortable**) and which is translated separately 55 lines
+  below in the same file, correctly cited as `(Java 2159-2179)`. So two Rust tests
+  now cite the same Java range, and a reader following the first lands on the
+  second's source.
+
+  The named method is at `SenderTest.java:715-735`, and the Rust test body does
+  translate that one — it prepares an `InitProducerId` response carrying
+  `CLUSTER_AUTHORIZATION_FAILED`, asserts `has_error()` with epoch `-1`, then
+  recovers, retries and sends successfully, which is Java 715-735 statement for
+  statement. The parenthetical's `714` is the `@Test` line, one short of the
+  declaration; the same commit's accounting entry for this method is `(715)` and
+  the block states that declaration lines are used throughout.
+
+  This is the only exception across all 34 `Translated from` citations and all 54
+  accounting entries, both of which I checked mechanically. It survived the audit
+  because the normalisation rewrote the numeric range for a given method name, and
+  a range that belongs to a *different* method cannot be fixed by that — it can
+  only be noticed by comparing the name against the range, which is what the
+  accounting block's own `comm` check does for entries and nothing does for
+  headers. The fix's completeness claim over the headers is therefore one short.
+- **Expected**: `(Java 715-735 — the produce-request variant is at Java 2159-2179)`,
+  and, if the header sweep is to be claimable as complete, the same
+  name-against-range check the accounting block ships for its entries.
+- **Actual**: The header attributes `…InProduceRequest`'s range to
+  `…InInitProducerIdRequest`, and its secondary range is the `@Test` line rather
+  than the declaration.
+
+---
+
+## Nothing else outstanding
+
+Every other item in the pass-2 brief verified clean, including the two derivation
+commands reproducing their claimed output on this tree, the 33/18/3 group
+arithmetic, both out-of-scope markings, the restored test's fidelity and mutation
+sensitivity, the A/B/C pin, and the corrected Java claims in issue 9's comment and
+§10.6 8b. DoD clauses 1 and 3 — the two that failed in pass 2 — now pass: the
+Java-divergent unmute is gone and the `SenderTest` accounting is complete and
+reproducible. §9.14 not re-filed.
+
+
+---
+
 # Critic 44 - Milestone 11 Phase 4 - pass 2 RESOLVED
 
 All four findings of Critic 44 pass 2 were conceded and fixed in one fixup commit.

@@ -5690,7 +5690,7 @@ mod tests {
 
     /// Translated from
     /// `SenderTest.testClusterAuthorizationExceptionInInitProducerIdRequest`
-    /// (Java 2158-2179 — the `InitProducerId` variant at Java 714-735): a cluster
+    /// (Java 715-735 — the produce-request variant is at Java 2159-2179): a cluster
     /// authorization failure on `InitProducerId` is *abortable*, so the producer
     /// recovers to `UNINITIALIZED`, retries and works again.
     #[tokio::test]
@@ -6569,7 +6569,12 @@ mod tests {
     // the 52 and carried anyway (each says so where it appears). 54 − 2 = 52, so every
     // in-scope method is placed exactly once and nothing else is owed.
     //
-    // Line numbers are the `public void` declaration line throughout.
+    // Line numbers are the `public void` declaration line throughout, here and in the
+    // `Translated from` header of every test above. Checking those headers requires
+    // comparing each method *name* against its range, not just rewriting the range for a
+    // given name: Critic 44 issue 10 was a header that cited a sibling method's range
+    // entirely, and it also escaped the first sweep because its range is followed by a
+    // clause inside the same parentheses rather than closing them.
     //
     // TRANSLATED IN PHASE 4 (33 entries — 32 of the 52, plus one out-of-scope):
     //   `testInitProducerIdRequest` (620),

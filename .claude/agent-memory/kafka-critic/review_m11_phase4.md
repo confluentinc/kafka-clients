@@ -141,3 +141,52 @@ difference is `maybe_add_partition`, whose idempotent body allocates nothing);
 the split retry backoffs (`SenderTest.java:3860` vs `:3864` — citations correct);
 `MockClient::set_max_in_flight_one` vs the anonymous subclass at `:3956-3973`;
 `test_producer_batch_retries_when_partition_leader_changes` vs Java 3325-3390.
+
+## Pass 3 — one finding; the fix made its own accounting reproducible
+
+Loop: 5 → 4 → 1. The Actor answered issue 7 not by patching the counts but by
+shipping the derivation: a stated scope criterion (52 = every `SenderTest` method
+whose body references a `TransactionManager`), two `awk`/`grep`/`comm` commands
+inside the comment block, and every count read off the lists. **Run the shipped
+commands — that is the whole review of that artifact.** Mine reproduced 52 / 54 /
+empty `comm -23` / exactly the 2 out-of-scope names, and an independent script
+confirmed 33+18+3=54, all names unique, no name in two groups, and all 54 entry
+line numbers equal to the `public void` declaration line.
+
+14. **A normalisation script fixes numbers, not attributions.** The one residual
+    across 34 `Translated from` headers was
+    `testClusterAuthorizationExceptionInInitProducerIdRequest` cited as
+    `(Java 2158-2179)` — which is its *sibling*
+    `…InProduceRequest` (declaration 2159), separately translated in the same file
+    with that same range. A script that rewrites `(Java A-B)` per method name
+    cannot catch a range belonging to a different method; only a name-against-range
+    comparison can. The reusable check, which finds all of these in one command:
+    build `name -> (decl_line, first '    }' at-or-after)` from the Java file by
+    regex, then match every `` `SenderTest.<name>` … (Java A-B) `` in the Rust file
+    against it. Adjacent tests sharing a name prefix are where this lands.
+
+15. **Don't eyeball line numbers off a `sed` range — the off-by-one will be
+    yours.** I nearly filed the restored test's `(Java 1105-1228)` as off by one
+    after mis-assigning rows in `sed -n '1103,1230p'` output; `grep -n` on the
+    declaration showed 1105 is correct. Locate declarations with `grep -n`, or by
+    script, never by counting displayed lines.
+
+16. **Adjudicating "no test catches this mutation": look for the loud-failure
+    property, not just the pinned gate.** The `!has_inflight_batches` guard in
+    `maybe_update_producer_id_and_epoch` is unreachable-when-false behind a gate
+    that *is* pinned (`sender.rs` "the new batch stays queued"), Java documents the
+    same redundancy in its own comment, **and** in this port the guard is what
+    licenses the `&mut []` pool argument — so violating it returns `Err` from
+    `start_sequences_at_beginning` (rules §7) rather than corrupting sequences. An
+    unpinned defensive check is acceptable when its violation fails loudly; say so
+    rather than filing a coverage gap.
+
+**Verified resolved in pass 3 — don't re-check:** the restored test vs Java
+1105-1228 (11 `assertPartitionState`s, both stale-epoch assertions, same `runOnce`
+counts) and its `adjust = attempts() < retries` mutation coupling;
+`fail_expired_batches` unmuting in neither arm with `Sender.java:737` the only
+`unmutePartition`; the A/B/C pin (16 KiB values against a 16 KiB `batch_size` force
+three batches; the second post-expiry `run_once` is the load-bearing assertion);
+issue 9's Java claims (`NetworkClient.java:736-746`, `Selector.java:886-892` +
+`:96`, `KafkaProducer.java:438` — all correct now); the deliberate `(Java
+3325-3339)` sub-range ending at `}));`.
