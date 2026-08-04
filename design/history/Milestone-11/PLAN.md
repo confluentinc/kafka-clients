@@ -1054,10 +1054,7 @@ which is already a `BTreeSet` for exactly that reason).
 `AddPartitionsToTxnRequest` in Java carries `Builder.forBroker`,
 `normalizeRequest`, `allVerifyOnlyRequest`, `partitionsByTransaction`, and
 `errorResponseForTransaction`. All five construct or inspect a *received* v4+
-request, which only a broker does — verified by caller analysis over the whole
-Kafka tree: `core/.../KafkaApis.scala` and
-`server/.../AddPartitionsToTxnManager.java` only, nothing under
-`clients/src/main`.
+request, which only a broker does.
 
 Verified callers, none under `clients/src/main`: `forBroker` →
 `AddPartitionsToTxnManager.java:343`; `normalizeRequest` → `KafkaApis.scala:1852`;

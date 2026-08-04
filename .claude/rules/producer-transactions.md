@@ -484,3 +484,49 @@ a missing-error bug into a spurious-error bug across all 197 generated types.
     silence is correct.
   - An all-versions serialize/parse round-trip test must therefore be
     version-aware for ignorable fields, and must state which field and why.
+
+## 12. Translate a builder's `super(...)` call literally — never default to `latest_version()`
+
+A Rust request builder's `latest_allowed_version` MUST mirror whichever Java
+`AbstractRequest.Builder` constructor its Java counterpart invokes:
+
+| Java `super(...)` | Rust `latest_allowed_version` |
+|---|---|
+| `super(apiKey)` | `latest_version_with_unstable(false)` |
+| `super(apiKey, enableUnstableLastVersion)` | pass the same flag through |
+| `super(apiKey, oldest, latest)` | the literal `latest` value |
+
+`super(apiKey)` delegates to `Builder(apiKey, false)` → `latestVersion(false)`
+(`AbstractRequest.java:46-51`), whose own comment reads "any supported and
+*released* version".
+
+**Why:** `latest_version()` hardwires `highest_supported_version(true)`, which
+includes an unreleased version whenever the spec sets
+`"latestVersionUnstable": true`. That produced Critic 42 finding 1:
+`InitProducerIdRequestBuilder` offered v6 where Java caps at v5, and v6 is the
+KIP-939 2PC version whose new fields are **non-ignorable**, so it compounded with
+the §9.1 generator gap.
+
+Only five APIs currently carry the flag (`OFFSET_COMMIT`, `OFFSET_FETCH`,
+`INIT_PRODUCER_ID`, `STREAMS_GROUP_HEARTBEAT`, `STREAMS_GROUP_DESCRIBE`), so for
+every other API the two accessors agree **today**. Write the faithful form anyway:
+the flag tracks whether a version is still under development and flips as versions
+release, so a coincidence today is not a guarantee tomorrow.
+
+**How to apply:**
+
+  - Check the Java builder's `super(...)` call, not the spec flag. The call is the
+    contract; the flag is why it matters.
+  - Where Java deliberately uses the unstable-inclusive `latestVersion()` —
+    `OffsetCommitRequest.java:56`, `OffsetFetchRequest.java:64` — translate *that*
+    as `latest_version()` and say so at the site, so a reviewer can tell
+    "deliberate" from "not yet reached".
+  - Apply uniformly across a phase. Mixed treatment with no stated criterion is
+    itself a defect (Critic 42 finding 6): before the first fixup all five txn
+    builders were uniformly wrong, which was at least legible.
+
+**Anti-patterns to flag in review:**
+
+  - `latest_version()` in a builder whose Java counterpart calls `super(apiKey)`.
+  - An explicit-range Java `super(apiKey, oldest, latest)` translated as an
+    accessor call instead of the literal bound.

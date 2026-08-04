@@ -109,7 +109,9 @@ impl AddOffsetsToTxnRequestBuilder {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ADD_OFFSETS_TO_TXN.oldest_version(),
-            latest_allowed_version: ApiKeys::ADD_OFFSETS_TO_TXN.latest_version(),
+            // Mirrors Java's `super(ApiKeys)` → `Builder(apiKey, false)` →
+            // `latestVersion(false)`: released versions only. Rules §12.
+            latest_allowed_version: ApiKeys::ADD_OFFSETS_TO_TXN.latest_version_with_unstable(false),
         }
     }
 

@@ -392,9 +392,23 @@ mod tests {
     #[test]
     fn test_builder_offers_only_released_versions() {
         let builder = EndTxnRequestBuilder::new(data(true), true);
+        let released = ApiKeys::END_TXN.latest_version_with_unstable(false);
+
+        assert_eq!(builder.latest_allowed_version(), released);
+
+        // `END_TXN`'s spec sets `latestVersionUnstable: false`, so the two
+        // accessors agree and the explicit `false` form is a no-op *today*. This
+        // asserts that equality rather than restating the production expression:
+        // if the flag ever flips upstream (as `INIT_PRODUCER_ID`'s is, because its
+        // v6 is unreleased), this fails and points a reader at the reason the
+        // explicit form was chosen — while production stays correct with no
+        // change. Without it the test could only detect an edit to the line above.
         assert_eq!(
-            builder.latest_allowed_version(),
-            ApiKeys::END_TXN.latest_version_with_unstable(false)
+            ApiKeys::END_TXN.latest_version(),
+            released,
+            "END_TXN's last version is expected to be released; if it is not, the \
+             builder's explicit `false` form is now load-bearing rather than \
+             cosmetic — see rules §12"
         );
     }
 }
