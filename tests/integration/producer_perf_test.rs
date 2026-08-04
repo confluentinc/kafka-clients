@@ -400,10 +400,10 @@ fn read_rss_bytes() -> u64 {
         Err(_) => return 0,
     };
     for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            if let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
-                return kb * 1024;
-            }
+        if let Some(rest) = line.strip_prefix("VmRSS:")
+            && let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok())
+        {
+            return kb * 1024;
         }
     }
     0
@@ -871,7 +871,7 @@ async fn producer_perf_test() {
             },
         }
 
-        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed) % config.limit_rps == 0 {
+        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed).is_multiple_of(config.limit_rps) {
             let elapsed = test_start.elapsed();
             if elapsed < next_check_time {
                 tokio::time::sleep(next_check_time - elapsed).await;

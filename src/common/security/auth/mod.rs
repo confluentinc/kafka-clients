@@ -14,6 +14,8 @@
 
 //! Security authentication types (org.apache.kafka.common.security.auth).
 
+pub mod kafka_principal;
 pub mod security_protocol;
 
+pub use kafka_principal::KafkaPrincipal;
 pub use security_protocol::SecurityProtocol;

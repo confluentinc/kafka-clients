@@ -315,3 +315,86 @@ Producer that accumulates messages into batches for Produce RPC.
 - Phase 4: SASL client authenticator state machine
 - Phase 5: ChannelBuilders factory for security protocol dispatch
 - Phase 6: SSL and SASL PLAIN integration tests with custom Docker image
+
+---
+
+## Milestone 11 — AdminClient (Tier 1 Phase 1, 2026-07-16)
+
+> The design notes above are stale (they predate Producer/Consumer/Admin).
+> This section captures the AdminClient design decisions. Full rules live in
+> `.claude/rules/admin-client.md`; the multi-tier plan in
+> `design/history/Milestone-11/PLAN.md`. **Scope for this task: Rust core +
+> tests only — C FFI / Python bindings are deferred to a separate future
+> task** (that future task should reuse PR #116's `src/ffi/common.rs` async
+> dispatcher).
+
+**Key architecture decision — sync-returning-futures, not async.** Unlike the
+Consumer (whose `poll()` itself blocks and is therefore `async`), every Java
+`Admin` RPC returns immediately with a `*Result` wrapping one `KafkaFuture<T>`
+per key; the network I/O happens on a background task and the caller opts into
+blocking at `KafkaFuture.get()`. So Admin's per-RPC methods are plain sync
+`fn` in Rust; only `close()` (which joins the background task in Java) is
+`async fn`. No `#[async_trait]` on per-RPC methods or internal types.
+
+**Dispatch + background task.** One `tokio::spawn` per client instance runs a
+generic `AdminClientRunnable<C: KafkaClient>` (mirrors the producer `Sender<C>`),
+driving a `Call`/`NodeProvider` retry engine over the shared `NetworkClient`.
+`AdminMetadataManager` handles bootstrap + controller/broker refresh. (The
+`AdminApiDriver`/lookup-strategy engine for coordinator/partition-leader RPCs
+arrives in later tiers; Phase 1's topic RPCs use the plain `Call` path.)
+
+**Completable `KafkaFuture`.** `KafkaFuture` was extended from pre-resolved-only
+to fully completable (`KafkaFutureImpl<T>`: complete / complete_exceptionally /
+when_complete + `all_of` / `then_apply` / `then_apply_try` / `join_map`),
+underpinning the per-key result model.
+
+**Phase 1 RPCs**: `create_topics`, `delete_topics`, `list_topics`,
+`describe_topics` (by-name and by-id via the Metadata API). Quota-exceeded
+retries carry `ThrottlingQuotaExceededException`/`throttleTimeMs` forward and
+re-complete on final timeout, matching Java's `maybeCompleteQuotaExceededException`.
+
+**Phase 2 (2026-07-17) — `create_partitions`, `delete_records`, and the
+`AdminApiDriver` engine.** `create_partitions` is a plain controller `Call`.
+`delete_records` required the second dispatch pattern, so the `AdminApiDriver` /
+`AdminApiHandler` / `AdminApiLookupStrategy` engine (with `PartitionLeaderStrategy`
++ `PartitionLeaderCache`) was pulled forward from the originally-planned Phase 5:
+a two-stage lookup→fulfillment driver that resolves per-partition leaders, batches
+fulfillment requests by node, and unmaps + re-looks-up keys on stale-leader /
+disconnect errors (via the new `Call::set_maybe_retry_fn` / `MaybeRetryOutcome`
+hook). It runs on the same single bg task (no per-key/request `tokio::spawn`) and
+now underpins Tier 1 Phase 5, all of Tier 2's `CoordinatorStrategy`, and Tier 3.
+
+**Phase 3 (2026-07-17) — cluster & config administration.** `describe_cluster`,
+`describe_configs`, `incremental_alter_configs`, `list_config_resources`, all on
+the plain `Call` path. Key design point preserved from Java: **per-resource-type
+routing** — `describe_configs`/`incremental_alter_configs` send broker /
+broker-logger resources to that specific broker node and topic/other resources to
+the controller or least-loaded node, rather than a single node. `describe_cluster`
+decodes `authorized_operations` via `common::utils::from_32_bit_field` +
+`common::acl::AclOperation`. Introduced `common::config::ConfigResource` and
+`admin::AlterConfigOp`; the `ListConfigResourcesRequest` wire wrapper is shared
+with Tier 3's future `listClientMetricsResources`.
+
+**Phase 4 (2026-07-17) — log directories.** `describe_log_dirs` (per-broker
+fan-out), `alter_replica_log_dirs` (replica→logdir assignments routed per
+destination broker), `describe_replica_log_dirs` (built on `DescribeLogDirsRequest`,
+reshaped into current/future-dir `ReplicaLogDirInfo`). All plain `Call` path.
+Introduced `common::TopicPartitionReplica` and `admin::LogDirDescription`/`ReplicaInfo`.
+The integration suite exercises a genuine cross-directory replica move via a
+broker fixture configured with two `KAFKA_LOG_DIRS`.
+
+**Phase 5 (2026-07-17) — elections, reassignments, offsets (completes Tier 1).**
+`elect_leaders`, `alter_partition_reassignments`, `list_partition_reassignments`
+on the plain controller `Call` path; `list_offsets` on the `AdminApiDriver` +
+`PartitionLeaderStrategy` engine (built in Phase 2) via a new `ListOffsetsHandler`
+— the plan's canonical first-class AdminApiDriver user. The Consumer module's
+existing `ListOffsetsRequest`/`Response` wrapper was reused (no duplicate wire
+type). Introduced `common::ElectionType`, `admin::OffsetSpec`,
+`NewPartitionReassignment`/`PartitionReassignment`.
+
+**Tier 1 complete.** Both admin dispatch patterns are implemented and exercised:
+(1) the `Call`/`NodeProvider` retry engine for single-request RPCs, and (2) the
+multi-step `AdminApiDriver`/`AdminApiHandler`/`AdminApiLookupStrategy` +
+`PartitionLeaderStrategy` lookup→fulfillment engine for per-leader RPCs. Tier 2
+(consumer groups & offsets) will add `CoordinatorStrategy` on top of the same
+engine.
