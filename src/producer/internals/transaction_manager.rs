@@ -394,10 +394,19 @@ impl fmt::Debug for TxnRequestHandler {
 /// and not consistently guarded by Java's `synchronized` blocks, because only
 /// the Sender thread touches them. They must NOT go behind the shared mutex.
 ///
-/// Phase 3 introduces no mutex: this struct is plain and unshared, so every
-/// field is a plain field and the rule is not yet engaged. Phase 4 wraps the
-/// manager as `Arc<Mutex<TransactionManager>>` (see PLAN §6.3) and is where the
-/// split has to be made; the fields that belong to the Sender are marked below.
+/// Phase 3 introduces no mutex, so the rule cannot be *violated* here — but it
+/// is already **constrained**, and that is the operative point. PLAN §10.5
+/// deviation 2 hosts `on_complete` / `handle_response` on the manager (Java's
+/// inner class reaches its owner through an implicit `TransactionManager.this`,
+/// which Rust cannot express), so every touch of `pending_requests` and
+/// `in_flight_request_correlation_id` is a `&mut TransactionManager` method.
+/// Complying with §2 in Phase 4 is therefore not a field move: it means
+/// reshaping ten signatures. PLAN §10.5 deviation 7 names them and PLAN
+/// §Phase-4 budgets the work.
+///
+/// Phase 4 wraps the manager as `Arc<Mutex<TransactionManager>>` (see PLAN
+/// §6.3) and is where the split has to be made; the fields that belong to the
+/// Sender are marked below.
 ///
 /// # Send-path allocations
 ///
@@ -603,6 +612,32 @@ impl TransactionManager {
         self.current_state
     }
 
+    /// Enqueues an `InitProducerId` handler unconditionally and hands back its
+    /// result, so tests can observe the bulk-failure methods
+    /// ([`Self::fail_pending_requests`], [`Self::authentication_failed`],
+    /// [`Self::close`]) with a non-empty queue.
+    ///
+    /// Java's tests reach this by driving `Sender.runOnce` against a
+    /// `MockClient`; `enqueue_request` is private and
+    /// `bump_idempotent_epoch_and_reset_id_if_needed` is state-guarded, so a
+    /// test-only door is needed instead.
+    #[cfg(test)]
+    fn force_enqueue_init_producer_id_for_test(&mut self) -> Arc<TransactionalRequestResult> {
+        let mut request_data = InitProducerIdRequestData::new();
+        request_data.set_transactional_id(None).set_transaction_timeout_ms(i32::MAX);
+        let handler = TxnRequestHandler::new(
+            "InitProducerId",
+            self.retry_backoff_ms,
+            TxnRequestHandlerKind::InitProducerId {
+                builder: InitProducerIdRequestBuilder::new(request_data),
+                is_epoch_bump: false,
+            },
+        );
+        let result = Arc::clone(handler.result());
+        self.enqueue_request(handler);
+        result
+    }
+
     /// Moves to [`State::FatalError`].
     ///
     /// Corresponds to `transitionToFatalError(RuntimeException)` (Java 541).
@@ -651,6 +686,115 @@ impl TransactionManager {
 
         kafka_info!(self.log_context, "Transiting to abortable error state due to {}", error);
         self.transition_to(State::AbortableError, Some(error), caller)
+    }
+
+    /// Moves back to [`State::Uninitialized`], clearing [`Self::last_error`], so
+    /// a fresh `InitProducerId` can be requested.
+    ///
+    /// Translated from `transitionToUninitialized(RuntimeException)` (Java 756).
+    ///
+    /// This is the **exit** from [`State::AbortableError`] on the idempotent
+    /// path, and the reason the table admits `UNINITIALIZED ← ABORTABLE_ERROR`
+    /// (Java 165). `Sender.runOnce` tests `hasAbortableError()`
+    /// (`Sender.java:325`) and calls `shouldHandleAuthorizationError(lastError)`
+    /// (`:351-360`), which runs [`Self::fail_pending_requests`],
+    /// `maybeAbortBatches` and then this method. For an idempotent producer the
+    /// `instanceof` test at `Sender.java:352` is **always** satisfied — the only
+    /// entry to `ABORTABLE_ERROR` is `InitProducerIdHandler`'s authorization arm
+    /// (Java 1524-1528), whose `lastError` is exactly one of the two exceptions
+    /// that test matches — so Java always recovers here. The Java comment at
+    /// `Sender.java:348-350` states the intent: "transition the state to
+    /// UNINITIALIZED so that the user doesn't need to instantiate the producer
+    /// again."
+    ///
+    /// Takes no error argument. Java passes the exception solely to
+    /// `pendingTransition.result.fail(..)` (Java 759), and `pendingTransition` is
+    /// only ever set by `handleCachedTransactionRequestResult` (Java 1281), which
+    /// begins with `ensureTransactional()` — so it is always null for an
+    /// idempotent producer. Phase 5 adds the field and the parameter together,
+    /// the same treatment [`Self::maybe_resolve_sequences`] gets for its
+    /// [`Caller`].
+    pub(crate) fn transition_to_uninitialized(&mut self, caller: Caller) -> Result<(), KafkaError> {
+        self.transition_to(State::Uninitialized, None, caller)?;
+        // Redundant — `transition_to` already clears `last_error` on a
+        // non-error target — but Java assigns it explicitly (Java 761), so the
+        // assignment is kept rather than silently relied upon.
+        self.last_error = None;
+        Ok(())
+    }
+
+    /// Fails every pending transactional request with `error` and moves to
+    /// [`State::AbortableError`] once per request.
+    ///
+    /// Translated from `failPendingRequests(RuntimeException)` (Java 944).
+    /// Reached from `Sender.shouldHandleAuthorizationError`
+    /// (`Sender.java:354`), immediately before
+    /// [`Self::transition_to_uninitialized`].
+    ///
+    /// Java iterates the live `PriorityQueue` and does **not** clear it, so a
+    /// failed handler stays queued; that is preserved. Iterating by index rather
+    /// than with an iterator is required because
+    /// [`Self::transition_to_abortable_error`] needs `&mut self`, which Java gets
+    /// for free from the enclosing monitor.
+    pub(crate) fn fail_pending_requests(&mut self, error: &KafkaError, caller: Caller) -> Result<(), KafkaError> {
+        for index in 0..self.pending_requests.len() {
+            // Java: handler.abortableError(exception), i.e. result.fail(e) then
+            // transitionToAbortableError(e), per handler and in that order.
+            self.pending_requests[index].fail(error.clone());
+            self.transition_to_abortable_error(error.clone(), caller)?;
+        }
+        Ok(())
+    }
+
+    /// Fails every pending transactional request with `error` and moves to
+    /// [`State::FatalError`].
+    ///
+    /// Translated from `authenticationFailed(AuthenticationException)`
+    /// (Java 939). Reached from `Sender.runOnce`'s
+    /// `catch (AuthenticationException e)` (`Sender.java:336-340`), which wraps
+    /// the whole transactional block. Reachable on the idempotent path:
+    /// `maybeSendAndPollTransactionalRequest` takes the `coordinatorType == null`
+    /// branch (`Sender.java:479-484`) and still calls `awaitNodeReady`, i.e.
+    /// `NetworkClientUtils.awaitReady`, which throws `AuthenticationException`.
+    ///
+    /// Java's parameter is narrowed to `AuthenticationException`. This crate has
+    /// no `KafkaError` variant for that family — a genuine authentication failure
+    /// is an [`AuthenticationError`](crate::common::network::authentication_error::AuthenticationError)
+    /// carried inside an `io::Error` at the transport layer — so the parameter is
+    /// a plain [`KafkaError`] and the caller supplies it. The body treats it as a
+    /// `RuntimeException` in Java too.
+    pub(crate) fn authentication_failed(&mut self, error: &KafkaError, caller: Caller) -> Result<(), KafkaError> {
+        for index in 0..self.pending_requests.len() {
+            // Java: request.fatalError(e), i.e. result.fail(e) then
+            // transitionToFatalError(e).
+            self.pending_requests[index].fail(error.clone());
+            self.transition_to_fatal_error(error.clone(), caller)?;
+        }
+        Ok(())
+    }
+
+    /// Fails every pending transactional request because the producer is being
+    /// closed forcefully.
+    ///
+    /// Translated from `close()` (Java 949). Reached from `Sender.run`'s
+    /// `forceClose` branch (`Sender.java:287-293`).
+    ///
+    /// Not reachable from [`State::AbortableError`] — this is the forced-shutdown
+    /// path — but it is reachable for a purely idempotent producer, and without
+    /// it a force close would leave a pending `InitProducerId`'s
+    /// [`TransactionalRequestResult`] never completed, i.e. a hanging future,
+    /// which CLAUDE.md §5 forbids. Landed here rather than with its
+    /// `Sender`-side call site in Phase 6 for that reason.
+    pub(crate) fn close(&mut self, caller: Caller) -> Result<(), KafkaError> {
+        let shutdown_error = KafkaError::with_message(Errors::UnknownServerError, "The producer closed forcefully");
+        for index in 0..self.pending_requests.len() {
+            self.pending_requests[index].fail(shutdown_error.clone());
+            self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
+        }
+        // Java also fails `pendingTransition` here (Java 953-955); see
+        // [`Self::transition_to_fatal_error`] for why that field arrives in
+        // Phase 5.
+        Ok(())
     }
 
     /// Moves the state machine to `target`.
@@ -2081,18 +2225,85 @@ mod tests {
         assert!(manager.has_producer_id());
     }
 
-    /// Runs the two `TransactionManager` calls that `Sender.runOnce` makes
-    /// before sending, in that order (`Sender.java:313` then `:331`).
+    /// Whether `error` is one of the two authorization exceptions that
+    /// `Sender.shouldHandleAuthorizationError` matches (`Sender.java:352-353`).
+    ///
+    /// A `Sender` private method, modelled here so the test harness can mirror
+    /// `runOnce`'s transaction block. Phase 4 owns the real one.
+    fn should_handle_authorization_error(error: &KafkaError) -> bool {
+        matches!(
+            error.error(),
+            Errors::TransactionalIdAuthorizationFailed | Errors::ClusterAuthorizationFailed
+        )
+    }
+
+    /// Mirrors the whole `transactionManager != null` block of `Sender.runOnce`
+    /// (`Sender.java:311-335`), guards included, and reports whether `runOnce`
+    /// would have returned early.
     ///
     /// Java's tests reach the epoch bump through
     /// `runUntil(() -> transactionManager.producerIdAndEpoch().epoch == N)`,
-    /// which spins `Sender.runOnce`. The send path is Phase 4, so the two
-    /// manager entry points are invoked directly.
-    fn run_sender_transaction_phase(manager: &mut TransactionManager, batches: &mut InFlightBatchPool<'_>) {
+    /// which spins `Sender.runOnce`. The send path is Phase 4, so the manager
+    /// entry points are invoked directly — but in `runOnce`'s order and behind
+    /// `runOnce`'s guards, because skipping the `:318` / `:325` guards and going
+    /// straight from `:313` to `:331` produces exactly the wrong behaviour on the
+    /// abortable-error path (an `ABORTABLE_ERROR → INITIALIZING` attempt Java
+    /// never makes).
+    ///
+    /// The two `Sender`-side steps with no Phase-3 counterpart are skipped and
+    /// noted: `maybeAbortBatches` (`:320`, `:355`) needs the accumulator, and
+    /// `client.poll` (`:322`) needs the network client. Both are Phase 4.
+    fn run_sender_transaction_phase(
+        manager: &mut TransactionManager,
+        batches: &mut InFlightBatchPool<'_>,
+    ) -> SenderPhaseOutcome {
+        // Sender.java:313
         manager.maybe_resolve_sequences().expect("resolving sequences succeeds");
+
+        // Sender.java:315
+        let last_error = manager.last_error().cloned();
+
+        // Sender.java:318-323 — do not continue sending in a fatal state.
+        if manager.has_fatal_error() {
+            return SenderPhaseOutcome::ReturnedOnFatalError;
+        }
+
+        // Sender.java:325-327 → shouldHandleAuthorizationError, :351-360.
+        let authorization_error =
+            last_error.filter(|error| manager.has_abortable_error() && should_handle_authorization_error(error));
+        if let Some(error) = authorization_error {
+            // Java wraps the cause in an AuthenticationException (Sender.java:354).
+            manager
+                .fail_pending_requests(
+                    &KafkaError::fatal(Errors::SaslAuthenticationFailed, error.message()),
+                    Caller::Sender,
+                )
+                .expect("failing pending requests succeeds");
+            manager
+                .transition_to_uninitialized(Caller::Sender)
+                .expect("ABORTABLE_ERROR -> UNINITIALIZED is a valid transition");
+            return SenderPhaseOutcome::RecoveredFromAuthorizationError;
+        }
+
+        // Sender.java:331
         manager
             .bump_idempotent_epoch_and_reset_id_if_needed(batches, Caller::Sender)
             .expect("bumping the epoch succeeds");
+        SenderPhaseOutcome::Continued
+    }
+
+    /// Which arm of `Sender.runOnce`'s transaction block was taken.
+    ///
+    /// Test-harness only; Java's `runOnce` returns `void` and communicates this
+    /// through control flow.
+    #[derive(Debug, PartialEq, Eq)]
+    enum SenderPhaseOutcome {
+        /// `Sender.java:322` — returned because the manager is in a fatal state.
+        ReturnedOnFatalError,
+        /// `Sender.java:326` — returned after recovering to `UNINITIALIZED`.
+        RecoveredFromAuthorizationError,
+        /// Fell through to `:331` and beyond.
+        Continued,
     }
 
     // ---------------------------------------------------------------------
@@ -2259,7 +2470,135 @@ mod tests {
             assert!(result.is_completed());
             assert!(!result.is_successful());
             assert!(!manager.has_producer_id());
+
+            // While in ABORTABLE_ERROR every send is rejected (Java 438 →
+            // maybeFailWithError). This is the state the producer must be able to
+            // leave; see the recovery test below.
+            let send_error = manager
+                .maybe_add_partition(&tp0())
+                .expect_err("sends are rejected in an error state");
+            assert_eq!(
+                send_error.message(),
+                "Cannot execute transactional method because we are in an error state"
+            );
         }
+    }
+
+    /// An idempotent producer in `ABORTABLE_ERROR` recovers to `UNINITIALIZED`
+    /// on the next `Sender.runOnce` and acquires a fresh producer id.
+    ///
+    /// This is the exit path Issue 1 identified as missing. `Sender.runOnce`
+    /// tests `hasAbortableError()` (`Sender.java:325`) and calls
+    /// `shouldHandleAuthorizationError(lastError)` (`:351-360`) →
+    /// `failPendingRequests` + `maybeAbortBatches` + `transitionToUninitialized`,
+    /// then returns. For an idempotent producer the `instanceof` at `:352` is
+    /// always satisfied, so this is the only outcome — Java never reaches `:331`
+    /// with an abortable error outstanding, and never attempts
+    /// `ABORTABLE_ERROR → INITIALIZING`.
+    #[test]
+    fn test_idempotent_producer_recovers_from_abortable_error_to_uninitialized() {
+        for error_code in [
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+        ] {
+            let mut manager = idempotent_manager(false);
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("the initial InitProducerId is enqueued");
+            let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+            complete_init_producer_id(&mut manager, handler, error_code, -1, -1).expect("the error is handled");
+            assert!(manager.has_abortable_error());
+
+            // Sender.runOnce intercepts at :325 and recovers; it does NOT reach
+            // the epoch bump at :331.
+            assert_eq!(
+                run_sender_transaction_phase(&mut manager, &mut pool),
+                SenderPhaseOutcome::RecoveredFromAuthorizationError
+            );
+            assert_eq!(manager.current_state(), State::Uninitialized);
+            assert!(
+                manager.last_error().is_none(),
+                "transitionToUninitialized clears lastError (Java 761)"
+            );
+            assert!(!manager.has_error());
+            assert!(!manager.has_abortable_error());
+            assert!(
+                !manager.has_pending_requests(),
+                "the failed handler was consumed by on_complete, so nothing is queued"
+            );
+
+            // Sends are accepted again — the state is escapable.
+            manager
+                .maybe_add_partition(&tp0())
+                .expect("sends are allowed once the error is cleared");
+
+            // The next iteration enqueues a fresh InitProducerId and it succeeds.
+            assert_eq!(
+                run_sender_transaction_phase(&mut manager, &mut pool),
+                SenderPhaseOutcome::Continued
+            );
+            assert_eq!(manager.current_state(), State::Initializing);
+            let handler = manager.next_request(false).expect("a fresh InitProducerId is pending");
+            complete_init_producer_id(&mut manager, handler, Errors::None, PRODUCER_ID, EPOCH)
+                .expect("the retry succeeds");
+            assert_eq!(manager.current_state(), State::Ready);
+            assert_eq!(manager.producer_id_and_epoch(), ProducerIdAndEpoch::new(PRODUCER_ID, EPOCH));
+        }
+    }
+
+    /// `failPendingRequests` (Java 944), `authenticationFailed` (Java 939) and
+    /// `close` (Java 949) each fail every queued handler and transition.
+    ///
+    /// The recovery path above reaches `fail_pending_requests` with an empty
+    /// queue, because `on_complete` consumed the only handler. These drive the
+    /// non-empty case, which is where the per-handler loop is observable.
+    #[test]
+    fn test_pending_requests_are_failed_in_bulk() {
+        // failPendingRequests → abortableError per handler.
+        let mut manager = idempotent_manager(false);
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        // Reach ABORTABLE_ERROR from INITIALIZING, the transition
+        // `InitProducerIdHandler`'s authorization arm makes (Java 1528), while
+        // leaving a handler queued for `fail_pending_requests` to fail.
+        manager
+            .transition_to_abortable_error(KafkaError::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
+            .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
+        let queued_result = manager.force_enqueue_init_producer_id_for_test();
+        assert!(manager.has_pending_requests());
+        manager
+            .fail_pending_requests(&KafkaError::fatal(Errors::SaslAuthenticationFailed, "authn"), Caller::Sender)
+            .expect("ABORTABLE_ERROR self-loop is valid");
+        assert!(queued_result.is_completed());
+        assert_eq!(queued_result.error().expect("failed").error(), Errors::SaslAuthenticationFailed);
+        assert!(manager.has_abortable_error(), "the state stays ABORTABLE_ERROR (self-loop)");
+        assert!(manager.has_pending_requests(), "Java does not clear the queue (Java 945-946)");
+
+        // authenticationFailed → fatalError per handler.
+        let mut manager = idempotent_manager(false);
+        let queued_result = manager.force_enqueue_init_producer_id_for_test();
+        manager
+            .authentication_failed(&KafkaError::fatal(Errors::SaslAuthenticationFailed, "authn"), Caller::Sender)
+            .expect("FATAL_ERROR is always a valid target");
+        assert!(manager.has_fatal_error());
+        assert_eq!(queued_result.error().expect("failed").error(), Errors::SaslAuthenticationFailed);
+
+        // close → fatalError with Java's message.
+        let mut manager = idempotent_manager(false);
+        let queued_result = manager.force_enqueue_init_producer_id_for_test();
+        manager.close(Caller::Sender).expect("FATAL_ERROR is always a valid target");
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            queued_result.error().expect("failed").message(),
+            "The producer closed forcefully"
+        );
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            "The producer closed forcefully"
+        );
     }
 
     /// A `PRODUCER_FENCED` / `INVALID_PRODUCER_EPOCH` `InitProducerId` response

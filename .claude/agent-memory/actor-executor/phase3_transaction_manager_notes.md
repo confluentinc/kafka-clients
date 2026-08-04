@@ -14,15 +14,35 @@ at-least-once. Phase 3 is the state machine; Phase 4 wires it to the send path.
 
 **How to apply** — five reusable lessons:
 
-1. **A "state X is unreachable" claim must be checked against every writer of
-   the state, not the entry-point guards.** The plan said `ABORTABLE_ERROR` is
-   unreachable without a `transactionalId`, derived from `ensureTransactional()`
-   / `if (isTransactional())` on the transaction-only entry points. But
-   `InitProducerIdHandler.handleResponse` (Java 1524) calls `abortableError` for
-   `CLUSTER_AUTHORIZATION_FAILED` with **no** such guard, and that code is what
-   an idempotent producer gets when it lacks `IdempotentWrite`. Recorded as
-   PLAN §9.15. Same failure shape as §9.8 (shared blind spot, invisible to
-   repetition).
+1. **A reachability correction has two halves — the entries AND the exits — and
+   the second is the one that gets forgotten.**
+
+   *Entries:* a "state X is unreachable" claim must be checked against every
+   writer of the state, not the entry-point guards. The plan said
+   `ABORTABLE_ERROR` is unreachable without a `transactionalId`, derived from
+   `ensureTransactional()` / `if (isTransactional())` on the transaction-only
+   entry points. But `InitProducerIdHandler.handleResponse` (Java 1524) calls
+   `abortableError` for `CLUSTER_AUTHORIZATION_FAILED` with **no** such guard,
+   and that code is what an idempotent producer gets when it lacks
+   `IdempotentWrite`.
+
+   *Exits:* the first fix added only the three methods that enter the state and
+   shipped an inescapable `ABORTABLE_ERROR` — `maybe_add_partition` rejected
+   every send forever. Critic 43 issue 1 found it. `Sender.java:325` →
+   `shouldHandleAuthorizationError` (`:351-360`) → `failPendingRequests` +
+   `maybeAbortBatches` + `transitionToUninitialized` is Java's recovery, and it
+   always fires idempotently because the only entry sets `lastError` to exactly
+   the exception the `instanceof` matches. That is *why* the table has
+   `UNINITIALIZED ← ABORTABLE_ERROR`: an unexplained arm in a transition table is
+   a hint that a path exists that you have not traced.
+
+   Two corollaries worth reusing: an all-green suite proves nothing about an exit
+   path nobody wrote a test for, so pin the exit with a mutation
+   (no-op the exit method, watch the test fail); and when a phase's plan schedules
+   an exit method for a *later* phase than its entry, that mismatch is the smell.
+   Recorded as PLAN §9.15; a DoD clause for this is proposed in
+   `COMMENTS.DONE.43.md`. Same failure shape as §9.8 (shared blind spot,
+   invisible to repetition).
 
 2. **When a plan clause contradicts itself, prefer the faithful translation and
    say so in the PLAN.** "only the 4 reachable states" + "the full 9-variant

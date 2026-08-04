@@ -284,6 +284,18 @@ a named test needs it, not as scope creep:
 - `transition_to_abortable_error` (530), `has_error` (522),
   `has_abortable_error` (991) — required by
   `InitProducerIdHandler.handleResponse`'s authorization arms (§9.15).
+- `transition_to_uninitialized` (756) and `fail_pending_requests` (944) — the
+  **exit** from `ABORTABLE_ERROR`, reached from
+  `Sender.shouldHandleAuthorizationError` (`Sender.java:351-360`). Without them
+  an idempotent producer that hits an authorization failure can enter
+  `ABORTABLE_ERROR` and never leave it, so every subsequent send is rejected
+  forever. Both were listed under Phase 5; that listing is removed. Added after
+  Critic 43 issue 1 — see §9.15.
+- `authentication_failed` (939) and `close` (949) — the other two methods that
+  fail the pending-request queue. Both were unscheduled in every phase and both
+  are reachable for a purely idempotent producer; `close`'s omission would leave
+  a pending `InitProducerId` result never completed on a force close, i.e. a
+  hanging future (CLAUDE.md §5). Reasoning in §9.15.
 - `maybe_add_partition` (437, idempotent arm) and `maybe_transition_to_error_state`
   (764, idempotent arm) — `testFailIfNotReadyForSendIdempotentProducer` and
   `testFailIfNotReadyForSendIdempotentProducerFatalError` (both named under
@@ -329,7 +341,8 @@ already scaffolded with deferral comments.
 | Concern | Java reference | Rust insertion point |
 |---|---|---|
 | `TransactionManager` field + ctor arg | `Sender.java:123,140,154` | `src/producer/internals/sender.rs:97–131` (struct), `136–168` (`new`) |
-| `maybe_resolve_sequences` / fatal check / `bump_idempotent_epoch_and_reset_id_if_needed` | `Sender.java:310–340` | `sender.rs:213–216` — **replaces the existing `// No transaction manager in this phase` comment at line 214**, must run before `send_producer_data` |
+| `maybe_resolve_sequences` / fatal check / **abortable-error recovery** / `bump_idempotent_epoch_and_reset_id_if_needed` / `authentication_failed` | `Sender.java:310–340` plus the private `shouldHandleAuthorizationError` (`:351–360`) | `sender.rs:213–216` — **replaces the existing `// No transaction manager in this phase` comment at line 214**, must run before `send_producer_data`. All four guards matter and the order is load-bearing: `:318` `hasFatalError` and `:325` `hasAbortableError` both **return** before `:331`. `transaction_manager.rs`'s test helper `run_sender_transaction_phase` models this block guard-for-guard and is the reference; §9.15 records what goes wrong if `:325` is skipped. The `TransactionManager` side (`fail_pending_requests`, `transition_to_uninitialized`, `authentication_failed`) landed in Phase 3; `maybeAbortBatches` and `client.poll` are this phase's. |
+| **Split the Sender-owned request-queue surface off `TransactionManager`** (rules §2) | `TransactionManager.java:136` (`inFlightRequestCorrelationId`), `:224` (`pendingRequests`), `:1406–1425` (`onComplete`, whose `synchronized` block starts only at `:1420`) | `transaction_manager.rs` — see §10.5 deviation 7 for the ten method signatures this reshapes. Budget it as its own commit: it is a refactor of the same constructor §6.3 already flags, and getting it wrong puts two deliberately-unsynchronized Java fields behind the shared lock. |
 | **Per-batch sequence assignment** + `add_in_flight_batch` | `RecordAccumulator.java:900–925` | `record_accumulator.rs` between `deque.pop_front()` (919) and `batch.close()` (923). Must be here, not in `Sender`: `sender.rs:396` (`batch.records()` → `take_built_records()`) serializes the v2 batch header, so producer id / epoch / base sequence must already be set. |
 | `should_stop_drain_batches_for_partition` | `RecordAccumulator.java:815–850` | `record_accumulator.rs:858`, alongside the existing `is_muted` check |
 | `handle_completed_batch` | `Sender.java:758` | `sender.rs:766` — replaces `// No transaction manager in this phase` |
@@ -363,15 +376,19 @@ Grows `transaction_manager.rs` to full parity. From `TransactionManager.java`:
 - Entry points: `initialize_transactions` (291/295/299), `begin_transaction`
   (330), `prepare_transaction` (342, 2PC), `begin_commit` (353), `begin_abort`
   (361), `begin_completing_transaction` (373), `send_offsets_to_transaction` (404),
-  `maybe_add_partition` (437), `is_send_to_partition_allowed` (466),
-  `transition_to_uninitialized` (756), `reset_transaction_state` (1330).
+  `maybe_add_partition` (437, transactional arm — the idempotent arm landed in
+  Phase 3), `is_send_to_partition_allowed` (466), `reset_transaction_state`
+  (1330). ~~`transition_to_uninitialized` (756)~~ **landed in Phase 3** (§9.15);
+  Phase 5 adds only its `pendingTransition` branch and the `error` parameter that
+  branch consumes.
 - `PendingStateTransition` (1953–1967) + `handle_cached_transaction_request_result`
   (1261–1283) + `throw_if_pending_state` (1249). See §6.4 — this is why
   `TransactionalRequestResult` cannot be a `oneshot`.
-- Error machine: `transition_to_abortable_error` (530),
-  `transition_to_abortable_error_or_fatal_error` (557), `has_abortable_error` (991),
-  `fail_pending_requests` (944), `need_to_trigger_epoch_bump_from_client` (1309),
-  `can_handle_abortable_error` (1326), `maybe_transition_to_error_state` (764, txn arm).
+- Error machine: `transition_to_abortable_error_or_fatal_error` (557),
+  `need_to_trigger_epoch_bump_from_client` (1309), `can_handle_abortable_error`
+  (1326), `maybe_transition_to_error_state` (764, txn arm).
+  ~~`transition_to_abortable_error` (530), `has_abortable_error` (991),
+  `fail_pending_requests` (944)~~ **all landed in Phase 3** (§9.15).
 - The 5 remaining handlers: `FindCoordinatorHandler` (1651–1721),
   `AddPartitionsToTxnHandler` (1541–1649, incl. the
   `ADD_PARTITIONS_RETRY_BACKOFF_MS = 20` override on first
@@ -1604,28 +1621,106 @@ Three facts make this reachable for a purely idempotent producer:
 producer is in `ABORTABLE_ERROR`, `hasError()` is true, so `maybeFailWithError()`
 throws and `maybeAddPartition` rejects every subsequent send. Omitting the state
 would have made an authorization failure silently non-fatal *and* left sends
-succeeding — the opposite of Java in both directions. A subsequent
-`bumpIdempotentEpochAndResetIdIfNeeded` then attempts
-`ABORTABLE_ERROR → INITIALIZING`, which the table refuses, so on the Sender side
-Java poisons to `FATAL_ERROR`; that behaviour also only exists if the state does.
+succeeding — the opposite of Java in both directions.
 
-**Consequence for the plan:** Phase 3 additionally translated
-`transitionToAbortableError` (530), `hasError` (522) and `hasAbortableError`
-(991). All nine `State` variants are declared (see §Phase-3), so the arithmetic
+**What Java does next: it recovers to `UNINITIALIZED`.** On the following
+`Sender.runOnce`, `:325` tests `hasAbortableError()` and calls
+`shouldHandleAuthorizationError(lastError)` (`:351-360`):
+
+```java
+if (exception instanceof TransactionalIdAuthorizationException ||
+                exception instanceof ClusterAuthorizationException) {
+    transactionManager.failPendingRequests(new AuthenticationException(exception));
+    maybeAbortBatches(exception);
+    transactionManager.transitionToUninitialized(exception);
+    return true;
+}
+```
+
+For an idempotent producer that `instanceof` test is **always** satisfied: the
+only entry to `ABORTABLE_ERROR` is the authorization arm above, whose `lastError`
+is exactly one of the two exceptions it matches. So `runOnce` returns at `:326`,
+`transitionToUninitialized` clears `lastError`, and the next iteration reaches
+`bumpIdempotentEpochAndResetIdIfNeeded` at `:331` from `UNINITIALIZED` and
+enqueues a fresh `InitProducerId`. That is why the table admits
+`UNINITIALIZED ← ABORTABLE_ERROR` (Java 165), and the Java comment at
+`Sender.java:348-350` states the intent: "transition the state to UNINITIALIZED
+so that the user doesn't need to instantiate the producer again."
+
+> **Correction (Critic 43 issue 2).** This paragraph previously claimed that a
+> subsequent `bumpIdempotentEpochAndResetIdIfNeeded` attempts
+> `ABORTABLE_ERROR → INITIALIZING`, is refused, and poisons to `FATAL_ERROR` on
+> the Sender side. Java never does that on this path: `:325` returns before
+> `:331` is reached. The claim asserted the opposite outcome — poison rather than
+> recover — on the exact path this section exists to document, which is worse
+> than no record at all (cf. §9.8, §9.14). The `FATAL_ERROR` outcome would only
+> arise for an idempotent `ABORTABLE_ERROR` whose `lastError` is *not* an
+> authorization exception, i.e. only through `Errors.TRANSACTION_ABORTABLE`
+> (Java 1533), which a broker returns only for transactional requests.
+
+**Consequence for the plan.** Phase 3 translated the three methods that *enter*
+the state — `transitionToAbortableError` (530), `hasError` (522),
+`hasAbortableError` (991) — and, after Critic 43 issue 1, the ones that *leave*
+it or clean up around it:
+
+| Java | Rust | was scheduled | now |
+|---|---|---|---|
+| `transitionToUninitialized` (756) | `transition_to_uninitialized` | Phase 5 | **Phase 3** |
+| `failPendingRequests` (944) | `fail_pending_requests` | Phase 5 | **Phase 3** |
+| `authenticationFailed` (939) | `authentication_failed` | *nowhere* | **Phase 3** |
+| `close` (949) | `close` | *nowhere* | **Phase 3** |
+
+The first two are removed from the Phase-5 list. All four are called from
+`Sender` code that Phase 4 and Phase 6 translate, and all four are implementable
+now — none needs Phase-5 state beyond the `pendingTransition` branch, which is
+always null for an idempotent producer for the reason already recorded on
+`transitionToFatalError`.
+
+`authenticationFailed` was unscheduled in **every** phase, and is reachable
+idempotently: `maybeSendAndPollTransactionalRequest` takes the
+`coordinatorType == null` branch (`Sender.java:479-484`) and still calls
+`awaitNodeReady` → `NetworkClientUtils.awaitReady`, which throws
+`AuthenticationException`, caught at `Sender.java:336`. `close` (949) was also
+unscheduled; it is not reachable *from* `ABORTABLE_ERROR` — it is the
+`forceClose` shutdown path at `Sender.java:287-293`, i.e. Phase 6 — but it is
+reachable for a purely idempotent producer, and without it a force close would
+leave a pending `InitProducerId`'s `TransactionalRequestResult` never completed,
+which is the hanging future CLAUDE.md §5 forbids. Both landed in Phase 3 rather
+than left for their call sites.
+
+All nine `State` variants are declared (see §Phase-3), so the arithmetic
 "4 of 9" no longer appears in the code either way.
 
-**Regression evidence.** Deleting `source == Self::Initializing` from the
-`AbortableError` arm of the Rust table fails
-`test_cluster_authorization_failure_moves_an_idempotent_producer_to_abortable_error`,
-which is the check that the arm is load-bearing on the idempotent path rather
-than only the transactional one.
+**Regression evidence.** Three mutations, each caught:
 
-**Lesson, same shape as §9.8's.** The claim was derived from the *guards* on the
-transaction-only entry points (`ensureTransactional`, `if (isTransactional())`),
-which do fence the state machine cleanly — and then generalised to the response
-handlers, which are not fenced the same way. A reachability claim has to be
-checked against every writer of the state, not only the entry points that look
-like they own it.
+  - deleting `source == Self::Initializing` from the `AbortableError` arm of the
+    Rust table fails
+    `test_cluster_authorization_failure_moves_an_idempotent_producer_to_abortable_error`
+    — the check that the arm is load-bearing on the idempotent path rather than
+    only the transactional one;
+  - making `transition_to_uninitialized` a no-op fails
+    `test_idempotent_producer_recovers_from_abortable_error_to_uninitialized`;
+  - removing the `Sender.java:325` guard from the test harness makes the same
+    test fail at `bump_idempotent_epoch_and_reset_id_if_needed` with an
+    `ABORTABLE_ERROR → INITIALIZING` rejection — a direct demonstration that the
+    guard, not the table, is what keeps Java off the path the stricken paragraph
+    described.
+
+**Lesson, same shape as §9.8's, in two parts.**
+
+  1. The original wrong claim was derived from the *guards* on the
+     transaction-only entry points (`ensureTransactional`,
+     `if (isTransactional())`), which do fence the state machine cleanly — and
+     then generalised to the response handlers, which are not fenced the same
+     way. A reachability claim has to be checked against every writer of the
+     state, not only the entry points that look like they own it.
+  2. The correction itself was then applied only half way: to the writers that
+     *enter* the newly-reachable state, not the one that *leaves* it. A state a
+     client can enter and not exit is worse than a state it never reaches — this
+     shipped an inescapable `ABORTABLE_ERROR` in which every send was rejected
+     forever. Enumerating exit paths is now a suggested `definition-of-done.md`
+     clause, recorded in `COMMENTS.DONE.43.md` for the `agent-roles.md` §2
+     process.
 
 ---
 
@@ -1768,6 +1863,58 @@ All six are documented at their call sites in
    transition — it only calls `requestIdempotentEpochBumpForPartition` — so the
    parameter would be dead. Phase 5's transactional arm transitions and adds it.
 
+7. **The rules §2 lock-topology split is deferred to Phase 4, and deviation 2
+   raises its price from a field move to ten reshaped signatures.** Rules §2
+   requires `pendingRequests` and `inFlightRequestCorrelationId` to live on the
+   Sender task's own unshared state rather than behind the shared
+   `TransactionManager` mutex, because Java touches them from the Sender thread
+   only and does so *outside* its `synchronized` blocks —
+   `clearInFlightCorrelationId` is called from `onComplete` at
+   `TransactionManager.java:1410`, while that method's `synchronized` block only
+   begins at `:1420`.
+
+   Phase 3 introduces no mutex, so §2 cannot be violated yet. But deviation 2
+   hosts `onComplete` / `handleResponse` on the manager, so **every** touch of
+   those two fields is now a `&mut TransactionManager` method:
+
+   | Rust method | Java | touches |
+   |---|---|---|
+   | `enqueue_request` | 1186 | `pending_requests` |
+   | `next_request` | 894 | `pending_requests` |
+   | `has_pending_requests` | 1005 | `pending_requests` |
+   | `maybe_terminate_request_with_error` | 1174 | fails a dequeued handler |
+   | `retry` | 934 | `pending_requests` |
+   | `fail_pending_requests` | 944 | `pending_requests` |
+   | `authentication_failed` | 939 | `pending_requests` |
+   | `close` | 949 | `pending_requests` |
+   | `set_in_flight_correlation_id` | 973 | correlation id |
+   | `clear_in_flight_correlation_id` | 977 | correlation id |
+   | `has_in_flight_request` | 981 | correlation id |
+   | `on_complete` | 1406 | both |
+   | `bump_idempotent_epoch_and_reset_id_if_needed` | 663 | enqueues |
+
+   (Thirteen after issue 1's three additions; the ten the Critic enumerated plus
+   `fail_pending_requests`, `authentication_failed` and `close`.)
+
+   So complying in Phase 4 means, at minimum,
+   `bump_idempotent_epoch_and_reset_id_if_needed` returning the handler instead of
+   enqueuing it, and `on_complete` splitting its correlation-id check from its
+   shared-state handling. **Not** complying puts both fields behind the shared
+   lock, which is the outcome §2 forbids and which would have `on_complete` hold a
+   lock across work Java deliberately leaves unsynchronized. Recorded here rather
+   than discovered in Phase 4; §Phase-4's table now carries a row for it, and the
+   struct doc in `transaction_manager.rs` points at this deviation instead of
+   claiming the rule is merely "not yet engaged". Added after Critic 43 issue 3.
+
+8. **`transition_to_uninitialized` takes no `error`.** Java's parameter
+   (Java 756) is passed only to `pendingTransition.result.fail(exception)`
+   (`:759`), and `pendingTransition` is `ensureTransactional`-guarded, so for an
+   idempotent producer the argument has no consumer. Same treatment and same
+   reason as deviation 6. Phase 5 adds the field and the parameter together. The
+   redundant `lastError = null` at `:761` is kept even though `transitionTo`
+   already clears it on a non-error target, so the translation does not silently
+   rely on that.
+
 Not deviations, recorded because a reviewer may read them as such:
 
   - `pending_requests` is a `VecDeque`, not Java's priority queue. The only
@@ -1784,3 +1931,9 @@ Not deviations, recorded because a reviewer may read them as such:
     satisfy the borrow checker. Both are per-`runOnce`, over error-state
     partitions only, and order is not observable because each partition is
     handled independently.
+  - `fail_pending_requests`, `authentication_failed` and `close` iterate
+    `pending_requests` **by index** where Java uses `forEach`. The per-handler
+    body needs `&mut self` for the transition, which Java gets for free from the
+    enclosing monitor. Order and per-handler semantics (fail the result, then
+    transition) are preserved, and Java's choice not to clear the queue is
+    preserved too.
