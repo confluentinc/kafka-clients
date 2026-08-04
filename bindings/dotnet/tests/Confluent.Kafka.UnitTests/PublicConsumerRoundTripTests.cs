@@ -48,7 +48,8 @@ public sealed class PublicConsumerRoundTripTests
     {
         MockConsumer consumer = new MockConsumer();
         consumer.Assign(new[] { new TopicPartition(topic, partition) });
-        await consumer.SeekAsync(new TopicPartition(topic, partition), offset: 0);
+        await TestTimeout.Run(
+            () => consumer.SeekAsync(new TopicPartition(topic, partition), offset: 0), s_deadline);
         return consumer;
     }
 
@@ -191,8 +192,9 @@ public sealed class PublicConsumerRoundTripTests
         using MockConsumer consumer = await ReadyToPoll();
         consumer.SetPollError("boom");
 
-        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => Poll(consumer), s_deadline));
+        // Poll already carries the TestTimeout hang guard, so a stall on the FAILURE
+        // path also fails fast rather than hanging the run.
+        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
 
         // Assert TYPE + Message content (part of the contract, DoD §3) + flags — never
         // the indistinct broker-free Code (-1).
@@ -208,8 +210,7 @@ public sealed class PublicConsumerRoundTripTests
         using MockConsumer consumer = await ReadyToPoll();
         consumer.SetPollError("transient");
 
-        await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => Poll(consumer), s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
 
         ConsumerRecords records = await Poll(consumer);
         Assert.Empty(records);
@@ -234,8 +235,7 @@ public sealed class PublicConsumerRoundTripTests
 
                 case 1:
                     consumer.SetPollError($"err-{i}");
-                    await Assert.ThrowsAsync<KafkaException>(
-                        () => TestTimeout.Run(() => Poll(consumer), s_deadline));
+                    await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
                     break;
 
                 default:
@@ -261,9 +261,19 @@ public sealed class PublicConsumerRoundTripTests
         Assert.True(Enum.IsDefined(typeof(TimestampType), record.TimestampType));
     }
 
-    private static Task<ConsumerRecords> Poll(IConsumer consumer) => consumer.PollAsync(s_pollTimeout);
+    // Every awaited poll routes through the TestTimeout hang guard (PLAN §5) so a
+    // future stall in the owned-handle bridge or the mock fails the run fast instead
+    // of hanging it — mirroring PublicConsumerTfmSmokeTests.Poll.
+    private static async Task<ConsumerRecords> Poll(IConsumer consumer)
+    {
+        ConsumerRecords result = default!;
+        await TestTimeout.Run(async () => result = await consumer.PollAsync(s_pollTimeout), s_deadline);
+        return result;
+    }
 
-    private static async Task<ConsumerRecords> TestTimeoutResult(Task<ConsumerRecords> op)
+    private static Task<ConsumerRecords> TestTimeoutResult(Task<ConsumerRecords> op) => Poll(op);
+
+    private static async Task<ConsumerRecords> Poll(Task<ConsumerRecords> op)
     {
         ConsumerRecords result = default!;
         await TestTimeout.Run(async () => result = await op, s_deadline);

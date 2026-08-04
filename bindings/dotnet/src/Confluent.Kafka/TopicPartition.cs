@@ -22,6 +22,18 @@ namespace Confluent.Kafka;
 /// equality (so it is usable as a dictionary / set key), mirroring the Java type's
 /// immutable, equatable shape. The input type for <c>IConsumer.SeekAsync(...)</c>.
 /// </summary>
+/// <remarks>
+/// Because this is a <c>readonly struct</c>, a <c>default(TopicPartition)</c> is always
+/// constructible and bypasses the constructor's argument validation: its <see cref="Topic"/>
+/// is <see langword="null"/> and its <see cref="Partition"/> is <c>0</c>. (Java's
+/// <c>TopicPartition</c> is a class, so the equivalent there is a <see langword="null"/>
+/// reference rather than an instance with a null field; this matches
+/// confluent-kafka-dotnet's struct choice.) <see cref="Equals(TopicPartition)"/> and
+/// <see cref="GetHashCode"/> are null-safe for that state, and <see cref="ToString"/>
+/// reflects it — the null <see cref="Topic"/> interpolates as an empty string (e.g.
+/// <c>"-0"</c>). No public API in this binding produces a <c>default</c> value; it can
+/// only arise from explicitly writing <c>default(TopicPartition)</c>.
+/// </remarks>
 public readonly struct TopicPartition : IEquatable<TopicPartition>
 {
     /// <summary>
