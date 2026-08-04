@@ -213,3 +213,81 @@ single-owner handle-TOCTOU residual reachable in principle. Per locked decision 
 NO per-call `DangerousAddRef` hardening this phase (flagged as a candidate N=9
 follow-up, not scheduled). The three M3/P2 accepted residuals remain accepted;
 composition inherits them unchanged.
+
+---
+
+## OBS-1 (Critic N=8, LOW, test hardening) — RESOLVED
+
+`bindings/dotnet/tests/Confluent.Kafka.UnitTests/PublicConsumerRoundTripTests.cs`
+
+**Finding.** The `Poll(consumer)` helper returned `consumer.PollAsync(...)` directly,
+bypassing the `TestTimeout` hang guard that PLAN §5 requires for "every awaited op and
+every teardown", and many success-path tests `await Poll(consumer)`. The `SeekAsync` in
+the `ReadyToPoll` setup helper was likewise unwrapped. Not reachable today (the mock poll
+completes near-instantly), but a future stall in the owned-handle bridge or the mock would
+hang the whole run instead of failing fast.
+
+**Resolution.** Routed every awaited op in the file through `TestTimeout.Run` (matching
+`PublicConsumerTfmSmokeTests.Poll` and the existing `TestTimeoutResult`):
+- `Poll(IConsumer)` now awaits `PollAsync` inside `TestTimeout.Run(..., s_deadline)`
+  (was: raw `PollAsync` return). This covers all success-path callsites unchanged.
+- Added a `Poll(Task<ConsumerRecords>)` overload (same guard) and pointed
+  `TestTimeoutResult` at it — no behavior change, just consolidation.
+- `ReadyToPoll` now wraps its `SeekAsync` in `TestTimeout.Run`.
+- The three FAILURE-path callsites (was `TestTimeout.Run(() => Poll(consumer), ...)`) now
+  call the guarded `Poll(consumer)` directly, removing the redundant double-wrap while
+  keeping the guard.
+No assertion was weakened — this only adds/consolidates the timeout wrapper. Whole file
+audited: the only awaited ops are the polls + the setup `SeekAsync`; teardown here is the
+sync `using`/`Dispose()` (not awaited), so nothing else needed wrapping.
+
+---
+
+## OBS-2 (Critic N=8, LOW, doc-only) — RESOLVED
+
+`bindings/dotnet/src/Confluent.Kafka/TopicPartition.cs`
+
+**Finding.** `TopicPartition.ToString()` does not null-guard a `default(TopicPartition)`
+(whose `Topic` is null), though `Equals`/`GetHashCode` do. This is inherent to the
+`readonly struct` choice and matches confluent-kafka-dotnet; the XML doc did not mention
+that a `default(TopicPartition)` has a null `Topic`.
+
+**Resolution.** Doc-only, per the Critic's guidance — **no runtime guard added** (the
+`readonly struct` value-type choice is deliberate; a runtime guard would diverge from CKD
+and add no value since no P4a API produces a `default`). Added a `<remarks>` note on
+`TopicPartition` documenting that a `default(TopicPartition)` bypasses the ctor validation
+(null `Topic`, `Partition == 0`), that `Equals`/`GetHashCode` are null-safe for that state,
+that `ToString()` reflects it (null `Topic` interpolates as empty, e.g. `"-0"`), and that
+no public API in the binding produces a `default` value. Kept accurate and brief; behavior
+unchanged.
+
+---
+
+## Critic N=8 — review outcome (closed)
+
+**Initial review: NO BLOCKING ISSUES.** Independently verified (not trusting the Actor's
+numbers): `cargo build --features ffi` clean; `dotnet build` 0/0 across all six TFM legs
+(CS1591 satisfied); `dotnet format` clean; net10.0 test loop **30× serial → 30/30,
+122 passed, 0 failed, 0 crashes**. Verified against the C ABI header + Java shape: copy-out
+absent/tombstone/empty sentinels, length-delimited `out_len` strings (no NUL-scan),
+`FreeGcHandle` sole-owner invariant (exactly the 3 expected sites), `CloseAsync`
+latch→close(surfaces error)→destroy-once-in-finally, `SeekAsync` exact Java message before
+native, `GroupMetadata` four-field + handle-destroy-in-finally + null→`InvalidOperationException`.
+Two LOW non-blocking observations raised — **OBS-1** (test hang-guard) and **OBS-2**
+(`TopicPartition` doc note) — both resolved above.
+
+**`DisableTestParallelization` (D8.8) verdict: LEGITIMATE, not masking.** The Critic
+independently bisected — re-enabling parallelism on P4a HEAD gave 3/20 host crashes; a
+throwaway `git worktree` at the pre-P4a tip `8641d08` (M3/P3, 66 tests) reproduced the
+identical 3/20 crash signature. The race is genuinely pre-existing (the accepted
+single-owner unawaited-op vs fire-and-forget `Consumer_destroy` residual); serial execution
+removes the inter-test race without weakening any assertion.
+
+**Re-review of the OBS fixup (`bab3d0e`): CLEAN.** Verified the failure-path guard +
+`KafkaException` type/message assertions survived the double-wrap removal, no assertion
+weakened, scope = exactly the two named files, `fixup!` subject clean. Independently re-ran
+net10.0 **22× serial → 22/22, 0 failures / 0 crashes**; `dotnet build` 0/0; `dotnet format`
+clean. **Phase remains approved with the fixup folded in.**
+
+**Loop closed:** Actor N=8 → Critic N=8 (approved) → Actor N=8 (OBS-1/OBS-2 fixup) →
+Critic N=8 (re-review clean). No outstanding comments.
