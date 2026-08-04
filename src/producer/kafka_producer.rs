@@ -55,6 +55,7 @@ use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
+use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProducerMetadata;
 use crate::producer::internals::Sender;
@@ -267,36 +268,23 @@ impl<K, V> KafkaProducer<K, V> {
         //    Translated from KafkaProducer.configureDeliveryTimeout().
         let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
 
-        // MILESTONE-11 GUARD: reject configurations that ask for idempotence or
-        // transactions, neither of which is implemented yet.
+        // MILESTONE-11 GUARD: reject configurations that ask for transactions, which
+        // are not implemented yet.
         //
-        // `ProducerConfig` defaults `enable.idempotence` to `true` to match Java,
-        // but no `TransactionManager` exists, so nothing requests a producer id
-        // and no sequence numbers are assigned — the producer behaves
-        // non-idempotently. CLAUDE.md §5 requires failing an unimplemented code
-        // path explicitly rather than silently completing, so this errors when
-        // the user *asks* for either feature.
+        // The idempotence arm of this guard is gone as of Phase 4: `enable.idempotence`
+        // is now honoured for real — `configure_transaction_state` below builds a
+        // `TransactionManager`, the accumulator's drain assigns producer ids, epochs
+        // and sequence numbers, and `Sender.runOnce` acquires and bumps the producer
+        // id. The transactional arm remains until Phase 6 wires
+        // `init_transactions` / `commit_transaction` / `abort_transaction`.
         //
-        // Deliberately keyed on explicit configuration only: users who never
-        // touched these keys keep today's behavior rather than being broken by a
-        // default they did not choose. The check lives here, not in
-        // `ProducerConfig`, so the config translation stays a faithful mirror of
-        // Java and free of "not yet implemented".
-        //
-        // Removal is a tracked deliverable: the idempotence arm in Phase 4, the
-        // transactional arm in Phase 6.
+        // The check lives here, not in `ProducerConfig`, so the config translation
+        // stays a faithful mirror of Java and free of "not yet implemented".
         if config.transactional_id.is_some() {
             return Err(KafkaError::unsupported_version(format!(
                 "Transactions are not yet implemented in this client (Milestone 11, Phase 6); \
                  remove `{}` from the producer configuration.",
                 ProducerConfig::TRANSACTIONAL_ID_CONFIG
-            )));
-        }
-        if config.enable_idempotence && config.explicitly_set.contains(ProducerConfig::ENABLE_IDEMPOTENCE_CONFIG) {
-            return Err(KafkaError::unsupported_version(format!(
-                "The idempotent producer is not yet implemented in this client (Milestone 11, \
-                 Phase 4); remove `{}` from the producer configuration.",
-                ProducerConfig::ENABLE_IDEMPOTENCE_CONFIG
             )));
         }
 
@@ -726,6 +714,22 @@ impl<K, V> KafkaProducer<K, V> {
             .await
         {
             Ok(result) => {
+                // Add the partition to the transaction (if in progress) after it has
+                // been successfully appended to the accumulator. We cannot do it
+                // before because the partition may be unknown. Note that the `Sender`
+                // will refuse to dequeue batches from the accumulator until they have
+                // been added to the transaction (`KafkaProducer.java:1040-1046`).
+                //
+                // `result.partition` is the resolved partition, which Java reads back
+                // as `appendCallbacks.topicPartition()`.
+                if let Some(transaction_manager) = &self.transaction_manager {
+                    let tp = TopicPartition::new(topic.to_string(), result.partition);
+                    // `Caller::App`: this runs on the application task.
+                    if let Err(error) = transaction_manager.lock().unwrap().maybe_add_partition(&tp) {
+                        return self.handle_api_exception(error, topic, result.partition, None);
+                    }
+                }
+
                 if result.batch_is_full || result.new_batch_created {
                     kafka_trace!(
                         self.log_context,
@@ -738,10 +742,38 @@ impl<K, V> KafkaProducer<K, V> {
             },
             Err(e) if e.is_api_exception() => {
                 kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
+                self.maybe_transition_to_error_state(&e);
                 let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
             },
             Err(e) => Err(e),
+        }
+    }
+
+    /// `transactionManager.maybeTransitionToErrorState(e)`, the tail of
+    /// `KafkaProducer.doSend`'s `catch (ApiException e)` block
+    /// (`KafkaProducer.java:1065-1067`).
+    ///
+    /// [`Caller::App`](crate::producer::internals::Caller::App): `doSend` runs on the
+    /// application task.
+    fn maybe_transition_to_error_state(&self, error: &KafkaError) {
+        if let Some(transaction_manager) = &self.transaction_manager {
+            // Java lets an invalid transition propagate out of `doSend`. That cannot
+            // happen on the idempotent path — the only transition
+            // `maybeTransitionToErrorState` performs is to `FATAL_ERROR`, which is
+            // always valid — and swallowing it here would hide a Phase-5 regression,
+            // so it is logged rather than dropped.
+            if let Err(transition_error) = transaction_manager
+                .lock()
+                .unwrap()
+                .maybe_transition_to_error_state(error, Caller::App)
+            {
+                kafka_warn!(
+                    self.log_context,
+                    "Failed to record a send error in the transaction manager: {}",
+                    transition_error
+                );
+            }
         }
     }
 
@@ -757,6 +789,7 @@ impl<K, V> KafkaProducer<K, V> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
+        self.maybe_transition_to_error_state(&error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
             let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
@@ -2092,10 +2125,10 @@ mod tests {
 
     // -- MILESTONE-11 GUARD tests -------------------------------------------
     //
-    // These cover the temporary guard in `from_config` that rejects explicit
-    // idempotence / transaction configuration. They are deleted along with the
-    // guard itself: the idempotence arm in Phase 4, the transactional arm in
-    // Phase 6.
+    // These cover the temporary guard in `from_config` that rejects transactional
+    // configuration. They are deleted along with the guard itself in Phase 6. The
+    // idempotence cases below are no longer rejections: as of Phase 4
+    // `enable.idempotence` is honoured, so all three must construct.
 
     fn guard_props(extra: &[(&str, &str)]) -> HashMap<String, String> {
         let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())]);
@@ -2111,34 +2144,53 @@ mod tests {
             .map(|_| ())
     }
 
-    /// The default configuration must still construct: users who never asked for
-    /// idempotence keep today's behavior even though the default is `true`.
-    /// `#[tokio::test]`: unlike the rejection cases, which error before doing
-    /// any work, a successful `from_config` spawns the Sender task and so needs a
-    /// runtime. The spawned task attempts to reach localhost:9999, fails
-    /// harmlessly, and is dropped with the test.
+    /// The default configuration must construct. `#[tokio::test]`: unlike the
+    /// rejection case, which errors before doing any work, a successful
+    /// `from_config` spawns the Sender task and so needs a runtime. The spawned task
+    /// attempts to reach localhost:9999, fails harmlessly, and is dropped with the
+    /// test.
     #[tokio::test]
     async fn test_guard_allows_default_config() {
         from_guard_props(&guard_props(&[])).expect("default config must still construct");
     }
 
-    #[test]
-    fn test_guard_rejects_explicit_enable_idempotence() {
-        let error = from_guard_props(&guard_props(&[("enable.idempotence", "true")]))
-            .expect_err("explicit idempotence must be rejected until Phase 4");
+    /// Explicit `enable.idempotence=true` is accepted as of Phase 4, and the
+    /// producer really is idempotent: it holds a `TransactionManager`.
+    #[tokio::test]
+    async fn test_explicit_enable_idempotence_builds_a_transaction_manager() {
+        let props = guard_props(&[("enable.idempotence", "true")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("explicit idempotence is supported as of Phase 4");
+        let transaction_manager = producer
+            .transaction_manager
+            .as_ref()
+            .expect("configureTransactionState builds a manager when enable.idempotence is true");
+        let manager = transaction_manager.lock().unwrap();
+        assert!(!manager.is_transactional());
         assert!(
-            error.message().contains("idempotent producer is not yet implemented"),
-            "unexpected message: {}",
-            error.message()
+            !manager.has_producer_id(),
+            "the producer id is acquired asynchronously by the Sender task"
         );
     }
 
-    /// `enable.idempotence=false` is explicit but asks for nothing unimplemented,
-    /// so it must pass.
+    /// `enable.idempotence=false` builds no manager at all, mirroring Java's `null`
+    /// return from `configureTransactionState` (`KafkaProducer.java:594`, `:615`).
     #[tokio::test]
-    async fn test_guard_allows_explicit_disable_idempotence() {
-        from_guard_props(&guard_props(&[("enable.idempotence", "false")]))
-            .expect("explicitly disabling idempotence must be allowed");
+    async fn test_disabled_idempotence_builds_no_transaction_manager() {
+        let props = guard_props(&[("enable.idempotence", "false")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("disabling idempotence is allowed");
+        assert!(producer.transaction_manager.is_none());
     }
 
     #[test]

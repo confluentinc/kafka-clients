@@ -1016,12 +1016,21 @@ transactions or the 4.3.1 semantic changes.
 
 ### 9.4 Remove the `MILESTONE-11 GUARD`
 
-**Status:** open, already scheduled inside this milestone.
+**Status:** half done. The idempotence arm was removed in **Phase 4**; the
+transactional arm remains and is scheduled for **Phase 6**.
 
-`KafkaProducer::from_config` rejects explicit `enable.idempotence=true` and any
-`transactional.id` (`src/producer/kafka_producer.rs`, marked `MILESTONE-11
-GUARD:`). Remove the idempotence arm in **Phase 4** and the transactional arm in
-**Phase 6**, deleting the corresponding `test_guard_*` tests in the same commit.
+`KafkaProducer::from_config` used to reject explicit `enable.idempotence=true` and
+any `transactional.id` (`src/producer/kafka_producer.rs`, marked
+`MILESTONE-11 GUARD:`). Phase 4 removed the idempotence arm — `enable.idempotence`
+is now honoured end to end — and replaced its two rejection tests with
+`test_explicit_enable_idempotence_builds_a_transaction_manager` and
+`test_disabled_idempotence_builds_no_transaction_manager`, which assert the two
+arms of `configureTransactionState` instead. `TransactionManager::new` keeps its
+own guard on `transactional_id` (PLAN §10.5 deviation 1) until Phase 5.
+
+Phase 6 removes what is left: the `transactional.id` rejection in `from_config`,
+`test_guard_rejects_transactional_id`, and the guard in `TransactionManager::new`
+along with `test_transactional_id_is_refused_until_phase_5`.
 
 ### 9.5 Critic review of Phase 1
 

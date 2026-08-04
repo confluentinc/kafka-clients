@@ -78,6 +78,17 @@ pub struct RecordAppendResult {
     pub new_batch_created: bool,
     /// The number of bytes appended.
     pub appended_bytes: i32,
+    /// The partition the record was actually appended to.
+    ///
+    /// Java reports this through `RecordAccumulator.AppendCallbacks.setPartition`
+    /// (`KafkaProducer.java:1606`), which the accumulator calls once the built-in
+    /// partitioner has resolved `UNKNOWN_PARTITION`; `KafkaProducer.doSend` then
+    /// reads it back as `appendCallbacks.topicPartition()` to pass to
+    /// `transactionManager.maybeAddPartition` (`:1045`). The Rust `append` takes a
+    /// plain completion `Callback` rather than an `AppendCallbacks` trait object, so
+    /// the resolved partition is reported here instead. It is never
+    /// `record_metadata::UNKNOWN_PARTITION`, which is what Java asserts at `:1038`.
+    pub partition: i32,
 }
 
 /// The set of nodes that have at least one complete record batch in the
@@ -415,8 +426,16 @@ impl RecordAccumulator {
                     continue;
                 }
 
-                let (result, returned_callback) =
-                    self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
+                let (result, returned_callback) = self.try_append(
+                    timestamp,
+                    key,
+                    value,
+                    headers,
+                    callback,
+                    &mut deque,
+                    effective_partition,
+                    now_ms,
+                )?;
                 if let Some(result) = result {
                     if partition == record_metadata::UNKNOWN_PARTITION {
                         let enable_switch = Self::all_batches_full(&deque);
@@ -463,8 +482,16 @@ impl RecordAccumulator {
                     continue;
                 }
 
-                let (result, returned_callback) =
-                    self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
+                let (result, returned_callback) = self.try_append(
+                    timestamp,
+                    key,
+                    value,
+                    headers,
+                    callback,
+                    &mut deque,
+                    effective_partition,
+                    now_ms,
+                )?;
                 if let Some(result) = result {
                     self.free.deallocate(buffer.take().unwrap());
                     if partition == record_metadata::UNKNOWN_PARTITION {
@@ -531,7 +558,13 @@ impl RecordAccumulator {
         self.incomplete.add(Arc::clone(&batch.produce_future));
         deque.push_back(batch);
 
-        RecordAppendResult { future, batch_is_full, new_batch_created: true, appended_bytes: estimated_size }
+        RecordAppendResult {
+            future,
+            batch_is_full,
+            new_batch_created: true,
+            appended_bytes: estimated_size,
+            partition,
+        }
     }
 
     fn records_builder(&self, buffer: Vec<u8>) -> MemoryRecordsBuilder {
@@ -583,6 +616,7 @@ impl RecordAccumulator {
         headers: &[RecordHeader],
         callback: Option<Callback>,
         deque: &mut VecDeque<ProducerBatch>,
+        partition: i32,
         now_ms: i64,
     ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
         if self.closed.load(Ordering::Relaxed) {
@@ -600,7 +634,13 @@ impl RecordAccumulator {
                     let is_full = last.is_full();
                     let batch_is_full = deque.len() > 1 || is_full;
                     return Ok((
-                        Some(RecordAppendResult { future, batch_is_full, new_batch_created: false, appended_bytes }),
+                        Some(RecordAppendResult {
+                            future,
+                            batch_is_full,
+                            new_batch_created: false,
+                            appended_bytes,
+                            partition,
+                        }),
                         None, // callback was consumed
                     ));
                 },
@@ -3950,5 +3990,50 @@ mod tests {
         assert!(deque.iter().all(|b| b.has_sequence()));
         drop(deque);
         assert!(transaction_manager.lock().unwrap().has_inflight_batches(&tp1()));
+    }
+
+    /// `definition-of-done.md` §10 / CLAUDE.md §11: the producer-state assignment the
+    /// drain performs is **per batch**, never per record, so enabling idempotence must
+    /// not add a single allocation that scales with the record count.
+    ///
+    /// Measured as a delta rather than an absolute budget: `drain` itself allocates a
+    /// constant amount per call (the ready `Vec`, the per-node `HashMap`, the
+    /// partition list), and pinning that number would make the test fail on unrelated
+    /// refactors. Comparing a 1-record drain against a 16-record drain isolates
+    /// exactly the per-record component, which must be zero.
+    ///
+    /// Uses the same [`crate::test_alloc_tracker::AllocTrackingGuard`] as the
+    /// consumer's §27 receive-path budget tests.
+    #[tokio::test]
+    async fn test_drain_allocations_do_not_scale_with_the_record_count() {
+        async fn drain_allocations(record_count: usize) -> usize {
+            let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+            let accum = create_idempotent_test_accumulator(16 * 1024, 1024 * 1024, 0, transaction_manager);
+            let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+            let now = 0i64;
+            for _ in 0..record_count {
+                append_one(&accum, metadata.cluster(), now).await;
+            }
+            let result = accum.ready(&metadata, now);
+            {
+                let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+                crate::test_alloc_tracker::AllocTrackingGuard::reset();
+                let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+                let count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+                assert!(count > 0, "the tracker must actually be measuring");
+                // Assert outside the measured region would need the guard dropped, so
+                // capture what is needed first.
+                assert_eq!(drained.get(&node1().id()).map_or(0, |b| b.len()), 1);
+                count
+            }
+        }
+
+        let one_record = drain_allocations(1).await;
+        let sixteen_records = drain_allocations(16).await;
+        assert_eq!(
+            one_record, sixteen_records,
+            "draining a 16-record batch must allocate exactly as much as a 1-record batch; \
+             got {one_record} vs {sixteen_records}"
+        );
     }
 }
