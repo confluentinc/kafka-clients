@@ -1,0 +1,1812 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Staged ahead of its callers: the idempotent send path (Phase 4) and the public
+// producer transaction API (Phase 6) are the only consumers, so under
+// `#![deny(warnings)]` most of this file is dead code until then. Same mechanism
+// as `txn_partition_map.rs:18`.
+#![allow(dead_code)]
+
+//! State for transactions, and the state needed to ensure idempotent production.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::sync::Arc;
+
+use crate::ApiVersions;
+use crate::client_response::ClientResponse;
+use crate::common::protocol::Errors;
+use crate::common::record::RecordBatch;
+use crate::common::requests::produce_response::INVALID_OFFSET;
+use crate::common::requests::{ConcreteResponse, InitProducerIdRequestBuilder, PartitionResponse};
+use crate::common::utils::{LogContext, ProducerIdAndEpoch};
+use crate::common::{KafkaError, TopicPartition};
+use crate::init_producer_id_request_data::InitProducerIdRequestData;
+use crate::producer::internals::{
+    InFlightBatchKey, ProducerBatch, TransactionalRequestResult, TxnPartitionEntry, TxnPartitionMap,
+};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
+
+/// Sentinel for "no transactional request is currently in flight".
+const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
+
+/// The per-partition in-flight batch pool supplied by the batches' owners.
+///
+/// [`TxnPartitionEntry`] tracks in-flight batch *ordering keys* rather than
+/// owning the batches (see `.claude/rules/producer-transactions.md` §7), so any
+/// method that Java implements by mutating the tracked batches takes them from
+/// their owner instead. Java reaches them through the entry's own references.
+///
+/// The map MUST be keyed by partition: [`InFlightBatchKey`] is
+/// `(producer_id, producer_epoch, base_sequence)` and is **not**
+/// partition-scoped, so two partitions routinely hold batches with identical
+/// keys. Handing a cross-partition pool to a single entry would let it rewrite
+/// another partition's batch.
+///
+/// A partition with no in-flight batches maps to an empty slice, or may be
+/// absent from the map entirely — the two are equivalent. That case is normal,
+/// not an error: see [`TransactionManager::bump_idempotent_producer_epoch`].
+///
+/// This is a type alias rather than a new type, so it adds no struct that Java
+/// does not have (`definition-of-done.md` §7).
+pub(crate) type InFlightBatchPool<'a> = HashMap<TopicPartition, Vec<&'a mut ProducerBatch>>;
+
+/// Which side of the producer is driving a state transition.
+///
+/// Replaces Java's `Thread.currentThread() instanceof Sender.SenderThread`
+/// (`TransactionManager.java:287-289`), which has no Rust analogue. See
+/// `.claude/rules/producer-transactions.md` §1: the poison-vs-throw distinction
+/// is load-bearing for the transactional guarantee, so it is threaded explicitly
+/// rather than inferred from task identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// The application task, i.e. a `Producer` API call.
+    App,
+    /// The Sender task.
+    Sender,
+}
+
+impl Caller {
+    /// Whether an invalid transition should poison the state machine before
+    /// returning the error.
+    ///
+    /// Translated from `shouldPoisonStateOnInvalidTransition()` (Java 287).
+    /// An invalid transition detected on the Sender side means the
+    /// transaction's integrity is already compromised, so the manager moves to
+    /// [`State::FatalError`]; on the application side the state is left alone so
+    /// the user can recover.
+    fn should_poison_state_on_invalid_transition(self) -> bool {
+        matches!(self, Self::Sender)
+    }
+}
+
+/// The internal state of the transaction manager.
+///
+/// Translated from `TransactionManager.State` (Java 151-189).
+///
+/// All nine Java variants are present even though the Phase-3 idempotence slice
+/// can only reach five of them (see [`State::is_transition_valid`] for why the
+/// transition table is translated whole).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum State {
+    /// No producer id has been requested yet.
+    Uninitialized,
+    /// An `InitProducerId` request is outstanding.
+    Initializing,
+    /// A producer id has been acquired; no transaction is in progress.
+    Ready,
+    /// A transaction has been started.
+    InTransaction,
+    /// A transaction has been prepared for a two-phase commit (KIP-939).
+    PreparedTransaction,
+    /// An `EndTxn(COMMIT)` is in progress.
+    CommittingTransaction,
+    /// An `EndTxn(ABORT)` is in progress.
+    AbortingTransaction,
+    /// An error occurred that requires the transaction to be aborted.
+    AbortableError,
+    /// An unrecoverable error occurred.
+    FatalError,
+}
+
+impl State {
+    /// Whether a transition from `source` to `self` is permitted.
+    ///
+    /// Translated verbatim from `State.isTransitionValid(State, State)`
+    /// (Java 162-188), which switches on the **target** — `self` here — and
+    /// enumerates the permitted sources.
+    ///
+    /// The whole nine-variant table is translated even though Phase 3 reaches
+    /// only five states, because the table is a single self-contained piece of
+    /// logic and splitting it would mean writing it twice. Note two arms that
+    /// are easy to get wrong: [`Self::AbortableError`] permits itself as a
+    /// source (a self-loop), and [`Self::Ready`] does **not** — `READY → READY`
+    /// is invalid.
+    fn is_transition_valid(&self, source: State) -> bool {
+        match self {
+            Self::Uninitialized => source == Self::Ready || source == Self::AbortableError,
+            Self::Initializing => {
+                source == Self::Uninitialized
+                    || source == Self::CommittingTransaction
+                    || source == Self::AbortingTransaction
+            },
+            Self::Ready => {
+                source == Self::Initializing
+                    || source == Self::CommittingTransaction
+                    || source == Self::AbortingTransaction
+            },
+            Self::InTransaction => source == Self::Ready,
+            Self::PreparedTransaction => source == Self::InTransaction || source == Self::Initializing,
+            Self::CommittingTransaction => source == Self::InTransaction || source == Self::PreparedTransaction,
+            Self::AbortingTransaction => {
+                source == Self::InTransaction || source == Self::PreparedTransaction || source == Self::AbortableError
+            },
+            Self::AbortableError => {
+                source == Self::InTransaction
+                    || source == Self::CommittingTransaction
+                    || source == Self::AbortableError
+                    || source == Self::Initializing
+            },
+            // We can transition to FATAL_ERROR unconditionally.
+            // FATAL_ERROR is never a valid starting state for any transition. So the only option is to close the
+            // producer or do purely non transactional requests.
+            Self::FatalError => true,
+        }
+    }
+}
+
+impl fmt::Display for State {
+    /// Formats as the Java enum constant name.
+    ///
+    /// Java's invalid-transition message interpolates `State.name()`, so the
+    /// exact spelling is part of the error contract that tests assert on.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Uninitialized => "UNINITIALIZED",
+            Self::Initializing => "INITIALIZING",
+            Self::Ready => "READY",
+            Self::InTransaction => "IN_TRANSACTION",
+            Self::PreparedTransaction => "PREPARED_TRANSACTION",
+            Self::CommittingTransaction => "COMMITTING_TRANSACTION",
+            Self::AbortingTransaction => "ABORTING_TRANSACTION",
+            Self::AbortableError => "ABORTABLE_ERROR",
+            Self::FatalError => "FATAL_ERROR",
+        };
+        f.write_str(name)
+    }
+}
+
+/// The order in which pending transactional requests must be sent.
+///
+/// Translated from `TransactionManager.Priority` (Java 195-207).
+///
+/// We use the priority to determine the order in which requests need to be sent out. For instance, if we have
+/// a pending FindCoordinator request, that must always go first. Next, If we need a producer id, that must go second.
+/// The endTxn request must always go last, unless we are bumping the epoch (a special case of InitProducerId) as
+/// part of ending the transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Priority {
+    /// `FindCoordinator`.
+    FindCoordinator = 0,
+    /// `InitProducerId` for the initial producer id.
+    InitProducerId = 1,
+    /// `AddPartitionsToTxn` / `AddOffsetsToTxn` / `TxnOffsetCommit`.
+    AddPartitionsOrOffsets = 2,
+    /// `EndTxn`.
+    EndTxn = 3,
+    /// `InitProducerId` sent to bump the epoch.
+    EpochBump = 4,
+}
+
+/// The request-specific half of a pending transactional request.
+///
+/// Java models the six request handlers as subclasses of the abstract inner
+/// class `TxnRequestHandler` (Java 1345-1459). Rust has neither inheritance nor
+/// an inner class's implicit `TransactionManager.this` reference, so the
+/// hierarchy becomes an enum carried by [`TxnRequestHandler`], and the methods
+/// that Java implements on the subclass while touching the enclosing manager
+/// (`handleResponse`, `coordinatorType`) become methods on
+/// [`TransactionManager`].
+///
+/// This mirrors how the crate already translates Java's `AbstractRequest` /
+/// `AbstractResponse` hierarchies — as the `ConcreteRequest` / `ConcreteResponse`
+/// enums — so it introduces no pattern the codebase does not already use.
+///
+/// Only `InitProducerIdHandler` is reachable from the idempotence slice; the
+/// other five arrive in Phase 5.
+pub(crate) enum TxnRequestHandlerKind {
+    /// `InitProducerIdHandler` (Java 1461-1539).
+    InitProducerId {
+        /// The request being sent.
+        builder: InitProducerIdRequestBuilder,
+        /// Whether this request bumps an existing epoch rather than acquiring a
+        /// producer id for the first time.
+        is_epoch_bump: bool,
+    },
+}
+
+/// A pending transactional request and its completion handle.
+///
+/// Translated from the abstract inner class `TxnRequestHandler`
+/// (Java 1345-1459). See [`TxnRequestHandlerKind`] for why the subclass
+/// hierarchy became an enum.
+pub(crate) struct TxnRequestHandler {
+    /// The handle the application awaits.
+    ///
+    /// `Arc` because `handle_cached_transaction_request_result` (Phase 5) must
+    /// hand the *same* result object to both the caller and the
+    /// pending-transition slot — see
+    /// `.claude/rules/producer-transactions.md` §5.
+    result: Arc<TransactionalRequestResult>,
+    /// Whether this request has already been retried.
+    is_retry: bool,
+    /// How long to back off before retrying this request.
+    ///
+    /// A field rather than a read-through to the manager because
+    /// `AddPartitionsToTxnHandler` (Phase 5) overrides it per instance
+    /// (Java 1543).
+    retry_backoff_ms: i64,
+    /// The request-specific state.
+    kind: TxnRequestHandlerKind,
+}
+
+impl TxnRequestHandler {
+    /// Creates a handler with a fresh result for `operation`.
+    ///
+    /// Corresponds to `TxnRequestHandler(String operation)` (Java 1353).
+    fn new(operation: &str, retry_backoff_ms: i64, kind: TxnRequestHandlerKind) -> Self {
+        Self {
+            result: Arc::new(TransactionalRequestResult::new(operation)),
+            is_retry: false,
+            retry_backoff_ms,
+            kind,
+        }
+    }
+
+    /// The handle the application awaits.
+    pub(crate) fn result(&self) -> &Arc<TransactionalRequestResult> {
+        &self.result
+    }
+
+    /// The request-specific state.
+    pub(crate) fn kind(&self) -> &TxnRequestHandlerKind {
+        &self.kind
+    }
+
+    /// The request builder, for the Sender to build and send.
+    ///
+    /// Corresponds to the abstract `requestBuilder()` (Java 1454). Returns
+    /// `&mut` because [`crate::common::requests::RequestBuilder::build`] takes
+    /// `&mut self` in this crate.
+    pub(crate) fn request_builder(&mut self) -> &mut InitProducerIdRequestBuilder {
+        match &mut self.kind {
+            TxnRequestHandlerKind::InitProducerId { builder, .. } => builder,
+        }
+    }
+
+    /// The priority of this request.
+    ///
+    /// Corresponds to the abstract `priority()` (Java 1458). Note
+    /// `InitProducerIdHandler.priority()` (Java 1477) is *dynamic*: an epoch
+    /// bump sorts after `EndTxn`, an initial acquisition before it.
+    pub(crate) fn priority(&self) -> Priority {
+        match &self.kind {
+            TxnRequestHandlerKind::InitProducerId { is_epoch_bump, .. } => {
+                if *is_epoch_bump {
+                    Priority::EpochBump
+                } else {
+                    Priority::InitProducerId
+                }
+            },
+        }
+    }
+
+    /// Whether this is an `EndTxn` request.
+    ///
+    /// Corresponds to `isEndTxn()` (Java 1450), whose base implementation
+    /// returns `false`; only `EndTxnHandler` (Phase 5) overrides it.
+    pub(crate) fn is_end_txn(&self) -> bool {
+        match &self.kind {
+            TxnRequestHandlerKind::InitProducerId { .. } => false,
+        }
+    }
+
+    /// Whether this request has already been retried.
+    ///
+    /// Corresponds to `isRetry()` (Java 1446).
+    pub(crate) fn is_retry(&self) -> bool {
+        self.is_retry
+    }
+
+    /// Marks this request as a retry.
+    ///
+    /// Corresponds to `setRetry()` (Java 1442).
+    fn set_retry(&mut self) {
+        self.is_retry = true;
+    }
+
+    /// How long to back off before retrying this request.
+    ///
+    /// Corresponds to `retryBackoffMs()` (Java 1401).
+    pub(crate) fn retry_backoff_ms(&self) -> i64 {
+        self.retry_backoff_ms
+    }
+
+    /// The operation name this handler's result was created for.
+    pub(crate) fn operation(&self) -> &str {
+        self.result.operation()
+    }
+}
+
+impl fmt::Debug for TxnRequestHandler {
+    /// Formats as the wrapped request builder.
+    ///
+    /// Java's log statements interpolate `requestBuilder()`, whose
+    /// `AbstractRequest.Builder.toString()` prints the request data. This crate
+    /// only exposes the builder as `&mut` (because `RequestBuilder::build` takes
+    /// `&mut self`), so the equivalent is reached through `Debug` instead.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            TxnRequestHandlerKind::InitProducerId { builder, .. } => write!(f, "{builder:?}"),
+        }
+    }
+}
+
+/// A class which maintains state for transactions. Also keeps the state necessary to ensure idempotent production.
+///
+/// Translated from
+/// `org.apache.kafka.clients.producer.internals.TransactionManager`.
+///
+/// # Scope
+///
+/// This is the idempotence slice (Milestone 11 Phase 3). The transactional state
+/// machine, the remaining five request handlers, the priority queue, KIP-890
+/// Transaction V2 and KIP-939 two-phase commit arrive in Phase 5. Construction
+/// with a `transactional_id` is refused until then — see [`Self::new`].
+///
+/// # Lock topology
+///
+/// `.claude/rules/producer-transactions.md` §2 requires a deliberate split when
+/// this type becomes shared: four Java fields (`inFlightRequestCorrelationId`,
+/// `transactionCoordinator`, `consumerGroupCoordinator`,
+/// `coordinatorSupportsBumpingEpoch`) plus `pendingRequests` are non-volatile
+/// and not consistently guarded by Java's `synchronized` blocks, because only
+/// the Sender thread touches them. They must NOT go behind the shared mutex.
+///
+/// Phase 3 introduces no mutex: this struct is plain and unshared, so every
+/// field is a plain field and the rule is not yet engaged. Phase 4 wraps the
+/// manager as `Arc<Mutex<TransactionManager>>` (see PLAN §6.3) and is where the
+/// split has to be made; the fields that belong to the Sender are marked below.
+pub(crate) struct TransactionManager {
+    log_context: LogContext,
+    /// `None` for a purely idempotent producer.
+    transactional_id: Option<String>,
+    transaction_timeout_ms: i32,
+    /// Read by `handleCoordinatorReady` and `maybeUpdateTransactionV2Enabled`,
+    /// both Phase 5. Held from Phase 3 so the constructor mirrors Java's.
+    api_versions: Arc<ApiVersions>,
+
+    txn_partition_map: TxnPartitionMap,
+
+    // If a batch bound for a partition expired locally after being sent at least once, the partition is considered
+    // to have an unresolved state. We keep track of such partitions here, and cannot assign any more sequence numbers
+    // for this partition until the unresolved state gets cleared. This may happen if other inflight batches returned
+    // successfully (indicating that the expired batch actually made it to the broker). If we don't get any successful
+    // responses for the partition once the inflight request count falls to zero, we reset the producer id and
+    // consequently clear this data structure as well.
+    // The value of the map is the sequence number of the batch following the expired one, computed by adding its
+    // record count to its sequence number. This is used to tell if a subsequent batch is the one immediately following
+    // the expired one.
+    partitions_with_unresolved_sequences: HashMap<TopicPartition, i32>,
+
+    // The partitions that have received an error that triggers an epoch bump. When the epoch is bumped, these
+    // partitions will have the sequences of their in-flight batches rewritten
+    partitions_to_rewrite_sequences: HashSet<TopicPartition>,
+
+    /// Sender-owned (rules §2).
+    ///
+    /// Java's `PriorityQueue<TxnRequestHandler>` ordered by
+    /// [`Priority`] (Java 224). A `VecDeque` suffices for the idempotence
+    /// slice: the only handler it can enqueue is `InitProducerId`, and
+    /// [`Self::bump_idempotent_epoch_and_reset_id_if_needed`] enqueues at most
+    /// one at a time (it is guarded on `!has_producer_id()`), so FIFO and
+    /// priority order coincide. Phase 5 introduces the ordered queue along with
+    /// the handlers that make ordering observable.
+    pending_requests: VecDeque<TxnRequestHandler>,
+
+    // This is used by the TxnRequestHandlers to control how long to back off before a given request is retried.
+    // For instance, this value is lowered by the AddPartitionsToTxnHandler when it receives a CONCURRENT_TRANSACTIONS
+    // error for the first AddPartitionsRequest in a transaction.
+    retry_backoff_ms: i64,
+
+    /// Sender-owned (rules §2).
+    in_flight_request_correlation_id: i32,
+
+    current_state: State,
+    last_error: Option<KafkaError>,
+    producer_id_and_epoch: ProducerIdAndEpoch,
+    client_side_epoch_bump_required: bool,
+    /// Always `false` in Phase 3: only `maybeUpdateTransactionV2Enabled`
+    /// (Java 492, Phase 5) sets it, and that method is transactional. Kept as a
+    /// field so [`Self::set_producer_id_and_epoch`]'s log-level fork
+    /// (Java 605) can be translated verbatim rather than approximated.
+    is_transaction_v2_enabled: bool,
+    enable_2pc: bool,
+}
+
+impl TransactionManager {
+    /// Creates a transaction manager.
+    ///
+    /// # Errors
+    ///
+    /// MILESTONE-11 GUARD: returns [`Errors::UnsupportedVersion`] when
+    /// `transactional_id` is `Some`. Java's constructor accepts it, but this
+    /// phase translates only the idempotence slice, so every transactional
+    /// entry point and the transactional arm of the five internally-forked
+    /// methods (`maybeTransitionToErrorState`, `handleFailedBatch`,
+    /// `maybeResolveSequences`, `nextRequest`, `canRetry`) are absent. Refusing
+    /// construction makes those paths unreachable instead of silently taking the
+    /// idempotent branch, which CLAUDE.md §5 requires. It mirrors the guard
+    /// already in `KafkaProducer::from_config` (PLAN §7.1); Phase 5 removes it.
+    pub(crate) fn new(
+        log_context: LogContext,
+        transactional_id: Option<String>,
+        transaction_timeout_ms: i32,
+        retry_backoff_ms: i64,
+        api_versions: Arc<ApiVersions>,
+        enable_2pc: bool,
+    ) -> Result<Self, KafkaError> {
+        if transactional_id.is_some() {
+            return Err(KafkaError::unsupported_version(
+                "The transactional producer is not yet implemented in this client \
+                 (Milestone 11, Phase 5); construct the TransactionManager without a \
+                 transactional id.",
+            ));
+        }
+        Ok(Self {
+            txn_partition_map: TxnPartitionMap::new(log_context.clone()),
+            log_context,
+            transactional_id,
+            transaction_timeout_ms,
+            api_versions,
+            partitions_with_unresolved_sequences: HashMap::new(),
+            partitions_to_rewrite_sequences: HashSet::new(),
+            pending_requests: VecDeque::new(),
+            retry_backoff_ms,
+            in_flight_request_correlation_id: NO_INFLIGHT_REQUEST_CORRELATION_ID,
+            current_state: State::Uninitialized,
+            last_error: None,
+            producer_id_and_epoch: ProducerIdAndEpoch::NONE,
+            client_side_epoch_bump_required: false,
+            is_transaction_v2_enabled: false,
+            enable_2pc,
+        })
+    }
+
+    // -- Identity and configuration ----------------------------------------
+
+    /// The configured transactional id, or `None` for an idempotent producer.
+    ///
+    /// Corresponds to `transactionalId()` (Java 472).
+    pub(crate) fn transactional_id(&self) -> Option<&str> {
+        self.transactional_id.as_deref()
+    }
+
+    /// Whether a producer id has been acquired.
+    ///
+    /// Corresponds to `hasProducerId()` (Java 476).
+    pub(crate) fn has_producer_id(&self) -> bool {
+        self.producer_id_and_epoch.is_valid()
+    }
+
+    /// Whether this producer is transactional.
+    ///
+    /// Corresponds to `isTransactional()` (Java 480).
+    pub(crate) fn is_transactional(&self) -> bool {
+        self.transactional_id.is_some()
+    }
+
+    /// Whether two-phase commit is enabled (KIP-939).
+    ///
+    /// Corresponds to `is2PCEnabled()` (Java 510).
+    pub(crate) fn is_2pc_enabled(&self) -> bool {
+        self.enable_2pc
+    }
+
+    /// The configured transaction timeout.
+    ///
+    /// Java reads the field directly from `initializeTransactions` (Java 319);
+    /// there is no accessor. Exposed here so the field has a reader before
+    /// Phase 5 adds that method.
+    pub(crate) fn transaction_timeout_ms(&self) -> i32 {
+        self.transaction_timeout_ms
+    }
+
+    /// The API versions this manager was constructed with.
+    ///
+    /// Java reads the field directly from `handleCoordinatorReady` (Java 1104)
+    /// and `maybeUpdateTransactionV2Enabled` (Java 493), both Phase 5.
+    pub(crate) fn api_versions(&self) -> &Arc<ApiVersions> {
+        &self.api_versions
+    }
+
+    // -- Error state --------------------------------------------------------
+
+    /// The error that moved this manager into an error state, if any.
+    ///
+    /// Corresponds to `lastError()` (Java 462).
+    pub(crate) fn last_error(&self) -> Option<&KafkaError> {
+        self.last_error.as_ref()
+    }
+
+    /// Whether the manager is in either error state.
+    ///
+    /// Corresponds to `hasError()` (Java 522).
+    pub(crate) fn has_error(&self) -> bool {
+        self.current_state == State::AbortableError || self.current_state == State::FatalError
+    }
+
+    /// Whether the manager is in an unrecoverable error state.
+    ///
+    /// Corresponds to `hasFatalError()` (Java 986).
+    pub(crate) fn has_fatal_error(&self) -> bool {
+        self.current_state == State::FatalError
+    }
+
+    /// Whether the manager is in an abortable error state.
+    ///
+    /// Corresponds to `hasAbortableError()` (Java 991).
+    pub(crate) fn has_abortable_error(&self) -> bool {
+        self.current_state == State::AbortableError
+    }
+
+    /// The current state. Visible for testing, as Java's package-private field
+    /// access is.
+    #[cfg(test)]
+    fn current_state(&self) -> State {
+        self.current_state
+    }
+
+    /// Moves to [`State::FatalError`].
+    ///
+    /// Corresponds to `transitionToFatalError(RuntimeException)` (Java 541).
+    ///
+    /// `caller` is a parameter rather than a constant because Java reaches this
+    /// from both sides: `TxnRequestHandler.fatalError` (Java 1359) runs on the
+    /// Sender, while `KafkaProducer`'s transactional API (Phase 6) reaches it
+    /// from the application task.
+    pub(crate) fn transition_to_fatal_error(&mut self, error: KafkaError, caller: Caller) -> Result<(), KafkaError> {
+        kafka_info!(self.log_context, "Transiting to fatal error state due to {}", error);
+        self.transition_to(State::FatalError, Some(error), caller)
+        // Java also fails `pendingTransition` here (Java 545-547).
+        // `pendingTransition` is only ever set by
+        // `handleCachedTransactionRequestResult` (Java 1281), which begins with
+        // `ensureTransactional()`, so it is always null for an idempotent
+        // producer. Phase 5 adds the field and this branch together.
+    }
+
+    /// Moves to [`State::AbortableError`].
+    ///
+    /// Corresponds to `transitionToAbortableError(RuntimeException)`
+    /// (Java 530).
+    ///
+    /// Reachable from the idempotence slice despite the "abortable" name:
+    /// `InitProducerIdHandler.handleResponse` calls `abortableError` for
+    /// `CLUSTER_AUTHORIZATION_FAILED` (Java 1524-1528) **without** checking
+    /// `isTransactional()`, and a non-transactional `InitProducerId` gets that
+    /// error code when the principal lacks `IdempotentWrite` on the cluster. The
+    /// transition itself is permitted because the manager is in
+    /// [`State::Initializing`] when the response arrives, and
+    /// `INITIALIZING → ABORTABLE_ERROR` is a valid arm of the table (Java 180).
+    pub(crate) fn transition_to_abortable_error(
+        &mut self,
+        error: KafkaError,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        if self.current_state == State::AbortingTransaction {
+            kafka_debug!(
+                self.log_context,
+                "Skipping transition to abortable error state since the transaction is already being aborted. \
+                 Underlying exception: {}",
+                error
+            );
+            return Ok(());
+        }
+
+        kafka_info!(self.log_context, "Transiting to abortable error state due to {}", error);
+        self.transition_to(State::AbortableError, Some(error), caller)
+    }
+
+    /// Moves the state machine to `target`.
+    ///
+    /// Translated from `transitionTo(State, RuntimeException)` (Java 1118).
+    /// The no-argument overload (Java 1114) is expressed by passing `None`.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalState`] when the transition is not permitted.
+    ///   When `caller` is [`Caller::Sender`] the manager first moves to
+    ///   [`State::FatalError`] and records the error as [`Self::last_error`]
+    ///   ("poisons" itself).
+    /// - [`KafkaError::IllegalArgument`] when moving to an error state without
+    ///   an error, mirroring Java's `IllegalArgumentException` (Java 1133).
+    fn transition_to(&mut self, target: State, error: Option<KafkaError>, caller: Caller) -> Result<(), KafkaError> {
+        if !target.is_transition_valid(self.current_state) {
+            let id_string = match &self.transactional_id {
+                Some(id) => format!("TransactionalId {id}: "),
+                None => String::new(),
+            };
+            let message = format!(
+                "{id_string}Invalid transition attempted from state {} to state {target}",
+                self.current_state
+            );
+
+            let error = KafkaError::illegal_state(message);
+            if caller.should_poison_state_on_invalid_transition() {
+                self.current_state = State::FatalError;
+                self.last_error = Some(error.clone());
+            }
+            return Err(error);
+        } else if target == State::FatalError || target == State::AbortableError {
+            match error {
+                None => {
+                    return Err(KafkaError::illegal_argument(format!(
+                        "Cannot transition to {target} with a null exception"
+                    )));
+                },
+                Some(error) => self.last_error = Some(error),
+            }
+        } else {
+            self.last_error = None;
+        }
+
+        match &self.last_error {
+            Some(last_error) => kafka_debug!(
+                self.log_context,
+                "Transition from state {} to error state {} ({})",
+                self.current_state,
+                target,
+                last_error
+            ),
+            None => kafka_debug!(self.log_context, "Transition from state {} to {}", self.current_state, target),
+        }
+
+        self.current_state = target;
+        Ok(())
+    }
+
+    /// Rejects a transactional operation on a non-transactional producer.
+    ///
+    /// Corresponds to `ensureTransactional()` (Java 1147).
+    fn ensure_transactional(&self) -> Result<(), KafkaError> {
+        if !self.is_transactional() {
+            return Err(KafkaError::illegal_state(
+                "Transactional method invoked on a non-transactional producer.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the recorded error if the manager is in an error state.
+    ///
+    /// Translated from `maybeFailWithError()` (Java 1152).
+    ///
+    /// Java chains `lastError` as the cause of the thrown exception for the
+    /// `IllegalStateException` and bare-`KafkaException` cases.
+    /// [`KafkaError`] has no cause chain, and Java's `getMessage()` does not
+    /// include the cause either, so the message text is reproduced exactly and
+    /// the cause stays reachable through [`Self::last_error`].
+    fn maybe_fail_with_error(&self) -> Result<(), KafkaError> {
+        if !self.has_error() {
+            return Ok(());
+        }
+
+        // Java interpolates a null transactionalId as the text "null".
+        let transactional_id = self.transactional_id.as_deref().unwrap_or("null");
+        let producer_id_and_epoch = self.producer_id_and_epoch;
+
+        match &self.last_error {
+            // for ProducerFencedException, do not wrap it as a KafkaException
+            // but create a new instance without the call trace since it was not thrown because of the current call
+            Some(error) if error.error() == Errors::ProducerFenced => Err(KafkaError::with_message(
+                Errors::ProducerFenced,
+                format!(
+                    "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} has been \
+                         fenced by another producer with the same transactionalId"
+                ),
+            )),
+            Some(error) if error.error() == Errors::InvalidProducerEpoch => Err(KafkaError::with_message(
+                Errors::InvalidProducerEpoch,
+                format!(
+                    "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} attempted to \
+                         produce with an old epoch"
+                ),
+            )),
+            Some(KafkaError::IllegalState(_)) => Err(KafkaError::illegal_state(format!(
+                "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
+                     transactional method because of previous invalid state transition attempt"
+            ))),
+            // Java: new KafkaException("Cannot execute transactional method because we are in an error state",
+            // lastError). A bare KafkaException carries no wire code, which this
+            // crate spells as `Errors::UnknownServerError` (cf.
+            // `record_accumulator.rs:1095`).
+            _ => Err(KafkaError::with_message(
+                Errors::UnknownServerError,
+                "Cannot execute transactional method because we are in an error state",
+            )),
+        }
+    }
+
+    /// Records an error that arose on the send path, moving to an error state
+    /// when the error class requires it.
+    ///
+    /// Translated from `maybeTransitionToErrorState(RuntimeException)`
+    /// (Java 764).
+    ///
+    /// The five error classes Java tests with `instanceof` map onto wire codes:
+    /// `ClusterAuthorizationException` → [`Errors::ClusterAuthorizationFailed`],
+    /// `TransactionalIdAuthorizationException` →
+    /// [`Errors::TransactionalIdAuthorizationFailed`],
+    /// `ProducerFencedException` → [`Errors::ProducerFenced`],
+    /// `UnsupportedVersionException` → [`Errors::UnsupportedVersion`],
+    /// `InvalidPidMappingException` → [`Errors::InvalidProducerIdMapping`].
+    pub(crate) fn maybe_transition_to_error_state(
+        &mut self,
+        error: &KafkaError,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        if matches!(
+            error.error(),
+            Errors::ClusterAuthorizationFailed
+                | Errors::TransactionalIdAuthorizationFailed
+                | Errors::ProducerFenced
+                | Errors::UnsupportedVersion
+                | Errors::InvalidProducerIdMapping
+        ) {
+            return self.transition_to_fatal_error(error.clone(), caller);
+        }
+        if self.is_transactional() {
+            // Java 771-785 converts retriable and InvalidTxnState errors into a
+            // TransactionAbortableException, may request a client-side epoch
+            // bump, and transitions to the abortable error state. All three need
+            // Phase 5 state (`needToTriggerEpochBumpFromClient`, `isCompleting`).
+            // Unreachable while `new` refuses a transactional id.
+            return Err(KafkaError::unsupported_version(
+                "The transactional error path is not yet implemented in this client \
+                 (Milestone 11, Phase 5).",
+            ));
+        }
+        Ok(())
+    }
+
+    // -- Producer id lifecycle ---------------------------------------------
+
+    /// Get the current producer id and epoch without blocking. Callers must use [`ProducerIdAndEpoch::is_valid`] to
+    /// verify that the result is valid.
+    ///
+    /// Corresponds to `producerIdAndEpoch()` (Java 581).
+    pub(crate) fn producer_id_and_epoch(&self) -> ProducerIdAndEpoch {
+        self.producer_id_and_epoch
+    }
+
+    /// Restarts `topic_partition`'s sequence numbering when the partition is
+    /// still on a stale producer id/epoch and has drained.
+    ///
+    /// Translated from `maybeUpdateProducerIdAndEpoch(TopicPartition)`
+    /// (Java 585).
+    ///
+    /// `batches` is the partition's in-flight batches; it is only consulted when
+    /// the rewrite happens, and the guard means the entry tracks none at that
+    /// point, so an empty slice is always correct here. It is still a parameter
+    /// because [`TxnPartitionMap::start_sequences_at_beginning`] requires the
+    /// pool by contract (rules §7).
+    pub(crate) fn maybe_update_producer_id_and_epoch(
+        &mut self,
+        topic_partition: &TopicPartition,
+        batches: &mut [&mut ProducerBatch],
+    ) -> Result<(), KafkaError> {
+        if self.has_fatal_error() {
+            kafka_debug!(
+                self.log_context,
+                "Ignoring producer ID and epoch update request since the producer is in fatal error state"
+            );
+            return Ok(());
+        }
+
+        if self.has_stale_producer_id_and_epoch(topic_partition) && !self.has_inflight_batches(topic_partition) {
+            // If the batch was on a different ID and/or epoch (due to an epoch bump) and all its in-flight batches
+            // have completed, reset the partition sequence so that the next batch (with the new epoch) starts from 0
+            let producer_id_and_epoch = self.producer_id_and_epoch;
+            self.txn_partition_map
+                .start_sequences_at_beginning(topic_partition, producer_id_and_epoch, batches)?;
+            kafka_debug!(
+                self.log_context,
+                "ProducerId of partition {} set to {} with epoch {}. Reinitialize sequence at beginning.",
+                topic_partition,
+                producer_id_and_epoch.producer_id,
+                producer_id_and_epoch.epoch
+            );
+        }
+        Ok(())
+    }
+
+    /// Set the producer id and epoch atomically.
+    ///
+    /// Corresponds to `setProducerIdAndEpoch(ProducerIdAndEpoch)` (Java 603).
+    fn set_producer_id_and_epoch(&mut self, producer_id_and_epoch: ProducerIdAndEpoch) {
+        // With TV2, the epoch bump is common and frequent. Only log if it is at debug level or the producer ID is
+        // changed.
+        if !self.is_transactional()
+            || !self.is_transaction_v2_enabled
+            || producer_id_and_epoch.producer_id != self.producer_id_and_epoch.producer_id
+        {
+            kafka_info!(
+                self.log_context,
+                "ProducerId set to {} with epoch {}",
+                producer_id_and_epoch.producer_id,
+                producer_id_and_epoch.epoch
+            );
+        } else {
+            kafka_debug!(
+                self.log_context,
+                "ProducerId set to {} with epoch {}",
+                producer_id_and_epoch.producer_id,
+                producer_id_and_epoch.epoch
+            );
+        }
+        self.producer_id_and_epoch = producer_id_and_epoch;
+    }
+
+    /// This method resets the producer ID and epoch and sets the state to [`State::Uninitialized`], which will trigger
+    /// a new `InitProducerId` request. This method is only called when the producer epoch is exhausted; we will bump
+    /// the epoch instead.
+    ///
+    /// Corresponds to `resetIdempotentProducerId()` (Java 618).
+    fn reset_idempotent_producer_id(&mut self, caller: Caller) -> Result<(), KafkaError> {
+        if self.is_transactional() {
+            return Err(KafkaError::illegal_state(
+                "Cannot reset producer state for a transactional producer. You must either abort the ongoing \
+                 transaction or reinitialize the transactional producer instead",
+            ));
+        }
+        kafka_debug!(
+            self.log_context,
+            "Resetting idempotent producer ID. ID and epoch before reset are {}",
+            self.producer_id_and_epoch
+        );
+        self.set_producer_id_and_epoch(ProducerIdAndEpoch::NONE);
+        self.transition_to(State::Uninitialized, None, caller)
+    }
+
+    /// Drops all sequence bookkeeping for `topic_partition`.
+    ///
+    /// Corresponds to `resetSequenceForPartition(TopicPartition)` (Java 627).
+    fn reset_sequence_for_partition(&mut self, topic_partition: &TopicPartition) {
+        self.txn_partition_map.remove(topic_partition);
+        self.partitions_with_unresolved_sequences.remove(topic_partition);
+    }
+
+    /// Drops all sequence bookkeeping for every partition.
+    ///
+    /// Corresponds to `resetSequenceNumbers()` (Java 632).
+    fn reset_sequence_numbers(&mut self) {
+        self.txn_partition_map.reset();
+        self.partitions_with_unresolved_sequences.clear();
+    }
+
+    /// This method is used to trigger an epoch bump for non-transactional idempotent producers.
+    ///
+    /// Corresponds to `requestIdempotentEpochBumpForPartition(TopicPartition)`
+    /// (Java 640).
+    pub(crate) fn request_idempotent_epoch_bump_for_partition(&mut self, topic_partition: &TopicPartition) {
+        self.client_side_epoch_bump_required = true;
+        self.partitions_to_rewrite_sequences.insert(topic_partition.clone());
+    }
+
+    /// Bumps the local epoch (or resets the producer id when the epoch is
+    /// exhausted) and rewrites the queued partitions' in-flight sequences.
+    ///
+    /// Translated from `bumpIdempotentProducerEpoch()` (Java 645).
+    ///
+    /// # A queued partition with no in-flight batches
+    ///
+    /// This is normal, not an error, and the rewrite must still run. Java
+    /// reaches [`TxnPartitionEntry::start_sequences_at_beginning`] through
+    /// `TxnPartitionMap.get` (Java 78), which throws only when the partition has
+    /// no **entry**; an entry with an empty `inflightBatchesBySequence` simply
+    /// runs the reset loop zero times and still lands `nextSequence = 0`,
+    /// `lastAckedSequence = NO_LAST_ACKED_SEQUENCE_NUMBER` and the new producer
+    /// id/epoch. Resetting the counter is the whole point of the call, so
+    /// skipping it would leave the partition numbering from the old epoch.
+    ///
+    /// `testProducerIdReset` (`TransactionManagerTest.java:865`) pins exactly
+    /// this: `tp0` gets an entry and sequence 3 from `incrementSequenceNumber`
+    /// but never an in-flight batch, and after the bump `sequenceNumber(tp0)`
+    /// must be 0 while `tp1`, which was not queued, must still be 3.
+    ///
+    /// So a queued partition absent from `batches` is passed an **empty slice**
+    /// rather than being skipped. A queued partition with no *entry* propagates
+    /// [`TxnPartitionMap::get_mut`]'s error, matching Java's throw; that
+    /// combination is unreachable today, because the only caller of
+    /// [`Self::request_idempotent_epoch_bump_for_partition`] that could remove
+    /// an entry is `handleFailedBatch`'s `UnknownProducerId` arm, and rules §9
+    /// routes an idempotent `UnknownProducerId` to the epoch-bump branch
+    /// instead.
+    fn bump_idempotent_producer_epoch(
+        &mut self,
+        batches: &mut InFlightBatchPool<'_>,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        if self.producer_id_and_epoch.epoch == i16::MAX {
+            self.reset_idempotent_producer_id(caller)?;
+        } else {
+            self.set_producer_id_and_epoch(ProducerIdAndEpoch::new(
+                self.producer_id_and_epoch.producer_id,
+                self.producer_id_and_epoch.epoch + 1,
+            ));
+            kafka_debug!(
+                self.log_context,
+                "Incremented producer epoch, current producer ID and epoch are now {}",
+                self.producer_id_and_epoch
+            );
+        }
+
+        // When the epoch is bumped, rewrite all in-flight sequences for the partition(s) that triggered the epoch bump
+        let producer_id_and_epoch = self.producer_id_and_epoch;
+        // Java iterates the `HashSet` directly; the order does not matter
+        // because each partition is rewritten independently. Collected here only
+        // to release the borrow on `self`.
+        let queued: Vec<TopicPartition> = self.partitions_to_rewrite_sequences.iter().cloned().collect();
+        let mut no_batches: [&mut ProducerBatch; 0] = [];
+        for topic_partition in queued {
+            // A queued partition with no in-flight batches gets an empty slice
+            // rather than being skipped — see the method docs.
+            let partition_batches: &mut [&mut ProducerBatch] = match batches.get_mut(&topic_partition) {
+                Some(partition_batches) => partition_batches.as_mut_slice(),
+                None => &mut no_batches,
+            };
+            self.txn_partition_map.start_sequences_at_beginning(
+                &topic_partition,
+                producer_id_and_epoch,
+                partition_batches,
+            )?;
+            self.partitions_with_unresolved_sequences.remove(&topic_partition);
+        }
+        self.partitions_to_rewrite_sequences.clear();
+
+        self.client_side_epoch_bump_required = false;
+        Ok(())
+    }
+
+    /// Bumps the epoch when one was requested, and enqueues an
+    /// `InitProducerId` request when no producer id is held.
+    ///
+    /// Translated from `bumpIdempotentEpochAndResetIdIfNeeded()` (Java 663).
+    /// Called once per `Sender.runOnce` (`Sender.java:331`), hence
+    /// [`Caller::Sender`] at the production call site.
+    pub(crate) fn bump_idempotent_epoch_and_reset_id_if_needed(
+        &mut self,
+        batches: &mut InFlightBatchPool<'_>,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        if !self.is_transactional() {
+            if self.client_side_epoch_bump_required {
+                self.bump_idempotent_producer_epoch(batches, caller)?;
+            }
+            if self.current_state != State::Initializing && !self.has_producer_id() {
+                self.transition_to(State::Initializing, None, caller)?;
+                let mut request_data = InitProducerIdRequestData::new();
+                request_data.set_transactional_id(None).set_transaction_timeout_ms(i32::MAX);
+                let handler = TxnRequestHandler::new(
+                    "InitProducerId",
+                    self.retry_backoff_ms,
+                    TxnRequestHandlerKind::InitProducerId {
+                        builder: InitProducerIdRequestBuilder::new(request_data),
+                        is_epoch_bump: false,
+                    },
+                );
+                self.enqueue_request(handler);
+            }
+        }
+        Ok(())
+    }
+
+    // -- Sequence numbers ---------------------------------------------------
+
+    /// Returns the next sequence number to be written to the given `TopicPartition`.
+    ///
+    /// Corresponds to `sequenceNumber(TopicPartition)` (Java 682).
+    pub(crate) fn sequence_number(&mut self, topic_partition: &TopicPartition) -> i32 {
+        self.txn_partition_map.get_or_create(topic_partition).next_sequence()
+    }
+
+    /// Returns the current producer id/epoch of the given `TopicPartition`.
+    ///
+    /// Corresponds to the `producerIdAndEpoch(TopicPartition)` overload
+    /// (Java 689). Renamed because Rust has no overloading and
+    /// [`Self::producer_id_and_epoch`] already takes the no-argument form.
+    pub(crate) fn producer_id_and_epoch_for_partition(
+        &mut self,
+        topic_partition: &TopicPartition,
+    ) -> ProducerIdAndEpoch {
+        self.txn_partition_map.get_or_create(topic_partition).producer_id_and_epoch()
+    }
+
+    /// Advances `topic_partition`'s next sequence by `increment`.
+    ///
+    /// Corresponds to `incrementSequenceNumber(TopicPartition, int)`
+    /// (Java 693).
+    pub(crate) fn increment_sequence_number(
+        &mut self,
+        topic_partition: &TopicPartition,
+        increment: i32,
+    ) -> Result<(), KafkaError> {
+        self.txn_partition_map.get_mut(topic_partition)?.increment_sequence(increment);
+        Ok(())
+    }
+
+    /// Records `batch` as in flight.
+    ///
+    /// Corresponds to `addInFlightBatch(ProducerBatch)` (Java 697).
+    pub(crate) fn add_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), KafkaError> {
+        if !batch.has_sequence() {
+            return Err(KafkaError::illegal_state(format!(
+                "Can't track batch for partition {} when sequence is not set.",
+                batch.topic_partition
+            )));
+        }
+        self.txn_partition_map
+            .get_mut(&batch.topic_partition)?
+            .add_inflight_batch(batch);
+        Ok(())
+    }
+
+    /// Returns the first inflight sequence for a given partition. This is the base sequence of an inflight batch with
+    /// the lowest sequence number.
+    ///
+    /// Corresponds to `firstInFlightSequence(TopicPartition)` (Java 710).
+    ///
+    /// Returns the lowest inflight sequence if the transaction manager is tracking inflight requests for this
+    /// partition. If there are no inflight requests being tracked for this partition, this method will return
+    /// [`RecordBatch::NO_SEQUENCE`].
+    pub(crate) fn first_in_flight_sequence(&mut self, topic_partition: &TopicPartition) -> Result<i32, KafkaError> {
+        if !self.has_inflight_batches(topic_partition) {
+            return Ok(RecordBatch::NO_SEQUENCE);
+        }
+        Ok(self
+            .next_batch_by_sequence(topic_partition)?
+            .map_or(RecordBatch::NO_SEQUENCE, |(_, _, base_sequence)| base_sequence))
+    }
+
+    /// The key of the lowest-sequence in-flight batch for `topic_partition`.
+    ///
+    /// Corresponds to `nextBatchBySequence(TopicPartition)` (Java 717). Java
+    /// returns the `ProducerBatch`; this returns its ordering key, because this
+    /// type does not own the batches (rules §7).
+    pub(crate) fn next_batch_by_sequence(
+        &self,
+        topic_partition: &TopicPartition,
+    ) -> Result<Option<InFlightBatchKey>, KafkaError> {
+        self.txn_partition_map.next_batch_by_sequence(topic_partition)
+    }
+
+    /// Removes `batch` from the in-flight set.
+    ///
+    /// Corresponds to `removeInFlightBatch(ProducerBatch)` (Java 721).
+    pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), KafkaError> {
+        if self.has_inflight_batches(&batch.topic_partition) {
+            self.txn_partition_map.remove_in_flight_batch(batch)?;
+        }
+        Ok(())
+    }
+
+    /// Raises `topic_partition`'s last acknowledged sequence to `sequence`.
+    ///
+    /// Corresponds to `maybeUpdateLastAckedSequence(TopicPartition, int)`
+    /// (Java 726).
+    fn maybe_update_last_acked_sequence(&mut self, topic_partition: &TopicPartition, sequence: i32) -> i32 {
+        self.txn_partition_map
+            .maybe_update_last_acked_sequence(topic_partition, sequence)
+    }
+
+    /// The last acknowledged sequence for `topic_partition`.
+    ///
+    /// Corresponds to `lastAckedSequence(TopicPartition)` (Java 730).
+    pub(crate) fn last_acked_sequence(&self, topic_partition: &TopicPartition) -> Option<i32> {
+        self.txn_partition_map.last_acked_sequence(topic_partition)
+    }
+
+    /// The last acknowledged offset for `topic_partition`.
+    ///
+    /// Corresponds to `lastAckedOffset(TopicPartition)` (Java 734).
+    pub(crate) fn last_acked_offset(&self, topic_partition: &TopicPartition) -> Option<i64> {
+        self.txn_partition_map.last_acked_offset(topic_partition)
+    }
+
+    /// Records the last offset acknowledged for `batch`'s partition.
+    ///
+    /// Corresponds to `updateLastAckedOffset(PartitionResponse, ProducerBatch)`
+    /// (Java 738).
+    fn update_last_acked_offset(
+        &mut self,
+        response: &PartitionResponse,
+        batch: &ProducerBatch,
+    ) -> Result<(), KafkaError> {
+        if response.base_offset == INVALID_OFFSET {
+            return Ok(());
+        }
+        let last_offset = response.base_offset + i64::from(batch.record_count) - 1;
+        let is_transactional = self.is_transactional();
+        self.txn_partition_map
+            .update_last_acked_offset(&batch.topic_partition, is_transactional, last_offset)
+    }
+
+    /// Records a successful produce response for `batch`.
+    ///
+    /// Corresponds to `handleCompletedBatch(ProducerBatch, PartitionResponse)`
+    /// (Java 745).
+    pub(crate) fn handle_completed_batch(
+        &mut self,
+        batch: &ProducerBatch,
+        response: &PartitionResponse,
+    ) -> Result<(), KafkaError> {
+        let last_acked_sequence = self.maybe_update_last_acked_sequence(&batch.topic_partition, batch.last_sequence());
+        kafka_trace!(
+            self.log_context,
+            "ProducerId: {}; Set last ack'd sequence number for topic-partition {} to {}",
+            batch.producer_id(),
+            batch.topic_partition,
+            last_acked_sequence
+        );
+
+        self.update_last_acked_offset(response, batch)?;
+        self.remove_in_flight_batch(batch)
+    }
+
+    /// Records a failed produce response for `batch`.
+    ///
+    /// Translated from
+    /// `handleFailedBatch(ProducerBatch, RuntimeException, boolean)`
+    /// (Java 788).
+    ///
+    /// `batches` supplies the partition's *remaining* in-flight batches for the
+    /// transactional sequence adjustment (Java 818); the idempotent path never
+    /// reads it, so an empty slice is fine there.
+    ///
+    /// # `UnknownProducerId` on an idempotent producer takes the epoch-bump arm
+    ///
+    /// Java's first branch tests `exception instanceof OutOfOrderSequenceException`,
+    /// and `UnknownProducerIdException` **extends** it, so an idempotent
+    /// producer's `UnknownProducerId` matches the first branch and requests an
+    /// epoch bump; only a transactional producer reaches the second branch. The
+    /// two wire codes are unrelated `Errors` values in Rust, so the relation is
+    /// spelled out by [`is_out_of_order_sequence`] — see
+    /// `.claude/rules/producer-transactions.md` §9.
+    pub(crate) fn handle_failed_batch(
+        &mut self,
+        batch: &ProducerBatch,
+        error: &KafkaError,
+        adjust_sequence_numbers: bool,
+        batches: &mut [&mut ProducerBatch],
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        self.maybe_transition_to_error_state(error, caller)?;
+        self.remove_in_flight_batch(batch)?;
+
+        if self.has_fatal_error() {
+            kafka_debug!(
+                self.log_context,
+                "Ignoring batch {} with producer id {}, epoch {}, and sequence number {} since the producer is \
+                 already in fatal error state ({})",
+                batch.topic_partition,
+                batch.producer_id(),
+                batch.producer_epoch(),
+                batch.base_sequence(),
+                error
+            );
+            return Ok(());
+        }
+
+        if is_out_of_order_sequence(error.error()) && !self.is_transactional() {
+            kafka_error!(
+                self.log_context,
+                "The broker returned {} for topic-partition {} with producerId {}, epoch {}, and sequence number {}",
+                error,
+                batch.topic_partition,
+                batch.producer_id(),
+                batch.producer_epoch(),
+                batch.base_sequence()
+            );
+
+            // If we fail with an OutOfOrderSequenceException, we have a gap in the log. Bump the epoch for this
+            // partition, which will reset the sequence number to 0 and allow us to continue
+            self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+        } else if error.error() == Errors::UnknownProducerId {
+            // If we get an UnknownProducerId for a partition, then the broker has no state for that producer. It will
+            // therefore accept a write with sequence number 0. We reset the sequence number for the partition here so
+            // that the producer can continue after aborting the transaction. All inflight-requests to this partition
+            // will also fail with an UnknownProducerId error, so the sequence will remain at 0. Note that if the
+            // broker supports bumping the epoch, we will later reset all sequence numbers after calling InitProducerId
+            //
+            // Only a transactional producer reaches this arm: the branch above
+            // already claims `UnknownProducerId` when `!isTransactional()`.
+            self.reset_sequence_for_partition(&batch.topic_partition);
+        } else if adjust_sequence_numbers {
+            if !self.is_transactional() {
+                self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+            } else {
+                self.txn_partition_map.adjust_sequences_due_to_failed_batch(batch, batches)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any batches are in flight for `topic_partition`.
+    ///
+    /// Corresponds to `hasInflightBatches(TopicPartition)` (Java 824).
+    pub(crate) fn has_inflight_batches(&mut self, topic_partition: &TopicPartition) -> bool {
+        self.txn_partition_map.get_or_create(topic_partition).has_inflight_batches()
+    }
+
+    /// Whether `topic_partition` is still numbering under an older producer
+    /// id/epoch than the manager's current one.
+    ///
+    /// Corresponds to `hasStaleProducerIdAndEpoch(TopicPartition)` (Java 828).
+    pub(crate) fn has_stale_producer_id_and_epoch(&mut self, topic_partition: &TopicPartition) -> bool {
+        let producer_id_and_epoch = self.producer_id_and_epoch;
+        producer_id_and_epoch != self.txn_partition_map.get_or_create(topic_partition).producer_id_and_epoch()
+    }
+
+    /// Whether any partition has an unresolved sequence.
+    ///
+    /// Corresponds to `hasUnresolvedSequences()` (Java 832).
+    pub(crate) fn has_unresolved_sequences(&self) -> bool {
+        !self.partitions_with_unresolved_sequences.is_empty()
+    }
+
+    /// Whether `topic_partition` has an unresolved sequence.
+    ///
+    /// Corresponds to `hasUnresolvedSequence(TopicPartition)` (Java 836).
+    pub(crate) fn has_unresolved_sequence(&self, topic_partition: &TopicPartition) -> bool {
+        self.partitions_with_unresolved_sequences.contains_key(topic_partition)
+    }
+
+    /// Marks `batch`'s partition unresolved after the batch expired locally.
+    ///
+    /// Corresponds to `markSequenceUnresolved(ProducerBatch)` (Java 840).
+    pub(crate) fn mark_sequence_unresolved(&mut self, batch: &ProducerBatch) {
+        let next_sequence = batch.last_sequence() + 1;
+        let recorded = self
+            .partitions_with_unresolved_sequences
+            .entry(batch.topic_partition.clone())
+            .and_modify(|value| *value = (*value).max(next_sequence))
+            .or_insert(next_sequence);
+        kafka_debug!(
+            self.log_context,
+            "Marking partition {} unresolved with next sequence number {}",
+            batch.topic_partition,
+            recorded
+        );
+    }
+
+    /// Attempts to resolve unresolved sequences. If all in-flight requests are complete and some partitions are still
+    /// unresolved, either bump the epoch if possible, or transition to a fatal error.
+    ///
+    /// Translated from `maybeResolveSequences()` (Java 850). Called once per
+    /// `Sender.runOnce` (`Sender.java:313`).
+    ///
+    /// Takes no [`Caller`]: the idempotent arm performs no state transition, it
+    /// only requests an epoch bump. Phase 5's transactional arm transitions and
+    /// will need the parameter.
+    pub(crate) fn maybe_resolve_sequences(&mut self) -> Result<(), KafkaError> {
+        // Java removes through the key-set iterator. Collected here because the
+        // loop body needs `&mut self`; each partition is handled independently,
+        // so `HashMap` iteration order is not observable.
+        let unresolved: Vec<TopicPartition> = self.partitions_with_unresolved_sequences.keys().cloned().collect();
+        for topic_partition in unresolved {
+            if self.has_inflight_batches(&topic_partition) {
+                continue;
+            }
+            // The partition has been fully drained. At this point, the last ack'd sequence should be one less than
+            // next sequence destined for the partition. If so, the partition is fully resolved. If not, we should
+            // reset the sequence number if necessary.
+            let sequence = self.sequence_number(&topic_partition);
+            if self.is_next_sequence(&topic_partition, sequence) {
+                // This would happen when a batch was expired, but subsequent batches succeeded.
+                self.partitions_with_unresolved_sequences.remove(&topic_partition);
+                continue;
+            }
+
+            // We would enter this branch if all in flight batches were ultimately expired in the producer.
+            if self.is_transactional() {
+                // Java 862-870 bumps the epoch if the coordinator supports it and
+                // otherwise moves to a fatal error, via
+                // `transitionToAbortableErrorOrFatalError`. That needs Phase 5
+                // state (`coordinatorSupportsBumpingEpoch`,
+                // `isTransactionV2Enabled`). Unreachable while `new` refuses a
+                // transactional id.
+                return Err(KafkaError::unsupported_version(format!(
+                    "Resolving unresolved sequences for partition {topic_partition} on a transactional producer is \
+                     not yet implemented in this client (Milestone 11, Phase 5)."
+                )));
+            }
+            // For the idempotent producer, bump the epoch
+            kafka_info!(
+                self.log_context,
+                "No inflight batches remaining for {}, last ack'd sequence for partition is {}, next sequence is {}. \
+                 Going to bump epoch and reset sequence numbers.",
+                topic_partition,
+                self.last_acked_sequence(&topic_partition)
+                    .unwrap_or(TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER),
+                sequence
+            );
+            self.request_idempotent_epoch_bump_for_partition(&topic_partition);
+            self.partitions_with_unresolved_sequences.remove(&topic_partition);
+        }
+        Ok(())
+    }
+
+    /// Whether `sequence` is exactly one past `topic_partition`'s last
+    /// acknowledged sequence.
+    ///
+    /// Corresponds to `isNextSequence(TopicPartition, int)` (Java 885).
+    fn is_next_sequence(&self, topic_partition: &TopicPartition, sequence: i32) -> bool {
+        sequence
+            - self
+                .last_acked_sequence(topic_partition)
+                .unwrap_or(TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER)
+            == 1
+    }
+
+    /// Whether `sequence` is the batch immediately following the expired one on
+    /// an unresolved partition.
+    ///
+    /// Corresponds to `isNextSequenceForUnresolvedPartition(TopicPartition, int)`
+    /// (Java 889).
+    fn is_next_sequence_for_unresolved_partition(&self, topic_partition: &TopicPartition, sequence: i32) -> bool {
+        self.has_unresolved_sequence(topic_partition)
+            && self.partitions_with_unresolved_sequences.get(topic_partition) == Some(&sequence)
+    }
+
+    // -- Pending transactional requests ------------------------------------
+
+    /// Enqueues `handler` for the Sender to pick up.
+    ///
+    /// Corresponds to `enqueueRequest(TxnRequestHandler)` (Java 1186).
+    fn enqueue_request(&mut self, handler: TxnRequestHandler) {
+        kafka_debug!(self.log_context, "Enqueuing transactional request {:?}", handler);
+        self.pending_requests.push_back(handler);
+    }
+
+    /// The next transactional request to send, if any.
+    ///
+    /// Translated from `nextRequest(boolean)` (Java 894).
+    ///
+    /// Java's first statement enqueues an `AddPartitionsToTxn` when
+    /// `newPartitionsInTransaction` is non-empty, and its `isEndTxn` branch
+    /// short-circuits an `EndTxn` for a transaction that never started. Both are
+    /// transaction-only, and [`TxnRequestHandler::is_end_txn`] is `false` for
+    /// every handler this phase can build, so neither is reachable; Phase 5 adds
+    /// them with the handlers they need.
+    pub(crate) fn next_request(&mut self, has_incomplete_batches: bool) -> Option<TxnRequestHandler> {
+        let next_request_handler = self.pending_requests.front()?;
+
+        // Do not send the EndTxn until all batches have been flushed
+        if next_request_handler.is_end_txn() && has_incomplete_batches {
+            return None;
+        }
+
+        let next_request_handler = self.pending_requests.pop_front()?;
+        if self.maybe_terminate_request_with_error(&next_request_handler) {
+            kafka_trace!(
+                self.log_context,
+                "Not sending transactional request {:?} because we are in an error state",
+                next_request_handler
+            );
+            return None;
+        }
+
+        kafka_trace!(self.log_context, "Request {:?} dequeued for sending", next_request_handler);
+        Some(next_request_handler)
+    }
+
+    /// Whether any transactional request is pending.
+    ///
+    /// Corresponds to `hasPendingRequests()` (Java 1005).
+    pub(crate) fn has_pending_requests(&self) -> bool {
+        !self.pending_requests.is_empty()
+    }
+
+    /// Fails `handler` when the manager is in an error state.
+    ///
+    /// Translated from `maybeTerminateRequestWithError(TxnRequestHandler)`
+    /// (Java 1174). Java's `hasAbortableError() && handler instanceof
+    /// FindCoordinatorHandler` escape hatch cannot match here — that handler
+    /// arrives in Phase 5 — so it is omitted rather than written as an
+    /// always-false test.
+    fn maybe_terminate_request_with_error(&self, handler: &TxnRequestHandler) -> bool {
+        if self.has_error() {
+            if let Some(last_error) = &self.last_error {
+                handler.result.fail(last_error.clone());
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Re-enqueues `handler` as a retry.
+    ///
+    /// Corresponds to `retry(TxnRequestHandler)` (Java 934), which is what
+    /// `Sender` calls; `TxnRequestHandler.reenqueue()` (Java 1394) is the same
+    /// two statements reached from the response path.
+    pub(crate) fn retry(&mut self, mut handler: TxnRequestHandler) {
+        handler.set_retry();
+        self.enqueue_request(handler);
+    }
+
+    /// Records the correlation id of the transactional request now in flight.
+    ///
+    /// Corresponds to `setInFlightCorrelationId(int)` (Java 973).
+    pub(crate) fn set_in_flight_correlation_id(&mut self, correlation_id: i32) {
+        self.in_flight_request_correlation_id = correlation_id;
+    }
+
+    /// Clears the in-flight correlation id.
+    ///
+    /// Corresponds to `clearInFlightCorrelationId()` (Java 977).
+    fn clear_in_flight_correlation_id(&mut self) {
+        self.in_flight_request_correlation_id = NO_INFLIGHT_REQUEST_CORRELATION_ID;
+    }
+
+    /// Whether a transactional request is in flight.
+    ///
+    /// Corresponds to `hasInFlightRequest()` (Java 981).
+    pub(crate) fn has_in_flight_request(&self) -> bool {
+        self.in_flight_request_correlation_id != NO_INFLIGHT_REQUEST_CORRELATION_ID
+    }
+
+    /// Fails `handler` and moves the manager to [`State::FatalError`].
+    ///
+    /// Corresponds to `TxnRequestHandler.fatalError(RuntimeException)`
+    /// (Java 1357).
+    fn fatal_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
+        handler.result.fail(error.clone());
+        // Every caller is on the response path, which runs on the Sender task.
+        self.transition_to_fatal_error(error, Caller::Sender)
+    }
+
+    /// Fails `handler` and moves the manager to [`State::AbortableError`].
+    ///
+    /// Corresponds to `TxnRequestHandler.abortableError(RuntimeException)`
+    /// (Java 1362).
+    fn abortable_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
+        handler.result.fail(error.clone());
+        // Every caller is on the response path, which runs on the Sender task.
+        self.transition_to_abortable_error(error, Caller::Sender)
+    }
+
+    /// Whether `handler` needs a coordinator before it can be sent.
+    ///
+    /// Corresponds to `needsCoordinator()` (Java 1430), i.e.
+    /// `coordinatorType() != null`. `InitProducerIdHandler.coordinatorType()`
+    /// (Java 1482) returns `null` for a non-transactional producer, which is why
+    /// the whole `FindCoordinator` subsystem is out of scope for the idempotence
+    /// slice.
+    pub(crate) fn needs_coordinator(&self, handler: &TxnRequestHandler) -> bool {
+        match handler.kind {
+            TxnRequestHandlerKind::InitProducerId { .. } => self.is_transactional(),
+        }
+    }
+
+    /// Handles the response to a transactional request.
+    ///
+    /// Translated from `TxnRequestHandler.onComplete(ClientResponse)`
+    /// (Java 1406). Moved from the handler onto the manager because Java's inner
+    /// class reaches the manager through an implicit `TransactionManager.this`,
+    /// which Rust has no equivalent for.
+    ///
+    /// `handler` is taken by value: Java's `reenqueue()` puts `this` back on the
+    /// pending queue, so ownership has to move.
+    ///
+    /// The `Caller` is always [`Caller::Sender`]: Java invokes this from
+    /// `NetworkClient.poll`, i.e. on the Sender thread, at every call site.
+    pub(crate) fn on_complete(
+        &mut self,
+        handler: TxnRequestHandler,
+        response: &ClientResponse,
+    ) -> Result<(), KafkaError> {
+        if response.request_header().correlation_id() != self.in_flight_request_correlation_id {
+            return self.fatal_error(
+                &handler,
+                KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    "Detected more than one in-flight transactional request.",
+                ),
+            );
+        }
+
+        self.clear_in_flight_correlation_id();
+        if response.was_disconnected() {
+            kafka_debug!(self.log_context, "Disconnected from {}. Will retry.", response.destination());
+            if self.needs_coordinator(&handler) {
+                // Java 1414 looks the coordinator up again. Unreachable for an
+                // idempotent producer, whose `coordinatorType()` is null; Phase 5
+                // adds `lookupCoordinator` with the FindCoordinator handler.
+                return Err(KafkaError::unsupported_version(
+                    "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
+                ));
+            }
+            self.retry(handler);
+            return Ok(());
+        }
+        if let Some(version_mismatch) = response.version_mismatch() {
+            let error = KafkaError::unsupported_version(version_mismatch.to_string());
+            return self.fatal_error(&handler, error);
+        }
+        match response.response_body() {
+            Some(response_body) => {
+                kafka_trace!(
+                    self.log_context,
+                    "Received transactional response {} for request {:?}",
+                    response_body,
+                    handler
+                );
+                self.handle_response(handler, response_body)
+            },
+            None => self.fatal_error(
+                &handler,
+                KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    "Could not execute transactional request for unknown reasons",
+                ),
+            ),
+        }
+    }
+
+    /// Dispatches a parsed response body to the handler that requested it.
+    ///
+    /// Corresponds to the abstract `handleResponse(AbstractResponse)`
+    /// (Java 1456).
+    fn handle_response(&mut self, handler: TxnRequestHandler, response: &ConcreteResponse) -> Result<(), KafkaError> {
+        // One handler kind in this phase, so no dispatch is needed yet; Phase 5
+        // matches on `handler.kind` here as Java dispatches on the subclass.
+        self.handle_init_producer_id_response(handler, response)
+    }
+
+    /// Handles an `InitProducerId` response.
+    ///
+    /// Translated from `InitProducerIdHandler.handleResponse(AbstractResponse)`
+    /// (Java 1491).
+    fn handle_init_producer_id_response(
+        &mut self,
+        handler: TxnRequestHandler,
+        response: &ConcreteResponse,
+    ) -> Result<(), KafkaError> {
+        // Irrefutable while `TxnRequestHandlerKind` has a single variant; Phase 5
+        // moves the dispatch up into `handle_response`.
+        let TxnRequestHandlerKind::InitProducerId { builder, is_epoch_bump } = &handler.kind;
+        let ConcreteResponse::InitProducerId(init_producer_id_response) = response else {
+            // Java casts unconditionally; a mismatch would be a
+            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            return Err(KafkaError::illegal_state(format!(
+                "Expected an InitProducerId response for an InitProducerId request, got {response}"
+            )));
+        };
+        let keep_prepared_txn = builder.data().keep_prepared_txn;
+        let is_epoch_bump = *is_epoch_bump;
+        let error = init_producer_id_response.error();
+
+        if error == Errors::None {
+            let producer_id_and_epoch = ProducerIdAndEpoch::new(
+                init_producer_id_response.data().producer_id,
+                init_producer_id_response.data().producer_epoch,
+            );
+            self.set_producer_id_and_epoch(producer_id_and_epoch);
+            // If this is a transaction with keepPreparedTxn=true, transition directly
+            // to PREPARED_TRANSACTION state IFF there is an ongoing transaction.
+            if keep_prepared_txn
+                && init_producer_id_response.data().ongoing_txn_producer_id != RecordBatch::NO_PRODUCER_ID
+            {
+                // Java 1504-1510 moves to PREPARED_TRANSACTION and records
+                // `preparedTxnState`. `keepPreparedTxn` can only be set by
+                // `initializeTransactions`, which is transactional, so this is
+                // unreachable while `new` refuses a transactional id. Phase 5
+                // adds the state field.
+                return Err(KafkaError::unsupported_version(
+                    "Two-phase commit is not yet implemented in this client (Milestone 11, Phase 5).",
+                ));
+            }
+            self.transition_to(State::Ready, None, Caller::Sender)?;
+            self.last_error = None;
+            if is_epoch_bump {
+                self.reset_sequence_numbers();
+            }
+            handler.result.done();
+            return Ok(());
+        }
+        if error == Errors::NotCoordinator || error == Errors::CoordinatorNotAvailable {
+            // Java 1520 looks the transaction coordinator up again and retries.
+            // Only a transactional `InitProducerId` is routed to a coordinator,
+            // so this is unreachable while `new` refuses a transactional id.
+            return Err(KafkaError::unsupported_version(
+                "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
+            ));
+        }
+        if error.is_retriable() {
+            self.retry(handler);
+            return Ok(());
+        }
+        if error == Errors::TransactionalIdAuthorizationFailed || error == Errors::ClusterAuthorizationFailed {
+            kafka_info!(
+                self.log_context,
+                "Abortable authorization error: {}.  Transition the producer state to {}",
+                error.message(),
+                State::AbortableError
+            );
+            let error = KafkaError::new(error);
+            self.last_error = Some(error.clone());
+            return self.abortable_error(&handler, error);
+        }
+        if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
+            // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
+            // just treat it the same as PRODUCE_FENCED.
+            return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+        }
+        if error == Errors::TransactionAbortable {
+            let error = KafkaError::new(error);
+            return self.abortable_error(&handler, error);
+        }
+        self.fatal_error(
+            &handler,
+            KafkaError::with_message(
+                Errors::UnknownServerError,
+                format!("Unexpected error in InitProducerIdResponse; {}", error.message()),
+            ),
+        )
+    }
+
+    // -- Send path ----------------------------------------------------------
+
+    /// Validates that a record may be appended for `topic_partition`, adding it
+    /// to the transaction when one is in progress.
+    ///
+    /// Translated from `maybeAddPartition(TopicPartition)` (Java 437).
+    ///
+    /// Java's second statement is `throwIfPendingState("send")` (Java 439),
+    /// which inspects `pendingTransition`. That field is only ever set by
+    /// `handleCachedTransactionRequestResult` (Java 1281), which starts with
+    /// `ensureTransactional()`, so it is always null for an idempotent producer
+    /// and the call can do nothing. Phase 5 adds the field and the call
+    /// together.
+    pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), KafkaError> {
+        self.maybe_fail_with_error()?;
+
+        if self.is_transactional() {
+            // Java 441-459 validates the transaction state and registers the
+            // partition. Unreachable while `new` refuses a transactional id.
+            return Err(KafkaError::unsupported_version(format!(
+                "Adding partition {topic_partition} to a transaction is not yet implemented in this client \
+                 (Milestone 11, Phase 5)."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether the failed produce response for `batch` should be retried.
+    ///
+    /// Translated from `canRetry(PartitionResponse, ProducerBatch)`
+    /// (Java 1015).
+    ///
+    /// `batches` supplies the partition's in-flight batches for the
+    /// transactional log-truncation rewrite (Java 1048); the idempotent path
+    /// never reads it.
+    pub(crate) fn can_retry(
+        &mut self,
+        response: &PartitionResponse,
+        batch: &ProducerBatch,
+        batches: &mut [&mut ProducerBatch],
+    ) -> Result<bool, KafkaError> {
+        let error = response.error;
+
+        // An UNKNOWN_PRODUCER_ID means that we have lost the producer state on the broker. Depending on the log start
+        // offset, we may want to retry these, as described for each case below. If none of those apply, then for the
+        // idempotent producer, we will locally bump the epoch and reset the sequence numbers of in-flight batches from
+        // sequence 0, then retry the failed batch, which should now succeed. For the transactional producer, allow the
+        // batch to fail. When processing the failed batch, we will transition to an abortable error and set a flag
+        // indicating that we need to bump the epoch (if supported by the broker).
+        if error == Errors::UnknownProducerId {
+            if response.log_start_offset == -1 {
+                // We don't know the log start offset with this response. We should just retry the request until we get
+                // it. The UNKNOWN_PRODUCER_ID error code was added along with the new ProduceResponse which includes
+                // the logStartOffset. So the '-1' sentinel is not for backward compatibility. Instead, it is possible
+                // for a broker to not know the logStartOffset at when it is returning the response because the
+                // partition may have moved away from the broker from the time the error was initially raised to the
+                // time the response was being constructed. In these cases, we should just retry the request: we are
+                // guaranteed to eventually get a logStartOffset once things settle down.
+                return Ok(true);
+            }
+
+            if batch.sequence_has_been_reset() {
+                // When the first inflight batch fails due to the truncation case, then the sequences of all the other
+                // in flight batches would have been restarted from the beginning. However, when those responses
+                // come back from the broker, they would also come with an UNKNOWN_PRODUCER_ID error. In this case, we
+                // should not reset the sequence numbers to the beginning.
+                return Ok(true);
+            }
+            // Java defaults the missing offset to `NO_LAST_ACKED_SEQUENCE_NUMBER`
+            // here rather than `INVALID_OFFSET`; both are -1, and the constant
+            // Java names is kept so the two stay in step.
+            if self
+                .last_acked_offset(&batch.topic_partition)
+                .unwrap_or(i64::from(TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER))
+                < response.log_start_offset
+            {
+                // The head of the log has been removed, probably due to the retention time elapsing. In this case,
+                // we expect to lose the producer state. For the transactional producer, reset the sequences of all
+                // inflight batches to be from the beginning and retry them, so that the transaction does not need to
+                // be aborted. For the idempotent producer, bump the epoch to avoid reusing (sequence, epoch) pairs
+                if self.is_transactional() {
+                    let producer_id_and_epoch = self.producer_id_and_epoch;
+                    self.txn_partition_map.start_sequences_at_beginning(
+                        &batch.topic_partition,
+                        producer_id_and_epoch,
+                        batches,
+                    )?;
+                } else {
+                    self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+                }
+                return Ok(true);
+            }
+
+            if !self.is_transactional() {
+                // For the idempotent producer, always retry UNKNOWN_PRODUCER_ID errors. If the batch has the current
+                // producer ID and epoch, request a bump of the epoch. Otherwise just retry the produce.
+                self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+                return Ok(true);
+            }
+        } else if error == Errors::OutOfOrderSequenceNumber {
+            if !self.has_unresolved_sequence(&batch.topic_partition)
+                && (batch.sequence_has_been_reset()
+                    || !self.is_next_sequence(&batch.topic_partition, batch.base_sequence()))
+            {
+                // We should retry the OutOfOrderSequenceException if the batch is _not_ the next batch, ie. its base
+                // sequence isn't the lastAckedSequence + 1.
+                return Ok(true);
+            } else if !self.is_transactional() {
+                // For the idempotent producer, retry all OUT_OF_ORDER_SEQUENCE_NUMBER errors. If there are no
+                // unresolved sequences, or this batch is the one immediately following an unresolved sequence, we know
+                // there is actually a gap in the sequences, and we bump the epoch. Otherwise, retry without bumping
+                // and wait to see if the sequence resolves
+                if !self.has_unresolved_sequence(&batch.topic_partition)
+                    || self.is_next_sequence_for_unresolved_partition(&batch.topic_partition, batch.base_sequence())
+                {
+                    self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+                }
+                return Ok(true);
+            }
+        }
+
+        // If neither of the above cases are true, retry if the exception is retriable
+        Ok(error.is_retriable())
+    }
+}
+
+/// Whether `code` satisfies Java's `instanceof OutOfOrderSequenceException`.
+///
+/// `UnknownProducerIdException extends OutOfOrderSequenceException`, so both wire
+/// codes match. The relation is stated once here rather than open-coded at each
+/// dispatch site — see `.claude/rules/producer-transactions.md` §9.
+pub(crate) fn is_out_of_order_sequence(code: Errors) -> bool {
+    matches!(code, Errors::OutOfOrderSequenceNumber | Errors::UnknownProducerId)
+}
