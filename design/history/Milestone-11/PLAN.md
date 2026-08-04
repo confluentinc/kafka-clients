@@ -1319,6 +1319,99 @@ with submodules → `cargo build`, full suite, `format-check`, `lint`,
 `check-generated` all clean, and the stub count stays at the 8 intentional ones
 (§9.10).
 
+### 9.12 Two `records`-field defects, found by the missing test schema
+
+**Status:** DONE — fixed 2026-08-04 in `f6d5fd7`.
+
+`generator/test-messages/` held 3 of Kafka's 4 test schemas. Adding the fourth,
+`SimpleRecordsMessage.json`, and translating its test (`RecordsSerdeTest.java`, which
+DoD §3 requires) exposed two real defects in `records`-typed fields. Both were live
+in `ProduceRequest`, `FetchResponse` and `ShareFetchResponse` — the client's busiest
+message types.
+
+(The schema needed `git add -f`: `.gitignore:4` blanket-ignores `*.json`, and the
+three existing schemas are tracked only because they predate that rule. Worth knowing
+before adding any future schema — a plain `git add` silently does nothing.)
+
+**Defect 1 — wrong default.** `FieldSpec.fieldDefault` returns `"null"`
+**unconditionally** for a `records` field (`FieldSpec.java:453-454`): a bare
+`else if (type.isRecords()) return "null";` with no nullability or explicit-default
+check, unlike the `isBytes()` branch immediately above it, which returns null only
+when the spec says `"default": "null"`. Our generator shared one match arm for
+`Bytes | Records` — as it does in roughly eight other places — and so gave `records`
+the `bytes` rule. An unset record set encoded as a **zero-length** buffer where Java
+encodes **null** (−1).
+
+Note this is *not* covered by CLAUDE.md's "nullable string/bytes default to empty"
+rule: that rule is about `string` and `bytes`, and `records` is a third case with the
+opposite default. The rule is right; `records` simply isn't in its scope.
+
+**Defect 2 — serialising mutated the message.** The write path emitted:
+
+    if let Some(_nv) = self.record_set.take() {
+
+justified in a comment as "zero-copy ownership transfer". `Writable::write_records`
+does take `Bytes` by value, but `bytes::Bytes` is a **reference-counted handle** whose
+`clone()` bumps a counter and copies no payload — so `.clone()` is equally zero-copy,
+while `.take()` leaves `None` behind and **destroys the record set as a side effect of
+writing it**. Java's `write` never modifies the message.
+
+One cause, three observable symptoms — worth recording because none of them looks
+like the others:
+
+  - `size()` computed after a `write` disagreed with the bytes written (9 vs 90);
+  - an explicitly-empty record set round-tripped back as null;
+  - null and empty encoded **identically** on the second iteration of a version loop,
+    the first having drained the field.
+
+**Neither appears to have been hit in production.** The producer rebuilds
+`ProduceRequestData` per send (`sender.rs:391-431`) rather than re-serialising, and a
+*first* write is correct. They survived because nothing exercised a `records` field at
+all — the test file that would have was the one missing from the corpus. A direct
+vindication of DoD §3's "never skip a test present in the Java codebase": the gap in
+the test corpus and the gap in the generator were the same gap.
+
+**Test added:** `tests/common/message/records_serde_test.rs` — Java's three cases plus
+one not in Java, asserting null and empty record sets encode differently at every
+version and do not round-trip into each other. That fourth test is what pins both
+fixes; either regression alone makes it fail.
+
+### 9.13 Four unhandled type combinations emit a TODO into generated code
+
+**Status:** open. Surveyed 2026-08-04.
+
+Four `writeln!` sites in `generator/src/lib.rs` write a comment into the *generated
+output* instead of working code, and generation continues normally. Same silent-failure
+shape as §9.10, one level down: there the whole type becomes a stub, here a single
+field's read or write is quietly missing.
+
+| # | Site | Function | Fires for |
+|---|---|---|---|
+| 1 | `lib.rs:2303` | `generate_tagged_field_read` | a **tagged** field that is an array whose element is `Uint16`, `Uint32`, `String`, `Bytes`, `Records`, `Struct`, or a nested array (handles `Uuid`, `Bool`, `Int8/16/32/64`, `Float64`) |
+| 2 | `lib.rs:2917` | `generate_tagged_field_write` | a tagged field of type `Uint16` or `Uint32` (every other variant has an arm) |
+| 3 | `lib.rs:3797` | `generate_array_element_read_with_prefix` | reading a length-prefixed array whose element is `Bytes`, `Records`, or a nested array |
+| 4 | `lib.rs:4269` | `generate_array_element_write` | writing an **array of arrays** — explicit `FieldType::Array(_)` arm, "Nested array not implemented" |
+
+**None fires today.** Verified against the generated output for all 197 production
+schemas and all 4 test schemas: zero occurrences of any of the four strings. So these
+are unreached paths, not active defects.
+
+**Why they still matter.** #1 and #3 are asymmetric — the write side of those
+combinations is implemented while the read side is not, so data would go out and be
+unreadable coming back, rather than failing at both ends. And the failure mode is the
+one that cost this session twice: the build succeeds, and the symptom surfaces much
+later as "this message type silently doesn't work".
+
+Note that §9.12's two defects were in `records` handling, which is the same family as
+#1 and #3 — so the neighbourhood is demonstrably not hypothetical.
+
+**Fix:** implement the four combinations, or — if any is genuinely unreachable by
+construction — make the fallback `panic!` with the field name and type, so the
+generator refuses to emit code it cannot write correctly. Do NOT leave a fallback that
+emits a comment: per CLAUDE.md §5 a TODO in generated output is unfinished work, and
+per §9.10's reasoning silence is the wrong default. Pair this with §9.10, which is the
+same principle applied to whole-schema failures.
+
 
 ---
 
