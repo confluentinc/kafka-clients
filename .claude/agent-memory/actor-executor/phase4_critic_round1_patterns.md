@@ -65,6 +65,25 @@ translate them instead. Where genuinely blocked, cite the *missing surface* per 
 (e.g. "the Sender's clock is `Arc<dyn Fn() -> i64>` with no `sleep`, so
 `tokio::time::sleep` cannot move a test's `MockTime`"), never a phase number alone.
 
+## 6. Do not classify a test by grepping for a type name — the hit may be a `null`
+
+`testProducerBatchRetriesWhenPartitionLeaderChanges` sat on the "idempotence subset"
+list for two rounds because `transactionManager` appears in its body — as the literal
+`null` argument to both the `RecordAccumulator` and the `Sender` constructor
+(`SenderTest.java:3316`, `:3320`). It is neither idempotent nor transactional. Check
+the constructor *arguments*, not the identifier. The same sweep also mis-filed
+`testUnresolvedSequencesAreNotFatal`, in the other direction.
+
+## 7. Mutation-check the doc claim, not just the assertion
+
+A rustdoc saying "this pins arm X" is a claim the mutation check can refute. Disabling
+`canRetry`'s `sequenceHasBeenReset()` arm left
+`testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` green, because
+after a sequence reset the truncation arm answers instead and both return `true`.
+Java's test cannot tell them apart either — so the honest fix is to say so in the doc,
+not to strengthen the test past Java. Overstating what a test covers is the same class
+of defect as overstating when an effect materialises (PLAN §9.15's lesson).
+
 ## Incidental
 
 Two `.lock()` calls in one expression deadlock a non-reentrant `std::sync::Mutex`
