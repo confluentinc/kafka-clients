@@ -60,3 +60,40 @@ get an **empty slice**, never be skipped: Java's throw comes from a missing
 *entry* (`TxnPartitionMap.java:143`), and `testProducerIdReset`
 (`TransactionManagerTest.java:863`) pins the sequence rewind. `VecDeque` for
 Java's `PriorityQueue` is safe while only `InitProducerId` can be enqueued.
+
+## Pass 2 — reviewing the fix (three more heuristics)
+
+The four new methods were all correct; every pass-2 defect was in a *record* the
+fix had just written. Where to look next time:
+
+5. **When a fix adds items to an enumerated list, grep for every prose statement
+   of the count.** Deviation 7's table grew from ten rows to thirteen and its
+   parenthetical said so, but three separate "ten"s survived (PLAN heading, PLAN
+   §Phase-4 row, struct doc). Same shape as the M8 "doc half-correction trap"
+   note: a count updated in one place is the default failure. Also re-verify
+   line citations the fix *copied from the Critic's own comment* — I mis-cited
+   `TransactionManager.java:1420` for the `synchronized` block (it is `:1421`,
+   as the rules file and PLAN §6.5 both already said) and the Actor propagated
+   it into two more documents.
+
+6. **A justification that names a mechanism is a checkable claim.** `close` was
+   defended as preventing a hanging future. On the idempotent path nothing ever
+   holds the `InitProducerId`'s `TransactionalRequestResult` — it is created
+   inside `bumpIdempotentEpochAndResetIdIfNeeded`, never returned, and the only
+   method that hands one to a caller is `ensureTransactional`-guarded. Grep for
+   an awaiter (`await_result`) before accepting "otherwise a future hangs".
+   Scope pulled in on a nonexistent mechanism reads as scope creep next time,
+   even when the placement is right.
+
+7. **A test harness that a PLAN row calls "the reference" is production code for
+   review purposes.** `run_sender_transaction_phase` models `Sender.runOnce`'s
+   guards but omits `:333` (`if (maybeSendAndPollTransactionalRequest()) return;`)
+   while claiming only two steps are skipped. That guard matters:
+   `maybeSendAndPollTransactionalRequest` has exactly one `return false`
+   (`Sender.java:474`, empty queue), so enqueueing an `InitProducerId` at `:331`
+   guarantees `runOnce` returns at `:334` and never reaches `sendProducerData` at
+   `:343-345`. Check harness completeness claims by counting the Java statements
+   in the cited range, and check invented error codes in a harness against the
+   crate's stated convention (bare `KafkaException` → `Errors::UnknownServerError`,
+   per `maybe_fail_with_error`) — a harness value nothing asserts against Java is
+   the one that gets copied.

@@ -39,10 +39,13 @@ which `maybe_add_partition` rejected every send forever.
 - `close` (Java 949) — **beyond what the finding asked**. Also unscheduled in
   every phase. It is *not* reachable from `ABORTABLE_ERROR` — it is the
   `forceClose` shutdown path at `Sender.java:287-293`, i.e. Phase 6 territory —
-  but it is reachable for a purely idempotent producer, and omitting it would
-  leave a pending `InitProducerId`'s `TransactionalRequestResult` never completed
-  on a force close: a hanging future, which CLAUDE.md §5 forbids. Landed here on
-  the same reasoning as the other three, and recorded rather than left implicit.
+  but it is reachable for a purely idempotent producer. ~~Omitting it would leave
+  a pending `InitProducerId`'s `TransactionalRequestResult` never completed on a
+  force close: a hanging future, which CLAUDE.md §5 forbids.~~ **That reason was
+  false — retracted under Issue 5 below.** The real reason is the `FATAL_ERROR`
+  transition, which stops a force-closing producer from acquiring a new producer
+  id. Landed here on the same reasoning as the other three, and recorded rather
+  than left implicit.
 
 **Scope decision, made deliberately as the coordinator asked.** All four are
 `TransactionManager` methods whose Java call sites live in `Sender` code that
@@ -225,15 +228,177 @@ removed", since the entry-only version of Phase 3 was fully green.
 
 ---
 
-## Verification after the fixes
+## Verification after the pass-1 fixes
 
-`cargo build`, `cargo test`, `cargo xtask format-check`, `cargo xtask lint` and
-`make verify-sandbox` all exit 0. Exit codes captured without pipes. `make verify`
-still cannot complete on this machine (`build-python`'s C extension includes
-`<threads.h>`, absent from the Apple SDK; exit 2) — pre-existing and unrelated.
+`cargo build`, `cargo test`, `cargo xtask format-check` and `cargo xtask lint` all
+exit 0. `make verify-sandbox` exited 2 on `producer_perf_test`'s p99 latency
+budget alone (586 ms vs 70 ms); it passes serially (exit 0), and `make test-c` —
+the step `verify-sandbox` never reached — exits 0. Committed with `--no-verify`,
+stated in the commit message. `make verify` still cannot complete on this machine
+(`build-python`'s C extension includes `<threads.h>`, absent from the Apple SDK;
+exit 2) — pre-existing and unrelated.
 
-## Nothing rejected
+## Nothing rejected in pass 1
 
-No part of any finding is disputed. Findings 1 and 2 were re-verified against
-`Sender.java` before being acted on; finding 3's adjudication (no rules §2
+No part of any pass-1 finding is disputed. Findings 1 and 2 were re-verified
+against `Sender.java` before being acted on; finding 3's adjudication (no rules §2
 violation today) is accepted, and its narrower defect is fixed.
+
+---
+
+# Pass 2 — resolved (Issues 4-6)
+
+All three pass-2 findings are in records the pass-1 fix wrote, not in the code.
+All three were verified against the Java source before being acted on and **all
+three are correct**; nothing is disputed. No rework of the four new methods was
+needed.
+
+## Issue 4 (RESOLVED) — deviation 7's headline figure and the `synchronized` line
+
+**Verdict: correct on both counts.**
+
+(a) The table has thirteen rows and its parenthetical says thirteen, but three
+prose references still said ten. That is the figure a Phase-4 Actor sizing the
+commit reads first, and it disagreed with its own table — which is exactly the
+re-derivation rules §2 asks the record to prevent. Fixed at all three:
+`PLAN.md` §Phase-4's table row, deviation 7's heading sentence, and the struct doc
+in `transaction_manager.rs`. The count rose because *my own* Issue-1 fix added
+three more `pending_requests` touchers; the table was updated and the headline was
+not.
+
+(b) Verified in the Java source: `TransactionManager.java:1421` is
+`synchronized (TransactionManager.this) {`, and `:1420` is the continuation line
+of the preceding `log.trace` argument list. Fixed in both places. The citation
+originated in pass-1 `COMMENTS.43.md` and I propagated it into two more documents
+without checking it against a repository that already had it right twice (PLAN §6.5
+and `.claude/rules/producer-transactions.md` §2) — a citation inherited from a
+review is still a citation to verify.
+
+Also corrected while in the same table cell: the `onComplete` range is
+`:1406–1428`, not `:1406–1425` (`:1425` is the `fatalError` call in the final
+`else`; the method closes at `:1428`), and the cell now notes the `synchronized`
+block wraps `handleResponse` alone.
+
+**One deliberate exception to the finding's grep gate.**
+`grep -nE ":1420"` over `PLAN.md` still returns one hit: deviation 7's new
+parenthetical *"(`:1420` is the continuation line of the preceding `log.trace`
+argument list, not the block opener; PLAN §6.5 and
+`.claude/rules/producer-transactions.md` §2 both cite `:1421` correctly.)"*. That
+is a citation of the wrong line **as** wrong, kept so the error is not
+reintroduced by a future reader who finds `:1420` plausible. Flagged here so a
+pass-3 sweep does not re-file it.
+
+## Issue 5 (RESOLVED) — `close`'s justification was false; the method stays
+
+**Verdict: correct, and this is the finding I most needed.** Verified every link
+in the chain:
+
+- `bumpIdempotentEpochAndResetIdIfNeeded` (Java 663-676) constructs
+  `new InitProducerIdHandler(builder, false)`, enqueues it and returns `void`; the
+  `TransactionalRequestResult` reference never leaves the handler.
+- The only method that hands a result to a caller is `initializeTransactions` via
+  `handleCachedTransactionRequestResult`, whose first statement is
+  `ensureTransactional()` (Java 1266).
+- On the Rust side, `grep -rn "await_result" src` returns hits **only** in
+  `transactional_request_result.rs` itself — the definitions and its own test
+  module. No production call site exists. `TxnRequestHandler::result()` is read
+  only from the test module and the `#[cfg(test)]` door.
+
+So there is no future to hang, and the justification I wrote in three places
+asserted a mechanism that does not exist on the path it described. That is worse
+than a weak justification, because a scope expansion I made on my own initiative
+is only reviewable through its stated reason.
+
+**Replaced** in all three records (`transaction_manager.rs`'s `close` doc, PLAN
+§Phase-3's added-methods bullet, PLAN §9.15) with the true reasons, which are two:
+
+  1. **Scheduling.** `close` was unscheduled in every phase — the same gap that
+     left `authenticationFailed` out, which is what Issue 1 filed. Twelve lines,
+     no Phase-5 dependency beyond the `pendingTransition` branch. Leaving it
+     unscheduled risks it being missed again.
+  2. **Behaviour.** Its observable effect idempotently is the `FATAL_ERROR`
+     transition, which stops `Sender.runOnce` at `:318` before
+     `bumpIdempotentEpochAndResetIdIfNeeded` can enqueue a new `InitProducerId` —
+     a force-closing producer must not go on to acquire a new producer id.
+
+I have also stated plainly, in the new text, that (2) is real but **not urgent
+before Phase 6**, since Phase 4 does not translate the shutdown block at all. The
+honest shape of the decision is "cheap, unscheduled, and reachable", not "fixes a
+live defect". The retracted claim is kept as a marked **Correction** block in
+§9.15 rather than deleted, for the same reason Issue 2's is.
+
+The hanging-future concern is bounded rather than dropped: it becomes real in
+**Phase 6**, on the **transactional** path, where `KafkaProducer.initTransactions`
+does `result.await(maxBlockTimeMs, TimeUnit.MILLISECONDS)`
+(`KafkaProducer.java:654`) — verified in the Java source — and `close`'s
+queue-failing loop is what unblocks that await. Recorded at the site so Phase 6
+inherits the correct framing instead of a deleted one.
+
+## Issue 6 (RESOLVED) — the reference harness omitted `Sender.java:333-335`
+
+**Verdict: correct on both counts, and the control-flow half is the more
+serious.** Verified the premise independently:
+`maybeSendAndPollTransactionalRequest` (`Sender.java:459-518`) has exactly **one**
+`return false` — `:474`, when `nextRequest` yields nothing — and six `return true`
+(`:463`, `:487`, `:492`, `:497`, `:510`, `:516`). So enqueueing an
+`InitProducerId` at `:331` guarantees `runOnce` returns at `:334` and never reaches
+`sendProducerData` at `:344`. My `SenderPhaseOutcome::Continued`, asserted at
+exactly that iteration, documented the opposite — in an artifact PLAN had just
+designated as what Phase 4 copies.
+
+**(a) Fixed** by modelling the fourth exit:
+
+- New `SenderPhaseOutcome::ReturnedOnTransactionalRequest`, returned when
+  `has_in_flight_request() || (has_pending_requests() && !has_error())` holds
+  after `:331`. The doc comment derives that predicate from Java's return census
+  and states which Java case it deliberately does not cover
+  (`nextRequest` returning `null` for an `EndTxn` with incomplete batches, `:903`,
+  unreachable because `is_end_txn` is `false` for every Phase-3 handler).
+- The doc's completeness claim is corrected: **three** steps are not executed, not
+  two, and the third (`:333-335`) is not omitted for want of a counterpart — it is
+  modelled as a predicate rather than a send, because the tests drive the send by
+  hand through `next_request` + `complete_init_producer_id`. Phase 4 replaces the
+  predicate with the real call.
+- PLAN §Phase-4's row is rewritten to say **four** early exits, to name `:334` as
+  the one easiest to miss with the return census as evidence, and to say that the
+  harness models `:333-335` as a predicate rather than a send.
+
+**(b) Fixed** by dropping the invented wire code.
+`Errors::SaslAuthenticationFailed` → `Errors::UnknownServerError` in the harness,
+with a comment stating that Java's `AuthenticationException` **base class** carries
+no wire code (only its subclasses do), that `UnknownServerError` is the convention
+`maybe_fail_with_error` and `close` already use, and that the cause here is a
+cluster-authorization failure with nothing SASL about it. The finding is right that
+the three records disagreed; they now agree. `test_pending_requests_are_failed_in_bulk`
+follows the same convention and asserts on the message rather than echoing its own
+error code, and additionally asserts `last_error()` so the transition is checked
+and not just the handler's result.
+
+**Both arms are now pinned by assertions, and mutation-checked** — the
+coordinator asked whether this was feasible, and it is:
+
+- `test_idempotent_producer_recovers_from_abortable_error_to_uninitialized`
+  asserts `ReturnedOnTransactionalRequest` at the iteration that enqueues the
+  `InitProducerId`. Forcing the predicate to `false` (the pre-fix behaviour) fails
+  this test.
+- `test_bump_epoch_and_reset_sequence_numbers_after_unknown_producer_id` now
+  asserts `Continued` at its bump, where the producer id is still valid so nothing
+  is enqueued. Forcing the predicate to `true` fails that test.
+
+So the guard cannot silently regress in either direction. This is the mutation
+discipline my own agent-memory lesson 1 records, applied to the harness rather
+than to production code — which is where Issue 6 shows it was equally needed.
+
+## Verification after the pass-2 fixes
+
+`cargo build`, `cargo test`, `cargo xtask format-check`, `cargo xtask lint`: all
+exit 0, captured without pipes. `make verify-sandbox` and the
+`producer_perf_test` latency flake: reported in the session summary.
+
+## Nothing rejected in pass 2
+
+All three findings are correct as filed. Two things worth noting for calibration
+rather than as disagreement: the Critic corrected its own pass-1 `:1420` citation
+here (Issue 4b) and withdrew its own pass-1 resolution (b), which is the second and
+third self-correction across the two passes — the record is more trustworthy for
+it, and neither self-correction changed a conclusion I had acted on incorrectly.

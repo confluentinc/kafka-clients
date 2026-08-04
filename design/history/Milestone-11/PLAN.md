@@ -292,10 +292,11 @@ a named test needs it, not as scope creep:
   forever. Both were listed under Phase 5; that listing is removed. Added after
   Critic 43 issue 1 — see §9.15.
 - `authentication_failed` (939) and `close` (949) — the other two methods that
-  fail the pending-request queue. Both were unscheduled in every phase and both
-  are reachable for a purely idempotent producer; `close`'s omission would leave
-  a pending `InitProducerId` result never completed on a force close, i.e. a
-  hanging future (CLAUDE.md §5). Reasoning in §9.15.
+  fail the pending-request queue. Both were **unscheduled in every phase**, both
+  are reachable for a purely idempotent producer, and neither needs Phase-5 state
+  beyond the `pendingTransition` branch. `close`'s observable effect idempotently
+  is the `FATAL_ERROR` transition, which stops a force-closing producer from
+  going on to acquire a new producer id. Reasoning in §9.15.
 - `maybe_add_partition` (437, idempotent arm) and `maybe_transition_to_error_state`
   (764, idempotent arm) — `testFailIfNotReadyForSendIdempotentProducer` and
   `testFailIfNotReadyForSendIdempotentProducerFatalError` (both named under
@@ -341,8 +342,8 @@ already scaffolded with deferral comments.
 | Concern | Java reference | Rust insertion point |
 |---|---|---|
 | `TransactionManager` field + ctor arg | `Sender.java:123,140,154` | `src/producer/internals/sender.rs:97–131` (struct), `136–168` (`new`) |
-| `maybe_resolve_sequences` / fatal check / **abortable-error recovery** / `bump_idempotent_epoch_and_reset_id_if_needed` / `authentication_failed` | `Sender.java:310–340` plus the private `shouldHandleAuthorizationError` (`:351–360`) | `sender.rs:213–216` — **replaces the existing `// No transaction manager in this phase` comment at line 214**, must run before `send_producer_data`. All four guards matter and the order is load-bearing: `:318` `hasFatalError` and `:325` `hasAbortableError` both **return** before `:331`. `transaction_manager.rs`'s test helper `run_sender_transaction_phase` models this block guard-for-guard and is the reference; §9.15 records what goes wrong if `:325` is skipped. The `TransactionManager` side (`fail_pending_requests`, `transition_to_uninitialized`, `authentication_failed`) landed in Phase 3; `maybeAbortBatches` and `client.poll` are this phase's. |
-| **Split the Sender-owned request-queue surface off `TransactionManager`** (rules §2) | `TransactionManager.java:136` (`inFlightRequestCorrelationId`), `:224` (`pendingRequests`), `:1406–1425` (`onComplete`, whose `synchronized` block starts only at `:1420`) | `transaction_manager.rs` — see §10.5 deviation 7 for the ten method signatures this reshapes. Budget it as its own commit: it is a refactor of the same constructor §6.3 already flags, and getting it wrong puts two deliberately-unsynchronized Java fields behind the shared lock. |
+| `maybe_resolve_sequences` / fatal check / **abortable-error recovery** / `bump_idempotent_epoch_and_reset_id_if_needed` / `maybeSendAndPollTransactionalRequest` / `authentication_failed` | `Sender.java:310–345` plus the private `shouldHandleAuthorizationError` (`:351–360`) | `sender.rs:213–216` — **replaces the existing `// No transaction manager in this phase` comment at line 214**, must run before `send_producer_data`. The block has **four** early exits and the order is load-bearing: `:322` (fatal), `:326` (abortable + authorization error), `:334` (`maybeSendAndPollTransactionalRequest` returned true) all **return** before `sendProducerData` at `:344`. `:334` is the one easiest to miss: `maybeSendAndPollTransactionalRequest` (`:459–518`) has exactly one `return false` (`:474`, empty queue) and six `return true`, so enqueueing an `InitProducerId` at `:331` *guarantees* `runOnce` returns without producing in that iteration. `transaction_manager.rs`'s test helper `run_sender_transaction_phase` models all four exits and is the reference — but it models `:333–335` as a *predicate* on the pending/in-flight state, not as an actual send, and says so at the site; Phase 4 replaces the predicate with the real call. §9.15 records what goes wrong if `:325` is skipped; Critic 43 issue 6 records what went wrong when `:334` was. The `TransactionManager` side (`fail_pending_requests`, `transition_to_uninitialized`, `authentication_failed`) landed in Phase 3; `maybeAbortBatches` and `client.poll` are this phase's. |
+| **Split the Sender-owned request-queue surface off `TransactionManager`** (rules §2) | `TransactionManager.java:136` (`inFlightRequestCorrelationId`), `:224` (`pendingRequests`), `:1406–1428` (`onComplete`, whose `synchronized` block starts only at `:1421` and covers `handleResponse` alone) | `transaction_manager.rs` — see §10.5 deviation 7 for the **thirteen** method signatures this reshapes. Budget it as its own commit: it is a refactor of the same constructor §6.3 already flags, and getting it wrong puts two deliberately-unsynchronized Java fields behind the shared lock. |
 | **Per-batch sequence assignment** + `add_in_flight_batch` | `RecordAccumulator.java:900–925` | `record_accumulator.rs` between `deque.pop_front()` (919) and `batch.close()` (923). Must be here, not in `Sender`: `sender.rs:396` (`batch.records()` → `take_built_records()`) serializes the v2 batch header, so producer id / epoch / base sequence must already be set. |
 | `should_stop_drain_batches_for_partition` | `RecordAccumulator.java:815–850` | `record_accumulator.rs:858`, alongside the existing `is_muted` check |
 | `handle_completed_batch` | `Sender.java:758` | `sender.rs:766` — replaces `// No transaction manager in this phase` |
@@ -1680,13 +1681,39 @@ always null for an idempotent producer for the reason already recorded on
 idempotently: `maybeSendAndPollTransactionalRequest` takes the
 `coordinatorType == null` branch (`Sender.java:479-484`) and still calls
 `awaitNodeReady` → `NetworkClientUtils.awaitReady`, which throws
-`AuthenticationException`, caught at `Sender.java:336`. `close` (949) was also
-unscheduled; it is not reachable *from* `ABORTABLE_ERROR` — it is the
-`forceClose` shutdown path at `Sender.java:287-293`, i.e. Phase 6 — but it is
-reachable for a purely idempotent producer, and without it a force close would
-leave a pending `InitProducerId`'s `TransactionalRequestResult` never completed,
-which is the hanging future CLAUDE.md §5 forbids. Both landed in Phase 3 rather
-than left for their call sites.
+`AuthenticationException`, caught at `Sender.java:336`.
+
+`close` (949) was also unscheduled everywhere. It is not reachable *from*
+`ABORTABLE_ERROR` — it is the `forceClose` shutdown path at
+`Sender.java:287-293`, i.e. Phase 6 — but it is reachable for a purely idempotent
+producer. Its observable effect on that path is the `FATAL_ERROR` transition,
+which is why it is worth translating: a force-closing producer must not go on to
+acquire a new producer id, and `FATAL_ERROR` stops `Sender.runOnce` at `:318`
+before `bumpIdempotentEpochAndResetIdIfNeeded` can enqueue one. (The transition
+happens **inside** the loop, so an empty queue means no transition at all —
+Java's behaviour, preserved.) Both landed in Phase 3 rather than left for their
+call sites, on the grounds that they were unscheduled, are twelve lines each and
+need no Phase-5 state.
+
+> **Correction (Critic 43 issue 5).** An earlier revision justified pulling
+> `close` forward by claiming that omitting it would leave a pending
+> `InitProducerId`'s `TransactionalRequestResult` never completed — a hanging
+> future under CLAUDE.md §5. **That mechanism does not exist on the idempotent
+> path.** The handler is built inside `bumpIdempotentEpochAndResetIdIfNeeded`
+> (Java 663-676), which returns `void` and never lets the result escape; the only
+> method that hands a `TransactionalRequestResult` to a caller is
+> `initializeTransactions` via `handleCachedTransactionRequestResult`, whose first
+> statement is `ensureTransactional()` (Java 1266). On the Rust side
+> `await_result` / `await_result_timeout` have no production call site at all —
+> `TxnRequestHandler::result()` is read only from tests and the `#[cfg(test)]`
+> door. The hanging-future concern becomes real in **Phase 6**, on the
+> **transactional** path, where `KafkaProducer.initTransactions` does
+> `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`); `close`'s
+> queue-failing loop is what unblocks that await on a force close. The scope
+> decision stands on the `FATAL_ERROR` effect and the scheduling gap, not on the
+> retracted claim. Recorded rather than silently edited, for the same reason the
+> retraction above is: a scope expansion defended by a mechanism that does not
+> exist cannot be reviewed, and this one was the Actor's own initiative.
 
 All nine `State` variants are declared (see §Phase-3), so the arithmetic
 "4 of 9" no longer appears in the code either way.
@@ -1864,14 +1891,17 @@ All six are documented at their call sites in
    parameter would be dead. Phase 5's transactional arm transitions and adds it.
 
 7. **The rules §2 lock-topology split is deferred to Phase 4, and deviation 2
-   raises its price from a field move to ten reshaped signatures.** Rules §2
+   raises its price from a field move to thirteen reshaped signatures.** Rules §2
    requires `pendingRequests` and `inFlightRequestCorrelationId` to live on the
    Sender task's own unshared state rather than behind the shared
    `TransactionManager` mutex, because Java touches them from the Sender thread
    only and does so *outside* its `synchronized` blocks —
    `clearInFlightCorrelationId` is called from `onComplete` at
    `TransactionManager.java:1410`, while that method's `synchronized` block only
-   begins at `:1420`.
+   begins at `:1421` and wraps `handleResponse` alone. (`:1420` is the
+   continuation line of the preceding `log.trace` argument list, not the block
+   opener; PLAN §6.5 and `.claude/rules/producer-transactions.md` §2 both cite
+   `:1421` correctly.)
 
    Phase 3 introduces no mutex, so §2 cannot be violated yet. But deviation 2
    hosts `onComplete` / `handleResponse` on the manager, so **every** touch of
