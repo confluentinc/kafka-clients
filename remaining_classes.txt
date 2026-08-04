@@ -177,10 +177,6 @@ org.apache.kafka.common.telemetry.internals.KafkaMetricsCollector
 org.apache.kafka.common.telemetry.internals.TelemetryMetricNamingConvention
 org.apache.kafka.common.requests.ShareRequestMetadata
 org.apache.kafka.clients.admin.FeatureUpdate
-org.apache.kafka.common.requests.AddOffsetsToTxnRequest
-org.apache.kafka.common.requests.AddOffsetsToTxnResponse
-org.apache.kafka.common.requests.AddPartitionsToTxnRequest
-org.apache.kafka.common.requests.AddPartitionsToTxnResponse
 org.apache.kafka.common.requests.AddRaftVoterRequest
 org.apache.kafka.common.requests.AddRaftVoterResponse
 org.apache.kafka.common.requests.AllocateProducerIdsRequest
@@ -263,8 +259,6 @@ org.apache.kafka.common.requests.ElectLeadersRequest
 org.apache.kafka.common.requests.ElectLeadersResponse
 org.apache.kafka.common.requests.EndQuorumEpochRequest
 org.apache.kafka.common.requests.EndQuorumEpochResponse
-org.apache.kafka.common.requests.EndTxnRequest
-org.apache.kafka.common.requests.EndTxnResponse
 org.apache.kafka.common.requests.EnvelopeRequest
 org.apache.kafka.common.requests.EnvelopeResponse
 org.apache.kafka.common.requests.ExpireDelegationTokenRequest
@@ -281,8 +275,6 @@ org.apache.kafka.common.requests.HeartbeatRequest
 org.apache.kafka.common.requests.HeartbeatResponse
 org.apache.kafka.common.requests.IncrementalAlterConfigsRequest
 org.apache.kafka.common.requests.IncrementalAlterConfigsResponse
-org.apache.kafka.common.requests.InitProducerIdRequest
-org.apache.kafka.common.requests.InitProducerIdResponse
 org.apache.kafka.common.requests.InitializeShareGroupStateRequest
 org.apache.kafka.common.requests.InitializeShareGroupStateResponse
 org.apache.kafka.common.requests.JoinGroupRequest
@@ -331,8 +323,6 @@ org.apache.kafka.common.requests.StreamsGroupHeartbeatRequest
 org.apache.kafka.common.requests.StreamsGroupHeartbeatResponse
 org.apache.kafka.common.requests.SyncGroupRequest
 org.apache.kafka.common.requests.SyncGroupResponse
-org.apache.kafka.common.requests.TxnOffsetCommitRequest
-org.apache.kafka.common.requests.TxnOffsetCommitResponse
 org.apache.kafka.common.requests.UnregisterBrokerRequest
 org.apache.kafka.common.requests.UnregisterBrokerResponse
 org.apache.kafka.common.requests.UpdateFeaturesRequest

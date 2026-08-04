@@ -571,8 +571,16 @@ org.apache.kafka.common.record.SimpleRecord
 org.apache.kafka.common.record.TimestampType
 org.apache.kafka.common.requests.AbstractRequest
 org.apache.kafka.common.requests.AbstractResponse
+org.apache.kafka.common.requests.AddOffsetsToTxnRequest
+org.apache.kafka.common.requests.AddOffsetsToTxnResponse
+org.apache.kafka.common.requests.AddPartitionsToTxnRequest
+org.apache.kafka.common.requests.AddPartitionsToTxnResponse
 org.apache.kafka.common.requests.ApiVersionsRequest
 org.apache.kafka.common.requests.ApiVersionsResponse
+org.apache.kafka.common.requests.EndTxnRequest
+org.apache.kafka.common.requests.EndTxnResponse
+org.apache.kafka.common.requests.InitProducerIdRequest
+org.apache.kafka.common.requests.InitProducerIdResponse
 org.apache.kafka.common.requests.MetadataRequest
 org.apache.kafka.common.requests.MetadataResponse
 org.apache.kafka.common.requests.ProduceRequest
@@ -587,6 +595,8 @@ org.apache.kafka.common.requests.SaslAuthenticateResponse
 org.apache.kafka.common.requests.SaslHandshakeRequest
 org.apache.kafka.common.requests.SaslHandshakeResponse
 org.apache.kafka.common.requests.TransactionResult
+org.apache.kafka.common.requests.TxnOffsetCommitRequest
+org.apache.kafka.common.requests.TxnOffsetCommitResponse
 org.apache.kafka.common.security.auth.SecurityProtocol
 org.apache.kafka.common.security.authenticator.SaslClientAuthenticator
 org.apache.kafka.common.security.ssl.SslFactory

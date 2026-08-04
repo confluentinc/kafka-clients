@@ -42,6 +42,7 @@ use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData
 use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
+use crate::txn_offset_commit_request_data::TxnOffsetCommitRequestData;
 
 use super::AddOffsetsToTxnRequest;
 use super::AddPartitionsToTxnRequest;
@@ -63,6 +64,7 @@ use super::RequestHeader;
 use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
+use super::TxnOffsetCommitRequest;
 
 /// Trait for building requests at a specific version.
 ///
@@ -136,6 +138,8 @@ pub enum ConcreteRequest {
     AddOffsetsToTxn(AddOffsetsToTxnRequest),
     /// An EndTxn request.
     EndTxn(EndTxnRequest),
+    /// A TxnOffsetCommit request.
+    TxnOffsetCommit(TxnOffsetCommitRequest),
 }
 
 impl ConcreteRequest {
@@ -158,6 +162,7 @@ impl ConcreteRequest {
             Self::AddPartitionsToTxn(r) => r.version(),
             Self::AddOffsetsToTxn(r) => r.version(),
             Self::EndTxn(r) => r.version(),
+            Self::TxnOffsetCommit(r) => r.version(),
         }
     }
 
@@ -180,6 +185,7 @@ impl ConcreteRequest {
             Self::AddPartitionsToTxn(r) => r.api_key(),
             Self::AddOffsetsToTxn(r) => r.api_key(),
             Self::EndTxn(r) => r.api_key(),
+            Self::TxnOffsetCommit(r) => r.api_key(),
         }
     }
 
@@ -208,6 +214,7 @@ impl ConcreteRequest {
             Self::AddPartitionsToTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AddOffsetsToTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::EndTxn(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::TxnOffsetCommit(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -290,6 +297,9 @@ impl ConcreteRequest {
             Self::EndTxn(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::TxnOffsetCommit(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -319,6 +329,7 @@ impl ConcreteRequest {
             Self::AddPartitionsToTxn(r) => Self::serialize_body(r.data_mut(), version),
             Self::AddOffsetsToTxn(r) => Self::serialize_body(r.data_mut(), version),
             Self::EndTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::TxnOffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -359,6 +370,7 @@ impl ConcreteRequest {
             Self::AddPartitionsToTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AddOffsetsToTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::EndTxn(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::TxnOffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -449,6 +461,10 @@ impl ConcreteRequest {
                 let data = EndTxnRequestData::read(readable, api_version)?;
                 Ok(Self::EndTxn(EndTxnRequest::new(data, api_version)))
             },
+            ApiKeys::TXN_OFFSET_COMMIT => {
+                let data = TxnOffsetCommitRequestData::read(readable, api_version)?;
+                Ok(Self::TxnOffsetCommit(TxnOffsetCommitRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -476,6 +492,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::AddPartitionsToTxn(r) => write!(f, "{r}"),
             Self::AddOffsetsToTxn(r) => write!(f, "{r}"),
             Self::EndTxn(r) => write!(f, "{r}"),
+            Self::TxnOffsetCommit(r) => write!(f, "{r}"),
         }
     }
 }

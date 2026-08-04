@@ -60,6 +60,8 @@ pub mod sasl_handshake_request;
 pub mod sasl_handshake_response;
 pub mod send_builder;
 pub mod transaction_result;
+pub mod txn_offset_commit_request;
+pub mod txn_offset_commit_response;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
@@ -108,6 +110,10 @@ pub use sasl_handshake_request::{SaslHandshakeRequest, SaslHandshakeRequestBuild
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 pub use transaction_result::TransactionResult;
+pub use txn_offset_commit_request::{
+    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilder, UNKNOWN_GENERATION_ID, UNKNOWN_MEMBER_ID,
+};
+pub use txn_offset_commit_response::TxnOffsetCommitResponse;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
 ///

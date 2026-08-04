@@ -47,6 +47,7 @@ use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
+use super::TxnOffsetCommitResponse;
 
 /// Default throttle time in milliseconds.
 pub const DEFAULT_THROTTLE_TIME: i32 = 0;
@@ -91,6 +92,8 @@ pub enum ConcreteResponse {
     AddOffsetsToTxn(AddOffsetsToTxnResponse),
     /// An EndTxn response.
     EndTxn(EndTxnResponse),
+    /// A TxnOffsetCommit response.
+    TxnOffsetCommit(TxnOffsetCommitResponse),
 }
 
 impl ConcreteResponse {
@@ -113,6 +116,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => r.api_key(),
             Self::AddOffsetsToTxn(r) => r.api_key(),
             Self::EndTxn(r) => r.api_key(),
+            Self::TxnOffsetCommit(r) => r.api_key(),
         }
     }
 
@@ -141,6 +145,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::AddOffsetsToTxn(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::EndTxn(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::TxnOffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -201,6 +206,9 @@ impl ConcreteResponse {
             Self::EndTxn(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::TxnOffsetCommit(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -229,6 +237,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => Self::serialize_body(r.data_mut(), version),
             Self::AddOffsetsToTxn(r) => Self::serialize_body(r.data_mut(), version),
             Self::EndTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::TxnOffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -261,6 +270,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => r.error_counts(),
             Self::AddOffsetsToTxn(r) => r.error_counts(),
             Self::EndTxn(r) => r.error_counts(),
+            Self::TxnOffsetCommit(r) => r.error_counts(),
         }
     }
 
@@ -285,6 +295,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => r.throttle_time_ms(),
             Self::AddOffsetsToTxn(r) => r.throttle_time_ms(),
             Self::EndTxn(r) => r.throttle_time_ms(),
+            Self::TxnOffsetCommit(r) => r.throttle_time_ms(),
         }
     }
 
@@ -308,6 +319,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::AddOffsetsToTxn(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::EndTxn(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::TxnOffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -330,6 +342,7 @@ impl ConcreteResponse {
             Self::AddPartitionsToTxn(r) => r.should_client_throttle(version),
             Self::AddOffsetsToTxn(r) => r.should_client_throttle(version),
             Self::EndTxn(r) => r.should_client_throttle(version),
+            Self::TxnOffsetCommit(r) => r.should_client_throttle(version),
         }
     }
 
@@ -442,6 +455,10 @@ impl ConcreteResponse {
                 let response = EndTxnResponse::parse(readable, version)?;
                 Ok(Self::EndTxn(response))
             },
+            ApiKeys::TXN_OFFSET_COMMIT => {
+                let response = TxnOffsetCommitResponse::parse(readable, version)?;
+                Ok(Self::TxnOffsetCommit(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -469,6 +486,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::AddPartitionsToTxn(r) => write!(f, "{r}"),
             Self::AddOffsetsToTxn(r) => write!(f, "{r}"),
             Self::EndTxn(r) => write!(f, "{r}"),
+            Self::TxnOffsetCommit(r) => write!(f, "{r}"),
         }
     }
 }
