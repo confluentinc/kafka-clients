@@ -507,11 +507,21 @@ includes an unreleased version whenever the spec sets
 KIP-939 2PC version whose new fields are **non-ignorable**, so it compounded with
 the §9.1 generator gap.
 
-Only five APIs currently carry the flag (`OFFSET_COMMIT`, `OFFSET_FETCH`,
-`INIT_PRODUCER_ID`, `STREAMS_GROUP_HEARTBEAT`, `STREAMS_GROUP_DESCRIBE`), so for
-every other API the two accessors agree **today**. Write the faithful form anyway:
-the flag tracks whether a version is still under development and flips as versions
-release, so a coincidence today is not a guarantee tomorrow.
+Five APIs set the flag true in **`generator/messages/`** — the corpus `build.rs`
+compiles, and therefore the one that decides what the Rust accessors return:
+`OFFSET_COMMIT`, `OFFSET_FETCH`, `INIT_PRODUCER_ID`, `STREAMS_GROUP_HEARTBEAT`,
+`STREAMS_GROUP_DESCRIBE`. For every other API the two accessors agree **today**.
+
+**The corpus matters, so always name it.** In `kafka/` 4.2 — what CLAUDE.md's
+"Source Reference" points at — only `InitProducerIdRequest.json` sets the flag true;
+the other four had their latest versions released by 4.2. `generator/messages/` is a
+pre-4.2 snapshot (36 of 197 specs differ; PLAN §9.9), so a flag claim checked
+against `kafka/` will appear false when it is true of the built code, and vice
+versa. Three findings in the Phase 2 review loop were this one error. Cite the file.
+
+Write the faithful form regardless: the flag tracks whether a version is still under
+development and flips as versions release, so a coincidence today is not a guarantee
+tomorrow — and per above, "today" differs between the two corpora.
 
 **How to apply:**
 

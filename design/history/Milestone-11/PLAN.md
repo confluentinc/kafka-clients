@@ -1004,6 +1004,160 @@ Beyond the phase-count cost, the Milestone 9 FFI access-guard model has no story
 for an *open* transaction: a transaction spans `begin` → N×`send` → `commit`,
 while the binding is one-operation-in-flight. Needs design, not a mechanical
 extension.
+### 9.7 Bring nine pre-existing `RequestBuilder`s in line with rules §12
+
+**Status:** open. Identified by Critic 42's third pass while reviewing rules §12.
+
+§12 requires a builder's `latest_allowed_version` to mirror whichever Java
+`AbstractRequest.Builder` constructor its counterpart invokes. Nine builders
+predating the rule still call `latest_version()`. **All are behaviourally correct
+today, but for two different reasons — and conflating them will introduce a bug.**
+
+> ⚠️ **Do NOT mechanically switch all nine to
+> `latest_version_with_unstable(false)`.** Four of them must **stay** on
+> `latest_version()` because **Java deliberately passes `latestVersion()`**
+> (`OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64`,
+> `ApiVersionsRequest.java:43`, `OffsetsForLeaderEpochRequest.java:57`). For two of
+> those — `OFFSET_COMMIT` and `OFFSET_FETCH` — switching is not merely unfaithful
+> but **actively wrong in this repo**: it caps them at **9 instead of 10**
+> (`offset_commit_request.rs:183`, `offset_fetch_request.rs:286`), diverging from
+> Java on the consumer's offset-commit and offset-fetch paths.
+
+> **Where that 9-vs-10 comes from — read this before checking the flag.** The two
+> accessors differ for those APIs only because **`generator/messages/`** (the corpus
+> `build.rs` actually compiles) sets `"latestVersionUnstable": true` for them.
+> **Kafka 4.2 does not** — in `kafka/clients/src/main/resources/common/message/`
+> only `InitProducerIdRequest.json` sets it true. So a reviewer who checks the flag
+> in `kafka/`, as CLAUDE.md's "Source Reference" directs, finds nothing and will
+> conclude this warning is false. It is not: the divergence is real in Rust because
+> the build corpus is a pre-4.2 snapshot. See §9.9. The instruction above does not
+> depend on the flag — it rests on Java's `super(...)` call, which is stable across
+> both corpora.
+
+Per-group reasons — each is the group's *own* reason, not a shared one:
+
+  - **Faithful group** (`api_versions`, `offset_commit`, `offset_fetch`,
+    `offsets_for_leader_epoch`): correct because **Java's own bound is
+    `latestVersion()`**. `latest_version()` is the faithful translation and must
+    **stay**. Only the "deliberate" marker is missing. This reason is independent of
+    any flag value.
+  - **Implicated group** (the five below): correct because their APIs carry
+    `latestVersionUnstable: false` **in `generator/messages/`** — verified per
+    member, not assumed for the group. These are the ones to switch. (`METADATA`,
+    `FIND_COORDINATOR`, `SASL_HANDSHAKE`, `SASL_AUTHENTICATE` and
+    `CONSUMER_GROUP_HEARTBEAT` set no flag at all, which defaults to false.)
+
+Two groups:
+
+| Group | Files | Action |
+|---|---|---|
+| Faithful but unmarked (Java's own bound *is* `latestVersion()`) | `api_versions_request.rs`, `offset_commit_request.rs`, `offset_fetch_request.rs`, `offsets_for_leader_epoch_request.rs` | add the "deliberate" marker §12 requires, so it stays distinguishable from "not yet reached" — do **not** change the expression |
+| Implicated by §12 | `metadata_request.rs:191`, `find_coordinator_request.rs:192`, `sasl_handshake_request.rs:116`, `sasl_authenticate_request.rs:122`, `consumer_group_heartbeat_request.rs:138` | switch to `latest_version_with_unstable(false)` |
+
+`consumer_group_heartbeat_request.rs` needs thought rather than a mechanical
+change: Java's builder takes `enableUnstableLastVersion` as a **parameter**, which
+the Rust builder does not model at all. Decide whether to thread it through or
+document why not.
+
+**Deliberately not folded into Milestone 11.** Nine files across the common and
+consumer surface with zero behaviour change is a poor fit for a transactions phase,
+and mixing it in would make any regression ambiguous between the two. Rules §12
+records this scope explicitly so a Critic reviewing pre-existing code cites this
+item instead of raising nine findings.
+
+**Consider on landing:** §12 is written as a general rule but lives in
+`producer-transactions.md`. Relocating it to a shared rules file would be the
+natural move once it governs code outside the producer.
+
+### 9.8 Critic review of Phase 2
+
+**Status:** open — **five** Critic 42 passes; none has yet returned zero findings.
+Passes archived at `design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
+
+| Pass | Findings | Where | Fixes |
+|---|---|---|---|
+| 1 | 5 (1 functional) | Phase 2 translation | `1391c69` |
+| 2 | 2 (non-behavioural) | the pass-1 fix | `b62e218` |
+| 3 | 1 | rules §12 prose, written to fix pass 2 | `e8a91e7` |
+| 4 | 2 | §9.7 justification + a §12 citation | `8264450` |
+| 5 | 3 | §9.7 / §12 flag anchoring, and this file's structure | pending |
+
+**Phase 2's `src/` has been clean since pass 1** — `git diff --stat e8a91e7 HEAD`
+over `*.rs` is empty, confirmed by pass 5. Every round after the first found a
+defect in a **fix**, never in the translation.
+
+**The functional finding (pass 1):** `InitProducerIdRequestBuilder` offered v6 where
+Java caps at v5, because `latest_version()` hardwires the unstable-inclusive
+accessor while Java's `super(apiKey)` passes `false`. Compounds with §9.1 — v6 is
+the 2PC version Phase 5 implements, and its two new fields are non-ignorable, so at
+a negotiated v5 the client would silently drop them where Java throws. Produced
+**rules §12** and the §9.7 follow-up.
+
+**One error class caused three of the later findings** — a claim about
+`latestVersionUnstable` not tied to the corpus it was read from:
+
+  - pass 2: the flag's **presence** checked instead of its value → two classes
+    wrongly reported as divergent;
+  - pass 4: a flag value asserted **across a set** without checking each member →
+    §9.7 would have told its executor that switching all nine was inert;
+  - pass 5: the corrected claim anchored to **`kafka/`**, where the flag does not
+    exist — it is a property of `generator/messages/` (§9.9).
+
+The common root: `generator/messages/` and `kafka/` are both "the specs", CLAUDE.md
+names only the latter, and they disagree. §9.9 addresses that; a rule suggestion to
+name the build corpus in CLAUDE.md's "Source Reference" is recorded in
+`COMMENTS.DONE.42.md` for the CLAUDE.md change process (`agent-roles.md` §2) rather
+than applied directly.
+
+**Confirmed by independent re-derivation across passes:** all four broker-side
+scoping omissions, the deterministic-sort deviation's safety at every version, all
+ten txn dispatch arms plus their `OffsetCommit`/`OffsetFetch` neighbours, all seven
+sort sites, and both halves of the `ignorable` distinction.
+
+**Lesson, consistent with §9.5:** six of seven Critic passes across the two phases
+found something real. Twice this phase the loop was declared closed without a
+zero-finding pass — once on the Critic's own "does not warrant a fourth round"
+(pass 3), once on the Actor's self-verification after pass 5 was interrupted. Both
+were premature; `agent-roles.md` §2's gate is a clean pass, and nothing else
+substitutes for it.
+
+### 9.9 `generator/messages/` is a pre-4.2 snapshot and diverges from `kafka/`
+
+**Status:** open. Found by Critic 42's fifth pass, while checking a §9.7 claim.
+
+CLAUDE.md's "Source Reference" names `kafka/` (Apache Kafka 4.2) as the contract,
+but `build.rs:44` generates all 197 wire types from **`generator/messages/`**, a
+separate copy that has been touched by exactly one commit — `6cd275c Initial branch
+(#1)` — and never refreshed. The two corpora disagree:
+
+| | `generator/messages/` (built) | `kafka/` 4.2 (documented) |
+|---|---|---|
+| specs differing | **36 of 197** | — |
+| …flag-line-only | 2 (`OffsetCommitRequest`, `OffsetFetchRequest`) | — |
+| `latestVersionUnstable: true` | 5 specs | **1** (`InitProducerIdRequest`) |
+| `ListOffsetsRequest` versions | `1-10` | `1-11` |
+
+The build corpus is consistently **older**. Two consequences:
+
+  1. **Reviewability.** A claim about spec content is unverifiable unless it names
+     its corpus, because the obvious place to check — `kafka/`, per CLAUDE.md — is
+     not what compiles. This produced three findings in the Phase 2 loop alone
+     (§9.8). Any spec-derived claim must now name the file it came from.
+  2. **§9.2 scope.** The 4.2 → 4.3.1 migration is really **pre-4.2 → 4.3.1** for
+     generated code. Refreshing `generator/messages/` will surface the 36 existing
+     deltas at the same time as the 4.3.1 ones, and `ListOffsetsRequest` v11 shows
+     these include whole new versions, not just flags.
+
+**Not folded into Milestone 11.** Regenerating from 4.2 changes 36 specs across the
+entire wire surface and would make any transaction-phase regression ambiguous.
+Sequence it with §9.2 instead, refreshing straight to the chosen base.
+
+**No known live defect.** All five Phase 2 transaction APIs have flags identical in
+both corpora, so Phase 2's generated code matches 4.2. The `OffsetCommit` /
+`OffsetFetch` flag delta is latent: no production site consults
+`latest_version_with_unstable` for those APIs today — it becomes real only if §9.7
+is executed mechanically, which is what §9.7's warning block now prevents.
+
 
 ---
 
@@ -1093,88 +1247,3 @@ Recorded in full elsewhere; listed here for completeness:
   - `ProducerConfig::explicitly_set` replaces Java's
     `AbstractConfig.originals()` — commit `d14d1ec`.
   - The five typed txn error structs deliberately not created — §1.1 and rules §9.
-
-### 9.7 Bring nine pre-existing `RequestBuilder`s in line with rules §12
-
-**Status:** open. Identified by Critic 42's third pass while reviewing rules §12.
-
-§12 requires a builder's `latest_allowed_version` to mirror whichever Java
-`AbstractRequest.Builder` constructor its counterpart invokes. Nine builders
-predating the rule still call `latest_version()`. **All are behaviourally correct
-today, but for two different reasons — and conflating them will introduce a bug.**
-
-> ⚠️ **Do NOT mechanically switch all nine to
-> `latest_version_with_unstable(false)`.** Two of them — `OFFSET_COMMIT` and
-> `OFFSET_FETCH` — carry `latestVersionUnstable: true` with `highest = 10`, so the
-> accessors differ (10 vs 9). Switching those caps them at **9 instead of 10**
-> (`offset_commit_request.rs:183`, `offset_fetch_request.rs:286`), diverging from
-> Java on the consumer's offset-commit and offset-fetch paths. They are correct
-> today because **Java deliberately passes `latestVersion()`**
-> (`OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64`), not because any
-> flag is false.
-
-Per-group reasons:
-
-  - **Faithful group** (`api_versions`, `offset_commit`, `offset_fetch`,
-    `offsets_for_leader_epoch`): correct because Java's own bound is
-    `latestVersion()`. `latest_version()` is the faithful translation and must
-    **stay**. Only the "deliberate" marker is missing.
-  - **Implicated group** (the five below): correct only because their APIs happen to
-    carry `latestVersionUnstable: false`, so the accessors agree. These are the ones
-    to switch.
-
-Two groups:
-
-| Group | Files | Action |
-|---|---|---|
-| Faithful but unmarked (Java's own bound *is* `latestVersion()`) | `api_versions_request.rs`, `offset_commit_request.rs`, `offset_fetch_request.rs`, `offsets_for_leader_epoch_request.rs` | add the "deliberate" marker §12 requires, so it stays distinguishable from "not yet reached" |
-| Implicated by §12 | `metadata_request.rs:191`, `find_coordinator_request.rs:192`, `sasl_handshake_request.rs:116`, `sasl_authenticate_request.rs:122`, `consumer_group_heartbeat_request.rs:138` | switch to `latest_version_with_unstable(false)` |
-
-`consumer_group_heartbeat_request.rs` needs thought rather than a mechanical
-change: Java's builder takes `enableUnstableLastVersion` as a **parameter**, which
-the Rust builder does not model at all. Decide whether to thread it through or
-document why not.
-
-**Deliberately not folded into Milestone 11.** Nine files across the common and
-consumer surface with zero behaviour change is a poor fit for a transactions phase,
-and mixing it in would make any regression ambiguous between the two. Rules §12
-records this scope explicitly so a Critic reviewing pre-existing code cites this
-item instead of raising nine findings.
-
-**Consider on landing:** §12 is written as a general rule but lives in
-`producer-transactions.md`. Relocating it to a shared rules file would be the
-natural move once it governs code outside the producer.
-
-### 9.8 Critic review of Phase 2
-
-**Status:** DONE — review loop **closed** 2026-08-04. Three Critic 42 passes,
-converged on pass 3 with **zero Phase 2 defects**. Archived at
-`design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
-
-| Pass | Findings | Fixes |
-|---|---|---|
-| 1 | 5 (1 functional) | `1391c69` |
-| 2 | 2 (low, non-behavioural) | `b62e218` |
-| 3 | 1, inside the new rules §12 prose | fixed inline; no Phase 2 defects |
-
-**The functional finding:** `InitProducerIdRequestBuilder` offered v6 where Java
-caps at v5, because `latest_version()` hardwires the unstable-inclusive accessor
-while Java's `super(apiKey)` passes `false`. Compounds with §9.1 — v6 is the 2PC
-version Phase 5 implements, and its two new fields are non-ignorable, so at a
-negotiated v5 the client would silently drop them where Java throws. Produced
-**rules §12** (translate a builder's `super(...)` call literally) and the §9.7
-follow-up.
-
-**Both later passes found the same shape of defect:** a fix reaching some of the
-sites it applied to rather than all — the version-cap convention applied to 2 of 4
-builders, and a PLAN correction appended to a stale claim rather than replacing it.
-Pass 3's finding was three prose imprecisions in the rule written to fix pass 2.
-
-**Confirmed by independent re-derivation:** all four broker-side scoping omissions,
-the deterministic-sort deviation's safety at every version, all 18 dispatch arms,
-and both halves of the `ignorable` distinction.
-
-**Lesson, consistent with §9.5:** across both phases, five of six Critic passes
-found something real, and in each phase a later pass found a defect *in a fix*. A
-single pass is not sufficient.
-

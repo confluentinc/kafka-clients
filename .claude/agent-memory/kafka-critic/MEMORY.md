@@ -62,3 +62,5 @@
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
 - [M11 Phase 1 producer txn support types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors than planned; exception-hierarchy flattening; stranded doc comment
 - [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; `enable()`/`pin!` NOT required (corrects an earlier wrong note)
+- [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives the build; 4 latestVersionUnstable flags differ from kafka/ 4.2
+- [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — heading reorder broke section containment; warning-block anchors; per-member vs across-set verification
