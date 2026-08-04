@@ -2245,12 +2245,21 @@ mod tests {
         ))
     }
 
-    /// The timing knobs a `SenderTest`-style context can override, matching the
-    /// three that Java's bespoke `RecordAccumulator` / `Sender` constructions vary.
+    /// The timing knobs a `SenderTest`-style context can override, matching the ones
+    /// Java's bespoke `RecordAccumulator` / `Sender` constructions vary.
+    ///
+    /// Note the two backoffs are separate, as they are in Java:
+    /// `setupWithTransactionState` builds the accumulator with `retryBackoffMs = 0L`
+    /// (`SenderTest.java:3860`), so a re-enqueued batch is drainable on the very next
+    /// `runOnce`, while the `Sender` gets `RETRY_BACKOFF_MS = 50` (`:3864`) for its
+    /// transactional-request backoff. Collapsing them made re-enqueued batches wait a
+    /// backoff Java does not impose, which is visible in every multi-in-flight retry
+    /// test.
     struct SenderTestTimeouts {
         request_timeout_ms: i32,
         delivery_timeout_ms: i32,
-        retry_backoff_ms: i64,
+        accumulator_retry_backoff_ms: i64,
+        sender_retry_backoff_ms: i64,
     }
 
     /// Test harness holding all state needed for SenderTest-style tests.
@@ -2292,7 +2301,12 @@ mod tests {
                 false,
                 i32::MAX,
                 Some(idempotent_transaction_manager()),
-                Some(SenderTestTimeouts { request_timeout_ms, delivery_timeout_ms, retry_backoff_ms: 0 }),
+                Some(SenderTestTimeouts {
+                    request_timeout_ms,
+                    delivery_timeout_ms,
+                    accumulator_retry_backoff_ms: 0,
+                    sender_retry_backoff_ms: 0,
+                }),
             )
         }
 
@@ -2304,12 +2318,19 @@ mod tests {
             transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
             timeouts: Option<SenderTestTimeouts>,
         ) -> Self {
-            let SenderTestTimeouts { request_timeout_ms, delivery_timeout_ms, retry_backoff_ms } =
-                timeouts.unwrap_or(SenderTestTimeouts {
-                    request_timeout_ms: REQUEST_TIMEOUT,
-                    delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
-                    retry_backoff_ms: RETRY_BACKOFF_MS,
-                });
+            let SenderTestTimeouts {
+                request_timeout_ms,
+                delivery_timeout_ms,
+                accumulator_retry_backoff_ms,
+                sender_retry_backoff_ms,
+            } = timeouts.unwrap_or(SenderTestTimeouts {
+                request_timeout_ms: REQUEST_TIMEOUT,
+                delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
+                // Java 3860: the accumulator's retry backoff is 0 in every
+                // `setupWithTransactionState` variant.
+                accumulator_retry_backoff_ms: 0,
+                sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+            });
             // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
             // which is always > 0. Starting at 0 breaks MockClient because
             // not_throttled(0) returns false when throttled_until_ms is also 0.
@@ -2331,8 +2352,8 @@ mod tests {
                 batch_size,
                 Compression::none(),
                 0, // linger_ms
-                retry_backoff_ms,
-                retry_backoff_ms * 10,
+                accumulator_retry_backoff_ms,
+                accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
                 Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
@@ -2354,7 +2375,7 @@ mod tests {
                 ACKS_ALL,
                 retries,
                 request_timeout_ms,
-                retry_backoff_ms,
+                sender_retry_backoff_ms,
                 running,
                 force_close,
                 time_provider,
@@ -4442,6 +4463,103 @@ mod tests {
     // `SenderTest.java` idempotence subset
     // =====================================================================
 
+    /// Inspects the outgoing produce request's first batch for `tp`, asserting its
+    /// producer epoch (when `expected_epoch` is `Some`) and base sequence, then answers
+    /// it.
+    ///
+    /// The analogue of `SenderTest.sendIdempotentProducerResponse` (Java 2136-2156).
+    /// Java inspects the request inside `client.respond(matcher, response)`; the Rust
+    /// `MockClient` has no matcher form, so the queued request is built and read
+    /// directly before responding. That also covers Java's
+    /// `hasIdempotentRecords(produceRequest)` assertion: a batch carrying a producer
+    /// id is what makes the records idempotent.
+    fn send_idempotent_producer_response(
+        ctx: &mut SenderTestContext,
+        expected_epoch: Option<i16>,
+        expected_sequence: i32,
+        tp: &TopicPartition,
+        error: Errors,
+        offset: i64,
+        log_start_offset: i64,
+    ) {
+        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::requests::ConcreteRequest;
+
+        {
+            let request = ctx
+                .sender
+                .client_mut()
+                .requests_mut()
+                .front_mut()
+                .expect("a produce request must be in flight");
+            let built = request.request_builder_mut().build().expect("the request builds");
+            let ConcreteRequest::Produce(produce_request) = built else {
+                panic!("expected a produce request, got {built}");
+            };
+            let partition_data = produce_request
+                .data()
+                .topic_data
+                .iter()
+                .filter(|topic| topic.name == *tp.topic())
+                .flat_map(|topic| topic.partition_data.iter())
+                .find(|partition| partition.index == tp.partition())
+                .expect("the request must carry this partition");
+            let records = MemoryRecords::new(
+                partition_data
+                    .records
+                    .clone()
+                    .expect("an idempotent produce request carries records"),
+            );
+            let mut batches = records.batches();
+            let first_batch = batches.next().expect("one batch");
+            assert!(batches.next().is_none(), "a produce request carries one batch per partition");
+            assert_ne!(
+                first_batch.producer_id(),
+                RecordBatch::NO_PRODUCER_ID,
+                "the records must be idempotent"
+            );
+            if let Some(expected_epoch) = expected_epoch {
+                assert_eq!(first_batch.producer_epoch(), expected_epoch);
+            }
+            assert_eq!(first_batch.base_sequence(), expected_sequence);
+        }
+
+        let response = ctx.produce_response_with_message(tp, offset, error, 0, log_start_offset, None);
+        ctx.sender.client_mut().respond(response);
+    }
+
+    /// Appends one record, sends it and completes it successfully.
+    ///
+    /// `SenderTest.assertSuccessfulSend` (Java 3871-3885).
+    async fn assert_successful_send(ctx: &mut SenderTestContext) {
+        let tp0 = ctx.tp0.clone();
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "We should have a single produce request in flight."
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(ctx.sender.client().has_in_flight_requests());
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(future.is_done());
+        future.get().await.expect("Future should not have raised an exception");
+    }
+
+    /// Appends one record and asserts the send fails immediately with `expected`.
+    ///
+    /// `SenderTest.assertSendFailure` (Java 3887-3897).
+    async fn assert_send_failure(ctx: &mut SenderTestContext, expected: Errors) {
+        let tp0 = ctx.tp0.clone();
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(future.is_done());
+        assert_eq!(future.get().await.expect_err("Future should have raised").error(), expected);
+    }
+
     /// Translated from `SenderTest.testInitProducerIdRequest` (Java 618-628).
     #[tokio::test]
     async fn test_init_producer_id_request() {
@@ -4492,6 +4610,142 @@ mod tests {
             drained.get().await.expect_err("aborted").message(),
             "Producer is closed forcefully."
         );
+    }
+
+    /// Translated from `SenderTest.testIdempotenceWithMultipleInflights`
+    /// (Java 761-808).
+    #[tokio::test]
+    async fn test_idempotence_with_multiple_inflights() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert!(!request1.is_done());
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 0
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::None, 1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 1
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
+    }
+
+    /// Translated from `SenderTest.testIdempotenceWithMultipleInflightsRetriedInOrder`
+    /// (Java 810-909).
+    ///
+    /// Three requests in flight, all retried one at a time in the correct order. This
+    /// is the multi-in-flight ordering that `should_stop_drain_batches_for_partition`'s
+    /// `firstInFlightSequence` gate exists to guarantee, and that the `0b8c3d0`
+    /// response-routing fix serves.
+    #[tokio::test]
+    async fn test_idempotence_with_multiple_inflights_retried_in_order() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        let request3 = ctx.append_to_accumulator_with(&tp0, 0, "k3", "v3").await;
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 3);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 3);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert!(!request1.is_done());
+        assert!(!request2.is_done());
+        assert!(!request3.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::LeaderNotAvailable, -1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 0
+
+        // Queue the fourth request; it must not be sent until the first three complete.
+        let request4 = ctx.append_to_accumulator_with(&tp0, 0, "k4", "v4").await;
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::OutOfOrderSequenceNumber, -1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        send_idempotent_producer_response(&mut ctx, None, 2, &tp0, Errors::OutOfOrderSequenceNumber, -1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        // Do nothing: we are reduced to one in-flight request during retries.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().sequence_number(&tp0),
+            3,
+            "request 4's batch must not have been drained, so the sequence is unchanged"
+        );
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 1
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+
+        ctx.sender.run_once().await.expect("run_once"); // send request 2
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::None, 1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 2
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+
+        ctx.sender.run_once().await.expect("run_once"); // send request 3
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+
+        send_idempotent_producer_response(&mut ctx, None, 2, &tp0, Errors::None, 2, -1);
+        // Receive response 3 and send request 4, now that we are out of retry mode.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(2));
+        assert!(request3.is_done());
+        assert_eq!(request3.get().await.expect("succeeds").offset(), 2);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+
+        send_idempotent_producer_response(&mut ctx, None, 3, &tp0, Errors::None, 3, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 4
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(3));
+        assert!(request4.is_done());
+        assert_eq!(request4.get().await.expect("succeeds").offset(), 3);
     }
 
     /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
