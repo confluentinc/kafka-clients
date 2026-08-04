@@ -2081,6 +2081,14 @@ mod tests {
         ))
     }
 
+    /// The timing knobs a `SenderTest`-style context can override, matching the
+    /// three that Java's bespoke `RecordAccumulator` / `Sender` constructions vary.
+    struct SenderTestTimeouts {
+        request_timeout_ms: i32,
+        delivery_timeout_ms: i32,
+        retry_backoff_ms: i64,
+    }
+
     /// Test harness holding all state needed for SenderTest-style tests.
     struct SenderTestContext {
         sender: Sender<MockClient>,
@@ -2100,22 +2108,44 @@ mod tests {
 
         /// Setup with guarantee_message_order and custom retries.
         fn with_options(guarantee_message_order: bool, retries: i32) -> Self {
-            Self::with_transaction_state(guarantee_message_order, retries, None)
+            Self::with_transaction_state(guarantee_message_order, retries, None, None)
         }
 
         /// Setup with an idempotent [`TransactionManager`] shared between the
         /// `Sender` and the `RecordAccumulator`, mirroring Java's
         /// `setupWithTransactionState(transactionManager)`.
         fn idempotent() -> Self {
-            Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()))
+            Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None)
         }
 
-        /// Setup with an explicit (possibly absent) transaction manager.
+        /// Idempotent setup with explicit timeouts and no retry backoff, mirroring the
+        /// bespoke `RecordAccumulator` + `Sender` that
+        /// `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`
+        /// (Java 754-763) builds: `retryBackoffMs` is `0` on both, so a re-enqueued
+        /// batch is immediately drainable again.
+        fn idempotent_with_timeouts(request_timeout_ms: i32, delivery_timeout_ms: i32) -> Self {
+            Self::with_transaction_state(
+                false,
+                i32::MAX,
+                Some(idempotent_transaction_manager()),
+                Some(SenderTestTimeouts { request_timeout_ms, delivery_timeout_ms, retry_backoff_ms: 0 }),
+            )
+        }
+
+        /// Setup with an explicit (possibly absent) transaction manager and optional
+        /// timeout overrides.
         fn with_transaction_state(
             guarantee_message_order: bool,
             retries: i32,
             transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+            timeouts: Option<SenderTestTimeouts>,
         ) -> Self {
+            let SenderTestTimeouts { request_timeout_ms, delivery_timeout_ms, retry_backoff_ms } =
+                timeouts.unwrap_or(SenderTestTimeouts {
+                    request_timeout_ms: REQUEST_TIMEOUT,
+                    delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
+                    retry_backoff_ms: RETRY_BACKOFF_MS,
+                });
             // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
             // which is always > 0. Starting at 0 breaks MockClient because
             // not_throttled(0) returns false when throttled_until_ms is also 0.
@@ -2137,9 +2167,9 @@ mod tests {
                 batch_size,
                 Compression::none(),
                 0, // linger_ms
-                RETRY_BACKOFF_MS,
-                RETRY_BACKOFF_MS * 10,
-                DELIVERY_TIMEOUT_MS,
+                retry_backoff_ms,
+                retry_backoff_ms * 10,
+                delivery_timeout_ms,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
                 Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
                 transaction_manager.clone(),
@@ -2159,8 +2189,8 @@ mod tests {
                 MAX_REQUEST_SIZE,
                 ACKS_ALL,
                 retries,
-                REQUEST_TIMEOUT,
-                RETRY_BACKOFF_MS,
+                request_timeout_ms,
+                retry_backoff_ms,
                 running,
                 force_close,
                 time_provider,
@@ -3779,6 +3809,385 @@ mod tests {
         // The `runOnce` in the loop body still executes, and it is what recovers the
         // state — pinning the body order (abort attempt, then runOnce).
         assert!(!ctx.transaction_manager().lock().unwrap().has_abortable_error());
+    }
+
+    // =====================================================================
+    // The three `TransactionManagerTest` methods PLAN §Phase-3 deferred to this
+    // phase by name, because each one builds a `RecordAccumulator` and a `Sender`
+    // and drives `runOnce`.
+    // =====================================================================
+
+    /// Acquires a producer id through the real path, mirroring
+    /// `TransactionManagerTest.initializeIdempotentProducerId` (Java 4333), which
+    /// spins `Sender.runOnce` against a prepared `InitProducerId` response.
+    async fn initialize_idempotent_producer_id(ctx: &mut SenderTestContext, producer_id: i64, epoch: i16) {
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, producer_id, epoch));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+    }
+
+    /// Assigns the next sequence to a fresh single-record batch and tracks it in
+    /// flight, mirroring `TransactionManagerTest.writeIdempotentBatchWithValue`
+    /// (Java 812) — i.e. a batch that has been drained and sent but not answered.
+    ///
+    /// The batch is returned to the caller rather than left with an owner, which is
+    /// how Java's helper behaves too: Java's `TxnPartitionEntry` holds a reference,
+    /// while here the entry tracks only the ordering key (rules §7) and the test owns
+    /// the batch until it hands it to the accumulator.
+    fn write_idempotent_batch_with_value(
+        transaction_manager: &Arc<Mutex<TransactionManager>>,
+        accumulator: &RecordAccumulator,
+        tp: &TopicPartition,
+        value: &str,
+    ) -> ProducerBatch {
+        let mut manager = transaction_manager.lock().unwrap();
+        manager
+            .maybe_update_producer_id_and_epoch(tp, &mut [])
+            .expect("no in-flight batches to rewrite");
+        let sequence = manager.sequence_number(tp);
+        manager.increment_sequence_number(tp, 1).expect("the entry exists");
+
+        let builder = crate::common::record::memory_records::MemoryRecords::builder(
+            64,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut batch = ProducerBatch::new(tp.clone(), builder, 0);
+        assert!(
+            batch.try_append(0, Some(&[]), Some(value.as_bytes()), &[], None, 0).is_ok(),
+            "a 64-byte batch has room for one small record"
+        );
+        let producer_id_and_epoch = manager.producer_id_and_epoch();
+        batch.set_producer_state(producer_id_and_epoch.producer_id, producer_id_and_epoch.epoch, sequence, false);
+        manager.add_in_flight_batch(&batch).expect("the sequence is set");
+        batch.close();
+        // A batch this test may hand back to the accumulator must be in the incomplete
+        // set, which a real `append` would have done.
+        accumulator.register_incomplete_for_test(&batch);
+        batch
+    }
+
+    /// Translated from `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`
+    /// (Java 748-810).
+    ///
+    /// The only one of the three that goes purely through the real path:
+    /// `accumulator.append` + `sender.runOnce()` across a request timeout, a retry and
+    /// a delivery timeout, ending with an epoch bump that restarts the partition's
+    /// sequence at 0 while the timed-out request is still in flight.
+    #[tokio::test]
+    async fn test_duplicate_sequence_after_producer_reset() {
+        for _transaction_v2_enabled in [true, false] {
+            let mut ctx = SenderTestContext::idempotent_with_timeouts(10_000, 15_000);
+            let tp0 = ctx.tp0.clone();
+            initialize_idempotent_producer_id(&mut ctx, 13131, 1).await;
+            assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+            let future1 = ctx.append_to_accumulator_with(&tp0, 0, "1", "1").await;
+            ctx.sender.run_once().await.expect("run_once");
+            assert_eq!(
+                ctx.transaction_manager().lock().unwrap().sequence_number(&tp0),
+                1,
+                "the drain assigned sequence 0 and advanced the counter"
+            );
+
+            // The request times out, which the mock client turns into a disconnect.
+            ctx.time.sleep(10_000);
+            ctx.sender.run_once().await.expect("run_once");
+            assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+            assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
+            assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+
+            // Retry: the same batch, with the same sequence, goes back out.
+            ctx.sender.run_once().await.expect("run_once");
+            assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+            assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
+            assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+
+            // The delivery timeout expires. The retried request stays in flight until
+            // the request timeout is reached even though the future has already
+            // completed exceptionally.
+            ctx.time.sleep(5_000);
+            ctx.sender.run_once().await.expect("run_once");
+            assert!(future1.is_done());
+            assert_eq!(
+                future1.get().await.expect_err("delivery timeout").error(),
+                Errors::RequestTimedOut
+            );
+            assert!(!ctx.sender.has_in_flight_request());
+            assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+            // The expired-in-retry batch left the partition unresolved, so the next
+            // iteration bumps the epoch and restarts the sequence at 0.
+            ctx.sender.run_once().await.expect("run_once");
+            assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 2);
+            assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+            // A fresh record is numbered from 0 under the new epoch.
+            let future2 = ctx.append_to_accumulator_with(&tp0, 0, "2", "2").await;
+            ctx.sender.run_once().await.expect("run_once");
+            ctx.sender.run_once().await.expect("run_once");
+            assert_eq!(
+                ctx.transaction_manager()
+                    .lock()
+                    .unwrap()
+                    .first_in_flight_sequence(&tp0)
+                    .expect("tracked"),
+                0
+            );
+            assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+
+            // It times out too, and is retried rather than failed.
+            ctx.time.sleep(5_000);
+            ctx.sender.run_once().await.expect("run_once");
+            assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
+            assert!(!future2.is_done());
+        }
+    }
+
+    /// The shared body of `testHealthyPartitionRetriesDuringEpochBump`
+    /// (Java 3599-3692) and `testFailedInflightBatchAfterEpochBump`
+    /// (Java 3727-3810), which in Kafka 4.2 are identical up to the final two
+    /// assertions. Both are translated (below) rather than collapsed into one, so
+    /// each Java method has a Rust counterpart; the duplication is Java's.
+    ///
+    /// Returns the context so each caller can make its own closing assertions.
+    ///
+    /// # Where this deviates from Java, and why
+    ///
+    /// Java's `writeIdempotentBatchWithValue` batches are referenced by the
+    /// `TxnPartitionEntry` *and* by the test. Rust's entry tracks ordering keys only
+    /// (rules §7), so the test owns them and supplies them to the epoch bump as an
+    /// `InFlightBatchPool` — the same thing `Sender::bump_idempotent_epoch_and_reset_id_if_needed`
+    /// does from the two real owners. Java reaches the bump through
+    /// `runUntil(() -> epoch == 2)`; here the manager entry point is called directly
+    /// with the pool, because `runOnce` can only find batches an owner holds.
+    ///
+    /// Everything the test asserts about the *accumulator* still goes through the real
+    /// `sender.run_once()`, which is the point of the test:
+    /// `should_stop_drain_batches_for_partition`'s stale-epoch gate and the
+    /// sequence-ordered re-enqueue.
+    async fn run_epoch_bump_with_a_healthy_partition() -> SenderTestContext {
+        const PRODUCER_ID: i64 = 13131;
+        const EPOCH: i16 = 1;
+
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, EPOCH).await;
+        let transaction_manager = ctx.transaction_manager();
+
+        let tp0b1 = write_idempotent_batch_with_value(&transaction_manager, &ctx.accumulator, &tp0, "1");
+        let mut tp0b2 = write_idempotent_batch_with_value(&transaction_manager, &ctx.accumulator, &tp0, "2");
+        let mut tp0b3 = write_idempotent_batch_with_value(&transaction_manager, &ctx.accumulator, &tp0, "3");
+        let tp1b1 = write_idempotent_batch_with_value(&transaction_manager, &ctx.accumulator, &tp1, "4");
+        let tp1b2 = write_idempotent_batch_with_value(&transaction_manager, &ctx.accumulator, &tp1, "5");
+        assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp0), 3);
+        assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1), 2);
+
+        // First batch of each partition succeeds.
+        let b1_append_time = 0;
+        let t0b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+        transaction_manager
+            .lock()
+            .unwrap()
+            .handle_completed_batch(&tp0b1, &t0b1_response)
+            .expect("the completion is recorded");
+        let t1b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+        transaction_manager
+            .lock()
+            .unwrap()
+            .handle_completed_batch(&tp1b1, &t1b1_response)
+            .expect("the completion is recorded");
+
+        // An UNKNOWN_PRODUCER_ID on tp0 requests the epoch bump and sets tp0's
+        // sequences back to 0.
+        let t0b2_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 500, Vec::new(), None);
+        assert!(
+            transaction_manager
+                .lock()
+                .unwrap()
+                .can_retry(&t0b2_response, &tp0b2, &mut [])
+                .expect("the retry decision is made")
+        );
+
+        {
+            let mut pool = InFlightBatchPool::new();
+            pool.insert(tp0.clone(), vec![&mut tp0b2, &mut tp0b3]);
+            let mut pending = PendingRequests::new();
+            transaction_manager
+                .lock()
+                .unwrap()
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
+                .expect("the epoch is bumped");
+            assert!(pending.is_empty(), "a valid producer id needs no new InitProducerId");
+        }
+
+        // tp0's batches were rewritten; tp1's were not.
+        assert_eq!(transaction_manager.lock().unwrap().producer_id_and_epoch().epoch, 2);
+        assert_eq!(
+            transaction_manager
+                .lock()
+                .unwrap()
+                .next_batch_by_sequence(&tp0)
+                .expect("entry exists"),
+            Some((tp0b2.producer_id(), tp0b2.producer_epoch(), tp0b2.base_sequence()))
+        );
+        assert_eq!(
+            transaction_manager
+                .lock()
+                .unwrap()
+                .first_in_flight_sequence(&tp0)
+                .expect("tracked"),
+            0
+        );
+        assert_eq!(tp0b2.base_sequence(), 0);
+        assert!(tp0b2.sequence_has_been_reset());
+        assert_eq!(tp0b2.producer_epoch(), 2);
+
+        assert_eq!(
+            transaction_manager
+                .lock()
+                .unwrap()
+                .next_batch_by_sequence(&tp1)
+                .expect("entry exists"),
+            Some((tp1b2.producer_id(), tp1b2.producer_epoch(), tp1b2.base_sequence()))
+        );
+        assert_eq!(
+            transaction_manager
+                .lock()
+                .unwrap()
+                .first_in_flight_sequence(&tp1)
+                .expect("tracked"),
+            1
+        );
+        assert_eq!(tp1b2.base_sequence(), 1);
+        assert!(!tp1b2.sequence_has_been_reset());
+        assert_eq!(tp1b2.producer_epoch(), EPOCH);
+
+        // New tp1 batches must not be drained while tp1 has in-flight requests using
+        // the old epoch — `shouldStopDrainBatchesForPartition`'s stale-epoch gate.
+        ctx.append_to_accumulator(&tp1).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.accumulator.deque_size(&tp1), 1, "the new batch stays queued");
+
+        // Partition failover: tp1 returns NOT_LEADER_OR_FOLLOWER. Despite having the
+        // old epoch, the batch retries.
+        let t1b2_response = PartitionResponse::new(Errors::NotLeaderOrFollower, -1, -1, 600, Vec::new(), None);
+        assert!(
+            transaction_manager
+                .lock()
+                .unwrap()
+                .can_retry(&t1b2_response, &tp1b2, &mut [])
+                .expect("the retry decision is made")
+        );
+        let tp1b2_base_sequence = tp1b2.base_sequence();
+        ctx.accumulator
+            .reenqueue(tp1b2, ctx.time.milliseconds())
+            .expect("the batch is still tracked");
+        assert_eq!(ctx.accumulator.deque_size(&tp1), 2);
+
+        // The batch with the old epoch drains ahead of the new one, leaving the new one
+        // queued. The mock clock is advanced past the retry backoff, which Java's
+        // `MockTime` does implicitly through the accumulator's zero backoff.
+        ctx.time.sleep(RETRY_BACKOFF_MS * 4);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.accumulator.deque_size(&tp1), 1);
+        let drained = ctx.sender.in_flight_batches(&tp1);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained[0].base_sequence(),
+            tp1b2_base_sequence,
+            "the re-enqueued old-epoch batch is the one that drained, not the new one"
+        );
+        assert_eq!(
+            drained[0].producer_epoch(),
+            EPOCH,
+            "the retried batch keeps the epoch it was written with"
+        );
+        ctx
+    }
+
+    /// Translated from `TransactionManagerTest.testHealthyPartitionRetriesDuringEpochBump`
+    /// (Java 3599-3692).
+    #[tokio::test]
+    async fn test_healthy_partition_retries_during_epoch_bump() {
+        for _transaction_v2_enabled in [true, false] {
+            let mut ctx = run_epoch_bump_with_a_healthy_partition().await;
+            let tp1 = ctx.tp1.clone();
+            let transaction_manager = ctx.transaction_manager();
+
+            // After successfully retrying there are no in-flight batches for tp1 and its
+            // sequence is 0 again.
+            let response = ctx.produce_response(&tp1, 500, Errors::None, 0);
+            ctx.sender
+                .client_mut()
+                .respond_from(response, &Node::new(0, "localhost".to_string(), 1969));
+            ctx.sender.run_once().await.expect("run_once");
+
+            transaction_manager
+                .lock()
+                .unwrap()
+                .maybe_update_producer_id_and_epoch(&tp1, &mut [])
+                .expect("tp1 has drained, so there is nothing to rewrite");
+            assert!(!transaction_manager.lock().unwrap().has_inflight_batches(&tp1));
+            assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1), 0);
+
+            // The last batch is now drained and sent, under the bumped epoch.
+            ctx.sender.run_once().await.expect("run_once");
+            assert!(transaction_manager.lock().unwrap().has_inflight_batches(&tp1));
+            assert_eq!(ctx.accumulator.deque_size(&tp1), 0);
+            let tp1b3 = ctx.sender.in_flight_batches(&tp1);
+            assert_eq!(tp1b3.len(), 1);
+            assert_eq!(tp1b3[0].producer_epoch(), 2, "epoch + 1");
+            assert_eq!(tp1b3[0].base_sequence(), 0);
+        }
+    }
+
+    /// Translated from `TransactionManagerTest.testFailedInflightBatchAfterEpochBump`
+    /// (Java 3727-3810).
+    ///
+    /// In Kafka 4.2 this is identical to
+    /// `testHealthyPartitionRetriesDuringEpochBump` except that it stops before the
+    /// final `maybeUpdateProducerIdAndEpoch(tp1)`, asserting instead that completing
+    /// the last batch leaves nothing in flight and the sequence at 1. Both are
+    /// translated because both exist.
+    #[tokio::test]
+    async fn test_failed_inflight_batch_after_epoch_bump() {
+        for _transaction_v2_enabled in [true, false] {
+            let mut ctx = run_epoch_bump_with_a_healthy_partition().await;
+            let tp1 = ctx.tp1.clone();
+            let transaction_manager = ctx.transaction_manager();
+
+            let response = ctx.produce_response(&tp1, 500, Errors::None, 0);
+            ctx.sender
+                .client_mut()
+                .respond_from(response, &Node::new(0, "localhost".to_string(), 1969));
+            ctx.sender.run_once().await.expect("run_once");
+            transaction_manager
+                .lock()
+                .unwrap()
+                .maybe_update_producer_id_and_epoch(&tp1, &mut [])
+                .expect("tp1 has drained");
+            assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1), 0);
+
+            // The last batch is drained under the new epoch and then completed.
+            ctx.sender.run_once().await.expect("run_once");
+            assert!(transaction_manager.lock().unwrap().has_inflight_batches(&tp1));
+            let response = ctx.produce_response(&tp1, 500, Errors::None, 0);
+            ctx.sender
+                .client_mut()
+                .respond_from(response, &Node::new(0, "localhost".to_string(), 1969));
+            ctx.sender.run_once().await.expect("run_once");
+
+            assert!(
+                !transaction_manager.lock().unwrap().has_inflight_batches(&tp1),
+                "handleCompletedBatch removed the last tracked batch"
+            );
+            assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1), 1);
+        }
     }
 
     /// A response with no body at all is fatal

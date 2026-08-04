@@ -1533,6 +1533,20 @@ impl RecordAccumulator {
         self.deallocate(batch);
     }
 
+    /// Registers `batch` in the incomplete set as [`Self::append`] would.
+    ///
+    /// Test-only. `TransactionManagerTest`'s `writeIdempotentBatchWithValue`
+    /// (Java 812) constructs a `ProducerBatch` outside the accumulator, and Java gets
+    /// away with it because `IncompleteBatches.remove` is only reached for batches the
+    /// accumulator itself created. The Rust tests that hand such a batch back to the
+    /// accumulator (`reenqueue`) do reach `complete_batch`, which would then fail its
+    /// "This should be impossible" assertion — so the batch is registered here first,
+    /// putting it in the state a real append would have left it in.
+    #[cfg(test)]
+    pub(crate) fn register_incomplete_for_test(&self, batch: &ProducerBatch) {
+        self.incomplete.add(Arc::clone(&batch.produce_future));
+    }
+
     /// Remove from the incomplete list but do not free memory yet.
     ///
     /// Translated from `RecordAccumulator.completeBatch`.
