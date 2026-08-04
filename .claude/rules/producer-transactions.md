@@ -270,7 +270,20 @@ Rust has no such second owner available: `RecordAccumulator` stores batches by
 value in `DashMap<i32, Mutex<VecDeque<ProducerBatch>>>`
 (`record_accumulator.rs:128`), `drain()` moves them out, and
 `Sender::in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>`
-(`sender.rs:122`) becomes the sole owner. `ProducerBatch` is not `Clone`.
+(`sender.rs:122`) takes ownership. `ProducerBatch` is not `Clone`.
+
+**Ownership alternates — the Sender's map is NOT the permanent sole owner.** On
+the retry path ownership moves *back* to the accumulator: `Sender.reenqueueBatch`
+(`Sender.java:750-752`) calls `accumulator.reenqueue(..)` then
+`maybeRemoveFromInflightBatches(..)` **without** calling
+`transactionManager.removeInFlightBatch` — unlike the `MESSAGE_TOO_LARGE` split
+path at `:685`, which does. Java depends on that asymmetry and asserts it:
+`RecordAccumulator.insertInSequenceOrder` (`RecordAccumulator.java:558-560`)
+throws when a reenqueued batch is *not* still tracked. Rust reproduces the move
+at `sender.rs` `BatchAction::Reenqueue` → `accumulator.reenqueue(batch, now)`.
+
+So a tracked batch lives in **either** owner, and any caller assembling the
+lookup pool must draw from both.
 
 Therefore `TxnPartitionEntry` MUST track in-flight batch **ordering keys**, not
 batches. Methods that Java implements by mutating the contained batches take the
@@ -296,11 +309,19 @@ behavioral gain.
   - The batches the owner supplies are a **lookup pool, not the membership
     set** (rule 6). A supplied batch the entry does not track is ignored; a
     tracked key with no supplied batch is an error. The two sets legitimately
-    differ: `Sender.failBatch` calls `handleFailedBatch` (`Sender.java:848`)
-    *before* `maybeRemoveAndDeallocateBatch` (`:854`), while `handleFailedBatch`
-    removes the batch from the txn map at `TransactionManager.java:790` and only
-    then calls `adjustSequencesDueToFailedBatch` at `:818` — so the failed batch
-    is already untracked while still owned by the Sender.
+    differ in **both** directions:
+      - *Pool ⊃ tracked*: `Sender.failBatch` calls `handleFailedBatch`
+        (`Sender.java:848`) *before* `maybeRemoveAndDeallocateBatch` (`:854`),
+        while `handleFailedBatch` removes the batch from the txn map at
+        `TransactionManager.java:790` and only then calls
+        `adjustSequencesDueToFailedBatch` at `:818` — so the failed batch is
+        already untracked while still owned by the Sender.
+      - *Tracked ⊃ the Sender's map*: a reenqueued batch stays tracked but moves
+        to the accumulator's deque (see above). Phase 4 MUST assemble the pool
+        from **both** owners before calling
+        `start_sequences_at_beginning`, or `bump_idempotent_producer_epoch`
+        (`TransactionManager.java:655`) will error and break idempotent
+        recovery — the very path it exists to serve.
   - Record this as a justified deviation per `definition-of-done.md` §7 in any
     commit that touches these types — a Critic comparing field-by-field against
     Java will otherwise report the missing batch storage as a defect.
@@ -315,6 +336,8 @@ behavioral gain.
     resetting sequences.
   - Assigning the tracked key set from a collection built out of the caller's
     batches (`self.inflight_batches_by_sequence = <rebuilt from argument>`).
+  - Building the lookup pool from `Sender::in_flight_batches` alone, omitting
+    reenqueued batches sitting in the accumulator's deque.
   - Swallowing the error from a rebuild whose result feeds `next_sequence`.
 
 ## 8. `TxnPartitionEntry::decrement_sequence` does not wrap

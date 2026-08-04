@@ -48,8 +48,12 @@ pub(crate) type InFlightBatchKey = (i64, i16, i32);
 /// **references** to batches that the accumulator's deque and the Sender's
 /// in-flight map also reference. Rust has no second owner available:
 /// `RecordAccumulator` stores batches by value, `drain()` moves them out, and
-/// `Sender::in_flight_batches` becomes the sole owner. `ProducerBatch` is not
-/// `Clone`.
+/// `Sender::in_flight_batches` takes ownership. `ProducerBatch` is not `Clone`.
+///
+/// Ownership **alternates**: on the retry path it moves back to the accumulator's
+/// deque while the batch stays tracked here, so a tracked batch lives in either
+/// owner. Callers assembling the batch pool must draw from both — see
+/// [`Self::reset_sequence_numbers`] and rules §7.
 ///
 /// So this type tracks in-flight **ordering keys**
 /// ([`InFlightBatchKey`]), and the two methods that Java implements by mutating
@@ -290,13 +294,33 @@ impl TxnPartitionEntry {
     /// one that surfaces only later as a broker-side
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER`.
     ///
-    /// The mismatch is real rather than defensive: `Sender.failBatch` calls
-    /// `handleFailedBatch` (`Sender.java:848`) *before*
-    /// `maybeRemoveAndDeallocateBatch` (`:854`), while `handleFailedBatch`
-    /// removes the batch from the txn map at `TransactionManager.java:790` and
-    /// only then calls `adjustSequencesDueToFailedBatch` at `:818`. So at that
-    /// moment the failed batch is already untracked here but still present in
-    /// `Sender::in_flight_batches`.
+    /// Both directions of mismatch are real rather than defensive:
+    ///
+    /// **Pool ⊃ tracked** — `Sender.failBatch` calls `handleFailedBatch`
+    /// (`Sender.java:848`) *before* `maybeRemoveAndDeallocateBatch` (`:854`),
+    /// while `handleFailedBatch` removes the batch from the txn map at
+    /// `TransactionManager.java:790` and only then calls
+    /// `adjustSequencesDueToFailedBatch` at `:818`. So the failed batch is
+    /// already untracked here but still owned by the Sender.
+    ///
+    /// **Tracked ⊃ one owner** — on the retry path the batch moves owners while
+    /// *staying* tracked. `Sender.reenqueueBatch` (`Sender.java:750-752`) calls
+    /// `accumulator.reenqueue(..)` and then `maybeRemoveFromInflightBatches(..)`,
+    /// but — unlike the `MESSAGE_TOO_LARGE` split path at `:685` — it does **not**
+    /// call `transactionManager.removeInFlightBatch`. Java relies on this and
+    /// asserts it: `RecordAccumulator.insertInSequenceOrder`
+    /// (`RecordAccumulator.java:558-560`) throws
+    /// `IllegalStateException("We are re-enqueueing a batch which is not tracked
+    /// as part of the in flight requests")` when the batch is *not* still
+    /// tracked.
+    ///
+    /// So the caller MUST supply every tracked batch **wherever it currently
+    /// lives** — `Sender::in_flight_batches` *and* the accumulator's deque. A
+    /// reenqueued batch sits in the latter, and
+    /// `bump_idempotent_producer_epoch` → `start_sequences_at_beginning`
+    /// (`TransactionManager.java:655`) exists precisely to rewrite it
+    /// (`:652-653`). Supplying only the Sender's map there would hit the error
+    /// below and break idempotent recovery.
     fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), KafkaError>
     where
         F: FnMut(&mut ProducerBatch) -> Result<(), KafkaError>,
@@ -311,15 +335,32 @@ impl TxnPartitionEntry {
         // Iterate the tracked keys in order — Java's `TreeSet` iteration order.
         let tracked: Vec<InFlightBatchKey> = self.inflight_batches_by_sequence.iter().copied().collect();
 
-        let mut new_inflights = BTreeSet::new();
-        for key in tracked {
-            let Some(&index) = pool.get(&key) else {
+        // Resolve every tracked key BEFORE mutating anything, so a missing batch
+        // leaves the caller's batches untouched. Without this pre-pass the loop
+        // rewrites the batches it reaches and then errors on a later missing key,
+        // leaving the caller with a half-rewritten set and no way to tell how far
+        // it got. Java has no equivalent error — the missing-batch check is a Rust
+        // safety net (see the doc comment) — so there is no Java behaviour to
+        // match here, and atomic is the only defensible choice.
+        //
+        // Note the *other* error path, `adjust_sequences_due_to_failed_batch`'s
+        // negative-sequence rejection, deliberately keeps Java's non-atomic
+        // behaviour: Java's lambda throws mid-iteration and leaves earlier
+        // elements mutated, so matching it is the faithful translation.
+        let mut resolved = Vec::with_capacity(tracked.len());
+        for key in &tracked {
+            let Some(&index) = pool.get(key) else {
                 return Err(KafkaError::illegal_state(format!(
                     "No in-flight batch supplied for tracked sequence {:?} on partition {}; \
                      the caller must supply every batch this entry tracks",
                     key, self.topic_partition
                 )));
             };
+            resolved.push(index);
+        }
+
+        let mut new_inflights = BTreeSet::new();
+        for index in resolved {
             let batch = &mut *batches[index];
             reset(batch)?;
             new_inflights.insert(Self::batch_key(batch));
@@ -692,6 +733,58 @@ mod tests {
         // And it was not re-added to the tracked set.
         assert_eq!(entry.inflight_batches_by_sequence.len(), 1);
         assert_eq!(entry.next_batch_by_sequence(), Some((1, 0, 2)));
+    }
+
+    /// The reenqueue (retry) path: a batch stays **tracked** while moving from
+    /// the Sender's in-flight map to the accumulator's deque, so the pool must be
+    /// drawn from both owners.
+    ///
+    /// Regression test for Critic 41 second-pass finding. The first-pass audit
+    /// justified the `TransactionManager.java:655` call site as "those batches are
+    /// in flight, so the Sender holds them" — false on this path.
+    /// `Sender.reenqueueBatch` (`Sender.java:750-752`) does **not** call
+    /// `transactionManager.removeInFlightBatch`, unlike the split path at `:685`,
+    /// and Java asserts the batch is still tracked
+    /// (`RecordAccumulator.java:558-560`).
+    ///
+    /// Both halves are pinned: supplying only one owner's batches errors, and
+    /// supplying both succeeds. `bump_idempotent_producer_epoch` exists precisely
+    /// to rewrite the reenqueued batch, so the erroring case would break
+    /// idempotent recovery outright.
+    #[test]
+    fn test_reenqueued_batch_stays_tracked_and_must_be_supplied() {
+        let mut entry = TxnPartitionEntry::new(tp());
+        // `still_in_flight` remains with the Sender; `reenqueued` has moved to the
+        // accumulator's deque after a retriable error. Both stay tracked.
+        let mut still_in_flight = batch(1, 0, 0, 2);
+        let mut reenqueued = batch(1, 0, 2, 3);
+        entry.add_inflight_batch(&still_in_flight);
+        entry.add_inflight_batch(&reenqueued);
+        entry.increment_sequence(5);
+
+        // Pool from the Sender's map alone — the reenqueued batch is missing.
+        let error = entry
+            .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 1), &mut [&mut still_in_flight])
+            .expect_err("a pool missing the reenqueued batch must error, not silently proceed");
+        assert!(
+            error.message().contains("No in-flight batch supplied for tracked sequence"),
+            "got: {}",
+            error.message()
+        );
+        // Nothing moved — in particular the sequence counter did not rewind.
+        assert_eq!(entry.next_sequence(), 5);
+        assert_eq!(entry.producer_id_and_epoch(), ProducerIdAndEpoch::NONE);
+
+        // Pool drawn from BOTH owners — the epoch bump succeeds and rewrites both.
+        entry
+            .start_sequences_at_beginning(ProducerIdAndEpoch::new(7, 1), &mut [&mut still_in_flight, &mut reenqueued])
+            .expect("supplying every tracked batch, from both owners, must succeed");
+
+        assert_eq!(still_in_flight.base_sequence(), 0);
+        assert_eq!(reenqueued.base_sequence(), 2, "rewritten after the first batch's records");
+        assert_eq!(entry.producer_id_and_epoch(), ProducerIdAndEpoch::new(7, 1));
+        assert_eq!(entry.next_sequence(), 5);
+        assert_eq!(entry.inflight_batches_by_sequence.len(), 2, "both still tracked");
     }
 
     /// Membership count is preserved across a rebuild regardless of pool size.
