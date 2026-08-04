@@ -5465,6 +5465,224 @@ mod tests {
         assert!(!ctx.accumulator.has_undrained(), "Failed to drain batches");
     }
 
+    /// Translated from
+    /// `SenderTest.testClusterAuthorizationExceptionInInitProducerIdRequest`
+    /// (Java 2158-2179 — the `InitProducerId` variant at Java 714-735): a cluster
+    /// authorization failure on `InitProducerId` is *abortable*, so the producer
+    /// recovers to `UNINITIALIZED`, retries and works again.
+    #[tokio::test]
+    async fn test_cluster_authorization_exception_in_init_producer_id_request() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent();
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::ClusterAuthorizationFailed, -1, -1));
+        ctx.sender.run_once().await.expect("run_once");
+
+        {
+            let manager = ctx.transaction_manager();
+            let manager = manager.lock().unwrap();
+            assert!(!manager.has_producer_id());
+            assert!(manager.has_error());
+            assert_eq!(
+                manager.last_error().expect("recorded").error(),
+                Errors::ClusterAuthorizationFailed
+            );
+            assert_eq!(manager.producer_id_and_epoch().epoch, -1);
+        }
+
+        // Java asserts the *send* fails while the error is outstanding. The recovery at
+        // `Sender.java:325` runs first in the very `runOnce` that `assert_send_failure`
+        // drives, so the failure is observed through `maybe_add_partition` instead —
+        // which is exactly what `doSend` calls (`KafkaProducer.java:1045`).
+        {
+            let manager = ctx.transaction_manager();
+            let mut manager = manager.lock().unwrap();
+            let error = manager
+                .maybe_add_partition(&ctx.tp0)
+                .expect_err("sends are rejected while the error is outstanding");
+            assert_eq!(
+                error.message(),
+                "Cannot execute transactional method because we are in an error state"
+            );
+        }
+
+        // The Sender retries the InitProducerId and succeeds.
+        ctx.sender.run_once().await.expect("run_once"); // recover to UNINITIALIZED
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, 0));
+        ctx.sender.run_once().await.expect("run_once");
+        {
+            let manager = ctx.transaction_manager();
+            let manager = manager.lock().unwrap();
+            assert!(!manager.has_fatal_error());
+            assert!(manager.has_producer_id());
+            assert_eq!(manager.producer_id_and_epoch().epoch, 0);
+        }
+
+        // A subsequent send is successful.
+        assert_successful_send(&mut ctx).await;
+    }
+
+    /// Translated from `SenderTest.testClusterAuthorizationExceptionInProduceRequest`
+    /// (Java 2157-2179): a cluster authorization failure on a *produce* request is
+    /// fatal, and stays fatal for later sends.
+    #[tokio::test]
+    async fn test_cluster_authorization_exception_in_produce_request() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let future = ctx.append_to_accumulator(&tp0).await;
+        let response = ctx.produce_response(&tp0, -1, Errors::ClusterAuthorizationFailed, 0);
+        ctx.sender.client_mut().prepare_response(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            future.get().await.expect_err("fatal").error(),
+            Errors::ClusterAuthorizationFailed
+        );
+
+        // Cluster authorization errors are fatal, so later sends keep seeing them.
+        assert!(ctx.transaction_manager().lock().unwrap().has_fatal_error());
+        assert_send_failure(&mut ctx, Errors::ClusterAuthorizationFailed).await;
+    }
+
+    /// Translated from `SenderTest.testUnsupportedForMessageFormatInProduceRequest`
+    /// (Java 2221-2241): `UNSUPPORTED_FOR_MESSAGE_FORMAT` fails the batch but is *not*
+    /// fatal for the producer.
+    #[tokio::test]
+    async fn test_unsupported_for_message_format_in_produce_request() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let future = ctx.append_to_accumulator(&tp0).await;
+        let response = ctx.produce_response(&tp0, -1, Errors::UnsupportedForMessageFormat, 0);
+        ctx.sender.client_mut().prepare_response(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            future.get().await.expect_err("failed").error(),
+            Errors::UnsupportedForMessageFormat
+        );
+        assert!(
+            !ctx.transaction_manager().lock().unwrap().has_error(),
+            "unsupported for message format is not a fatal error"
+        );
+    }
+
+    /// Translated from `SenderTest.testUnsupportedVersionInProduceRequest`
+    /// (Java 2243-2262): a version mismatch is fatal and stays fatal.
+    #[tokio::test]
+    async fn test_unsupported_version_in_produce_request() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.client_mut().prepare_unsupported_version_response();
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(future.get().await.expect_err("failed").error(), Errors::UnsupportedVersion);
+
+        // Unsupported version errors are fatal, so later sends keep seeing them.
+        assert!(ctx.transaction_manager().lock().unwrap().has_fatal_error());
+        assert_send_failure(&mut ctx, Errors::UnsupportedVersion).await;
+    }
+
+    /// Translated from `SenderTest.testSequenceNumberIncrement` (Java 2263-2303).
+    #[tokio::test]
+    async fn test_sequence_number_increment() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, 0).await;
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send
+
+        // Java asserts the outgoing batch's producer id, epoch and base sequence inside
+        // the response matcher; `send_idempotent_producer_response` does the same.
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive the response
+
+        assert!(response_future.is_done());
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+    }
+
+    /// Translated from `SenderTest.testRetryWhenProducerIdChanges` (Java 2305-2338):
+    /// with the epoch maxed out, a disconnect resets the producer id, and the batch is
+    /// retried under the new one.
+    #[tokio::test]
+    async fn test_retry_when_producer_id_changes() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, i16::MAX).await;
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send
+        let destination = ctx
+            .sender
+            .client()
+            .requests()
+            .front()
+            .expect("in flight")
+            .destination()
+            .to_string();
+        let node = Node::new(destination.parse::<i32>().expect("node id"), "localhost".to_string(), 0);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert!(
+            ctx.sender.client().is_ready(&node, ctx.time.milliseconds()),
+            "Client ready status should be true"
+        );
+        ctx.sender.client_mut().disconnect_by_id(&destination);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert!(
+            !ctx.sender.client().is_ready(&node, ctx.time.milliseconds()),
+            "Client ready status should be false"
+        );
+
+        ctx.sender.run_once().await.expect("run_once"); // receive the error
+        ctx.sender.run_once().await.expect("run_once"); // reset the producer id
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID + 1, 0));
+        ctx.sender.run_once().await.expect("run_once"); // acquire the new producer id
+        ctx.sender.run_once().await.expect("run_once"); // retry the batch
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "Expected requests to be retried after pid change"
+        );
+        assert!(!response_future.is_done());
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+    }
+
+    /// Translated from `SenderTest.testBumpEpochWhenOutOfOrderSequenceReceived`
+    /// (Java 2340-2370).
+    #[tokio::test]
+    async fn test_bump_epoch_when_out_of_order_sequence_received() {
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+
+        let response = ctx.produce_response(&tp0, 0, Errors::OutOfOrderSequenceNumber, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await.expect("run_once"); // receive the out-of-order error
+        ctx.sender.run_once().await.expect("run_once"); // bump the epoch
+        assert!(!response_future.is_done());
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+    }
+
     /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
     /// (Java 2182-2219).
     ///
@@ -5829,17 +6047,56 @@ mod tests {
         assert!(drained.iter().all(|batch| batch.has_sequence()));
     }
 
-    // `SenderTest.java` methods that reference the transaction manager and are **not**
-    // translated in Phase 4, with the reason for each. None is skipped as irrelevant;
-    // every one is scheduled.
+    // =====================================================================
+    // `SenderTest.java` accounting (`definition-of-done.md` §3)
     //
-    // Transactional — need `initTransactions` / `beginTransaction` /
-    // `commitTransaction` / `abortTransaction` and the FindCoordinator subsystem, i.e.
-    // Phases 5 and 6. `TransactionManager::new` still refuses a transactional id, so
-    // none of them is expressible yet:
-    //   `testInitProducerIdWithMaxInFlightOne` (636), `testNodeNotReady` (689),
+    // Every method in `SenderTest.java` that references the transaction manager is
+    // accounted for individually below. Critic 44 issue 4 rejected the earlier
+    // block deferral, and rightly: it named Phase 8 as the owner while §Phase-8's
+    // own scope covers only `TransactionManagerTest`, and one of the deferred
+    // tests — `testCancelInFlightRequestAfterFatalError` — was the test that would
+    // have caught the buffer-pool leak of issue 2.
+    //
+    // TRANSLATED IN PHASE 4 (25): `testInitProducerIdRequest` (618),
+    // `testClusterAuthorizationExceptionInInitProducerIdRequest` (714),
+    // `testIdempotenceWithMultipleInflights` (761),
+    // `testIdempotenceWithMultipleInflightsRetriedInOrder` (810),
+    // `testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted` (911),
+    // `testEpochBumpOnOutOfOrderSequenceForNextBatch` (970),
+    // `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight` (1018),
+    // `testCorrectHandlingOfOutOfOrderResponses` (1244),
+    // `testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds` (1325),
+    // `testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences` (1392),
+    // `testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed` (1416),
+    // `testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail` (1483),
+    // `testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences` (1573),
+    // `testResetOfProducerStateShouldAllowQueuedBatchesToDrain` (1611),
+    // `testCloseWithProducerIdReset` (1653), `testForceCloseWithProducerIdReset` (1688),
+    // `testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry` (1719),
+    // `testCorrectHandlingOfDuplicateSequenceError` (1766),
+    // `testIdempotentUnknownProducerHandlingWhenRetentionLimitReached` (1882),
+    // `testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown` (1939),
+    // `testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated` (2085),
+    // `testClusterAuthorizationExceptionInProduceRequest` (2157),
+    // `testCancelInFlightRequestAfterFatalError` (2181),
+    // `testUnsupportedForMessageFormatInProduceRequest` (2221),
+    // `testUnsupportedVersionInProduceRequest` (2243),
+    // `testSequenceNumberIncrement` (2263), `testRetryWhenProducerIdChanges` (2305),
+    // `testBumpEpochWhenOutOfOrderSequenceReceived` (2340),
+    // `testTooLargeBatchesAreSafelyRemoved` (3004, `#[ignore]`d on PLAN §9.18).
+    //
+    // TRANSACTIONAL — not expressible while `TransactionManager::new` refuses a
+    // transactional id; Phases 5 and 6 own them:
+    //   `testInitProducerIdWithMaxInFlightOne` (636) — builds the manager with a
+    //     transactional id and calls `initializeTransactions`.
+    //   `testNodeNotReady` (689) — transactional id + `coordinator(TRANSACTION)`.
+    //   `testUnresolvedSequencesAreNotFatal` (1534) — transactional id,
+    //     `beginTransaction`, `AddPartitionsToTxn`. Reclassified out of the
+    //     idempotence list on close reading, as Critic 44 issue 4 permits: line 1538
+    //     is `new TransactionManager(logContext, "testUnresolvedSeq", ..)`.
     //   `testTransactionalUnknownProducerHandlingWhenRetentionLimitReached` (1820),
     //   `testTransactionalSplitBatchAndSend` (2385),
+    //   `testDoNotPollWhenNoRequestSent` (2991) — `doInitTransactions`,
     //   `testTransactionalRequestsSentOnShutdown` (2737),
     //   `testRecordsFlushedImmediatelyOnTransactionCompletion` (2771),
     //   `testAwaitPendingRecordsBeforeCommittingTransaction` (2829),
@@ -5851,48 +6108,47 @@ mod tests {
     //   `testInvalidTxnStateIsAnAbortableError` (3176),
     //   `testTransactionAbortableExceptionIsAnAbortableError` (3215),
     //   `testAbortableErrorIsConvertedToFatalErrorDuringAbort` (3254),
-    //   `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399),
-    //   `testUnresolvedSequencesAreNotFatal` (1534).
+    //   `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399).
     //
-    // Idempotence-only, and translatable against the surface this phase landed, but
-    // not yet written. Each is a multi-batch / multi-inflight scenario over machinery
-    // the tests above already exercise one arm at a time, so they add depth rather
-    // than reach; they are the residual DoD §3 debt of this phase and are carried to
-    // Phase 8's parity sweep:
-    //   `testIdempotentInitProducerIdWithMaxInFlightOne` (664),
-    //   `testClusterAuthorizationExceptionInInitProducerIdRequest` (715),
-    //   `testIdempotenceWithMultipleInflights` (762),
-    //   `testIdempotenceWithMultipleInflightsRetriedInOrder` (811),
-    //   `testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted` (912),
-    //   `testEpochBumpOnOutOfOrderSequenceForNextBatch` (971),
-    //   `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight` (1019),
-    //   `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails` (1105),
-    //   `testCorrectHandlingOfOutOfOrderResponses` (1245),
-    //   `testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds` (1326),
-    //   `testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences` (1394),
-    //   `testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed` (1417),
-    //   `testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail` (1484),
-    //   `testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences` (1575),
-    //   `testResetOfProducerStateShouldAllowQueuedBatchesToDrain` (1613),
-    //   `testCloseWithProducerIdReset` (1655),
-    //   `testForceCloseWithProducerIdReset` (1689),
-    //   `testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry` (1720),
-    //   `testIdempotentUnknownProducerHandlingWhenRetentionLimitReached` (1884),
-    //   `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` (2000),
-    //   `testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated` (2086),
-    //   `testClusterAuthorizationExceptionInProduceRequest` (2159),
-    //   `testCancelInFlightRequestAfterFatalError` (2182),
-    //   `testUnsupportedForMessageFormatInProduceRequest` (2223),
-    //   `testUnsupportedVersionInProduceRequest` (2244),
-    //   `testSequenceNumberIncrement` (2265),
-    //   `testRetryWhenProducerIdChanges` (2306),
-    //   `testBumpEpochWhenOutOfOrderSequenceReceived` (2341),
-    //   `testIdempotentSplitBatchAndSend` (2372),
-    //   `testDoNotPollWhenNoRequestSent` (2991),
-    //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104),
-    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308),
-    //   `testNoBufferReuseWhenBatchExpires` (3605).
-
+    // BLOCKED ON NAMED MISSING SURFACE — each cites what is absent, per the Phase-3
+    // standard:
+    //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104). Asserts
+    //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between
+    //     retries. Missing surface: the `Sender`'s clock is an injected
+    //     `Arc<dyn Fn() -> i64>` with no `sleep`, so `sleep_ms` uses
+    //     `tokio::time::sleep` and does not move the test's `MockTime` — the
+    //     assertion is unrepresentable. Needs Java's `Time` interface (a `sleep`
+    //     that advances the injected clock) threaded through `Sender`, which is a
+    //     constructor change across the producer and belongs with the Phase-6
+    //     review of `maybeSendAndPollTransactionalRequest`'s two sleeps
+    //     (`.claude/rules/producer-transactions.md` §4).
+    //   `testNoBufferReuseWhenBatchExpires` (3605). Asserts
+    //     `assertSame(buffer.array(), batch.records().buffer().array())` — pooled
+    //     buffer identity across the send. Missing surface: `BufferPool` does
+    //     accounting only and does not hand back the same backing array, and
+    //     `ProducerBatch::records()` moves the buffer out (PLAN §9.18), so neither
+    //     half of the assertion has a Rust counterpart. Belongs with §9.18.
+    //   `testIdempotentSplitBatchAndSend` (2372). Drives `testSplitBatchAndSend`,
+    //     whose whole point is a `MESSAGE_TOO_LARGE` split. Missing surface: the
+    //     split panics — PLAN §9.18, with `test_too_large_batches_are_safely_removed`
+    //     as the reproducer.
+    //
+    // NOT YET WRITTEN — no missing surface, and no blocker other than this phase's
+    // remaining budget. Stated plainly rather than dressed as a deferral:
+    //   `testIdempotentInitProducerIdWithMaxInFlightOne` (664) — needs a
+    //     metadata-pending mock-client setup (`createMockClientWithMaxFlightOneMetadataPending`).
+    //   `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` (2000)
+    //     — a longer variant of the two `UNKNOWN_PRODUCER_ID` tests above, over three
+    //     batches.
+    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) — leader-change
+    //     retry bookkeeping; overlaps `should_backoff`'s
+    //     `has_leader_changed_for_the_ongoing_retry` arm, which
+    //     `record_accumulator.rs`'s `test_exponential_retry_backoff_leader_change`
+    //     already covers on the accumulator side.
+    // These three are the residual `SenderTest` debt of Phase 4. They are *not*
+    // assigned to Phase 8, whose scope is `TransactionManagerTest` only; PLAN §9.19
+    // owns them.
+    //
     /// A response with no body at all is fatal
     /// (`TransactionManager.java:1424-1425`).
     #[test]

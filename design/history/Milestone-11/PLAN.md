@@ -1847,6 +1847,43 @@ here it is a different author.
     control-flow model was fully green, in an artifact §Phase-4 names as its reference.
     Now pinned in both directions.
 
+### 9.19 Three `SenderTest` idempotence tests still owed, plus two blocked on §9.18
+
+**Status:** open. Raised by Critic 44 issue 4, which rejected Phase 4's block
+deferral of 33 `SenderTest` methods — correctly, since it named Phase 8 as the owner
+while §Phase-8's scope covers `TransactionManagerTest` only, and one of the deferred
+tests (`testCancelInFlightRequestAfterFatalError`) was the test that would have
+caught the buffer-pool leak of issue 2.
+
+Phase 4 then translated **25** of them. The full per-method accounting lives in a
+comment block at the end of `src/producer/internals/sender.rs`, which is the
+authoritative list; this section records the residue and its owner, so no test is
+assigned to a phase whose scope excludes it.
+
+**Owed here, with no missing surface** — not written for budget reasons only:
+
+  - `testIdempotentInitProducerIdWithMaxInFlightOne` (Java 664), which needs a
+    metadata-pending mock-client setup.
+  - `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` (2000).
+  - `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308).
+
+**Blocked on named missing surface:**
+
+  - `testSenderShouldRetryWithBackoffOnRetriableError` (3104) asserts the clock
+    advances by exactly `RETRY_BACKOFF_MS` between retries. The `Sender`'s clock is an
+    injected `Arc<dyn Fn() -> i64>` with no `sleep`, so `sleep_ms` uses
+    `tokio::time::sleep` and cannot move a test's `MockTime`. Needs Java's `Time`
+    interface threaded through `Sender` — a producer-wide constructor change that
+    belongs with the Phase-6 review of `maybeSendAndPollTransactionalRequest`'s two
+    sleeps (rules §4).
+  - `testNoBufferReuseWhenBatchExpires` (3605) and `testIdempotentSplitBatchAndSend`
+    (2372) are blocked on §9.18 below.
+
+**Not owed here:** the 17 transactional methods are Phases 5/6, listed individually
+in the same comment block. `testUnresolvedSequencesAreNotFatal` (1534) was
+reclassified into that group on close reading — line 1538 constructs the manager with
+a transactional id.
+
 ### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
 
 **Status:** open. Found in Phase 4 while translating
