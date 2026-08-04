@@ -28,6 +28,7 @@ use crate::ApiVersions;
 use crate::client_response::ClientResponse;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
+use crate::common::requests::find_coordinator_request::CoordinatorType;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::requests::{ConcreteResponse, InitProducerIdRequestBuilder, PartitionResponse};
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
@@ -346,6 +347,15 @@ impl TxnRequestHandler {
     /// The operation name this handler's result was created for.
     pub(crate) fn operation(&self) -> &str {
         self.result.operation()
+    }
+
+    /// Fails this handler's result without touching the manager's state.
+    ///
+    /// Corresponds to `fail(RuntimeException)` (Java 1390). Distinct from
+    /// [`TransactionManager::fatal_error`] and
+    /// [`TransactionManager::abortable_error`], which also transition.
+    fn fail(&self, error: KafkaError) {
+        self.result.fail(error);
     }
 }
 
@@ -1453,7 +1463,7 @@ impl TransactionManager {
     fn maybe_terminate_request_with_error(&self, handler: &TxnRequestHandler) -> bool {
         if self.has_error() {
             if let Some(last_error) = &self.last_error {
-                handler.result.fail(last_error.clone());
+                handler.fail(last_error.clone());
             }
             return true;
         }
@@ -1511,17 +1521,45 @@ impl TransactionManager {
         self.transition_to_abortable_error(error, Caller::Sender)
     }
 
+    /// The coordinator `handler` must be routed to, or `None` when it can go to
+    /// any broker.
+    ///
+    /// Corresponds to `coordinatorType()` (Java 1434), overridden by
+    /// `InitProducerIdHandler` (Java 1482) to return `null` for a
+    /// non-transactional producer — which is why the whole `FindCoordinator`
+    /// subsystem is out of scope for the idempotence slice.
+    ///
+    /// A method on the manager rather than the handler because Java's override
+    /// reads the enclosing instance's `transactionalId`.
+    pub(crate) fn coordinator_type(&self, handler: &TxnRequestHandler) -> Option<CoordinatorType> {
+        match handler.kind {
+            TxnRequestHandlerKind::InitProducerId { .. } => {
+                if self.is_transactional() {
+                    Some(CoordinatorType::Transaction)
+                } else {
+                    None
+                }
+            },
+        }
+    }
+
+    /// The key identifying the coordinator `handler` must be routed to.
+    ///
+    /// Corresponds to `coordinatorKey()` (Java 1438). The base implementation
+    /// returns the transactional id; only `TxnOffsetCommitHandler` (Phase 5)
+    /// overrides it.
+    pub(crate) fn coordinator_key(&self, handler: &TxnRequestHandler) -> Option<&str> {
+        match handler.kind {
+            TxnRequestHandlerKind::InitProducerId { .. } => self.transactional_id(),
+        }
+    }
+
     /// Whether `handler` needs a coordinator before it can be sent.
     ///
     /// Corresponds to `needsCoordinator()` (Java 1430), i.e.
-    /// `coordinatorType() != null`. `InitProducerIdHandler.coordinatorType()`
-    /// (Java 1482) returns `null` for a non-transactional producer, which is why
-    /// the whole `FindCoordinator` subsystem is out of scope for the idempotence
-    /// slice.
+    /// `coordinatorType() != null`.
     pub(crate) fn needs_coordinator(&self, handler: &TxnRequestHandler) -> bool {
-        match handler.kind {
-            TxnRequestHandlerKind::InitProducerId { .. } => self.is_transactional(),
-        }
+        self.coordinator_type(handler).is_some()
     }
 
     /// Handles the response to a transactional request.
@@ -2335,10 +2373,13 @@ mod tests {
             .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
         let handler = manager.next_request(false).expect("an InitProducerId request is pending");
-        assert!(
-            !manager.needs_coordinator(&handler),
-            "a non-transactional InitProducerId has no coordinator type"
+        assert_eq!(
+            manager.coordinator_type(&handler),
+            None,
+            "InitProducerIdHandler.coordinatorType() is null when non-transactional (Java 1482)"
         );
+        assert_eq!(manager.coordinator_key(&handler), None);
+        assert!(!manager.needs_coordinator(&handler));
         let result = Arc::clone(handler.result());
 
         manager.set_in_flight_correlation_id(CORRELATION_ID);
