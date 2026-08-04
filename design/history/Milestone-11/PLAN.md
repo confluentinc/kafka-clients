@@ -1,6 +1,6 @@
 # Milestone 11 — Producer Idempotence and Transactions
 
-**Status:** APPROVED (2026-07-31). Phase 1 in progress; Phases 2-8 not started.
+**Status:** APPROVED (2026-07-31). Phases 1-3 landed; Phases 4-8 not started.
 
 Decisions §7.1-§7.4 all approved as recommended: faithful idempotence-config
 translation plus a temporary `KafkaProducer` guard (§7.1), bindings deferred to a
@@ -100,9 +100,20 @@ Every transactional code path in `TransactionManager.java` is behind either
 `if (isTransactional())` guard. Nothing on the idempotent path calls a
 transaction-only method. Concretely, an idempotence-only slice needs:
 
-- **4 of 9 states**: `UNINITIALIZED`, `INITIALIZING`, `READY`, `FATAL_ERROR`.
+- ~~**4 of 9 states**: `UNINITIALIZED`, `INITIALIZING`, `READY`, `FATAL_ERROR`.
   `ABORTABLE_ERROR` is unreachable without a `transactionalId`.
-  (`PREPARED_TRANSACTION`, `COMMITTING_*`, `ABORTING_*` likewise.)
+  (`PREPARED_TRANSACTION`, `COMMITTING_*`, `ABORTING_*` likewise.)~~
+  **Corrected in Phase 3 — it is 5 of 9.** `ABORTABLE_ERROR` *is* reachable
+  without a `transactionalId`: `InitProducerIdHandler.handleResponse` calls
+  `abortableError(..)` for `CLUSTER_AUTHORIZATION_FAILED` (Java 1524–1528)
+  **without** testing `isTransactional()`, a non-transactional
+  `InitProducerId` receives that code when the principal lacks
+  `IdempotentWrite` on the cluster, and the manager is in `INITIALIZING` when
+  the response arrives — which the table permits as a source for
+  `ABORTABLE_ERROR` (Java 180). So Phase 3 also translates
+  `transitionToAbortableError` (530), `hasError` (522) and `hasAbortableError`
+  (991). See §9.15. (`PREPARED_TRANSACTION`, `COMMITTING_*`, `ABORTING_*` are
+  genuinely unreachable.)
 - **1 of 6 request handlers**: `InitProducerIdHandler` (Java 1461–1539) plus the
   `TxnRequestHandler` base (1345–1459). `InitProducerIdHandler.coordinatorType()`
   (1482–1488) returns `null` when non-transactional, so **the whole
@@ -232,10 +243,16 @@ Per CLAUDE.md §2 (`internal` packages), everything is `pub(crate)`.
 
 Translate from `TransactionManager.java`:
 
-- `State` enum, but only the 4 reachable states, **with the full 9-variant
+- `State` enum, ~~but only the 4 reachable states,~~ **with the full 9-variant
   `is_transition_valid` table from Java 162–188 written correctly from the
   start** so Phase 5 adds no transition logic. (Target-first table; note the
   `ABORTABLE_ERROR` self-loop and that `READY → READY` is illegal.)
+  **Resolved in Phase 3:** these two clauses contradict each other — a
+  four-variant enum cannot carry a nine-variant table — so all nine variants
+  are declared. That is also the faithful translation (they are all in Java's
+  `State`), and it makes Phase 5 purely additive, which is what the second
+  clause asks for. Five of the nine are reachable here, not four; see §2 and
+  §9.15.
 - `transition_to(target, error, caller)` (Java 1114–1145) — see §6.2 for the
   `Caller` parameter that replaces Java's `Thread.currentThread() instanceof
   Sender.SenderThread`.
@@ -261,10 +278,46 @@ Translate from `TransactionManager.java`:
   `has_fatal_error` (986), `last_error` (462), `hasProducerId` (476),
   `is_transactional` (480).
 
-**Tests:** the ~15 `TransactionManagerTest` methods that call
-`initializeTransactionManager(Optional.empty(), ..)` (Java lines 270, 277, 626,
-635, 673, 713, 750, 852, 865, 3041, 3085, +). Phase 3's DoD does **not** claim
-`TransactionManagerTest` parity — see §2.
+**Added during Phase 3, beyond the list above** — each because a listed item or
+a named test needs it, not as scope creep:
+
+- `transition_to_abortable_error` (530), `has_error` (522),
+  `has_abortable_error` (991) — required by
+  `InitProducerIdHandler.handleResponse`'s authorization arms (§9.15).
+- `maybe_add_partition` (437, idempotent arm) and `maybe_transition_to_error_state`
+  (764, idempotent arm) — `testFailIfNotReadyForSendIdempotentProducer` and
+  `testFailIfNotReadyForSendIdempotentProducerFatalError` (both named under
+  **Tests** below) call the first, and `handleFailedBatch` calls the second on
+  its first line.
+- `next_request` (894, idempotent arm), `enqueue_request` (1186), `retry` (934),
+  `maybe_terminate_request_with_error` (1174), `has_pending_requests` (1005),
+  `set_in_flight_correlation_id` (973), `clear_in_flight_correlation_id` (977),
+  `has_in_flight_request` (981), `needs_coordinator` (1430) — the
+  `TxnRequestHandler` base's own surface, without which the handler cannot be
+  handed to a Sender or completed. `hasInFlightRequest` is also asserted by
+  `testDuplicateSequenceAfterProducerReset` (Phase 4).
+- `ensure_transactional` (1147), `transactional_id` (472), `is_2pc_enabled`
+  (510), `producer_id_and_epoch_for_partition` (689),
+  `maybe_update_last_acked_sequence` (726), `Priority` (195) — trivial
+  accessors and the handler's `priority()` return type.
+
+**Tests:** the 15 `TransactionManagerTest` methods that call
+`initializeTransactionManager(Optional.empty(), ..)` — Java lines 270, 277, 626,
+635, 673, 713, 750, 852, 865, 3041, 3085, 3126, 3246, 3603, 3728.
+**12 landed**; the 3 that need the Phase-4 send path
+(`testDuplicateSequenceAfterProducerReset` 750,
+`testHealthyPartitionRetriesDuringEpochBump` 3603,
+`testFailedInflightBatchAfterEpochBump` 3728) are named with their missing
+surface in a comment block at the end of the Rust test module, per DoD §3.
+Phase 3's DoD does **not** claim `TransactionManagerTest` parity — see §2.
+
+All 12 are `@ParameterizedTest @ValueSource(booleans = {true, false})` on
+`transactionV2Enabled`, translated as loops. The flag is **not** observable in
+this phase: Java threads it only into `ApiVersions`, and the manager reads
+`apiVersions` from just `handleCoordinatorReady` (1104) and
+`maybeUpdateTransactionV2Enabled` (493), both Phase 5, so
+`isTransactionV2Enabled` stays `false` in both iterations. The loops are kept
+because they cost nothing and start discriminating in Phase 5.
 
 ---
 
@@ -1514,6 +1567,65 @@ worth the effort:
   - Responses rank below requests either way: a wrong request is misread by a live
     broker, whereas a response decoding error surfaces in our own round-trips.
 
+### 9.15 `ABORTABLE_ERROR` is reachable without a `transactionalId`
+
+**Status:** DONE — corrected in Phase 3; §2 and §Phase-3 amended in place.
+
+§2 asserted "**4 of 9 states** … `ABORTABLE_ERROR` is unreachable without a
+`transactionalId`", and §Phase-3 repeated it. Both are wrong.
+
+`InitProducerIdHandler.handleResponse` (`TransactionManager.java:1524-1528`):
+
+```java
+} else if (error == Errors.TRANSACTIONAL_ID_AUTHORIZATION_FAILED ||
+        error == Errors.CLUSTER_AUTHORIZATION_FAILED) {
+    log.info("Abortable authorization error: {}.  Transition the producer state to {}",
+        error.message(), State.ABORTABLE_ERROR);
+    lastError = error.exception();
+    abortableError(error.exception());
+```
+
+Three facts make this reachable for a purely idempotent producer:
+
+  1. The arm does **not** test `isTransactional()`, and neither does
+     `abortableError` → `transitionToAbortableError` → `transitionTo`. There is
+     no `ensureTransactional()` anywhere on the path.
+  2. A **non-transactional** `InitProducerId` is answered
+     `CLUSTER_AUTHORIZATION_FAILED` when the principal lacks `IdempotentWrite`
+     on the cluster. That is the idempotent-producer authorization failure, not
+     a transactional one.
+  3. The transition is permitted: the manager is in `INITIALIZING` when the
+     response arrives (set by `bumpIdempotentEpochAndResetIdIfNeeded`,
+     Java 669), and `INITIALIZING` is one of the four sources the table accepts
+     for `ABORTABLE_ERROR` (Java 178-180). That arm exists *for* this case —
+     the other three sources are transactional.
+
+**Why it matters rather than being a naming curiosity.** Once an idempotent
+producer is in `ABORTABLE_ERROR`, `hasError()` is true, so `maybeFailWithError()`
+throws and `maybeAddPartition` rejects every subsequent send. Omitting the state
+would have made an authorization failure silently non-fatal *and* left sends
+succeeding — the opposite of Java in both directions. A subsequent
+`bumpIdempotentEpochAndResetIdIfNeeded` then attempts
+`ABORTABLE_ERROR → INITIALIZING`, which the table refuses, so on the Sender side
+Java poisons to `FATAL_ERROR`; that behaviour also only exists if the state does.
+
+**Consequence for the plan:** Phase 3 additionally translated
+`transitionToAbortableError` (530), `hasError` (522) and `hasAbortableError`
+(991). All nine `State` variants are declared (see §Phase-3), so the arithmetic
+"4 of 9" no longer appears in the code either way.
+
+**Regression evidence.** Deleting `source == Self::Initializing` from the
+`AbortableError` arm of the Rust table fails
+`test_cluster_authorization_failure_moves_an_idempotent_producer_to_abortable_error`,
+which is the check that the arm is load-bearing on the idempotent path rather
+than only the transactional one.
+
+**Lesson, same shape as §9.8's.** The claim was derived from the *guards* on the
+transaction-only entry points (`ensureTransactional`, `if (isTransactional())`),
+which do fence the state machine cleanly — and then generalised to the response
+handlers, which are not fenced the same way. A reachability claim has to be
+checked against every writer of the state, not only the entry points that look
+like they own it.
 
 ---
 
@@ -1603,3 +1715,72 @@ Recorded in full elsewhere; listed here for completeness:
   - `ProducerConfig::explicitly_set` replaces Java's
     `AbstractConfig.originals()` — commit `d14d1ec`.
   - The five typed txn error structs deliberately not created — §1.1 and rules §9.
+
+### 10.5 Phase 3 deviations (`TransactionManager`, idempotence core)
+
+All six are documented at their call sites in
+`src/producer/internals/transaction_manager.rs`.
+
+1. **`TransactionManager::new` returns `Result` and refuses a
+   `transactional_id`** (MILESTONE-11 GUARD). Java's constructor accepts one.
+   This phase translates no transactional entry point and none of the
+   transactional arms of the five internally-forked methods, so accepting a
+   transactional id would mean silently taking the idempotent branch where Java
+   takes another — which CLAUDE.md §5 forbids. It mirrors the guard already in
+   `KafkaProducer::from_config` (§7.1) and is removed in Phase 5. The
+   still-unwritten transactional arms return
+   `KafkaError::unsupported_version(..)` naming Phase 5, which the guard makes
+   unreachable; a test asserts the guard's message.
+
+2. **`TxnRequestHandler` is a struct plus a `TxnRequestHandlerKind` enum**, not
+   an abstract class with six subclasses, and `handleResponse` / `onComplete` /
+   `coordinatorType` move onto `TransactionManager`. Java's inner classes reach
+   the manager through an implicit `TransactionManager.this`; Rust has no
+   equivalent, and a `Box<dyn>` handler holding a back-reference to its owner is
+   not expressible. This is the same shape the crate already uses for Java's
+   `AbstractRequest` / `AbstractResponse` hierarchies (`ConcreteRequest` /
+   `ConcreteResponse`), so it introduces no new pattern.
+
+3. **`InFlightBatchPool` type alias** —
+   `HashMap<TopicPartition, Vec<&mut ProducerBatch>>` — is the per-partition
+   batch pool that `bump_idempotent_producer_epoch` and
+   `bump_idempotent_epoch_and_reset_id_if_needed` take, because
+   `TxnPartitionEntry` tracks ordering keys rather than owning batches
+   (rules §7). It must be keyed by partition: `InFlightBatchKey` is
+   `(producer_id, producer_epoch, base_sequence)` and is not partition-scoped,
+   so two partitions routinely hold identical keys and a flat pool would let one
+   entry rewrite another partition's batch. A type alias adds no struct Java
+   lacks (DoD §7).
+
+4. **`producer_id_and_epoch_for_partition`** renames the
+   `producerIdAndEpoch(TopicPartition)` overload (Java 689). Rust has no
+   overloading and the no-argument form (581) already holds the name.
+
+5. **`maybe_fail_with_error` drops the exception cause.** Java chains `lastError`
+   as the cause for the `IllegalStateException` and bare-`KafkaException` cases.
+   `KafkaError` has no cause chain; Java's `getMessage()` does not include the
+   cause either, so the message text is reproduced byte-for-byte and the cause
+   stays reachable through `last_error()`. Preferring exact messages keeps DoD
+   §3's message assertions meaningful.
+
+6. **`maybe_resolve_sequences` takes no `Caller`** where every other
+   transition-capable method does (rules §1). Its idempotent arm performs no
+   transition — it only calls `requestIdempotentEpochBumpForPartition` — so the
+   parameter would be dead. Phase 5's transactional arm transitions and adds it.
+
+Not deviations, recorded because a reviewer may read them as such:
+
+  - `pending_requests` is a `VecDeque`, not Java's priority queue. The only
+    handler this phase can enqueue is `InitProducerId`, and
+    `bumpIdempotentEpochAndResetIdIfNeeded` is guarded on `!hasProducerId()` so
+    at most one is pending, making FIFO and priority order identical. `Priority`
+    itself is translated in full. §2 anticipated this ("a plain FIFO holding a
+    single `InitProducerId` suffices").
+  - `maybe_terminate_request_with_error` omits Java's
+    `hasAbortableError() && handler instanceof FindCoordinatorHandler` escape
+    hatch, because that handler does not exist until Phase 5 and the test could
+    only ever be false.
+  - Two loops collect a `Vec` of partition keys where Java iterates in place, to
+    satisfy the borrow checker. Both are per-`runOnce`, over error-state
+    partitions only, and order is not observable because each partition is
+    handled independently.

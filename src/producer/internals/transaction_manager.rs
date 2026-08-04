@@ -388,6 +388,21 @@ impl fmt::Debug for TxnRequestHandler {
 /// field is a plain field and the rule is not yet engaged. Phase 4 wraps the
 /// manager as `Arc<Mutex<TransactionManager>>` (see PLAN §6.3) and is where the
 /// split has to be made; the fields that belong to the Sender are marked below.
+///
+/// # Send-path allocations
+///
+/// The methods the drain path reaches — [`Self::sequence_number`],
+/// [`Self::increment_sequence_number`], [`Self::add_in_flight_batch`],
+/// [`Self::maybe_update_producer_id_and_epoch`] — run once per **batch**, not
+/// per record, and allocate no more than Java: a `TopicPartition` clone only
+/// where Java also inserts into a map or set. Nothing here is per-record, so
+/// `definition-of-done.md` §10's per-message budget is unaffected.
+///
+/// Two methods collect a `Vec` of partition keys where Java iterates its
+/// collection in place ([`Self::bump_idempotent_producer_epoch`] and
+/// [`Self::maybe_resolve_sequences`]), because the loop bodies need `&mut self`.
+/// Both run once per `Sender.runOnce`, i.e. per network poll, and only over
+/// partitions in an error state.
 pub(crate) struct TransactionManager {
     log_context: LogContext,
     /// `None` for a purely idempotent producer.
