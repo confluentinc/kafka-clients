@@ -49,6 +49,7 @@ use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::IncompleteBatches;
 use crate::producer::internals::ProducerBatch;
+use crate::producer::internals::TransactionManager;
 use crate::producer::record_metadata;
 
 /// Partitioner configuration for the built-in partitioner.
@@ -154,6 +155,27 @@ pub struct RecordAccumulator {
     topic_info_map: DashMap<Arc<str>, Arc<TopicInfo>>,
     node_stats: DashMap<i32, NodeLatencyStats>,
     incomplete: IncompleteBatches,
+    /// The shared transaction state object which tracks producer IDs, epochs, and
+    /// sequence numbers per partition; `None` for a producer with idempotence
+    /// disabled.
+    ///
+    /// Translated from `RecordAccumulator.transactionManager` (Java 90), which is
+    /// nullable — hence [`Option`].
+    ///
+    /// # Lock topology and ordering
+    ///
+    /// `std::sync::Mutex`, shared with `KafkaProducer` and `Sender`
+    /// (`.claude/rules/producer-transactions.md` §2 and PLAN §6.3). Every
+    /// critical section here is CPU-bound with no `.await`, matching
+    /// `RecordAccumulator.java:877-926`, so the async mutex is wrong (rules §3).
+    ///
+    /// **The lock order is per-partition deque → transaction manager, never
+    /// inverted** (rules §3). Java assigns sequences inside
+    /// `synchronized (deque)` while calling into `synchronized`
+    /// `TransactionManager` methods, so inverting the order here would create a
+    /// cycle against the Java-ordered path and deadlock under concurrent
+    /// append + drain.
+    transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     /// Only accessed by the sender thread, so no synchronization needed.
     muted: Mutex<HashSet<TopicPartition>>,
     /// Only accessed by the sender thread.
@@ -180,6 +202,15 @@ impl RecordAccumulator {
     ///   failure on record delivery
     /// * `partitioner_config` - Partitioner configuration
     /// * `buffer_pool` - The buffer pool
+    /// * `transaction_manager` - The shared transaction state object which tracks
+    ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
+    ///   idempotence is disabled
+    // `TransactionManager` is `pub(crate)` per CLAUDE.md §2 (its Java package is
+    // `internals`), while this constructor is nominally `pub` inside the
+    // `pub(crate) producer::internals` module and so is not reachable from outside
+    // the crate either. Demoting it instead would make several genuinely-used
+    // `ProducerBatch` / `ProducerMetadata` accessors look dead.
+    #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         batch_size: i32,
@@ -190,6 +221,7 @@ impl RecordAccumulator {
         delivery_timeout_ms: i32,
         partitioner_config: PartitionerConfig,
         buffer_pool: Arc<BufferPool>,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
         Self::with_log_context(
             batch_size,
@@ -200,6 +232,7 @@ impl RecordAccumulator {
             delivery_timeout_ms,
             partitioner_config,
             buffer_pool,
+            transaction_manager,
             LogContext::empty(),
         )
     }
@@ -218,7 +251,12 @@ impl RecordAccumulator {
     ///   failure on record delivery
     /// * `partitioner_config` - Partitioner configuration
     /// * `buffer_pool` - The buffer pool
+    /// * `transaction_manager` - The shared transaction state object which tracks
+    ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
+    ///   idempotence is disabled
     /// * `log_context` - Contextual log message prefix
+    // See [`Self::new`] for why `private_interfaces` is allowed here.
+    #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
     pub fn with_log_context(
         batch_size: i32,
@@ -229,6 +267,7 @@ impl RecordAccumulator {
         delivery_timeout_ms: i32,
         partitioner_config: PartitionerConfig,
         buffer_pool: Arc<BufferPool>,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         log_context: LogContext,
     ) -> Self {
         let retry_backoff = ExponentialBackoff::new(
@@ -254,6 +293,7 @@ impl RecordAccumulator {
             topic_info_map: DashMap::new(),
             node_stats: DashMap::new(),
             incomplete: IncompleteBatches::new(),
+            transaction_manager,
             muted: Mutex::new(HashSet::new()),
             nodes_drain_index: Mutex::new(HashMap::new()),
             next_batch_expiry_time_ms: Mutex::new(i64::MAX),
@@ -1289,6 +1329,7 @@ mod tests {
             30000, // delivery_timeout_ms
             PartitionerConfig::default(),
             pool,
+            None,
         )
     }
 
@@ -1541,6 +1582,7 @@ mod tests {
             delivery_timeout_ms,
             PartitionerConfig::default(),
             pool,
+            None,
         );
 
         let metadata = make_metadata_snapshot(&[n1], TOPIC, &[(0, Some(0))]);
@@ -1726,6 +1768,7 @@ mod tests {
             delivery_timeout_ms,
             PartitionerConfig::default(),
             pool,
+            None,
         );
 
         let n1 = node1();
@@ -1972,6 +2015,7 @@ mod tests {
             delivery_timeout_ms,
             PartitionerConfig::default(),
             pool,
+            None,
         );
 
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
@@ -2066,6 +2110,7 @@ mod tests {
             delivery_timeout_ms,
             PartitionerConfig::default(),
             pool,
+            None,
         );
 
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
@@ -2382,6 +2427,7 @@ mod tests {
             delivery_timeout_ms,
             PartitionerConfig::default(),
             pool,
+            None,
         );
 
         let now: i64 = 0;
@@ -2443,6 +2489,7 @@ mod tests {
             delivery_timeout_ms,
             PartitionerConfig::default(),
             pool,
+            None,
         );
 
         // Metadata where partition 0 is on node1

@@ -58,6 +58,7 @@ use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProducerMetadata;
 use crate::producer::internals::Sender;
+use crate::producer::internals::TransactionManager;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
@@ -109,6 +110,18 @@ pub struct KafkaProducer<K, V> {
     accumulator: Arc<RecordAccumulator>,
     /// The producer metadata.
     metadata: Arc<ProducerMetadata>,
+    /// All the state related to transactions, in particular the producer id,
+    /// producer epoch, and sequence numbers; `None` when idempotence is disabled.
+    ///
+    /// Translated from `KafkaProducer.transactionManager` (Java 269), which is
+    /// nullable — hence [`Option`].
+    ///
+    /// Shared with the [`Sender`] task and the [`RecordAccumulator`] behind a
+    /// `std::sync::Mutex` (`.claude/rules/producer-transactions.md` §2 and
+    /// PLAN §6.3): the Sender is moved into a `tokio::task::spawn`, so this
+    /// struct cannot reach it any other way. No guard is ever held across an
+    /// `.await` (rules §4).
+    transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     /// The compression type for records.
     compression_type: CompressionType,
     /// The maximum time to block on send/partitionsFor.
@@ -152,6 +165,11 @@ impl<K, V> KafkaProducer<K, V> {
     /// * `wakeup` - Notification to wake up the sender task
     /// * `sender_handle` - Handle to the sender background task
     /// * `time_provider` - Provider of current wall-clock time
+    /// * `transaction_manager` - The shared transaction state object, or `None`
+    ///   when idempotence is disabled
+    // `TransactionManager` is `pub(crate)` per CLAUDE.md §2; see the note on
+    // [`Self::with_client`] for why this constructor stays nominally `pub`.
+    #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &ProducerConfig,
@@ -164,6 +182,7 @@ impl<K, V> KafkaProducer<K, V> {
         wakeup: Arc<Notify>,
         sender_handle: Option<JoinHandle<()>>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         Self {
@@ -174,6 +193,7 @@ impl<K, V> KafkaProducer<K, V> {
             total_memory_size: config.buffer_memory,
             accumulator,
             metadata,
+            transaction_manager,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
@@ -338,14 +358,20 @@ impl<K, V> KafkaProducer<K, V> {
             config.socket_connection_setup_timeout_ms,
             config.socket_connection_setup_timeout_max_ms,
             true, // discover_broker_versions
-            api_versions,
+            Arc::clone(&api_versions),
             DefaultHostResolver::new(),
             config.metadata_max_age_ms, // rebootstrap_trigger_ms
             MetadataRecoveryStrategy::None,
             log_context.clone(),
         );
 
-        // 8. Create BufferPool and RecordAccumulator
+        // 8. Create the TransactionManager, before the accumulator and the Sender
+        //    because both of them need it (PLAN §6.3). Java's field assignment sits
+        //    at the same point in the constructor (`KafkaProducer.java:415`, ahead
+        //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
+        let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context)?;
+
+        // 9. Create BufferPool and RecordAccumulator
         //    As per Kafka configuration documentation, batch.size may be set to 0
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
@@ -362,10 +388,11 @@ impl<K, V> KafkaProducer<K, V> {
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
             buffer_pool,
+            transaction_manager.clone(),
             log_context.clone(),
         ));
 
-        // 9. Wire up the Sender and spawn the I/O background task
+        // 10. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client(
             &config,
             key_serializer,
@@ -374,7 +401,51 @@ impl<K, V> KafkaProducer<K, V> {
             accumulator,
             client,
             time_provider,
+            transaction_manager,
         ))
+    }
+
+    /// Builds the [`TransactionManager`] when idempotence is enabled.
+    ///
+    /// Translated from `KafkaProducer.configureTransactionState`
+    /// (`KafkaProducer.java:592-620`).
+    ///
+    /// Java returns `null` when `enable.idempotence` is `false`; that is `None`
+    /// here. Java's `else` branch only marks `transaction.timeout.ms` as consumed
+    /// so `AbstractConfig` does not warn about it, which has no Rust analogue —
+    /// `ProducerConfig` parses every key eagerly.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`TransactionManager::new`]'s error. Its only failure mode is
+    /// the Phase-5 MILESTONE-11 GUARD on a `transactional_id`, which
+    /// [`Self::from_config`] has already rejected with a clearer message, so this
+    /// is unreachable today.
+    fn configure_transaction_state(
+        config: &ProducerConfig,
+        api_versions: &Arc<ApiVersions>,
+        log_context: &LogContext,
+    ) -> Result<Option<Arc<Mutex<TransactionManager>>>, KafkaError> {
+        if !config.enable_idempotence {
+            return Ok(None);
+        }
+
+        let transaction_manager = TransactionManager::new(
+            log_context.clone(),
+            config.transactional_id.clone(),
+            config.transaction_timeout_ms,
+            config.retry_backoff_ms,
+            Arc::clone(api_versions),
+            config.two_phase_commit_enable,
+        )?;
+
+        if transaction_manager.is_transactional() {
+            kafka_info!(log_context, "Instantiated a transactional producer.");
+        } else {
+            kafka_info!(log_context, "Instantiated an idempotent producer.");
+        }
+
+        Ok(Some(Arc::new(Mutex::new(transaction_manager))))
     }
 
     /// Creates a `KafkaProducer` from pre-built collaborators and spawns the
@@ -402,6 +473,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// # Type Parameters
     ///
     /// * `C` - The KafkaClient implementation type
+    #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
     pub fn with_client<C: KafkaClient + Send + 'static>(
         config: &ProducerConfig,
@@ -411,6 +483,7 @@ impl<K, V> KafkaProducer<K, V> {
         accumulator: Arc<RecordAccumulator>,
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
@@ -434,6 +507,7 @@ impl<K, V> KafkaProducer<K, V> {
             Arc::clone(&running),
             Arc::clone(&force_close),
             Arc::clone(&time_provider),
+            transaction_manager.clone(),
             log_context.clone(),
         );
 
@@ -454,6 +528,7 @@ impl<K, V> KafkaProducer<K, V> {
             total_memory_size: config.buffer_memory,
             accumulator,
             metadata,
+            transaction_manager,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
@@ -1156,6 +1231,7 @@ mod tests {
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
             Arc::new(BufferPool::new(32 * 1024 * 1024, 16384)),
+            None,
         ))
     }
 
@@ -1186,6 +1262,7 @@ mod tests {
             wakeup,
             None,
             default_time_provider(),
+            None,
         )
     }
 

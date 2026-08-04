@@ -23,8 +23,8 @@
 //! Transactional methods are not translated in this phase.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
 
@@ -46,6 +46,7 @@ use crate::common::utils::LogContext;
 use super::ProducerBatch;
 use super::ProducerMetadata;
 use super::RecordAccumulator;
+use super::TransactionManager;
 
 /// The action to take after `complete_batch` has processed a batch.
 ///
@@ -118,6 +119,30 @@ pub struct Sender<C: KafkaClient> {
     running: Arc<AtomicBool>,
     /// True when the caller wants to ignore all unsent/inflight messages and force close.
     force_close: Arc<AtomicBool>,
+    /// All the state related to transactions, in particular the producer id,
+    /// producer epoch, and sequence numbers; `None` when idempotence is disabled.
+    ///
+    /// Translated from `Sender.transactionManager` (Java 123), which is nullable —
+    /// hence [`Option`].
+    ///
+    /// # Lock topology
+    ///
+    /// `std::sync::Mutex`, shared with `KafkaProducer` and `RecordAccumulator`
+    /// (`.claude/rules/producer-transactions.md` §2, PLAN §6.3). Two hard rules
+    /// apply to every use below (rules §4):
+    ///
+    ///   1. **No guard may be held across an `.await`.** Acquire → read/mutate →
+    ///      drop, then await, then re-acquire. `Sender.java:459-518` interleaves
+    ///      ten manager calls with three `client.poll(..)` calls and two sleeps,
+    ///      all of which are `.await` points here.
+    ///   2. **The network poll is never raced in a `tokio::select!`** — it is not
+    ///      cancel-safe (see `consumer-threading.md` §10).
+    ///
+    /// The fields Java deliberately leaves *outside* its `synchronized` blocks
+    /// because only the Sender thread touches them live on this struct instead of
+    /// behind this mutex — the pending transactional request queue and the
+    /// in-flight correlation id.
+    transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     /// A per-partition queue of batches ordered by creation time for tracking in-flight batches.
     in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
@@ -146,6 +171,7 @@ impl<C: KafkaClient> Sender<C> {
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         log_context: LogContext,
     ) -> Self {
         Self {
@@ -160,6 +186,7 @@ impl<C: KafkaClient> Sender<C> {
             retry_backoff_ms,
             running,
             force_close,
+            transaction_manager,
             in_flight_batches: HashMap::new(),
             pending_produce_responses: HashMap::new(),
             time_provider,
@@ -1163,6 +1190,7 @@ mod tests {
                 DELIVERY_TIMEOUT_MS,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
                 Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+                None,
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
@@ -1184,6 +1212,7 @@ mod tests {
                 running,
                 force_close,
                 time_provider,
+                None,
                 LogContext::empty(),
             );
 
@@ -1415,6 +1444,7 @@ mod tests {
             120000, // use long delivery timeout for this test
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
             Arc::new(BufferPool::new(1024 * 1024, 16384)),
+            None,
         ));
         let tp = TopicPartition::new("test".to_string(), 0);
         let batch = make_batch(tp.clone(), 0);
@@ -2156,6 +2186,7 @@ mod tests {
             DELIVERY_TIMEOUT_MS,
             PartitionerConfig { enable_adaptive_partitioning: false, partition_availability_timeout_ms: 42 },
             Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            None,
         ));
 
         let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
@@ -2177,6 +2208,7 @@ mod tests {
             running,
             force_close,
             time_provider,
+            None,
             LogContext::empty(),
         );
 
