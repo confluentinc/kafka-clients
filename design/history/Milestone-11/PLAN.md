@@ -1852,15 +1852,20 @@ here it is a different author.
 **Status:** open, and reduced to three blocked items — nothing is owed on budget any
 more.
 
-Raised by Critic 44 issue 4, which rejected Phase 4's block deferral of 33
-`SenderTest` methods — correctly, since it named Phase 8 as the owner while
-§Phase-8's own scope covers `TransactionManagerTest` only, and one of the deferred
-tests (`testCancelInFlightRequestAfterFatalError`) was the test that would have caught
-the buffer-pool leak of issue 2.
+Raised by Critic 44 issue 4, which rejected Phase 4's block deferral of `SenderTest`
+methods — correctly, since it named Phase 8 as the owner while §Phase-8's own scope
+covers `TransactionManagerTest` only, and one of the deferred tests
+(`testCancelInFlightRequestAfterFatalError`) was the test that would have caught the
+buffer-pool leak of issue 2.
 
-Phase 4 translated **28** of them. The full per-method accounting lives in a comment
-block at the end of `src/producer/internals/sender.rs`, which is the authoritative
-list. This section records only what is left and why.
+The per-method accounting lives in a comment block at the end of
+`src/producer/internals/sender.rs`, which is the authoritative list and carries the two
+shell commands that reproduce both the scope set and the completeness claim. In summary:
+**52** `SenderTest` methods reference a `TransactionManager`, of which **32** are
+translated, **18** are transactional (Phases 5 and 6), and **2** are blocked below; the
+lists carry 2 further entries that are outside the 52 and are marked as such, so
+33 + 18 + 3 = 54 entries and 54 − 2 = 52. This section records only what is left and
+why.
 
 **Blocked on named missing surface:**
 
@@ -1871,23 +1876,36 @@ list. This section records only what is left and why.
     interface threaded through `Sender` — a producer-wide constructor change that
     belongs with the Phase-6 review of `maybeSendAndPollTransactionalRequest`'s two
     sleeps (rules §4).
-  - `testNoBufferReuseWhenBatchExpires` (3605) asserts
-    `assertSame(buffer.array(), batch.records().buffer().array())`. `BufferPool` does
-    accounting only and does not hand back the same backing array, and
-    `ProducerBatch::records()` moves the buffer out. Blocked on §9.18.
   - `testIdempotentSplitBatchAndSend` (2372) drives a `MESSAGE_TOO_LARGE` split, which
     panics. Blocked on §9.18, reproducer
     `test_too_large_batches_are_safely_removed`.
+  - `testNoBufferReuseWhenBatchExpires` (3605) asserts
+    `assertSame(buffer.array(), batch.records().buffer().array())`. `BufferPool` does
+    accounting only and does not hand back the same backing array, and
+    `ProducerBatch::records()` moves the buffer out. Blocked on §9.18. This one uses no
+    transaction manager, so it is outside the 52; it is listed with the blocked group
+    because the same gap blocks it.
 
-**Not owed here:** the 17 transactional methods are Phases 5/6, listed individually in
-the same comment block. Two were reclassified out of the idempotence list on close
-reading: `testUnresolvedSequencesAreNotFatal` (1534), whose line 1538 constructs the
-manager with a transactional id, and — in the other direction —
-`testProducerBatchRetriesWhenPartitionLeaderChanges` (3307), which builds both the
-accumulator and the `Sender` with `transactionManager = null` (Java 3316, 3320) and so
-is neither idempotent nor transactional. The latter was translated anyway rather than
-argued out of scope, being the only end-to-end cover for the leader-change backoff
-skip.
+**Reclassifications.** Two methods moved on close reading, and Critic 44 issue 7
+corrected which was which:
+
+  - `testDoNotPollWhenNoRequestSent` (2991) moved **out** of the idempotence list into
+    the transactional group: it calls `doInitTransactions`. An earlier revision of this
+    section credited `testUnresolvedSequencesAreNotFatal` with the move, which was
+    wrong — that method was in the transactional group from the start (its manager is
+    built with a transactional id at `SenderTest.java:1537`).
+  - `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) is outside the 52
+    entirely: it builds both the accumulator and the `Sender` with
+    `transactionManager = null` (Java 3321 and 3324), so it is neither idempotent nor
+    transactional. It was translated anyway rather than argued out of scope, being the
+    only end-to-end cover for the leader-change backoff skip.
+
+**Lesson recorded.** Both issues 6 and 7 were failures of an artifact that asserted its
+own completeness in prose: the hand-assembled list lost
+`testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails` (1105) while
+claiming nothing was owed, and the counts written beside the lists drifted from them.
+The accounting block now states the criterion, gives the commands that derive the set
+and diff it against the groups, and derives every count from the lists.
 
 
 ### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
@@ -2251,11 +2269,23 @@ Each is documented at its call site as well.
    still reach the batch and return its pooled buffer (KAFKA-19012). A Rust callback
    cannot capture `&mut self`, and `PendingProduceRequest` stores only an
    `Arc<ProduceRequestResult>` identity, so that holder is an explicit field.
-   `handle_produce_response_for` searches it after `in_flight_batches`, and
-   `run()` releases whatever remains after `client.close()` — Java's `close()` does
-   that through the aborted requests' callbacks, which the Rust `close()` (returning
-   `()`) cannot. Added after Critic 44 issue 2, which was a permanent
-   `BufferPool::available_memory` shrink on every abort of an in-flight batch.
+   `handle_produce_response_for` searches it after `in_flight_batches`.
+
+   `run()` then releases whatever remains after `client.close()`, and that release is
+   a **deliberate improvement, not a translation** — an earlier draft of this entry
+   claimed Java's `close()` does the same through the aborted requests' callbacks,
+   which is false (Critic 44 issue 9). `NetworkClient.close()` is
+   `selector.close(); metadataUpdater.close(); telemetrySender.close();`
+   (`NetworkClient.java:736-746`); it never walks `inFlightRequests` and never calls
+   `completeResponses`, and `Selector.close()` closes each channel with
+   `CloseMode.DISCARD_NO_NOTIFY` (`Selector.java:886-892`, mode at `:96`: "no
+   disconnect notification"). Java therefore abandons those buffers, unobservably,
+   because the `BufferPool` is built inside `KafkaProducer`'s constructor
+   (`KafkaProducer.java:438`) and dies with the producer. Rust releases them so the
+   pool's accounting is exact for the whole `Sender` lifetime, which is what lets
+   `available_memory()` serve as the oracle in the leak regression tests. Added after
+   Critic 44 issue 2, which was a permanent `BufferPool::available_memory` shrink on
+   every abort of an in-flight batch.
 
 9. **`transaction_completing` is read once per `ready()`**, not once per batch as
    Java does inside `batchReady` (`RecordAccumulator.java:614`). The value is

@@ -86,3 +86,58 @@ twice, Rust once, and the batch's own callback still fires);
 `test_healthy_partition_retries_during_epoch_bump` stopping short of Java's tail
 (the omitted assertions are covered verbatim by its sibling and the extra
 `maybeUpdateProducerIdAndEpoch` is inert).
+
+## Pass 2 — the fixes were right; three of four findings were in their records
+
+Four findings (issues 6-9) over `144c8a8..521b36e`. All three code fixes were
+mechanically correct and their pins faithful; the defects were one Java-divergent
+branch the fix left behind and three record-level errors.
+
+11. **When a fix rewrites an enumerated list, diff the old list against the new one
+    mechanically — do not read it.** One `SenderTest` method
+    (`testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails`, Java
+    1105) vanished between the pass-1 deferral list and the pass-2 accounting
+    comment, while both the comment and PLAN §9.19 asserted "nothing else is owed".
+    `git show <old>:file | sed -n '<range>p' | grep -o 'test[A-Za-z]*' | sort -u`
+    into `comm -23` against the new range found it in one command. The tell was
+    arithmetic: §9.19's "translated 28 of them" is consistent with 33 only after
+    silently subtracting the lost entry (33 − 3 blocked − 1 reclassified − 1 lost).
+    **A count that "works out" is evidence the author derived it from the wrong
+    set.** Also count groups programmatically — the header said 28 over a list of
+    32, and a group the prose called 17 had 18 entries.
+
+12. **A fix that splits one branch into two can get one arm right and keep the
+    other wrong.** Issue 2's fix correctly moved the unmute for *expired in-flight*
+    batches onto the response path (Java `Sender.java:735-737`) but kept
+    `else if guarantee_message_order { unmute }` for *undrained* ones, where Java's
+    `failExpiredBatches` unmutes nothing. The new comment ("undrained batches never
+    had a request, so no response will ever unmute them") is true and irrelevant:
+    the mute belongs to whichever batch is in flight. Reachable ordering violation —
+    A in flight and expired (retained, no unmute), B queued and expired (unmutes),
+    C queued and not expired (drains next iteration) → two in-flight requests for
+    one partition under `max.in.flight=1`. When a conditional gains an arm, ask what
+    Java does in *each* arm, not whether the new arm is an improvement.
+
+13. **A justification that names a Java method's behaviour is checkable in three
+    greps, and the third rewrite is as likely to be wrong as the first.** The
+    close-time buffer release claims "Java's `client.close()` … runs their
+    completion callbacks with disconnected responses". `NetworkClient.close()`
+    (`NetworkClient.java:736-746`) only calls `selector.close()` /
+    `metadataUpdater.close()`; `Selector.close()` (`:369-385`) uses
+    `CloseMode.DISCARD_NO_NOTIFY`, defined at `Selector.java:96` as "no disconnect
+    notification". Same failure mode as Phase 3's three `close()` justifications:
+    the Rust behaviour was fine, the reason invented. Grep the cited Java method
+    body every time, even when the code is obviously harmless.
+
+**Verified resolved in pass 2 — don't re-check:** `RecordAppendResult::topic_partition`
+(refcount-only; `TopicPartition` is `{i32, Arc<str>}`; the three surviving
+`topic.to_string()` sites in `kafka_producer.rs` are error paths) and its
+manager-vs-no-manager delta test (isolates the right class — the only remaining
+difference is `maybe_add_partition`, whose idempotent body allocates nothing);
+`batches_awaiting_response`'s deallocate-exactly-once path (`complete_batch` clears
+`is_inflight` first; `is_done()` excludes the split arm and `can_retry`; both
+`complete*` return false onto the deallocating `else` arms);
+`handle_client_responses`'s per-response catch vs `NetworkClient.java:666-674`;
+the split retry backoffs (`SenderTest.java:3860` vs `:3864` — citations correct);
+`MockClient::set_max_in_flight_one` vs the anonymous subclass at `:3956-3973`;
+`test_producer_batch_retries_when_partition_leader_changes` vs Java 3325-3390.
