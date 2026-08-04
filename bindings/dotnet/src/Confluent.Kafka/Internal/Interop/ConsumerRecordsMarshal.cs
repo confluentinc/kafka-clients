@@ -28,12 +28,11 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>On the dispatcher thread — the key M3/P3 decision (PLAN §"The key design
-/// decision").</b> The whole batch lifetime (create → copy-out → destroy) stays inside
-/// the callback, so there is no <c>SafeConsumerRecordsHandle</c>, no native-backed
-/// <see cref="ReadOnlyMemory{T}"/>, and no leak-on-abandoned-<c>Task</c>. The copy-out
-/// is bounded framework work; the user's continuation runs off-thread via
-/// <c>RunContinuationsAsynchronously</c>.
+/// <b>On the dispatcher thread — the key M3/P3 decision.</b> The whole batch lifetime
+/// (create → copy-out → destroy) stays inside the callback, so there is no
+/// <c>SafeConsumerRecordsHandle</c>, no native-backed <see cref="ReadOnlyMemory{T}"/>,
+/// and no leak-on-abandoned-<c>Task</c>. The copy-out is bounded framework work; the
+/// user's continuation runs off-thread via <c>RunContinuationsAsynchronously</c>.
 /// </para>
 /// <para>
 /// <b>Borrow discipline (§B2 Category 4).</b> Each <c>ConsumerRecord_t</c> and every
@@ -41,6 +40,15 @@ namespace Confluent.Kafka.Internal.Interop;
 /// never freed here. Strings use the <b>length-delimited</b> form
 /// (<see cref="Utf8Marshal.PtrToString(IntPtr, int)"/> with <c>out_len</c>) — NEVER a
 /// NUL-scan (§B3), which would over-read past the field into the batch.
+/// </para>
+/// <para>
+/// <b>Key/Value as <c>byte[]</c> (PLAN micro-decision A).</b> The copy-out produces an
+/// owned <c>byte[]</c> directly — see <see cref="CopyBytes"/>, which drops the
+/// <see cref="ReadOnlyMemory{T}"/> wrap the internal type used. That removes a wrapper
+/// (and lets this file stay <c>unsafe</c>-free — <see cref="Marshal.Copy(IntPtr, byte[], int, int)"/>
+/// into an owned array is safe managed API), rather than adding any copy: the array was
+/// always allocated. This unifies the record's raw bytes with <see cref="Header.Value"/>
+/// and matches Java / confluent-kafka-dotnet.
 /// </para>
 /// <para>
 /// <b>Allocation budget (§B4 / consumer-threading §27 / DoD §10).</b> The only
@@ -52,8 +60,6 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </remarks>
 internal static class ConsumerRecordsMarshal
 {
-    private static readonly IReadOnlyList<RecordHeader> s_noHeaders = Array.Empty<RecordHeader>();
-
     /// <summary>
     /// Copies the borrowed native batch <paramref name="records"/> into an owned
     /// <see cref="ConsumerRecords"/>. The caller retains ownership of
@@ -97,7 +103,7 @@ internal static class ConsumerRecordsMarshal
         int partition = NativeMethods.ConsumerRecordPartition(record);
         long offset = NativeMethods.ConsumerRecordOffset(record);
         long timestamp = NativeMethods.ConsumerRecordTimestamp(record);
-        int timestampType = NativeMethods.ConsumerRecordTimestampType(record);
+        TimestampType timestampType = (TimestampType)NativeMethods.ConsumerRecordTimestampType(record);
 
         // Topic: length-delimited slice → owned string (§B3, never NUL-scan). A record
         // always has a topic, so a null pointer would be a core contract violation; the
@@ -106,27 +112,28 @@ internal static class ConsumerRecordsMarshal
         IntPtr topicPtr = NativeMethods.ConsumerRecordTopic(record, out int topicLen);
         string topic = Utf8Marshal.PtrToString(topicPtr, topicLen) ?? string.Empty;
 
-        ReadOnlyMemory<byte>? key = CopyBytes(NativeMethods.ConsumerRecordKey(record, out int keyLen), keyLen);
-        ReadOnlyMemory<byte>? value = CopyBytes(NativeMethods.ConsumerRecordValue(record, out int valueLen), valueLen);
-        IReadOnlyList<RecordHeader> headers = CopyHeaders(record);
+        byte[]? key = CopyBytes(NativeMethods.ConsumerRecordKey(record, out int keyLen), keyLen);
+        byte[]? value = CopyBytes(NativeMethods.ConsumerRecordValue(record, out int valueLen), valueLen);
+        Headers headers = CopyHeaders(record);
 
         return new ConsumerRecord(topic, partition, offset, timestamp, timestampType, key, value, headers);
     }
 
     /// <summary>
-    /// Copies all headers of a borrowed record into an owned list, each key from the
-    /// length-delimited slice (§B3) and each value copied out (or <see langword="null"/>).
-    /// Returns a shared empty list when the record has no headers (no allocation).
+    /// Copies all headers of a borrowed record into an owned <see cref="Headers"/>,
+    /// each key from the length-delimited slice (§B3) and each value copied out (or
+    /// <see langword="null"/>). Returns the shared empty <see cref="Headers"/> when the
+    /// record has no headers (no allocation).
     /// </summary>
-    private static IReadOnlyList<RecordHeader> CopyHeaders(IntPtr record)
+    private static Headers CopyHeaders(IntPtr record)
     {
         int headerCount = NativeMethods.ConsumerRecordHeaderCount(record);
         if (headerCount <= 0)
         {
-            return s_noHeaders;
+            return Headers.Empty;
         }
 
-        List<RecordHeader> headers = new List<RecordHeader>(headerCount);
+        List<Header> headers = new List<Header>(headerCount);
         for (int i = 0; i < headerCount; i++)
         {
             // Header key: length-delimited slice → owned string (§B3). A missing key
@@ -134,31 +141,36 @@ internal static class ConsumerRecordsMarshal
             IntPtr keyPtr = NativeMethods.ConsumerRecordHeaderKey(record, i, out int keyLen);
             string key = Utf8Marshal.PtrToString(keyPtr, keyLen) ?? string.Empty;
 
-            ReadOnlyMemory<byte>? value =
+            byte[]? value =
                 CopyBytes(NativeMethods.ConsumerRecordHeaderValue(record, i, out int valueLen), valueLen);
 
-            headers.Add(new RecordHeader(key, value));
+            headers.Add(new Header(key, value));
         }
 
-        return headers;
+        return new Headers(headers);
     }
 
     /// <summary>
-    /// Copies a borrowed <c>(ptr, len)</c> byte slice into an owned array, or returns
-    /// <see langword="null"/> when the slice is absent (<c>len &lt; 0</c> or a null
-    /// pointer — the ABI's absent-key / tombstone sentinel). A non-null pointer with
+    /// Copies a borrowed <c>(ptr, len)</c> byte slice into an owned <c>byte[]</c>, or
+    /// returns <see langword="null"/> when the slice is absent (<c>len &lt; 0</c> or a
+    /// null pointer — the ABI's absent-key / tombstone sentinel). A non-null pointer with
     /// <c>len == 0</c> is a genuine empty array (distinct from absent).
     /// </summary>
-    private static unsafe ReadOnlyMemory<byte>? CopyBytes(IntPtr ptr, int length)
+    /// <remarks>
+    /// Returns <c>byte[]</c> directly (PLAN micro-decision A) — no
+    /// <see cref="ReadOnlyMemory{T}"/> wrap. The array is an owned copy: the borrowed
+    /// slice is invalidated by <c>ConsumerRecords_destroy</c> right after this callback
+    /// (§B4 copy-out default). <see cref="Marshal.Copy(IntPtr, byte[], int, int)"/> pins
+    /// nothing and does not over-read (exactly <paramref name="length"/> bytes), so no
+    /// <c>unsafe</c> is needed here.
+    /// </remarks>
+    private static byte[]? CopyBytes(IntPtr ptr, int length)
     {
         if (ptr == IntPtr.Zero || length < 0)
         {
             return null;
         }
 
-        // An owned copy — the borrowed slice is invalidated by ConsumerRecords_destroy
-        // right after this callback (§B4 copy-out default). Marshal.Copy pins nothing
-        // and does not over-read: exactly `length` bytes.
         byte[] buffer = new byte[length];
         if (length > 0)
         {
