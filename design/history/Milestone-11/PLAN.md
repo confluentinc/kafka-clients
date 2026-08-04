@@ -1071,8 +1071,9 @@ natural move once it governs code outside the producer.
 
 ### 9.8 Critic review of Phase 2
 
-**Status:** open — **five** Critic 42 passes; none has yet returned zero findings.
-Passes archived at `design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
+**Status:** DONE — loop **closed 2026-08-04 on a clean sixth pass** (zero findings).
+Six Critic 42 passes archived at
+`design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
 
 | Pass | Findings | Where | Fixes |
 |---|---|---|---|
@@ -1080,7 +1081,12 @@ Passes archived at `design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
 | 2 | 2 (non-behavioural) | the pass-1 fix | `b62e218` |
 | 3 | 1 | rules §12 prose, written to fix pass 2 | `e8a91e7` |
 | 4 | 2 | §9.7 justification + a §12 citation | `8264450` |
-| 5 | 3 | §9.7 / §12 flag anchoring, and this file's structure | pending |
+| 5 | 3 | §9.7 / §12 flag anchoring, and §9's structure | `e7442fe` |
+| 6 | **0** | — | closes the loop |
+
+Pass 6 verified the pass-5 fixes and re-derived §9.9's figures independently, then
+audited **every** consumer of `latestVersionUnstable` in the tree — not just the txn
+builders — to confirm §9.9's "no live defect" claim, Streams pair included.
 
 **Phase 2's `src/` has been clean since pass 1** — `git diff --stat e8a91e7 HEAD`
 over `*.rs` is empty, confirmed by pass 5. Every round after the first found a
@@ -1137,26 +1143,61 @@ separate copy that has been touched by exactly one commit — `6cd275c Initial b
 | `latestVersionUnstable: true` | 5 specs | **1** (`InitProducerIdRequest`) |
 | `ListOffsetsRequest` versions | `1-10` | `1-11` |
 
-The build corpus is consistently **older**. Two consequences:
+The build corpus is consistently **older**.
 
-  1. **Reviewability.** A claim about spec content is unverifiable unless it names
-     its corpus, because the obvious place to check — `kafka/`, per CLAUDE.md — is
-     not what compiles. This produced three findings in the Phase 2 loop alone
-     (§9.8). Any spec-derived claim must now name the file it came from.
-  2. **§9.2 scope.** The 4.2 → 4.3.1 migration is really **pre-4.2 → 4.3.1** for
-     generated code. Refreshing `generator/messages/` will surface the 36 existing
-     deltas at the same time as the 4.3.1 ones, and `ListOffsetsRequest` v11 shows
-     these include whole new versions, not just flags.
+**Why it matters — reviewability.** A claim about spec content is unverifiable
+unless it names its corpus, because the obvious place to check — `kafka/`, per
+CLAUDE.md — is not what compiles. This produced three findings in the Phase 2 loop
+alone (§9.8), the worst of which was a warning block whose cited evidence
+contradicted it: a reviewer verifying it the documented way would have deleted the
+warning and made the change it forbids. Until the duplication is resolved, every
+spec-derived claim must name the file it came from.
 
-**Not folded into Milestone 11.** Regenerating from 4.2 changes 36 specs across the
-entire wire surface and would make any transaction-phase regression ambiguous.
-Sequence it with §9.2 instead, refreshing straight to the chosen base.
+**This item is self-contained.** It is *not* coupled to §9.2 — the divergence exists
+against 4.2 today and stands on its own merits, whatever base is chosen later.
 
-**No known live defect.** All five Phase 2 transaction APIs have flags identical in
-both corpora, so Phase 2's generated code matches 4.2. The `OffsetCommit` /
-`OffsetFetch` flag delta is latent: no production site consults
-`latest_version_with_unstable` for those APIs today — it becomes real only if §9.7
-is executed mechanically, which is what §9.7's warning block now prevents.
+**Full classification of the 36 (done, so the refresh no longer needs the review):**
+
+| Category | Count | In scope? |
+|---|---|---|
+| Comment/doc text only (`"Verison"` → `"Version"`, `"reqestor"` → `"requestor"`) | 16 | no code impact whatsoever |
+| New `validVersions`, out of scope | 14 | 10 Share (KIP-932, `consumer-threading.md` §20), 2 Raft controller, 2 `WriteTxnMarkers` (broker-sent) |
+| New `validVersions`, **in scope** | 2 | `ListOffsets{Request,Response}` v11 |
+| New fields | 2 | `StreamsGroup{Describe,Heartbeat}Response` — Streams, out of scope |
+| Flag line only | 2 | `OffsetCommitRequest`, `OffsetFetchRequest` |
+
+`ListOffsets` v11 is the only in-scope functional delta, and its whole diff is the
+version range plus a comment — KIP-1023 adds a sentinel *timestamp value*, not a
+field. Version negotiation settles on v10, so a v10-capable client is compatible;
+the gap is an unexposed capability, not an incompatibility.
+
+**Options when this is picked up:**
+
+  1. **Refresh the copy** from the submodule. Keeps the build submodule-independent,
+     but it drifted silently for the project's entire history and would again.
+  2. **Point `build.rs` at `kafka/clients/src/main/resources/common/message/`.**
+     Single source of truth, cannot drift; costs `git submodule update --init` as a
+     build prerequisite. Both trees hold the *same 197 filenames* with nothing
+     custom in `generator/messages/`, so nothing is lost by deleting it.
+
+Option 2 is preferred: silent drift caused this, and a missing submodule fails
+loudly. Either way, verify by rebuilding and running the suite — the generated code
+for `ListOffsets` v11 and the out-of-scope version bumps is the only real unknown.
+
+**No known live defect** — audited by Critic 42's sixth pass, not merely assumed.
+`latest_version_unstable()` has no caller outside the generated file. The only
+production `latest_version_with_unstable(false)` sites are the five txn builders,
+whose specs are flag-identical across corpora. The two other readers
+(`is_version_enabled`, `to_api_version_internal`) are reached only from
+`api_versions_response.rs`, and **every caller in the tree passes `true`**.
+`NodeApiVersions` uses the unstable-inclusive `latest_version()`, faithful to Java's
+`ApiVersionsResponse.toApiVersion`. For the Streams pair, `validVersions` is
+identical in both corpora (highest = 0), so `latest_version()` returns 0 = Java;
+only the uncalled `with_unstable(false)` would yield −1.
+
+The `OffsetCommit` / `OffsetFetch` flag delta is therefore **latent**: it becomes
+real only if §9.7 is executed mechanically, which §9.7's warning block prevents.
+Resolving this item removes that hazard at the source instead of annotating it.
 
 
 ---

@@ -1,7 +1,7 @@
-# Critic 42 — Milestone 11 Phase 2: OPEN (5 passes, none clean)
+# Critic 42 — Milestone 11 Phase 2: CLOSED on a clean pass
 
-Five completed Critic passes. **None has returned zero findings.** This phase is not
-closed; pass 6 is required.
+Six Critic passes. **Pass 6 returned zero findings** — that is what closes this
+phase, per `agent-roles.md` §2. Nothing was substituted for it.
 
 | Pass | Findings | Nature | Fixes |
 |---|---|---|---|
@@ -9,7 +9,8 @@ closed; pass 6 is required.
 | 2 | 2 | consistency + docs, no behaviour | `b62e218` |
 | 3 | 1 | **docs only** — rules §12 prose | `e8a91e7` |
 | 4 | 2 | **docs only** — §9.7 justification, §12 citation | `8264450` |
-| 5 | 3 | **docs only** — flag anchoring in §9.7/§12, PLAN structure | pending |
+| 5 | 3 | **docs only** — flag anchoring in §9.7/§12, PLAN structure | `e7442fe` |
+| 6 | **0** | — | closes the loop |
 
 ## Pass 5's findings (all three confirmed by the Actor, independently)
 
@@ -30,14 +31,34 @@ Fixed by naming the corpus at every claim site, moving §9.7-§9.8 back inside �
 and adding **§9.9** for the root cause: `generator/messages/` is a pre-4.2 snapshot,
 36 of 197 specs differ, never refreshed since `6cd275c`.
 
-## Why this is not closed yet
+## Pass 6 (clean)
+
+Verified `e7442fe` is documentation-only (`git diff --stat e8a91e7 HEAD -- '*.rs'`
+empty; no non-`.md` file changed at all), re-derived every figure in §9.9
+independently, and confirmed §9.1-§9.9 are ascending inside `## 9` with all 17
+`§9.x` cross-references resolving.
+
+Went beyond its brief on one point: rather than accept §9.9's "no live defect", it
+audited **every** reader of the flag in the tree. `latest_version_unstable()` has no
+caller outside the generated file; the only production
+`latest_version_with_unstable(false)` sites are the five txn builders, whose specs
+are flag-identical across corpora; `is_version_enabled` and
+`to_api_version_internal` are reached only from `api_versions_response.rs` and every
+caller passes `true`. For the Streams pair `validVersions` is identical in both
+corpora, so the live accessor returns Java's value. The claim holds.
+
+Recorded three items it examined and deliberately did not raise, so they read as
+considered rather than missed — including that §9.8's pass-5 row could not cite the
+SHA of the commit containing it.
+
+## What the closure rests on
 
 **Phase 2's code was last found defective in pass 1** and has been clean across
 passes 2, 3, and 4. Passes 3 and 4 found nothing in `src/` at all — both were
 entirely about documentation, and specifically about the *follow-up item* (§9.7) and
 the *rule* (§12) that pass 1's fix produced.
 
-**No clean pass exists.** Five passes, five non-empty reports. Pass 4's two
+**A clean pass exists.** Six passes; the sixth found nothing. Pass 4's two
 findings were fixed in `8264450` and re-verified **mechanically by the Actor**, not
 by an independent reviewer:
 
@@ -887,3 +908,142 @@ One suggestion, arising from Issue 12 rather than from any false positive:
     per-corpus distinction is the missing piece that would have caught all three.
     Rules §12:503-514 is the natural place for the concrete version of this, since
     it is the rule that reasons about the flag.
+
+---
+
+# Pass 6 report (clean — closes the loop)
+
+# Critic 42 — Milestone 11 Phase 2, sixth pass
+
+Reviewed `e7442fe` (`fixup! Phase 2: address Critic 42 fifth-pass findings 11-13`).
+
+**No findings.**
+
+`git diff --stat e8a91e7 HEAD -- '*.rs'` is empty, and
+`git diff --name-only e8a91e7 HEAD | grep -v '\.md$'` returns nothing — the commit is
+documentation-only, as stated.
+
+## Pass 5's three findings: all fixed correctly
+
+**Issues 11 / 12 (corpus anchoring) — fixed, and every claim verified against the
+corpus it now names.**
+
+  - `grep -rl '"latestVersionUnstable": true' generator/messages/` → **5** files
+    (`InitProducerIdRequest`, `OffsetCommitRequest`, `OffsetFetchRequest`,
+    `StreamsGroupHeartbeatRequest`, `StreamsGroupDescribeRequest`).
+    Same grep over `kafka/clients/src/main/resources/common/message/` → **1**
+    (`InitProducerIdRequest.json`). Both counts as documented.
+  - Generated table
+    (`target/debug/build/confluent-kafka-rust-*/out/generated/api_message_type.rs`):
+    `OFFSET_COMMIT`/`OFFSET_FETCH` highest = 10, `latest_version_unstable()` = true,
+    and `highest_supported_version` returns `highest - 1` when the flag is set and
+    unstable is disabled (`:621-625`) — so 10 vs 9, exactly as §9.7's warning says.
+  - §9.7's cited sites are right: `offset_commit_request.rs:183` and
+    `offset_fetch_request.rs:286` are both the
+    `latest_allowed_version: ApiKeys::X.latest_version(),` line.
+  - §9.7's parenthetical "(`METADATA`, `FIND_COORDINATOR`, `SASL_HANDSHAKE`,
+    `SASL_AUTHENTICATE` and `CONSUMER_GROUP_HEARTBEAT` set no flag at all, which
+    defaults to false)" — verified absent in **both** corpora for all five. This is a
+    presence-vs-value claim stated correctly.
+  - §12:515-517's "the other four had their latest versions released by 4.2" holds:
+    for all four, `validVersions` is byte-identical between the corpora, so the only
+    4.2 change was dropping the flag.
+
+**§9.9 — every number checked and correct.** 197 specs in each tree; `diff -rq`
+reports **36** differing files (plus `README.md` present only in `kafka/`); exactly
+**2** of the 36 differ by a single line, and in both that line is
+`"latestVersionUnstable": true` (`OffsetCommitRequest.json` `43d42`,
+`OffsetFetchRequest.json` `45d44`); `ListOffsetsRequest.json` is `1-10` vs `1-11`;
+`build.rs:44` is the
+`generator::generate_messages(Path::new("generator/messages"), …)` call;
+`git log --oneline -- generator/messages/` returns exactly one commit,
+`6cd275c Initial branch (#1)`.
+
+**§9.9's "no known live defect" is sound, including for the Streams APIs.** I swept
+every consumer of the flag rather than only the txn builders:
+
+  - `latest_version_unstable()` — no caller outside the generated file.
+  - `latest_version_with_unstable(false)` in production — only the five Phase 2 txn
+    builders (`init_producer_id_request.rs:141`, `end_txn_request.rs:151`,
+    `add_offsets_to_txn_request.rs:114`, `txn_offset_commit_request.rs:319`, `:360`).
+    All five txn request specs and all five response specs are byte-identical
+    between the corpora except one comment typo in `InitProducerIdRequest.json:29`
+    (`Verison` → `Version`), and its flag is `true` in both. So Phase 2's generated
+    code does match 4.2.
+  - The other two paths that reach the flag —
+    `ApiKeys::is_version_enabled(v, enable_unstable)` (`api_keys.rs:290`) and
+    `to_api_version_internal` (`:347`) — are reached only from
+    `filter_apis` / `collect_apis` / `intersect_forwardable_apis` /
+    `default_api_versions_response*` in `api_versions_response.rs`. Every caller in
+    the tree passes `true`; `collect_apis` has no caller; `is_version_enabled` has no
+    production caller (two `API_VERSIONS` asserts only, which short-circuit at
+    `:291`).
+  - `NodeApiVersions` (`node_api_versions.rs:57`, `:326`) goes through
+    `ApiVersionsResponse::to_api_version`, which uses `latest_version()` — the
+    unstable-**inclusive** accessor — matching Java's
+    `ApiVersionsResponse.toApiVersion(ApiKeys)`. Unaffected by the flag.
+  - Streams specifically: `STREAMS_GROUP_HEARTBEAT` / `STREAMS_GROUP_DESCRIBE` have
+    highest = 0 with identical `validVersions` in both corpora, so `latest_version()`
+    returns 0 = Java. Only `with_unstable(false)` would yield -1, and nothing calls
+    it for them. The assertion holds for Streams as it does for
+    OffsetCommit/OffsetFetch.
+
+**Issue 13 (structure) — fixed.** §9.1 … §9.9 are all `###` headings inside
+`## 9. Follow-ups`, ascending, with `## 10. Recorded translation deviations` at
+`:1164` after them. Every one of `### 9.1`–`### 9.9` and `### 10.1`–`### 10.4`
+appears exactly once. Diffing §9.7's body between `8264450` and HEAD shows only the
+intended content edits — nothing truncated or lost in the move. §9.8's body is
+complete.
+
+**Every `§9.x` cross-reference resolves and says what the citing text implies** —
+`PLAN.md` `:1033`, `:1082-1083`, `:1091`, `:1094`, `:1102`, `:1104`, `:1107`,
+`:1117`, `:1126`, `:1145`, `:1146`, `:1153`, `:1158-1159`; and
+`.claude/rules/producer-transactions.md:472` (§9.1), `:518` (§9.9), `:551` and `:556`
+(§9.7). No dangling numbers.
+
+**§9.8's corrected status is accurate and does not overclaim.** "Five Critic 42
+passes; none has yet returned zero findings" matches the archive (5 / 2 / 1 / 2 / 3);
+every fix SHA in the table is the right commit; "every round after the first found a
+defect in a **fix**, never in the translation" holds for passes 2-5; and the
+"declared closed without a clean pass" admission matches `e8a91e7`'s own commit
+message ("close the Phase 2 Critic loop after a clean third pass").
+
+## Phase 2's code is untouched and intact
+
+Ten txn wrapper files present; the five txn `ApiKeys` arms in each of
+`abstract_request.rs` and `abstract_response.rs` unchanged; all seven
+`sort_unstable*` sites still in place
+(`add_partitions_to_txn_request.rs:238`, `add_partitions_to_txn_response.rs:181,187`,
+`txn_offset_commit_request.rs:185,191`, `txn_offset_commit_response.rs:87,93`).
+
+## Considered and deliberately not raised
+
+Recorded so a future reader knows these were looked at, not missed:
+
+  1. §9.8's table row for pass 5 shows its fix as `pending`, but the commit writing
+     that row **is** the fix. A commit cannot cite its own SHA, and the section body
+     immediately below describes §9.9 as added, so the fix state is unambiguous in
+     context. Not a defect.
+  2. §9.8's "common root" sentence attributes all three flag-related findings to the
+     two-corpus disagreement. Strictly that root applies only to pass 5's; pass 2's
+     was presence-vs-value (provably corpus-independent — the four txn specs involved
+     are byte-identical across both trees) and pass 4's was a value asserted across a
+     set without per-member checking. But this is the Critic's own pass-5 framing
+     ("the per-corpus distinction is the missing piece that would have caught all
+     three") implemented faithfully, the operative guard is §12's "check the Java
+     `super(...)` call, not the spec flag", and nothing actionable turns on the
+     attribution.
+  3. "Phase 2's `src/` has been clean since pass 1" is supported by the pass-2/3
+     verdicts rather than by the `e8a91e7..HEAD` diff it cites; pass 2's three
+     production-line changes were provable no-ops. Reads correctly in context.
+
+## Suggested rule / CLAUDE.md updates
+
+`COMMENTS.FP.md` contains nothing about this loop; no `COMMENTS.FN.md` exists.
+Nothing to fold in. Pass 5's CLAUDE.md "Source Reference" suggestion is already
+recorded in `COMMENTS.DONE.42.md` for the `agent-roles.md` §2 process; I have no
+further suggestion.
+
+## Sign-off
+
+Clean pass — **no findings**. Phase 2 can close on this.
