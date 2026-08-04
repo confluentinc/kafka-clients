@@ -31,6 +31,7 @@ use confluent_kafka::common::protocol::Errors;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::{create_topic, wait_for_all_partitions_metadata};
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -73,6 +74,9 @@ async fn test_create_then_list_and_describe_topics() {
 
     // The topic shows up in list_topics.
     assert!(wait_until_listed(admin.as_ref(), &topic, true).await, "topic should be listed");
+    // As above: being listed does not imply the describe target's metadata cache
+    // is populated, and the assertions below depend on the partition count.
+    wait_for_all_partitions_metadata(admin.as_ref(), &topic, 2).await;
 
     // describe_topics reports the partition count and replication factor.
     let described = admin
@@ -133,12 +137,7 @@ async fn test_delete_topics_removes_them() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_delete");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topics should succeed");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     assert!(
         wait_until_listed(admin.as_ref(), &topic, true).await,
         "topic should be listed after create"
@@ -192,6 +191,11 @@ async fn test_create_multiple_topics_partition_round_trip() {
         .expect("create topics should succeed");
     assert!(wait_until_listed(admin.as_ref(), &topic_a, true).await);
     assert!(wait_until_listed(admin.as_ref(), &topic_b, true).await);
+    // Appearing in `list_topics` does not guarantee that the broker answering
+    // the `describe_topics` below has the topic in its metadata cache yet, so
+    // wait on the partition counts the assertions rely on.
+    wait_for_all_partitions_metadata(admin.as_ref(), &topic_a, 3).await;
+    wait_for_all_partitions_metadata(admin.as_ref(), &topic_b, 1).await;
 
     let described = admin
         .describe_topics(

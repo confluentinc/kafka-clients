@@ -32,6 +32,12 @@ use confluent_kafka::common::quota::{
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::wait_until_true;
+
+/// Message Java uses when a quota describe never observes the alteration.
+///
+/// Mirrors `PlaintextAdminIntegrationTest`'s `TestUtils.waitUntilTrue` message.
+const QUOTA_PROPAGATION_TIMEOUT_MSG: &str = "Timed out waiting for quota config to be propagated to all servers";
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -68,6 +74,27 @@ async fn test_alter_then_describe_round_trips_a_byte_rate_quota() {
         CLIENT_ID,
         "quota-client-roundtrip",
     )]);
+
+    // `alterClientQuotas` returns once the controller has accepted the change;
+    // the brokers observe it asynchronously, so a describe issued immediately
+    // after can legitimately report nothing. Java wraps the describe in
+    // `TestUtils.waitUntilTrue` for exactly this reason (see
+    // `PlaintextAdminIntegrationTest.testCreatePartitionWithOptionRetryOnQuotaViolation`),
+    // and swallows in-flight errors inside the condition — mirrored by
+    // `is_ok_and` below.
+    wait_until_true(
+        || async {
+            admin
+                .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
+                .entities()
+                .get()
+                .await
+                .is_ok_and(|entities| entities.contains_key(&entity))
+        },
+        QUOTA_PROPAGATION_TIMEOUT_MSG,
+    )
+    .await;
+
     let described = admin
         .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
         .entities()
@@ -91,6 +118,22 @@ async fn test_remove_quota_is_no_longer_reported() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let entity = client_id_entity("quota-client-remove");
+    let filter =
+        ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(CLIENT_ID, "quota-client-remove")]);
+
+    // Reports whether `producer_byte_rate` is currently visible for the entity.
+    let producer_rate_reported = || async {
+        admin
+            .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
+            .entities()
+            .get()
+            .await
+            .is_ok_and(|entities| {
+                entities
+                    .get(&entity)
+                    .is_some_and(|values| values.contains_key("producer_byte_rate"))
+            })
+    };
 
     // First set a quota.
     admin
@@ -106,6 +149,12 @@ async fn test_remove_quota_is_no_longer_reported() {
         .await
         .expect("set producer_byte_rate");
 
+    // Wait for the *set* to become visible before removing it. Without this the
+    // "no longer reported" assertion below passes vacuously whenever the set has
+    // not propagated yet — i.e. the test would go green without ever exercising
+    // removal.
+    wait_until_true(producer_rate_reported, QUOTA_PROPAGATION_TIMEOUT_MSG).await;
+
     // Then remove it via an `Op` with a `None` value (Java `null`).
     admin
         .alter_client_quotas(
@@ -120,8 +169,13 @@ async fn test_remove_quota_is_no_longer_reported() {
         .await
         .expect("remove producer_byte_rate");
 
-    let filter =
-        ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(CLIENT_ID, "quota-client-remove")]);
+    // And wait for the removal to propagate in turn.
+    wait_until_true(
+        || async { !producer_rate_reported().await },
+        "Timed out waiting for quota config removal to be propagated to all servers",
+    )
+    .await;
+
     let described = admin
         .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
         .entities()
@@ -161,6 +215,21 @@ async fn test_entity_type_filter_returns_only_matching_entities() {
 
     // A filter on the CLIENT_ID entity type must only return client-id entities.
     let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
+
+    // Same asynchronous propagation as the round-trip test above.
+    wait_until_true(
+        || async {
+            admin
+                .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
+                .entities()
+                .get()
+                .await
+                .is_ok_and(|entities| entities.contains_key(&entity))
+        },
+        QUOTA_PROPAGATION_TIMEOUT_MSG,
+    )
+    .await;
+
     let described = admin
         .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
         .entities()

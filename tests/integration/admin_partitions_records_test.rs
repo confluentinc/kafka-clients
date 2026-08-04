@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DescribeTopicsOptions, NewPartitions, NewTopic, RecordsToDelete, new_admin_client,
+    Admin, AdminClientConfig, CreatePartitionsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DescribeTopicsOptions, NewPartitions, RecordsToDelete, new_admin_client,
 };
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
@@ -35,6 +35,7 @@ use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, Produce
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::{create_topic, wait_for_all_partitions_metadata};
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -112,12 +113,7 @@ async fn test_create_partitions_increases_count() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_create_partitions");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     assert_eq!(
         partition_count(admin.as_ref(), &topic).await,
         1,
@@ -133,17 +129,15 @@ async fn test_create_partitions_increases_count() {
         .await
         .expect("create partitions should succeed");
 
-    // The new partition count is observable via describe_topics (allow a brief
-    // metadata-propagation window).
-    let mut observed = 0;
-    for _ in 0..50 {
-        observed = partition_count(admin.as_ref(), &topic).await;
-        if observed == 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert_eq!(observed, 3, "partition count should have increased to 3");
+    // The new partition count is observable via describe_topics once the
+    // metadata has propagated. Mirrors Java's
+    // `TestUtils.waitForAllPartitionsMetadata(brokers, topic1, expectedNumPartitions = 3)`.
+    wait_for_all_partitions_metadata(admin.as_ref(), &topic, 3).await;
+    assert_eq!(
+        partition_count(admin.as_ref(), &topic).await,
+        3,
+        "partition count should have increased to 3"
+    );
 
     admin
         .delete_topics(TopicCollection::of_topic_names(vec![topic.clone()]), DeleteTopicsOptions::new())
@@ -163,12 +157,7 @@ async fn test_create_partitions_decreasing_count_fails() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_create_partitions_decrease");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 3, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 3, 1).await;
 
     let mut counts = HashMap::new();
     counts.insert(topic.clone(), NewPartitions::increase_to(1));
@@ -201,12 +190,7 @@ async fn test_delete_records_advances_low_watermark() {
     let bootstrap = ctx.bootstrap_servers().to_string();
 
     let topic = ctx.topic("admin_delete_records");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     // Produce 10 records (offsets 0..9) to partition 0.
     produce_records(&bootstrap, &topic, 0, 10).await;
@@ -243,12 +227,7 @@ async fn test_delete_records_offset_out_of_range_fails() {
     let bootstrap = ctx.bootstrap_servers().to_string();
 
     let topic = ctx.topic("admin_delete_records_oor");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     produce_records(&bootstrap, &topic, 0, 5).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -284,12 +263,7 @@ async fn test_delete_records_nonexistent_partition_fails() {
     let admin = admin_for_with_timeout(ctx.bootstrap_servers(), 8000);
 
     let topic = ctx.topic("admin_delete_records_missing");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     // Partition 5 does not exist (topic has only partition 0).
     let tp = TopicPartition::new(topic.clone(), 5);

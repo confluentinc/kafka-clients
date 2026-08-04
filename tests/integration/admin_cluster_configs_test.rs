@@ -24,15 +24,29 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, ConfigEntry, CreateTopicsOptions,
-    DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions, ListConfigResourcesOptions, NewTopic, OpType,
-    new_admin_client,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, ConfigEntry, DeleteTopicsOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, ListConfigResourcesOptions, OpType, new_admin_client,
 };
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::{create_topic, wait_until_true};
+
+/// Reads `retention.ms` for `resource`, or `None` if the describe failed or the
+/// entry is absent — i.e. "not observable (yet)" rather than a hard failure.
+async fn retention_ms(admin: &dyn Admin, resource: &ConfigResource) -> Option<String> {
+    admin
+        .describe_configs(std::slice::from_ref(resource), DescribeConfigsOptions::new())
+        .values()
+        .get(resource)?
+        .get()
+        .await
+        .ok()?
+        .get("retention.ms")
+        .and_then(|entry| entry.value().map(str::to_string))
+}
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -77,12 +91,10 @@ async fn test_describe_configs_topic_returns_defaults() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_describe_topic_config");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    // Creates the topic and waits for its metadata to reach the brokers, so the
+    // describes below cannot race creation. Mirrors Java's
+    // `TestUtils.createTopicWithAdmin`.
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
     let result = admin.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
@@ -108,12 +120,10 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_alter_topic_config");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    // Creates the topic and waits for its metadata to reach the brokers, so the
+    // describes below cannot race creation. Mirrors Java's
+    // `TestUtils.createTopicWithAdmin`.
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
 
@@ -130,6 +140,15 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
         .get()
         .await
         .expect("set retention.ms");
+
+    // Config changes reach the brokers asynchronously, so wait for the new value
+    // to be observable before asserting. Java guards every describe-after-alter
+    // the same way, with `TestUtils.waitUntilTrue`.
+    wait_until_true(
+        || async { retention_ms(admin.as_ref(), &resource).await.as_deref() == Some("123456789") },
+        "Timed out waiting for the retention.ms set to be propagated to all servers",
+    )
+    .await;
 
     // describe_configs confirms the new value.
     let described = admin
@@ -154,6 +173,13 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
         .get()
         .await
         .expect("delete retention.ms");
+
+    // Likewise wait for the delete to propagate before asserting on it.
+    wait_until_true(
+        || async { retention_ms(admin.as_ref(), &resource).await.as_deref() != Some("123456789") },
+        "Timed out waiting for the retention.ms delete to be propagated to all servers",
+    )
+    .await;
 
     let described = admin
         .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
@@ -216,12 +242,10 @@ async fn test_list_config_resources_lists_resources() {
 
     // Create a topic so at least one TOPIC config resource is listable.
     let topic = ctx.topic("admin_list_config_resources");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    // Creates the topic and waits for its metadata to reach the brokers, so the
+    // describes below cannot race creation. Mirrors Java's
+    // `TestUtils.createTopicWithAdmin`.
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     // An empty type set requests all supported config-resource types.
     let resources = admin
@@ -285,6 +309,20 @@ async fn test_list_client_metrics_resources_lists_subscription() {
         .get()
         .await
         .expect("create client-metrics subscription");
+
+    // The new subscription becomes visible to the listing asynchronously.
+    wait_until_true(
+        || async {
+            admin
+                .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
+                .all()
+                .get()
+                .await
+                .is_ok_and(|listings| listings.iter().any(|l| l.name() == subscription))
+        },
+        "Timed out waiting for the client-metrics subscription to be propagated to all servers",
+    )
+    .await;
 
     let listings = admin
         .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())

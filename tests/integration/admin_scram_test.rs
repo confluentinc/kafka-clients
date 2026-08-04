@@ -46,6 +46,7 @@ use confluent_kafka::admin::{
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::wait_until_true;
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -82,6 +83,26 @@ async fn test_upsert_describe_delete_scram_credential_round_trips() {
         .await
         .expect("upsert SCRAM-SHA-256 credential");
 
+    // Credential changes reach the brokers asynchronously, so a describe issued
+    // immediately after the upsert can still report nothing. Wait for it to
+    // land, mirroring how Java guards describe-after-alter with
+    // `TestUtils.waitUntilTrue`.
+    wait_until_true(
+        || async {
+            admin
+                .describe_user_scram_credentials(
+                    std::slice::from_ref(&user),
+                    DescribeUserScramCredentialsOptions::new(),
+                )
+                .users()
+                .get()
+                .await
+                .is_ok_and(|users| users.contains(&user))
+        },
+        "Timed out waiting for SCRAM credential upsert to be propagated to all servers",
+    )
+    .await;
+
     // 2. Describe (only our user) and assert the mechanism + iterations round
     //    trip. The salted password is NEVER returned by the broker, so it is
     //    not (and cannot be) asserted.
@@ -110,6 +131,24 @@ async fn test_upsert_describe_delete_scram_credential_round_trips() {
         .get()
         .await
         .expect("delete SCRAM credential");
+
+    // The deletion propagates asynchronously too — wait for our user to drop out
+    // of the described set before asserting on it.
+    wait_until_true(
+        || async {
+            admin
+                .describe_user_scram_credentials(
+                    std::slice::from_ref(&user),
+                    DescribeUserScramCredentialsOptions::new(),
+                )
+                .users()
+                .get()
+                .await
+                .is_ok_and(|users| !users.contains(&user))
+        },
+        "Timed out waiting for SCRAM credential deletion to be propagated to all servers",
+    )
+    .await;
 
     // 4. Describe again: our user no longer has any credential. `users()`
     //    filters out RESOURCE_NOT_FOUND, so the described-users list for our
