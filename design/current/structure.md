@@ -55,3 +55,108 @@ tests/
     ├── metadata_test.rs
     └── ssl_sasl_test.rs    # SSL and SASL PLAIN integration tests
 ```
+
+## Admin module (Milestone 11 Tier 1 Phase 1 — org.apache.kafka.clients.admin)
+
+> The tree above is stale (it predates the Producer, Consumer and Admin work).
+> The Admin module added in Milestone 11 Phase 1:
+
+```
+src/admin/
+├── mod.rs                    # Admin trait + new_admin_client() factory
+├── admin_client_config.rs    # AdminClientConfig
+├── kafka_admin_client.rs     # KafkaAdminClient (owns NetworkClient + bg task)
+├── mock_admin_client.rs      # MockAdminClient (in-memory fake)
+├── config.rs, config_entry.rs
+├── new_topic.rs, topic_listing.rs, topic_description.rs
+├── create_topics_result.rs, delete_topics_result.rs,
+│   list_topics_result.rs, describe_topics_result.rs
+├── options/                  # {create,delete,list,describe}_topics_options.rs
+└── internals/
+    ├── call.rs               # Call + NodeProvider retry engine
+    ├── admin_metadata_manager.rs
+    ├── admin_utils.rs
+    └── admin_client_runnable.rs   # single tokio::spawn background task (AdminClientRunnable<C>)
+
+# New common/wire types added this phase:
+src/common/acl/{acl_operation.rs, acl_permission_type.rs}   # AclOperation, AclPermissionType (enums)
+src/common/{topic_collection.rs, topic_partition_info.rs}
+src/common/requests/{create_topics_request,create_topics_response,
+                     delete_topics_request,delete_topics_response}.rs
+tests/integration/admin_topics_test.rs                      # real-broker topic-CRUD tests
+```
+
+### Phase 2 additions — Partitions & records + AdminApiDriver engine
+
+```
+src/admin/
+├── new_partitions.rs, records_to_delete.rs, deleted_records.rs
+├── create_partitions_result.rs, delete_records_result.rs
+├── options/{create_partitions_options.rs, delete_records_options.rs}
+└── internals/          # multi-step lookup→fulfillment dispatch engine (pulled fwd from Phase 5)
+    ├── admin_api_driver.rs          # AdminApiDriver
+    ├── admin_api_handler.rs         # AdminApiHandler
+    ├── admin_api_lookup_strategy.rs # AdminApiLookupStrategy
+    ├── admin_api_future.rs          # AdminApiFuture
+    ├── api_request_scope.rs         # ApiRequestScope (SingleLookup | Fulfillment)
+    ├── partition_leader_strategy.rs # PartitionLeaderStrategy
+    ├── partition_leader_cache.rs    # PartitionLeaderCache
+    └── delete_records_handler.rs    # DeleteRecordsHandler
+
+src/common/requests/{create_partitions_request,create_partitions_response,
+                     delete_records_request,delete_records_response}.rs
+tests/integration/admin_partitions_records_test.rs
+```
+
+### Phase 3 additions — Cluster & configs
+
+```
+src/admin/
+├── alter_config_op.rs        # AlterConfigOp (+ OpType)
+├── describe_cluster_result.rs, describe_configs_result.rs,
+│   alter_configs_result.rs, list_config_resources_result.rs
+└── options/{describe_cluster_options, describe_configs_options,
+            alter_configs_options, list_config_resources_options}.rs
+
+src/common/config/config_resource.rs                        # ConfigResource (+ resource-type enum)
+src/common/requests/{describe_cluster_request,describe_cluster_response,
+                     describe_configs_request,describe_configs_response,
+                     incremental_alter_configs_request,incremental_alter_configs_response,
+                     list_config_resources_request,list_config_resources_response}.rs
+tests/integration/admin_cluster_configs_test.rs
+```
+
+### Phase 4 additions — Log dirs
+
+```
+src/admin/
+├── log_dir_description.rs, replica_info.rs
+├── describe_log_dirs_result.rs, alter_replica_log_dirs_result.rs,
+│   describe_replica_log_dirs_result.rs
+└── options/{describe_log_dirs_options, alter_replica_log_dirs_options,
+            describe_replica_log_dirs_options}.rs
+
+src/common/topic_partition_replica.rs                       # TopicPartitionReplica
+src/common/requests/{describe_log_dirs_request,describe_log_dirs_response,
+                     alter_replica_log_dirs_request,alter_replica_log_dirs_response}.rs
+tests/integration/admin_log_dirs_test.rs                    # incl. real cross-dir move (2 KAFKA_LOG_DIRS)
+```
+
+### Phase 5 additions — Elections, reassignment, offsets (completes Tier 1)
+
+```
+src/admin/
+├── offset_spec.rs, new_partition_reassignment.rs, partition_reassignment.rs
+├── elect_leaders_result.rs, alter_partition_reassignments_result.rs,
+│   list_partition_reassignments_result.rs, list_offsets_result.rs
+├── options/{elect_leaders_options, alter_partition_reassignments_options,
+│           list_partition_reassignments_options, list_offsets_options}.rs
+└── internals/list_offsets_handler.rs   # ListOffsetsHandler on the AdminApiDriver engine
+
+src/common/election_type.rs                                 # ElectionType
+src/common/requests/{elect_leaders_request,elect_leaders_response,
+                     alter_partition_reassignments_request,alter_partition_reassignments_response,
+                     list_partition_reassignments_request,list_partition_reassignments_response}.rs
+# (ListOffsetsRequest/Response reused from the Consumer module — not duplicated)
+tests/integration/admin_elections_reassignments_offsets_test.rs  # incl. real 3-broker reassignment
+```

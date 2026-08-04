@@ -38,7 +38,7 @@ use rand::Rng;
 /// ```
 ///
 /// This struct is `Send + Sync` since all fields are immutable after construction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExponentialBackoff {
     initial_interval: i64,
     multiplier: i32,
