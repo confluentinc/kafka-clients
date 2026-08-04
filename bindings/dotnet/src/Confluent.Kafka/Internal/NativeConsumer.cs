@@ -332,13 +332,40 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Unsubscribes from all topics / partitions (async). The returned
+    /// <see cref="Task"/> completes when the core resolves the op (successfully for a
+    /// <c>MockConsumer</c>), or faults with a <see cref="KafkaException"/>. Reuses the
+    /// void completion bridge over <c>Consumer_unsubscribe_async</c> — the one new wire
+    /// this phase (§B7).
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task UnsubscribeAsync(CancellationToken cancellationToken = default)
+    {
+        return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+            NativeMethods.ConsumerUnsubscribeAsync(consumer, callback, userData));
+    }
+
+    /// <summary>
     /// Seeks <c>(topic, partition)</c> to <paramref name="offset"/> (async). On a
     /// <c>MockConsumer</c>, seeking an <b>unassigned</b> partition is a genuine
     /// broker-free failure — the returned <see cref="Task"/> faults with a
     /// <see cref="KafkaException"/> (the void bridge's error path).
     /// </summary>
+    /// <remarks>
+    /// <b>Async, Java-faithful (deliberate divergence from Python's sync <c>seek</c>).</b>
+    /// Java's <c>AsyncKafkaConsumer.seek()</c> returns <c>void</c> but calls a blocking
+    /// cross-thread <c>applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))</c>
+    /// — it blocks — so the CLAUDE.md idiom map maps it to a <see cref="Task"/> (§4). We
+    /// promote the existing async mechanism over <c>Consumer_seek_async</c> unchanged
+    /// (never the sync <c>Consumer_seek</c>). Python exposes <c>seek</c> synchronously;
+    /// that is a deliberate Python divergence, and we choose Java fidelity.
+    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="partition"/> is negative, or <paramref name="offset"/> is negative
+    /// (Java: <c>"seek offset must not be a negative number"</c>).
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     internal Task SeekAsync(
@@ -356,6 +383,17 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         {
             throw new ArgumentOutOfRangeException(
                 nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        // Java-fidelity: AsyncKafkaConsumer.seek() throws IllegalArgumentException
+        // ("seek offset must not be a negative number") on offset < 0 BEFORE the
+        // blocking addAndGet. Per the CLAUDE.md idiom map (IllegalArgumentException →
+        // ArgumentOutOfRangeException, validated before the FFI call) and locked
+        // PLAN decision 11 — the exact message is asserted by the tests (DoD §3).
+        if (offset < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(offset), offset, "seek offset must not be a negative number");
         }
 
         return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
@@ -623,6 +661,57 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     {
         ThrowIfClosed();
 
+        IntPtr metadata = GetGroupMetadataHandleOrThrow();
+        try
+        {
+            return Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(metadata));
+        }
+        finally
+        {
+            NativeMethods.ConsumerGroupMetadataDestroy(metadata);
+        }
+    }
+
+    /// <summary>
+    /// Reads the full consumer group metadata (Java <c>groupMetadata()</c>) — a
+    /// <b>synchronous state read</b>. Marshals the owned (Category-3) metadata handle
+    /// into a public <see cref="ConsumerGroupMetadata"/> (all four fields) and frees the
+    /// handle exactly once (§B2/§B3 via <see cref="ConsumerGroupMetadataMarshal"/>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Concurrency (single-owner).</b> If the core's own access guard rejects
+    /// concurrent access it returns a <b>null</b> metadata handle; this maps to
+    /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
+    /// multi-threaded access."), mirroring the Python sibling's <c>None → RuntimeError</c>
+    /// and the CLAUDE.md §3 idiom map (concurrent sync state read →
+    /// <see cref="InvalidOperationException"/>). <b>Accepted residual:</b> the same
+    /// check-then-use handle TOCTOU vs teardown as <see cref="Wakeup"/> (accepted-by-
+    /// design; a candidate N=9 follow-up if ever hardened).
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for
+    /// multi-threaded access).
+    /// </exception>
+    internal ConsumerGroupMetadata GroupMetadata()
+    {
+        ThrowIfClosed();
+
+        IntPtr metadata = GetGroupMetadataHandleOrThrow();
+
+        // The marshaller reads all four fields and frees the handle exactly once in its
+        // own finally (even if a read throws).
+        return ConsumerGroupMetadataMarshal.CopyOutAndDestroy(metadata);
+    }
+
+    /// <summary>
+    /// Fetches the owned group-metadata handle, mapping the core's concurrent-access
+    /// rejection (a null handle) to <see cref="InvalidOperationException"/> (ffi §B5,
+    /// CLAUDE.md §3). Shared by <see cref="GroupId"/> and <see cref="GroupMetadata"/>.
+    /// The caller owns the returned non-null handle and must destroy it exactly once.
+    /// </summary>
+    private IntPtr GetGroupMetadataHandleOrThrow()
+    {
         IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle());
         if (metadata == IntPtr.Zero)
         {
@@ -633,14 +722,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                 "KafkaConsumer is not safe for multi-threaded access.");
         }
 
-        try
-        {
-            return Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(metadata));
-        }
-        finally
-        {
-            NativeMethods.ConsumerGroupMetadataDestroy(metadata);
-        }
+        return metadata;
     }
 
     /// <summary>
@@ -725,6 +807,56 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         finally
         {
             // ReleaseHandle → Consumer_destroy, exactly once.
+            _handle.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Graceful <b>async</b> close (Java <c>close()</c>) that <b>surfaces</b> the close
+    /// error — the public <c>CloseAsync()</c>'s worker. Takes the one-shot
+    /// <see cref="TryBeginClose"/> latch, closes via <see cref="CloseAsyncInternal"/>
+    /// (<c>close_async</c>, joining the background task), then releases the handle
+    /// (→ <c>Consumer_destroy</c>) in a <c>finally</c> — destroy runs exactly once even
+    /// on a close error. A subsequent <see cref="Dispose"/> / <see cref="DisposeAsync"/>
+    /// loses the latch and no-ops (closed-flag idempotence). Calling this after a
+    /// teardown that already won the latch is a no-op (returns without closing again).
+    /// </summary>
+    /// <remarks>
+    /// <b>No timeout (ABI-verified, PLAN decision 6).</b> The ABI has no async close
+    /// with a timeout — <c>Consumer_close_async</c> takes only a callback; the only
+    /// timeout-accepting close is the sync <c>Consumer_close_with_timeout</c>. So this
+    /// takes only a <see cref="CancellationToken"/>; a faithful <c>CloseAsync(TimeSpan)</c>
+    /// is deferred to an additive overload once a Rust-core <c>close_async_with_timeout</c>
+    /// exists (Mode-B, out of scope). Unlike <see cref="DisposeAsync"/> (which swallows
+    /// the close error), this <b>throws</b> it — <c>close()</c> reports failures.
+    /// </remarks>
+    /// <param name="cancellationToken">
+    /// Cancellation is observed only before the close is submitted (a canceled token
+    /// throws <see cref="OperationCanceledException"/> before taking the latch); once
+    /// close is in flight the graceful join runs to completion.
+    /// </param>
+    /// <exception cref="KafkaException">The core reported a close failure.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal async ValueTask CloseAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!TryBeginClose())
+        {
+            // A prior teardown already won the latch — closing again would double-close
+            // / double-destroy. No-op, matching the idempotent teardown contract.
+            return;
+        }
+
+        try
+        {
+            // Graceful async close (joins the bg task); surface any close error (unlike
+            // DisposeAsync). Under single-owner there is nothing to drain first.
+            await CloseAsyncInternal().ConfigureAwait(false);
+        }
+        finally
+        {
+            // ReleaseHandle → Consumer_destroy, exactly once — even if the close threw.
             _handle.Dispose();
         }
     }
