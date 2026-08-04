@@ -132,7 +132,13 @@ impl InitProducerIdRequestBuilder {
         Self {
             data,
             oldest_allowed_version: ApiKeys::INIT_PRODUCER_ID.oldest_version(),
-            latest_allowed_version: ApiKeys::INIT_PRODUCER_ID.latest_version(),
+            // Java's `AbstractRequest.Builder(ApiKeys)` delegates to
+            // `Builder(apiKey, false)` → `latestVersion(false)`, i.e. "any
+            // supported and *released* version". This spec sets
+            // `latestVersionUnstable: true`, so the unstable-inclusive
+            // `latest_version()` would offer one version higher than Java ever
+            // does. Use the explicit `false` form.
+            latest_allowed_version: ApiKeys::INIT_PRODUCER_ID.latest_version_with_unstable(false),
         }
     }
 
@@ -348,5 +354,31 @@ mod tests {
             assert_eq!(parsed.data().transaction_timeout_ms, 100);
             assert_eq!(parsed.data().transactional_id, None, "v{version}");
         }
+    }
+    /// The builder must offer only *released* versions.
+    ///
+    /// Java's `AbstractRequest.Builder(ApiKeys)` passes
+    /// `enableUnstableLastVersion = false`, and this spec sets
+    /// `latestVersionUnstable: true`, so `latestVersion(false)` is one below the
+    /// unstable-inclusive maximum. Using `latest_version()` here would offer a
+    /// version Java never sends. Regression test for Critic 42 finding 1.
+    #[test]
+    fn test_builder_offers_only_released_versions() {
+        let builder = InitProducerIdRequestBuilder::new(valid_data());
+        let released = ApiKeys::INIT_PRODUCER_ID.latest_version_with_unstable(false);
+        let with_unstable = ApiKeys::INIT_PRODUCER_ID.latest_version();
+
+        assert_eq!(builder.latest_allowed_version(), released);
+        assert_eq!(
+            with_unstable,
+            released + 1,
+            "this spec is expected to mark its last version unstable; if that \
+             changes upstream, revisit the cap rather than this assertion"
+        );
+        assert_ne!(
+            builder.latest_allowed_version(),
+            with_unstable,
+            "must not offer the unstable version"
+        );
     }
 }

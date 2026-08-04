@@ -29,11 +29,14 @@
 //!
 //! Java's class also carries `normalizeRequest`, `allVerifyOnlyRequest`,
 //! `partitionsByTransaction`, and `errorResponseForTransaction`. All four
-//! inspect a *received* v4+ request, which only a broker does — their callers
-//! are `core/.../KafkaApis.scala` and
-//! `server/.../AddPartitionsToTxnManager.java`, with no caller anywhere under
-//! `clients/src/main`. `Builder.forBroker` is likewise used only by the server
-//! module.
+//! inspect a *received* v4+ request, which only a broker does. Verified callers,
+//! none under `clients/src/main`:
+//!
+//!   - `Builder.forBroker` → `server/.../AddPartitionsToTxnManager.java:343`
+//!   - `normalizeRequest` → `core/.../KafkaApis.scala:1852`
+//!   - `partitionsByTransaction` → `KafkaApis.scala:1857`, `:1895`
+//!   - `errorResponseForTransaction` → `KafkaApis.scala:1899`, `:1938`
+//!   - `allVerifyOnlyRequest` → `core/.../network/RequestChannel.scala:228`
 //!
 //! They are omitted for the same reason `WriteTxnMarkers` and
 //! `EndTransactionMarker` are out of scope for this client-only port (see

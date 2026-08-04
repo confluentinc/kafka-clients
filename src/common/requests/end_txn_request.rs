@@ -142,7 +142,13 @@ impl EndTxnRequestBuilder {
             data,
             is_transaction_v2_enabled,
             oldest_allowed_version: ApiKeys::END_TXN.oldest_version(),
-            latest_allowed_version: ApiKeys::END_TXN.latest_version(),
+            // Java's `AbstractRequest.Builder(ApiKeys)` delegates to
+            // `Builder(apiKey, false)` → `latestVersion(false)`, i.e. "any
+            // supported and *released* version". This spec sets
+            // `latestVersionUnstable: true`, so the unstable-inclusive
+            // `latest_version()` would offer one version higher than Java ever
+            // does. Use the explicit `false` form.
+            latest_allowed_version: ApiKeys::END_TXN.latest_version_with_unstable(false),
         }
     }
 
@@ -374,5 +380,21 @@ mod tests {
         let request = EndTxnRequest::new(data(true), 3);
         assert_eq!(request.api_key(), &ApiKeys::END_TXN);
         assert_eq!(request.version(), 3);
+    }
+    /// The builder must call the same accessor Java calls.
+    ///
+    /// Java's `EndTxnRequest.Builder` reaches
+    /// `super(ApiKeys.END_TXN, enableUnstableLastVersion)` with `false` from the
+    /// public two-argument form, i.e. `latestVersion(false)`. `END_TXN`'s spec
+    /// currently sets `latestVersionUnstable: false`, so the two accessors agree
+    /// today — this pins the *call*, not the coincidence, so the builder stays
+    /// correct if the flag ever flips upstream.
+    #[test]
+    fn test_builder_offers_only_released_versions() {
+        let builder = EndTxnRequestBuilder::new(data(true), true);
+        assert_eq!(
+            builder.latest_allowed_version(),
+            ApiKeys::END_TXN.latest_version_with_unstable(false)
+        );
     }
 }

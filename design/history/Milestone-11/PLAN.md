@@ -1059,6 +1059,12 @@ Kafka tree: `core/.../KafkaApis.scala` and
 `server/.../AddPartitionsToTxnManager.java` only, nothing under
 `clients/src/main`.
 
+Verified callers, none under `clients/src/main`: `forBroker` →
+`AddPartitionsToTxnManager.java:343`; `normalizeRequest` → `KafkaApis.scala:1852`;
+`partitionsByTransaction` → `:1857`, `:1895`; `errorResponseForTransaction` →
+`:1899`, `:1938`; `allVerifyOnlyRequest` → `RequestChannel.scala:228` — a third
+file the original write-up omitted (Critic 42 finding 5).
+
 Omitted, consistent with §1.1's exclusion of `WriteTxnMarkers` and
 `EndTransactionMarker` from this client-only port. Translating them would add
 permanently unreachable code that `#![deny(warnings)]` forces us to mask with

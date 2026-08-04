@@ -486,6 +486,9 @@ mod tests {
                 assert_eq!(counts.get(&Errors::None), Some(&1), "top level, v{version}");
                 assert_eq!(counts.get(&error_one), Some(&2), "v{version}");
                 assert_eq!(counts.get(&error_two), Some(&1), "v{version}");
+                // Java asserts the whole map; pin the cardinality too so a
+                // spurious extra entry cannot slip through.
+                assert_eq!(counts.len(), 3, "v{version}");
 
                 let mut expected = HashMap::new();
                 expected.insert(tp2.clone(), error_one);

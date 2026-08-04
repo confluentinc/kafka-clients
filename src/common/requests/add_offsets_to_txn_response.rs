@@ -81,8 +81,14 @@ impl AddOffsetsToTxnResponse {
         version >= 1
     }
 
-    /// Returns the error code wrapped as an [`Errors`].
-    pub fn error(&self) -> Errors {
+    /// The error code wrapped as an [`Errors`].
+    ///
+    /// **Private**, unlike the equivalents on `InitProducerIdResponse` and
+    /// `EndTxnResponse`: Java's `AddOffsetsToTxnResponse` has no public `error()`
+    /// accessor — `TransactionManager.java:1806` reads `data.errorCode()` inline.
+    /// Kept as an internal helper for [`Self::error_counts`] rather than added to
+    /// the public surface (DoD §7).
+    fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
 

@@ -91,15 +91,19 @@ impl CommittedOffset {
 }
 
 impl fmt::Display for CommittedOffset {
-    /// Matches Java's `toString()` form.
+    /// Matches Java's `toString()` form character-for-character.
+    ///
+    /// Java interpolates the `Optional<Integer>` directly, which renders as
+    /// `Optional[2]` / `Optional.empty` — **not** Rust's `Debug` form
+    /// `Some(2)` / `None`. The epoch is formatted explicitly to reproduce Java's
+    /// text, since this string is user-visible in logs.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "CommittedOffset(offset={}, leaderEpoch={:?}, metadata='{}')",
-            self.offset,
-            self.leader_epoch,
-            self.metadata.as_deref().unwrap_or("null")
-        )
+        write!(f, "CommittedOffset(offset={}, leaderEpoch=", self.offset)?;
+        match self.leader_epoch {
+            Some(epoch) => write!(f, "Optional[{epoch}]")?,
+            None => write!(f, "Optional.empty")?,
+        }
+        write!(f, ", metadata='{}')", self.metadata.as_deref().unwrap_or("null"))
     }
 }
 
@@ -656,9 +660,11 @@ mod tests {
     #[test]
     fn test_committed_offset_display_and_equality() {
         let offset = CommittedOffset::new(5, Some("m".to_string()), Some(2));
+        // Java interpolates the Optional directly, giving `Optional[2]` /
+        // `Optional.empty` — not Rust's Debug form `Some(2)` / `None`.
         assert_eq!(
             offset.to_string(),
-            "CommittedOffset(offset=5, leaderEpoch=Some(2), metadata='m')"
+            "CommittedOffset(offset=5, leaderEpoch=Optional[2], metadata='m')"
         );
         assert_eq!(offset, CommittedOffset::new(5, Some("m".to_string()), Some(2)));
         assert_ne!(offset, CommittedOffset::new(6, Some("m".to_string()), Some(2)));
@@ -668,7 +674,7 @@ mod tests {
         let absent = CommittedOffset::new(5, None, None);
         assert_eq!(
             absent.to_string(),
-            "CommittedOffset(offset=5, leaderEpoch=None, metadata='null')"
+            "CommittedOffset(offset=5, leaderEpoch=Optional.empty, metadata='null')"
         );
     }
 
