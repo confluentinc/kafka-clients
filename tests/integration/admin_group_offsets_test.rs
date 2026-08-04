@@ -25,8 +25,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterConsumerGroupOffsetsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, NewTopic, new_admin_client,
+    Admin, AdminClientConfig, AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, new_admin_client,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
@@ -99,16 +99,13 @@ async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) {
     panic!("consumer never received a partition assignment for topic {topic}");
 }
 
+/// Creates the test topic, waiting for its metadata to propagate.
+///
+/// Delegates to the shared helper (Java's `TestUtils.createTopicWithAdmin`) so a
+/// describe issued right after cannot be answered `UnknownTopicOrPartition` by a
+/// broker that has not caught up yet.
 async fn create_topic(admin: &dyn Admin, topic: &str) {
-    admin
-        .create_topics(
-            &[NewTopic::new(topic.to_string(), NUM_PARTITIONS, 1)],
-            CreateTopicsOptions::new(),
-        )
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    crate::common::test_utils::create_topic(admin, topic, NUM_PARTITIONS, 1).await;
 }
 
 async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {

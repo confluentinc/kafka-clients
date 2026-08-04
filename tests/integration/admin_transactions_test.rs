@@ -44,15 +44,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AbortTransactionSpec, Admin, AdminClientConfig, CreateTopicsOptions, DescribeProducersOptions,
-    DescribeTransactionsOptions, FenceProducersOptions, ListTransactionsOptions, NewTopic, TerminateTransactionOptions,
-    new_admin_client,
+    AbortTransactionSpec, Admin, AdminClientConfig, DescribeProducersOptions, DescribeTransactionsOptions,
+    FenceProducersOptions, ListTransactionsOptions, TerminateTransactionOptions, new_admin_client,
 };
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::protocol::Errors;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
 
 /// A single-broker cluster whose transaction-state log is replicated with a
 /// factor of 1, so the transaction coordinator is usable on one node (the
@@ -141,12 +141,7 @@ async fn test_describe_producers_reports_no_active_producers() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_describe_producers");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
     let state = admin
@@ -260,12 +255,7 @@ async fn test_abort_ongoing_transaction() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_abort_txn");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     // Would: start a transactional producer, begin a txn, send an uncommitted
     // record, read the producer id/epoch via describe_producers, build the

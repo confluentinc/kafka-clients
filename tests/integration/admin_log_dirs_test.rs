@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterReplicaLogDirsOptions, CreateTopicsOptions, DescribeClusterOptions,
-    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, NewTopic, new_admin_client,
+    Admin, AdminClientConfig, AlterReplicaLogDirsOptions, DescribeClusterOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, new_admin_client,
 };
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::TopicPartitionReplica;
@@ -43,6 +43,7 @@ use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, Produce
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
 
 /// Build an admin client pointed at the cluster's PLAINTEXT listener.
 fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
@@ -108,12 +109,7 @@ async fn test_describe_log_dirs_returns_dirs_with_replica_sizes() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_describe_log_dirs");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     produce_records(ctx.bootstrap_servers(), &topic, 0, 10).await;
 
     let broker_id = first_broker_id(admin.as_ref()).await;
@@ -150,12 +146,7 @@ async fn test_describe_replica_log_dirs_returns_current_dir() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_describe_replica_log_dirs");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     produce_records(ctx.bootstrap_servers(), &topic, 0, 5).await;
 
     let broker_id = first_broker_id(admin.as_ref()).await;
@@ -181,12 +172,7 @@ async fn test_alter_replica_log_dirs_nonexistent_dir_errors() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_alter_replica_log_dirs_bad_dir");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let broker_id = first_broker_id(admin.as_ref()).await;
     let replica = TopicPartitionReplica::new(topic.clone(), 0, broker_id);
@@ -221,12 +207,7 @@ async fn test_alter_replica_log_dirs_cross_dir_move() {
     let admin = admin_for(ctx.bootstrap_servers());
 
     let topic = ctx.topic("admin_alter_replica_log_dirs_move");
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
     produce_records(ctx.bootstrap_servers(), &topic, 0, 10).await;
 
     let broker_id = first_broker_id(admin.as_ref()).await;
