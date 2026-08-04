@@ -5073,6 +5073,190 @@ mod tests {
         assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
     }
 
+    /// Translated from
+    /// `SenderTest.testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences`
+    /// (Java 1392-1414): a batch that expires before it was ever sent has no sequence,
+    /// so it must not leave the partition unresolved.
+    #[tokio::test]
+    async fn test_expiry_of_unsent_batches_should_not_cause_unresolved_sequences() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.time.sleep(10_000);
+        ctx.sender.client_mut().disconnect_by_id(node.id_string());
+        ctx.sender.client_mut().backoff(&node, 10);
+
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert_eq!(request1.get().await.expect_err("expired").error(), Errors::RequestTimedOut);
+        assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+    }
+
+    /// Translated from
+    /// `SenderTest.testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences`
+    /// (Java 1573-1610): when every sent batch expires, the partition is unresolved and
+    /// the next iteration bumps the epoch to clear it.
+    #[tokio::test]
+    async fn test_expiry_of_all_sent_batches_should_cause_unresolved_sequences() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
+        ctx.sender.run_once().await.expect("run_once");
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::NotLeaderOrFollower, -1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.time.sleep(15_000);
+        ctx.sender.client_mut().disconnect_by_id(node.id_string());
+        ctx.sender.client_mut().backoff(&node, 10);
+
+        ctx.sender.run_once().await.expect("run_once"); // expire the batch
+
+        assert_eq!(request1.get().await.expect_err("expired").error(), Errors::RequestTimedOut);
+        assert!(ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 0);
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().producer_id,
+            PRODUCER_ID
+        );
+
+        // The next iteration bumps the epoch and clears the unresolved sequences.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+        assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+    }
+
+    /// Translated from
+    /// `SenderTest.testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed`
+    /// (Java 1416-1481): the first batch expires while a later one is still in flight;
+    /// the partition stays unresolved — blocking new drains — until the later batch
+    /// succeeds and `maybeResolveSequences` clears it.
+    #[tokio::test]
+    async fn test_expiry_of_first_batch_should_not_cause_unresolved_sequences_if_future_batches_succeed() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        // The two appends are separated by a second so the batches do not expire
+        // together.
+        ctx.time.sleep(1000);
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 2);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::RequestTimedOut, -1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive the first response
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+
+        // 600 more ms expires the first batch but not the second
+        // (`delivery.timeout.ms` is 1500).
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.time.sleep(600);
+        ctx.sender.client_mut().disconnect_by_id(node.id_string());
+        ctx.sender.client_mut().backoff(&node, 10);
+
+        ctx.sender.run_once().await.expect("run_once"); // expire the first batch
+        assert_eq!(request1.get().await.expect_err("expired").error(), Errors::RequestTimedOut);
+        assert!(ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+
+        // A third batch must not be dequeued until the unresolved state clears.
+        let request3 = ctx.append_to_accumulator_with(&tp0, 0, "k3", "v3").await;
+        ctx.time.sleep(20);
+        assert!(!request2.is_done());
+
+        ctx.sender.run_once().await.expect("run_once"); // send the second request again
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::None, 1, -1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+
+        // Receive the second response; the third request is not sent, because the
+        // partition is still unresolved.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 1);
+        assert_eq!(
+            ctx.accumulator.base_sequences_for_test(&tp0),
+            vec![RecordBatch::NO_SEQUENCE],
+            "the queued third batch has no sequence yet"
+        );
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert!(ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+
+        // Clear the unresolved state and send the pending request.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 0);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert!(!request3.is_done());
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+    }
+
+    /// Translated from
+    /// `SenderTest.testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail`
+    /// (Java 1483-1531): the later batch fails with `OUT_OF_ORDER_SEQUENCE_NUMBER`
+    /// instead of succeeding, so the unresolved partition is cleared by an epoch bump.
+    #[tokio::test]
+    async fn test_expiry_of_first_batch_should_cause_epoch_bump_if_future_batches_fail() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.time.sleep(1000);
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::NotLeaderOrFollower, -1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive the first response
+
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.time.sleep(1000);
+        ctx.sender.client_mut().disconnect_by_id(node.id_string());
+        ctx.sender.client_mut().backoff(&node, 10);
+
+        ctx.sender.run_once().await.expect("run_once"); // expire the first batch
+        assert_eq!(request1.get().await.expect_err("expired").error(), Errors::RequestTimedOut);
+        assert!(ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+
+        // A third batch must not be dequeued until the unresolved state clears.
+        ctx.append_to_accumulator_with(&tp0, 0, "k3", "v3").await;
+        ctx.time.sleep(20);
+        assert!(!request2.is_done());
+        ctx.sender.run_once().await.expect("run_once"); // send the second request
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::OutOfOrderSequenceNumber, 1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive the second response
+
+        // The epoch is bumped and the second request is re-queued.
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 2);
+
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+        assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+    }
+
     /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
     /// (Java 2182-2219).
     ///
