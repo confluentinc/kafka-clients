@@ -382,7 +382,9 @@ Grows `transaction_manager.rs` to full parity. From `TransactionManager.java`:
   (330), `prepare_transaction` (342, 2PC), `begin_commit` (353), `begin_abort`
   (361), `begin_completing_transaction` (373), `send_offsets_to_transaction` (404),
   `maybe_add_partition` (437, transactional arm — the idempotent arm landed in
-  Phase 3), `is_send_to_partition_allowed` (466), `reset_transaction_state`
+  Phase 3), `is_send_to_partition_allowed` (466, transactional arm — the
+  fatal-error and non-transactional arms landed in Phase 4),
+  `reset_transaction_state`
   (1330). ~~`transition_to_uninitialized` (756)~~ **landed in Phase 3** (§9.15);
   Phase 5 adds only its `pendingTransition` branch and the `error` parameter that
   branch consumes.

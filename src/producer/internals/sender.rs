@@ -20,7 +20,25 @@
 //!
 //! Translated from `org.apache.kafka.clients.producer.internals.Sender`.
 //!
-//! Transactional methods are not translated in this phase.
+//! # What is translated, and what is not
+//!
+//! Milestone 11 Phase 4 translated the whole `transactionManager != null` block of
+//! `runOnce` (`Sender.java:311-345`), `maybeSendAndPollTransactionalRequest`
+//! (`:456-530`), `maybeFindCoordinatorAndRetry` (`:520-530`), `maybeAbortBatches`
+//! (`:532-538`), `awaitNodeReady` (`:563-574`),
+//! `hasPendingTransactionalRequests` (`:233-235`),
+//! `shouldHandleAuthorizationError` (`:351-360`), the three shutdown stages of
+//! `run()` (`:245-303`), and the unsynchronized half of
+//! `TxnRequestHandler.onComplete`.
+//!
+//! Still deferred: the transactional state machine and the coordinator subsystem
+//! (Phases 5 and 6). Concretely, `coordinator_type()` is `None` for every request
+//! this client can build, so `maybeSendAndPollTransactionalRequest`'s coordinator
+//! branches and `lookupCoordinator` return
+//! [`KafkaError::unsupported_version`](crate::common::KafkaError::unsupported_version)
+//! rather than being silently skipped, and `sendProduceRequest` does not yet set
+//! `transactional_id` / `use_transaction_v1_version` (`Sender.java:922-936`,
+//! Phase 6).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -617,7 +635,8 @@ impl<C: KafkaClient> Sender<C> {
 
         let current_time_ms = (self.time_provider)();
         let poll_timeout = self.send_producer_data(current_time_ms).await?;
-        self.poll_and_dispatch(poll_timeout, current_time_ms).await
+        self.poll_and_dispatch(poll_timeout, current_time_ms).await;
+        Ok(())
     }
 
     /// `transactionManager.authenticationFailed(e)` (`Sender.java:339`).
@@ -645,35 +664,58 @@ impl<C: KafkaClient> Sender<C> {
     /// The poll future is awaited to completion and never raced in a
     /// `tokio::select!` (rules §4 / `consumer-threading.md` §10: it is not
     /// cancel-safe).
-    async fn poll_and_dispatch(&mut self, timeout: i64, now: i64) -> Result<(), KafkaError> {
+    async fn poll_and_dispatch(&mut self, timeout: i64, now: i64) {
         let responses = self.client.poll(timeout, now).await;
         let dispatch_time_ms = (self.time_provider)();
-        self.handle_client_responses(&responses, dispatch_time_ms)
+        self.handle_client_responses(&responses, dispatch_time_ms);
     }
 
     /// Dispatches each completed response to the handler that requested it,
     /// preserving arrival order as Java's callback invocation does.
-    fn handle_client_responses(&mut self, responses: &[ClientResponse], now: i64) -> Result<(), KafkaError> {
+    ///
+    /// # Failures are isolated per response
+    ///
+    /// This is `NetworkClient.completeResponses` (`NetworkClient.java:666-674`),
+    /// which wraps each `response.onComplete()` in its own `try`/`catch`:
+    ///
+    /// ```java
+    /// for (ClientResponse response : responses) {
+    ///     try {
+    ///         response.onComplete();
+    ///     } catch (Exception e) {
+    ///         log.error("Uncaught error in request completion:", e);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// So one handler raising does **not** abandon the remaining responses of the
+    /// poll. Propagating with `?` here instead would leave their
+    /// `pending_produce_responses` entries and `in_flight_batches` uncompleted until
+    /// `delivery.timeout.ms` expired them.
+    fn handle_client_responses(&mut self, responses: &[ClientResponse], now: i64) {
         for response in responses {
             let correlation_id = response.request_header().correlation_id();
             let is_transactional = self
                 .pending_transactional_response
                 .as_ref()
                 .is_some_and(|(pending_correlation_id, _)| *pending_correlation_id == correlation_id);
-            if is_transactional {
+            let result = if is_transactional {
                 let (_, handler) = self
                     .pending_transactional_response
                     .take()
                     .expect("the slot was just observed to be occupied");
-                self.on_transactional_response(handler, response)?;
+                self.on_transactional_response(handler, response)
             } else {
-                self.handle_produce_responses(std::slice::from_ref(response), now)?;
+                self.handle_produce_response_for(response, now)
+            };
+            if let Err(error) = result {
+                // Java: `log.error("Uncaught error in request completion:", e)`.
+                kafka_error!(self.log_context, "Uncaught error in request completion: {}", error);
             }
         }
-        Ok(())
     }
 
-    /// Process all produce responses from a poll cycle.
+    /// Process one produce response.
     ///
     /// In Java, this happens inside the `RequestCompletionHandler` callback.
     /// In Rust, we process responses after `client.poll()` returns.
@@ -683,10 +725,12 @@ impl<C: KafkaClient> Sender<C> {
     /// Propagates a failure from `reenqueue` / `split_and_reenqueue`, both of which
     /// re-insert an idempotent batch in sequence order. Java's
     /// `IllegalStateException` from `insertInSequenceOrder` escapes the completion
-    /// callback, hence `client.poll` and `runOnce`, to `Sender.run`'s catch-and-log;
-    /// [`Self::run_once_logging_errors`] is the same boundary.
-    fn handle_produce_responses(&mut self, responses: &[ClientResponse], now: i64) -> Result<(), KafkaError> {
-        for response in responses {
+    /// callback but is caught **inside** `client.poll`, by
+    /// `NetworkClient.completeResponses` (`NetworkClient.java:666-674`) — *not* by
+    /// `Sender.run`. [`Self::handle_client_responses`] is that boundary and logs the
+    /// error there, so the remaining responses of the same poll are still dispatched.
+    fn handle_produce_response_for(&mut self, response: &ClientResponse, now: i64) -> Result<(), KafkaError> {
+        {
             let correlation_id = response.request_header().correlation_id();
             if let Some(pending) = self.pending_produce_responses.remove(&correlation_id) {
                 // Extract the batches this request carried from `in_flight_batches`.
@@ -791,9 +835,7 @@ impl<C: KafkaClient> Sender<C> {
                 self.maybe_abort_batches(error);
             }
             let now = (self.time_provider)();
-            self.poll_and_dispatch(self.retry_backoff_ms, now)
-                .await
-                .map_err(TransactionPhaseError::Other)?;
+            self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
 
@@ -925,9 +967,7 @@ impl<C: KafkaClient> Sender<C> {
         // simply wait for them to return.
         if self.has_in_flight_request() {
             let now = (self.time_provider)();
-            self.poll_and_dispatch(self.retry_backoff_ms, now)
-                .await
-                .map_err(TransactionPhaseError::Other)?;
+            self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
 
@@ -983,9 +1023,7 @@ impl<C: KafkaClient> Sender<C> {
                 .unwrap()
                 .retry(&mut self.pending_requests, next_request_handler);
             let now = (self.time_provider)();
-            self.poll_and_dispatch(self.retry_backoff_ms, now)
-                .await
-                .map_err(TransactionPhaseError::Other)?;
+            self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         };
 
@@ -1070,9 +1108,7 @@ impl<C: KafkaClient> Sender<C> {
         self.client.send(client_request, current_time_ms);
         self.set_in_flight_correlation_id(correlation_id);
         let now = (self.time_provider)();
-        self.poll_and_dispatch(self.retry_backoff_ms, now)
-            .await
-            .map_err(TransactionPhaseError::Other)?;
+        self.poll_and_dispatch(self.retry_backoff_ms, now).await;
         Ok(true)
     }
 
@@ -3983,9 +4019,11 @@ mod tests {
 
     /// The shared body of `testHealthyPartitionRetriesDuringEpochBump`
     /// (Java 3599-3692) and `testFailedInflightBatchAfterEpochBump`
-    /// (Java 3727-3810), which in Kafka 4.2 are identical up to the final two
-    /// assertions. Both are translated (below) rather than collapsed into one, so
-    /// each Java method has a Rust counterpart; the duplication is Java's.
+    /// (Java 3727-3810). In Kafka 4.2 the two differ only by one
+    /// `maybeUpdateProducerIdAndEpoch(tp1)` call before their closing pair of
+    /// assertions, which are themselves identical. Both are translated (below)
+    /// rather than collapsed into one, so each Java method has a Rust counterpart;
+    /// the duplication is Java's.
     ///
     /// Returns the context so each caller can make its own closing assertions.
     ///
@@ -4177,6 +4215,22 @@ mod tests {
             assert_eq!(tp1b3.len(), 1);
             assert_eq!(tp1b3[0].producer_epoch(), 2, "epoch + 1");
             assert_eq!(tp1b3[0].base_sequence(), 0);
+
+            // Java 3684-3692: completing that batch leaves nothing in flight for tp1
+            // and the sequence at 1. Java reaches it through `tp1b3.complete(..)` plus
+            // `handleCompletedBatch`, which is what the response round trip does here.
+            let response = ctx.produce_response(&tp1, 500, Errors::None, 0);
+            ctx.sender
+                .client_mut()
+                .respond_from(response, &Node::new(0, "localhost".to_string(), 1969));
+            ctx.sender.run_once().await.expect("run_once");
+            transaction_manager
+                .lock()
+                .unwrap()
+                .maybe_update_producer_id_and_epoch(&tp1, &mut [])
+                .expect("tp1 has drained");
+            assert!(!transaction_manager.lock().unwrap().has_inflight_batches(&tp1));
+            assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1), 1);
         }
     }
 
@@ -4222,6 +4276,63 @@ mod tests {
             );
             assert_eq!(transaction_manager.lock().unwrap().sequence_number(&tp1), 1);
         }
+    }
+
+    /// `NetworkClient.completeResponses` (`NetworkClient.java:666-674`) catches and
+    /// logs per response, so one failing completion must not abandon the rest of the
+    /// poll's responses.
+    ///
+    /// Two produce requests are in flight for the same partition. Both are answered
+    /// in the same poll, the first with a retriable error whose re-enqueue is made to
+    /// fail (its partition is no longer tracked, so `insertInSequenceOrder` rejects
+    /// it, `RecordAccumulator.java:558-560`). The second response must still be
+    /// dispatched and complete its record.
+    #[tokio::test]
+    async fn test_a_failing_response_handler_does_not_abandon_the_rest_of_the_poll() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let future1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        let future2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+
+        // Untrack the partition so the first response's re-enqueue fails.
+        {
+            let in_flight: Vec<(i64, i16, i32)> = ctx
+                .sender
+                .in_flight_batches(&tp0)
+                .iter()
+                .map(|batch| (batch.producer_id(), batch.producer_epoch(), batch.base_sequence()))
+                .collect();
+            assert_eq!(in_flight.len(), 2);
+            let manager = ctx.transaction_manager();
+            let mut manager = manager.lock().unwrap();
+            for batch in ctx.sender.in_flight_batches(&tp0) {
+                manager.remove_in_flight_batch(batch).expect("tracked");
+            }
+            assert!(!manager.has_inflight_batches(&tp0));
+        }
+
+        // Both responses land in the same poll, the failing one first.
+        let retriable = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, 0);
+        ctx.sender.client_mut().respond_to_request_at(0, retriable);
+        let success = ctx.produce_response(&tp0, 1000, Errors::None, 0);
+        ctx.sender.client_mut().respond_to_request_at(0, success);
+
+        ctx.sender.run_once().await.expect("the poll itself must not fail");
+
+        assert!(
+            !future1.is_done(),
+            "the first response's handler failed, so its record is not completed"
+        );
+        assert!(
+            future2.is_done(),
+            "the second response must still be dispatched after the first one failed"
+        );
+        assert_eq!(future2.get().await.expect("succeeds").offset(), 1000);
     }
 
     // =====================================================================
