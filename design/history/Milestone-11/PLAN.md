@@ -2115,9 +2115,95 @@ Not deviations, recorded because a reviewer may read them as such:
     satisfy the borrow checker. Both are per-`runOnce`, over error-state
     partitions only, and order is not observable because each partition is
     handled independently.
-  - `fail_pending_requests`, `authentication_failed` and `close` iterate
-    `pending_requests` **by index** where Java uses `forEach`. The per-handler
-    body needs `&mut self` for the transition, which Java gets for free from the
-    enclosing monitor. Order and per-handler semantics (fail the result, then
-    transition) are preserved, and Java's choice not to clear the queue is
-    preserved too.
+  - ~~`fail_pending_requests`, `authentication_failed` and `close` iterate
+    `pending_requests` **by index** where Java uses `forEach`.~~ **No longer true
+    as of Phase 4**: once the queue became a parameter rather than a field (§2, see
+    Phase-4 deviation 1 below) the queue borrow and `&mut self` are disjoint, so all
+    three are direct `forEach` equivalents. Java's choice not to clear the queue is
+    still preserved.
+
+### 10.6 Phase 4 deviations (idempotent send-path integration)
+
+Each is documented at its call site as well.
+
+1. **The rules §2 split is "queue as a parameter", not "queue on the Sender's own
+   type".** `pendingRequests` and `inFlightRequestCorrelationId` are fields on
+   `Sender`, and the manager methods that Java implements by touching them take them
+   as parameters — the same shape rules §7 already uses for `InFlightBatchPool`.
+   Four methods whose bodies touch *only* Sender-confined state moved to `Sender`
+   outright (`hasPendingRequests` 1005, `setInFlightCorrelationId` 973,
+   `clearInFlightCorrelationId` 977, `hasInFlightRequest` 981), as did the
+   unsynchronized half of `TxnRequestHandler.onComplete` (1406-1420). The criterion
+   is stated once, on the `TransactionManager` struct docs. The property a reviewer
+   can check mechanically: neither name appears as a **field** in
+   `transaction_manager.rs`. Supersedes deviation 7's "thirteen reshaped signatures"
+   estimate — it was accurate.
+
+2. **`PendingRequests` type alias** (`VecDeque<TxnRequestHandler>`) so Phase 5's swap
+   to a priority queue is one line. Adds no struct Java lacks (DoD §7); same
+   justification as `InFlightBatchPool`.
+
+3. **`TransactionPhaseError { Authentication, Other }`**, a private enum in
+   `sender.rs`. Java distinguishes the two by exception *type* at two different
+   `catch` sites (`Sender.java:336` vs `:248`), and `KafkaError` is flat. Same
+   approach `common::network::authentication_error` already takes at the transport
+   boundary, and for the same reason.
+
+4. **`RecordAccumulator::with_in_flight_batch_pool` assembles the rules §7 pool from
+   both owners.** Java's `TxnPartitionEntry` holds live batch references; Rust's
+   tracks keys, so the batches must come from the accumulator's deques *and*
+   `Sender::in_flight_batches`. The merge happens inside the accumulator because
+   every `&mut ProducerBatch` in the pool must share the deque guards' lifetime,
+   which only exists inside that call. Every requested partition's deque lock is held
+   for the duration of the closure, and the manager lock is taken inside it —
+   preserving rules §3's deque → manager order.
+
+5. **Two accessors Java lacks:**
+   `TransactionManager::client_side_epoch_bump_required` and
+   `partitions_to_rewrite_sequences`. Java reads both fields from inside the class;
+   the Sender needs them to decide whether to build the pool *before* taking the
+   manager lock, because building it locks deques and is pure waste on the common
+   path. Java needs no equivalent because its entry can reach the batches itself.
+
+6. **`RecordAppendResult::partition`.** Java reports the resolved partition through
+   `AppendCallbacks.setPartition` (`KafkaProducer.java:1606`) and reads it back as
+   `appendCallbacks.topicPartition()` for `maybeAddPartition`. The Rust `append`
+   takes a plain completion `Callback`, not an `AppendCallbacks` trait object, so
+   there is nowhere else for it to go.
+
+7. **`PendingProduceRequest` records each batch's `Arc<ProduceRequestResult>`.**
+   Java's callback closes over the batches themselves; identity by `Arc::ptr_eq` is
+   the nearest equivalent that survives the batch moving between owners. This fixed
+   a real defect — see commit `0b8c3d0`.
+
+8. **`Sender::maybe_abort_batches` aborts the Sender's in-flight batches itself.**
+   Java's `inFlightBatches.clear()` (`Sender.java:536`) merely drops references,
+   because `abortBatches` already aborted those batches via `incomplete.copyAll()`,
+   which returns batches. Rust's `IncompleteBatches` tracks
+   `ProduceRequestResult`s (a `ProducerBatch` has one owner, rules §7), so the
+   accumulator cannot reach the Sender's share; dropping them un-aborted would leave
+   their record futures pending forever (CLAUDE.md §5).
+
+9. **`transaction_completing` is read once per `ready()`**, not once per batch as
+   Java does inside `batchReady` (`RecordAccumulator.java:614`). The value is
+   partition-independent; hoisting avoids a manager lock per partition and removes
+   the (Java-visible) possibility of two partitions in one pass disagreeing.
+
+10. **`begin_abort` translates only `ensureTransactional()`.** Java's shutdown loop
+    (`Sender.java:273`) depends on `beginAbort` *throwing* for a non-transactional
+    producer, and force-closes when it does. Translating the guard is what makes the
+    shutdown path behave as Java's; the transactional body is Phase 6 and is
+    unreachable while `TransactionManager::new` refuses a transactional id.
+
+11. **`network_client_utils::await_ready` takes `&(dyn Fn() -> i64 + Send + Sync)`.**
+    `&dyn Fn()` is only `Send` when the trait object is `Sync`, and without the bound
+    the spawned `Sender` future stops being `Send`. No behaviour change; `await_ready`
+    had no other caller.
+
+12. **Two pre-existing gaps fixed because Phase 4 makes them load-bearing:**
+    `RecordAccumulator::abort_batches` / `abort_undrained_batches` did not remove the
+    aborted batch from `incomplete`, so `has_incomplete()` never fell back to false
+    and `maybeAbortBatches` would re-abort every `runOnce`; and
+    `ProducerBatch::finalize_split_batches` skipped Java's
+    `assignProducerStateToBatches` (`ProducerBatch.java:392`), without which
+    `splitAndReenqueue` cannot track an idempotent sub-batch at all.
