@@ -7,6 +7,75 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 4 / Phase 4a — "Public Consumer Client (the first usable public cut)":
+  DONE (2026-08-04).** The first PUBLIC client surface — promotes the proven internal
+  machinery to a Java-shaped, XML-documented public API: subscribe → poll → seek →
+  group metadata → close, usable end-to-end broker-free via `MockConsumer` and against
+  a real broker with auto-commit. Mode A (every ABI function already ships; no Rust
+  authored). Delivered:
+  - **Public value types** (namespace `Confluent.Kafka`, library root): promoted
+    `ConsumerRecord` / `ConsumerRecords` (internal → `public sealed`); new
+    `Header` / `Headers` (read-only view), the `TimestampType` enum, the
+    `TopicPartition` `readonly struct` (value equality + Java `"topic-partition"`
+    `ToString`), and `ConsumerGroupMetadata` (full four-field set). **`Key`/`Value` +
+    `Header.Value` unified on `byte[]?`** (micro-decision A — a deliberate deviation
+    from the CLAUDE.md §3 `ReadOnlyMemory` sketch; the copy-out marshaller drops the
+    `ReadOnlyMemory` wrap it used, so `unsafe` left `ConsumerRecordsMarshal` too — a net
+    simplification, no new copy). The internal `RecordHeader` struct is deleted.
+  - **Public interface + clients**: `IConsumer : IAsyncDisposable, IDisposable`
+    (minimal, additive-growth, **non-generic** — micro-decision D), and
+    `KafkaConsumer` / `MockConsumer` (`public sealed`, both `impl IConsumer`). Both
+    **compose** the internal `NativeConsumer` and forward (§2.5 compose-over-absorb) —
+    the ~40 internal interop tests + the `unsafe`/`GCHandle` quarantine stay intact.
+    `MockConsumer`'s mock helpers (`Assign` / `AddRecord` component-tuple /
+    `SetPollError`) are inherent, NOT on `IConsumer` (consumer-threading §2).
+  - **`NativeConsumer` edits**: `UnsubscribeAsync` (the ONE new void wire over
+    `Consumer_unsubscribe_async`), the `SeekAsync` `offset < 0` precondition
+    (`ArgumentOutOfRangeException`, exact Java message `"seek offset must not be a
+    negative number"` — the only Java-fidelity behavior fix, PLAN dec. 11),
+    `GroupMetadata()` (full four-field read via a new `ConsumerGroupMetadataMarshal` +
+    the three group-metadata DllImports), and `CloseAsync(CancellationToken)` (dec. 6
+    wiring: one-shot latch → `close_async` → destroy, **surfaces** the close error
+    unlike `DisposeAsync`; NO timeout — the ABI has none).
+  - **Async/sync split** (from the Java impl, CLAUDE.md §4): `PollAsync` /
+    `SubscribeAsync` / `UnsubscribeAsync` / `SeekAsync` / `CloseAsync` async;
+    `Wakeup()` / `GroupMetadata()` sync. **`SeekAsync`-is-async** is the load-bearing
+    call (Java `seek()` blocks on `addAndGet`) — a deliberate divergence from Python's
+    sync `seek`, documented in the docstring.
+  - **Tests** (public-surface, PLAN §5): round-trip (incl. non-ASCII out_len path,
+    sentinels, churn, byte[] header), async/sync split, SeekAsync exact-message,
+    GroupMetadata full-field (real pre-join defaults + non-ASCII + Mock sentinels),
+    teardown (Dispose/DisposeAsync/CloseAsync idempotence + unawaited-op residual +
+    use-after-dispose), allocation budget, TFM smoke. net462 added to the test TFMs
+    (builds cross-platform via `Microsoft.NETFramework.ReferenceAssemblies`; run
+    Windows/CI-only). **122 tests, 20/20 full-suite runs green.**
+  - **FINDING — pre-existing intermittent host crash under xUnit parallel execution**
+    (COMMENTS.DONE.8 D8.8). Bisected to the tracked HEAD *before* any P4a test: the
+    accepted single-owner residual (an unawaited-op straggler dispatcher callback after
+    the fire-and-forget `Consumer_destroy`) races GC across parallel test collections.
+    Fixed with `[assembly: CollectionBehavior(DisableTestParallelization = true)]` — the
+    standard setting for a not-thread-safe native-resource suite (no assertion
+    weakened; the within-test ops are already serialized by the core guard). A real fix
+    of the residual (a Rust-core dispatcher-join on destroy) is out of scope.
+  - **Governance — `Wakeup()` is now genuinely public / cross-thread for the first
+    time** (the one item P4a changes). Per locked decision 5 = **option (a)**: the
+    handle-TOCTOU residual stays accepted-by-design and is documented on the public
+    `KafkaConsumer` / `IConsumer` as a not-thread-safe caveat (Python/CKD parity); NO
+    per-call `DangerousAddRef` hardening this phase — flagged as a candidate **N=9**
+    follow-up (not scheduled). The three M3/P2 accepted residuals remain accepted;
+    composition inherits them unchanged.
+  - **Deferred (later additive phases, unchanged public shape):** the commit family
+    (`Consumer_commit_async` naming minefield), `position` (scalar callback),
+    `Assignment`/`Subscription`/`Paused` (owned-list sync), the owned-handle query
+    siblings (`committed`/`offsetsForTimes`/`beginning|endOffsets`/`partitionsFor`/
+    `listTopics`), `subscribe(pattern)`/`assign`/`pause`/`resume`,
+    `ConsumerRebalanceListener`/`OffsetCommitCallback`, serializers + generic
+    `IConsumer<TKey,TValue>`, typed `KafkaException` subclasses, `CloseAsync(TimeSpan)`.
+  - **⚠ CLAUDE.md §4 package-id pre-publish gate stays OPEN** (M0/P1). P4a adds public
+    *types* but does not publish; `IsPackable=false` holds it shut. Decide (own SR
+    integration, or diverge the id) before any publish — out of scope here.
+  - Approved plan + closed record: `design/history/M4/P4a-public-consumer/`. Additive on
+    `prashah_dev_public_consumer_scaffolding` (a NEW PR stacked on the M3/P3 PR).
 - **Milestone 3 / Phase 3 — "Poll + the receive path (owned-handle completion
   bridge)": DONE (2026-08-03).** Proves the **result-returning** completion shape
   end-to-end via `poll` — the owned-handle bridge that five sibling query ops reuse
@@ -287,6 +356,36 @@ bindings/dotnet/
                                                    return-without-hang only (no separate-op drain; the
                                                    unawaited-op strand+leak is an accepted residual)
 ```
+
+## Verification state (M4/P4a DoD — Actor, all green)
+
+- `cargo build --features ffi` — native cdylib + regenerated header present (run
+  FIRST, CLAUDE.md §7.1). **No ABI change this phase (Mode A).**
+- `dotnet build` — **0 warnings, 0 errors** across all library TFMs
+  (netstandard2.0, net8.0, net10.0) and all test TFMs (**net462**, net8.0, net10.0);
+  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` + `GenerateDocumentationFile`
+  active. **CS1591 satisfied on every new public member** — the first new public
+  surface since M2/P1 (`IConsumer`, `KafkaConsumer`, `MockConsumer`, `ConsumerRecord`,
+  `ConsumerRecords`, `Header`, `Headers`, `TimestampType`, `TopicPartition`,
+  `ConsumerGroupMetadata`). No analyzer suppressions needed (CA1815 satisfied by
+  `TopicPartition`'s `==`/`!=` + value equality). Apache-2.0 header on every new file;
+  no TODO/FIXME.
+- `dotnet test -f net10.0` — **122 passed, 0 failed**; **20/20 full-suite runs green,
+  0 crashes / 0 failures** (the §5.8 stability gate). Every awaited op / teardown under
+  a `TestTimeout` hang guard. Serial execution
+  (`[assembly: CollectionBehavior(DisableTestParallelization = true)]`) fixes a
+  pre-existing intermittent host crash (D8.8) that only manifested under xUnit's
+  default cross-collection parallelism.
+- `dotnet format --verify-no-changes` — clean.
+- **CI-only (not blocking):** the local runtime is .NET 10; the net8.0 test *run* and
+  net462 (via ns2.0 for the library; a direct net462 test TFM) are CI/Windows-only.
+  **All three test *build* legs (net462 / net8.0 / net10.0) pass locally**, and the
+  library's three TFMs build.
+- **Docs match code:** `ffi-marshalling.md` §B (single-owner, copy-out, the 5
+  invariants) and CLAUDE.md §3/§4 (the idiom map, `byte[]` key/value deviation,
+  async/sync split) describe the landed public surface; the byte[] deviation +
+  CloseAsync wiring + GroupMetadata reachability + the D8.8 finding are recorded in
+  `COMMENTS.DONE.8.md`.
 
 ## Verification state (M3/P2 DoD — Actor, all green)
 
@@ -710,23 +809,36 @@ NOT part of the approved plan and were NOT put through a separate Critic cycle:
 
 ## Governance pointers
 
-Current phase (**M3/P2** — single-owner alignment):
+Current phase (**M4/P4a** — public consumer client):
 
-- Approved plans: `design/history/M3/P2-single-owner-alignment/PLAN.md` (current),
+- Approved plan: `design/history/M4/P4a-public-consumer/PLAN.md` (current). Prior:
+  `design/history/M3/P3-poll-receive-path/PLAN.md`,
+  `design/history/M3/P2-single-owner-alignment/PLAN.md`,
   `design/history/M3/P1-completion-bridge/PLAN.md`,
   `design/history/M2/P2-safehandle-return-hardening/PLAN.md`,
   `design/history/M2/P1-error-model-safehandle/PLAN.md`,
   `design/history/M1/P1-interop-scaffolding/PLAN.md`.
 - Closed review records:
+  `design/history/M3/P3-poll-receive-path/COMMENTS.DONE.7.md`,
   `design/history/M3/P1-completion-bridge/COMMENTS.DONE.5.md`,
   `design/history/M2/P2-safehandle-return-hardening/COMMENTS.DONE.4.md`,
   `design/history/M2/P1-error-model-safehandle/COMMENTS.DONE.3.md`,
-  `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md`. (M3/P2: no Critic
-  review yet — the archived record will be `COMMENTS.DONE.6.md`.)
-- Personas: `dotnet-actor` (Actor N=6), `dotnet-critic` (Critic N=6). NEVER the
-  Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.6.md` is
-  gitignored; the archived record is `COMMENTS.DONE.6.md`. Extends PR #135 on
-  `prashah_dev_asyncbridge_scaffolding` — additive commits, no history rewrite.
+  `design/history/M1/P1-interop-scaffolding/COMMENTS.DONE.2.md` (M3/P2's closed record
+  is archived alongside its plan). M4/P4a: no Critic review yet — the archived record
+  will be `design/history/M4/P4a-public-consumer/COMMENTS.DONE.8.md`.
+- Personas: `dotnet-actor` (Actor **N=8**), `dotnet-critic` (Critic **N=8**). NEVER
+  the Rust `actor-executor` / `kafka-critic`. The working `COMMENTS.8.md` is gitignored;
+  the execution record `COMMENTS.DONE.8.md` is tracked but never `git add`ed into a code
+  commit. Lands on `prashah_dev_public_consumer_scaffolding` (a NEW PR stacked on the
+  M3/P3 PR) — additive commits, no history rewrite.
+- **N-counter reconciliation:** M4/P4a **takes N=8**. The STATUS / `NativeConsumer`
+  cross-thread **hardening** items previously labeled "N≥8, whenever a public client
+  makes `Wakeup()` genuinely cross-thread" (the `Wakeup()`/`GroupMetadata()` handle
+  TOCTOU vs teardown; the submit-vs-`destroy` handle race) are now **reachable in
+  principle** — P4a is that public client. Per locked decision 5 = option (a) they stay
+  **accepted-by-design, documented** on the public client (not scheduled); a future
+  per-call `DangerousAddRef` hardening (and/or the D8.8 dispatcher-join) is renumbered
+  **N=9** (candidate follow-up, unscheduled). No dangling "N≥8" label remains.
 
 Previous phase (**M0/P1** — rename identity):
 
@@ -747,19 +859,29 @@ Previous phase (**M0/P0** — scaffolding):
 
 ## Next up (not started)
 
-The **first public client operations + the receive path** (still Mode A). From the
-completion bridge now in place:
-- The public `IConsumer` / `KafkaConsumer` / `MockConsumer` types (the internal
-  `NativeConsumer` lifecycle + bridge fold into the public client), promoting the
-  proof ops to the real API surface (`SubscribeAsync` / `SeekAsync` public, then
-  `CommitAsync` / `position` on the same void/scalar bridges).
-- `PollAsync` and the entire receive path: Category 3/4 handles (poll-batch
-  borrow-roots / views), length-delimited `out_len` receive strings (§B3), the
-  copy-out `ConsumerRecord(s)` surface (§B4 / CLAUDE.md §6.4), and the per-record
-  allocation-budget test.
-- The wakeup-fault + in-flight-cancellation slices that need a wakeup-observing op
-  (poll) to be deterministically testable (M3/P1 D1).
-Sequence and exact scope to be set in the next PLAN (Manager, with approval).
+The **additive consumer op families** that grow the P4a public surface without
+changing its shape (still Mode A unless a new ABI function is needed). Candidates, each
+its own later phase:
+- **Commit family** (`CommitSync` / `CommitAsync`) — needs a naming decision (the ABI
+  `Consumer_commit_async` is Java's fire-and-forget *sync* `commitAsync`; the *push*
+  variant of `commitSync` is `Consumer_commit_sync_async`).
+- **`position`** — the scalar-callback (Category B) completion shape, not yet proven.
+- **`Assignment` / `Subscription` / `Paused`** — owned-list sync marshalling
+  (`TopicPartitionList_t` / `StringList_t`).
+- **Owned-handle query siblings** — `committed` / `offsetsForTimes` /
+  `beginning|endOffsets` / `partitionsFor` / `listTopics` (each a new result container).
+- **`subscribe(pattern)` / `assign` (public) / `pause` / `resume` /
+  `seekToBeginning`/`seekToEnd`**, `ConsumerRebalanceListener` /
+  `OffsetCommitCallback`, serializers + generic `IConsumer<TKey,TValue>`, typed
+  `KafkaException` subclasses, `CloseAsync(TimeSpan)` (needs a Rust-core
+  `close_async_with_timeout` — Mode B).
+
+Candidate N=9 hardening (unscheduled): the per-call `SafeHandle.DangerousAddRef` /
+`DangerousRelease` around `Wakeup()` / `GroupMetadata()` now that `Wakeup()` is a public
+cross-thread API; and/or a Rust-core dispatcher-join on `Consumer_destroy` (would also
+close the parallel-test host-crash residual — D8.8 — and let the suite re-enable
+parallelization). Sequence and exact scope to be set in the next PLAN (Manager, with
+approval).
 
 ### Deferred hardening (N=5) — teardown thread-safety: **DONE (M3/P1, 2026-07-27)**
 
