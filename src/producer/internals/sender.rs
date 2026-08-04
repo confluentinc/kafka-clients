@@ -2291,6 +2291,13 @@ mod tests {
             Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None)
         }
 
+        /// Idempotent setup with `guarantee_message_order` and a bounded retry count,
+        /// mirroring the bespoke `Sender` several `SenderTest` methods build with
+        /// `guaranteeOrder = true`.
+        fn idempotent_in_order(retries: i32) -> Self {
+            Self::with_transaction_state(true, retries, Some(idempotent_transaction_manager()), None)
+        }
+
         /// Idempotent setup with a bounded retry count, mirroring Java's
         /// `setupWithTransactionState(transactionManager, false, null, true, retries, 0)`.
         fn idempotent_with_retries(retries: i32) -> Self {
@@ -2461,6 +2468,35 @@ mod tests {
             _throttle_time_ms: i32,
         ) -> ConcreteResponse {
             self.produce_response_with_message(tp, offset, error, _throttle_time_ms, -1, None)
+        }
+
+        /// Build a produce response covering several partitions, in the given order.
+        ///
+        /// `SenderTest.produceResponse(Map<TopicPartition, OffsetAndError>)`
+        /// (Java 3760-3785). Ordering matters: the tests rely on the response listing
+        /// `tp1` before `tp0`.
+        fn produce_response_for(&self, entries: &[(&TopicPartition, i64, Errors)]) -> ConcreteResponse {
+            let mut by_topic: Vec<TopicProduceResponse> = Vec::new();
+            for (tp, offset, error) in entries {
+                let mut ppr = PartitionProduceResponse::new();
+                ppr.set_index(tp.partition());
+                ppr.set_base_offset(*offset);
+                ppr.set_error_code(error.code());
+                ppr.set_log_start_offset(-1);
+                match by_topic.iter_mut().find(|topic| topic.name == *tp.topic()) {
+                    Some(topic) => topic.partition_responses.push(ppr),
+                    None => {
+                        let mut tpr = TopicProduceResponse::new();
+                        tpr.set_topic_id(topic_id());
+                        tpr.set_name(tp.topic().to_string());
+                        tpr.set_partition_responses(vec![ppr]);
+                        by_topic.push(tpr);
+                    },
+                }
+            }
+            let mut data = ProduceResponseData::new();
+            data.set_responses(by_topic);
+            ConcreteResponse::Produce(ProduceResponse::new(data))
         }
 
         /// Build a produce response with optional error message.
@@ -5255,6 +5291,178 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
         assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
         assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
+    }
+
+    /// Translated from
+    /// `SenderTest.testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry`
+    /// (Java 1719-1764): a batch drained under the old producer id still succeeds after
+    /// the epoch is bumped for a different partition.
+    #[tokio::test]
+    async fn test_batches_drained_with_old_producer_id_should_succeed_on_subsequent_retry() {
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let out_of_order_response = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        let successful_response = ctx.append_to_accumulator_with(&tp1, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        let response = ctx.produce_response_for(&[
+            (&tp1, -1, Errors::NotLeaderOrFollower),
+            (&tp0, -1, Errors::OutOfOrderSequenceNumber),
+        ]);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!out_of_order_response.is_done());
+
+        // Bump the epoch and send tp1's request again with the old producer id.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+        assert!(!successful_response.is_done());
+
+        // The response comes back with a retriable error.
+        let response = ctx.produce_response_for(&[(&tp1, 0, Errors::NotLeaderOrFollower)]);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!successful_response.is_done());
+
+        ctx.sender.run_once().await.expect("run_once"); // retry one more time
+        let response = ctx.produce_response_for(&[(&tp1, 0, Errors::None)]);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(successful_response.is_done());
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().sequence_number(&tp1),
+            1,
+            "tp1's epoch is bumped and its sequence reset when the next batch is sent"
+        );
+    }
+
+    /// Translated from
+    /// `SenderTest.testResetOfProducerStateShouldAllowQueuedBatchesToDrain`
+    /// (Java 1611-1651): with the epoch already at `Short.MAX_VALUE`, the bump resets
+    /// the producer id instead, and the batch queued for the healthy partition still
+    /// drains.
+    #[tokio::test]
+    async fn test_reset_of_producer_state_should_allow_queued_batches_to_drain() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, i16::MAX).await;
+
+        ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await; // failed response
+        let successful_response = ctx.append_to_accumulator_with(&tp1, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        let response = ctx.produce_response_for(&[
+            (&tp1, -1, Errors::NotLeaderOrFollower),
+            (&tp0, -1, Errors::OutOfOrderSequenceNumber),
+        ]);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once"); // trigger the epoch bump
+
+        // An exhausted epoch resets the producer id, which means a fresh
+        // `InitProducerId`.
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID + 1, 0));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().producer_id,
+            PRODUCER_ID + 1
+        );
+
+        assert!(!successful_response.is_done());
+        ctx.sender.run_once().await.expect("run_once"); // send tp1's batch again
+        let response = ctx.produce_response_for(&[(&tp1, 10, Errors::None)]);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert!(successful_response.is_done());
+        assert_eq!(successful_response.get().await.expect("succeeds").offset(), 10);
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().sequence_number(&tp1),
+            1,
+            "the epoch and sequence are updated when the next batch is sent"
+        );
+    }
+
+    /// Translated from `SenderTest.testForceCloseWithProducerIdReset`
+    /// (Java 1688-1716): a force close while the producer id is being reset must not
+    /// block, and must abort the pending batches.
+    #[tokio::test]
+    async fn test_force_close_with_producer_id_reset() {
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, 1, i16::MAX).await;
+
+        ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        let successful_response = ctx.append_to_accumulator_with(&tp1, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        let response = ctx.produce_response_for(&[
+            (&tp1, -1, Errors::NotLeaderOrFollower),
+            (&tp0, -1, Errors::OutOfOrderSequenceNumber),
+        ]);
+        ctx.sender.client_mut().respond(response);
+        // The out-of-order sequence error resets the producer id, because the epoch is
+        // maxed out.
+        ctx.sender.run_once().await.expect("run_once");
+
+        ctx.sender.force_close();
+        ctx.sender.run_once().await.expect("this must not block");
+        tokio::time::timeout(std::time::Duration::from_secs(5), ctx.sender.run())
+            .await
+            .expect("the force-close flag must end the main loop");
+
+        assert!(!ctx.accumulator.has_undrained(), "Pending batches are not aborted.");
+        assert!(successful_response.is_done());
+    }
+
+    /// Translated from `SenderTest.testCloseWithProducerIdReset` (Java 1653-1686): an
+    /// orderly close drains the queued batches even though the close began while the
+    /// producer id was being reset.
+    #[tokio::test]
+    async fn test_close_with_producer_id_reset() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent_in_order(10);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, i16::MAX).await;
+
+        ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await; // failed response
+        ctx.append_to_accumulator_with(&tp1, 0, "k2", "v2").await; // success response
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        let response = ctx.produce_response_for(&[
+            (&tp1, -1, Errors::NotLeaderOrFollower),
+            (&tp0, -1, Errors::OutOfOrderSequenceNumber),
+        ]);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.initiate_close();
+        // The out-of-order sequence error resets the producer id, because the epoch is
+        // maxed out.
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Java's `TestUtils.waitForCondition` spins `runOnce` with a fresh
+        // `InitProducerId` response prepared each time until the accumulator drains.
+        for _ in 0..50 {
+            if !ctx.accumulator.has_undrained() {
+                break;
+            }
+            ctx.sender
+                .client_mut()
+                .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID + 1, 1));
+            ctx.sender.run_once().await.expect("run_once");
+        }
+        assert!(!ctx.accumulator.has_undrained(), "Failed to drain batches");
     }
 
     /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
