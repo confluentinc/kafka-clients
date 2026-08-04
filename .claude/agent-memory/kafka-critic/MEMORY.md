@@ -65,4 +65,4 @@
 - [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives the build; 4 latestVersionUnstable flags differ from kafka/ 4.2; full flag-consumer audit list
 - [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean on pass 6; heading-reorder containment, warning-block anchors, per-member verification, lock mechanics
 - [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED in 4 passes (3/3/1/0). Reachability entries-vs-exits; audit *replacement* justifications; unit-reachable ≠ phase-reachable; non-blocking follow-ups need their own heading
-- [M11 Phase 4 send-path integration](review_m11_phase4.md) — "deallocate later" needs a named 2nd owner; completeResponses catches per-response; a deferral's destination is checkable; DoD §10 audited the wrong class
+- [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim

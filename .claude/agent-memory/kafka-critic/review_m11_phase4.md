@@ -190,3 +190,28 @@ three batches; the second post-expiry `run_once` is the load-bearing assertion);
 issue 9's Java claims (`NetworkClient.java:736-746`, `Selector.java:886-892` +
 `:96`, `KafkaProducer.java:438` — all correct now); the deliberate `(Java
 3325-3339)` sub-range ending at `}));`.
+
+## Pass 4 — clean; Phase 4 closed on 5 → 4 → 1 → 0
+
+Doc-only fix (`374ca12`). All four passes' findings were real and conceded; no false
+positives across the loop.
+
+17. **An audit's denominator is part of its claim.** The Actor did not just fix the
+    header — it re-derived why the pass-2 sweep missed it (the rewrite and the audit
+    shared a matcher requiring `(Java A-B)` to close the parenthesis, so the one
+    header with a trailing clause inside the parens was in neither set) and
+    corrected its own earlier "0 mismatches over 34" to "over 33". Verify such a
+    correction by reproducing *both* matchers: broadened (paren need not close) gives
+    34 citations, and counting citations whose range is not immediately followed by
+    `)` gives exactly 1 — so the narrow matcher's reach was 33 and nothing else was
+    hidden. That two-number check is the cheap way to confirm a sweep's coverage
+    claim rather than its results.
+
+18. **Distinguish a deliberate sub-range from a wrong one by what it annotates.**
+    The single surviving mismatch against declaration..closing-brace is
+    `(Java 3325-3339)` on the *helper* `update_metadata_with_leader_epochs`, whose
+    doc says "mirroring the `metadataUpdateWithIds(..)` calls in …" — not a
+    `Translated from` header, and the test's own header separately cites the full
+    `3308-3394`. A convention statement scoped to "the `Translated from` header of
+    every test" correctly excludes it. Check the annotated item's kind before
+    flagging a narrow range.

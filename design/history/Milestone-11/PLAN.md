@@ -1847,6 +1847,64 @@ here it is a different author.
     control-flow model was fully green, in an artifact §Phase-4 names as its reference.
     Now pinned in both directions.
 
+### 9.17 `KafkaCluster` leaks broker containers when a run aborts
+
+**Status:** open. Found by Actor 43 while running the gate repeatedly; diagnosis
+confirmed by Critic 43 and by direct inspection. **Not a Phase 3 defect** — outside its
+diff entirely.
+
+Containers are created inside `tokio::spawn`ed tasks at
+`tests/common/kafka_cluster.rs:361-375` and only become owned by
+`KafkaCluster::_containers` (`:285`) after the collect loop at `:379-382`. There is no
+`impl Drop for KafkaCluster`. An abort between the first container starting and the
+struct being built — a panic at `handle.await.expect(..)` (`:381`), or the whole future
+dropped on a timeout — detaches the surviving tasks, leaving their containers running.
+
+Because host ports are pre-reserved at `:333`, a survivor collides **deterministically**
+on a later run, and the failure surfaces inside `with_mapped_port` as a *test* failure:
+`failed to bind host port ... address already in use`. So it mimics a code regression.
+It cost one gate run in this phase, and four `apache/kafka:4.2.0` containers were found
+up 2-3 hours holding ports.
+
+**Fix:** register teardown as each container starts rather than after all of them do, so
+an abort mid-startup still reclaims what already exists.
+
+**Meanwhile:** `docker ps` before trusting an integration failure that mentions port
+binding, and `docker rm -f` any orphans.
+
+### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
+
+**Status:** open. Found in Phase 4 while translating
+`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3049). **Not a Phase 4
+defect** — it predates the transaction manager and affects idempotent and
+non-idempotent producers alike.
+
+`Sender.completeBatch` splits and re-enqueues a batch when the broker answers
+`MESSAGE_TOO_LARGE` (`Sender.java:675-689`). In Rust that path panics with
+`build() called but no records built` (`memory_records_builder.rs:298`).
+
+Cause: `Sender::send_producer_data` obtains the wire bytes with
+`ProducerBatch::records()` (`producer_batch.rs:653`), which is
+`MemoryRecordsBuilder::take_built_records()` — it **moves** the built buffer out of
+the batch. That move is deliberate; it is what makes the send path zero-copy under
+CLAUDE.md §12. But `MESSAGE_TOO_LARGE` can only arrive *after* the batch was sent,
+so `ProducerBatch::split` → `validate_and_get_records` → `build()` finds nothing.
+
+Reachability: `completeBatch`'s split arm requires
+`recordCount > 1 && !batch.isDone() && magic >= v2`. The existing
+`test_expired_batch_does_not_split_on_message_too_large_error` passes only because it
+expires the batch first, taking the `!isDone()` branch and skipping the split. No
+test covered the live path, which is why this went unnoticed.
+
+**Reproducer:** `sender.rs`'s `test_too_large_batches_are_safely_removed`, left in
+place and `#[ignore]`d with this section cited.
+
+**Fix direction (not attempted here):** the batch needs its serialised bytes to stay
+readable after the send without reintroducing a copy — e.g. keep the `bytes::Bytes`
+in the builder and hand out a cheap clone to the request, since `Bytes` is already
+refcounted. That is a write-path change, so it does not belong in a transactions
+phase; it also needs its own allocation audit against DoD §10.
+
 ### 9.19 Three `SenderTest` methods blocked on missing surface
 
 **Status:** open, and reduced to three blocked items — nothing is owed on budget any
@@ -1908,63 +1966,39 @@ The accounting block now states the criterion, gives the commands that derive th
 and diff it against the groups, and derives every count from the lists.
 
 
-### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
+### 9.20 Critic review of Phase 4
 
-**Status:** open. Found in Phase 4 while translating
-`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3049). **Not a Phase 4
-defect** — it predates the transaction manager and affects idempotent and
-non-idempotent producers alike.
+**Status:** DONE — loop **closed 2026-08-05 on a clean fourth pass** (zero findings).
+Archived at `design/history/Milestone-11/Phase-4/COMMENTS.DONE.44.md`.
 
-`Sender.completeBatch` splits and re-enqueues a batch when the broker answers
-`MESSAGE_TOO_LARGE` (`Sender.java:675-689`). In Rust that path panics with
-`build() called but no records built` (`memory_records_builder.rs:298`).
+| Pass | Findings | Where the defects were | Fix |
+|---|---|---|---|
+| 1 | 5 | **2 real bugs** (per-send double allocation; buffer-pool leak), response-loop mismatch, rejected 33-test deferral, stale doc | `c1c6e60` `a2ca2f9` `13e6201` + test commits |
+| 2 | 4 | 1 lost test, 1 behaviour mismatch (expiry unmute), 2 record classes | `86a2b6c` |
+| 3 | 1 | one citation header crediting the sibling test's range | `374ca12` |
+| 4 | **0** | — | closes the loop |
 
-Cause: `Sender::send_producer_data` obtains the wire bytes with
-`ProducerBatch::records()` (`producer_batch.rs:653`), which is
-`MemoryRecordsBuilder::take_built_records()` — it **moves** the built buffer out of
-the batch. That move is deliberate; it is what makes the send path zero-copy under
-CLAUDE.md §12. But `MESSAGE_TOO_LARGE` can only arrive *after* the batch was sent,
-so `ProducerBatch::split` → `validate_and_get_records` → `build()` finds nothing.
+All ten findings real and conceded; no false positives. The full pass-by-pass record,
+the two bugs' anatomy, the deferral rejection (its covering evidence: deferred item 23
+was exactly the test that would have caught the buffer leak), and the lessons are in
+the archive header. Headline lessons:
 
-Reachability: `completeBatch`'s split arm requires
-`recordCount > 1 && !batch.isDone() && magic >= v2`. The existing
-`test_expired_batch_does_not_split_on_message_too_large_error` passes only because it
-expires the batch first, taking the `!isDone()` branch and skipping the split. No
-test covered the live path, which is why this went unnoticed.
+  - An allocation audit must cover the public entry point, not only the inner hot
+    loop — the double allocation sat between the Actor's sound drain audit and the
+    send API.
+  - A "deallocated later" claim needs the holder named; if no structure keeps the
+    object reachable until "later", the claim is a leak.
+  - A completeness claim over a list needs its mechanical check shipped alongside —
+    the accounting lost one entry while its totals still reconciled, and the rebuilt
+    self-verifying block then caught the Actor's own audit-regex blind spot.
+  - Third invented-Java-mechanism instance this milestone (`client.close()` "runs
+    completion callbacks" — it uses `DISCARD_NO_NOTIFY`, `Selector.java:96`). The
+    honest record is "Java quietly abandons these; our explicit release is a
+    deliberate improvement", and it now says so.
 
-**Reproducer:** `sender.rs`'s `test_too_large_batches_are_safely_removed`, left in
-place and `#[ignore]`d with this section cited.
-
-**Fix direction (not attempted here):** the batch needs its serialised bytes to stay
-readable after the send without reintroducing a copy — e.g. keep the `bytes::Bytes`
-in the builder and hand out a cheap clone to the request, since `Bytes` is already
-refcounted. That is a write-path change, so it does not belong in a transactions
-phase; it also needs its own allocation audit against DoD §10.
-
-### 9.17 `KafkaCluster` leaks broker containers when a run aborts
-
-**Status:** open. Found by Actor 43 while running the gate repeatedly; diagnosis
-confirmed by Critic 43 and by direct inspection. **Not a Phase 3 defect** — outside its
-diff entirely.
-
-Containers are created inside `tokio::spawn`ed tasks at
-`tests/common/kafka_cluster.rs:361-375` and only become owned by
-`KafkaCluster::_containers` (`:285`) after the collect loop at `:379-382`. There is no
-`impl Drop for KafkaCluster`. An abort between the first container starting and the
-struct being built — a panic at `handle.await.expect(..)` (`:381`), or the whole future
-dropped on a timeout — detaches the surviving tasks, leaving their containers running.
-
-Because host ports are pre-reserved at `:333`, a survivor collides **deterministically**
-on a later run, and the failure surfaces inside `with_mapped_port` as a *test* failure:
-`failed to bind host port ... address already in use`. So it mimics a code regression.
-It cost one gate run in this phase, and four `apache/kafka:4.2.0` containers were found
-up 2-3 hours holding ports.
-
-**Fix:** register teardown as each container starts rather than after all of them do, so
-an abort mid-startup still reclaims what already exists.
-
-**Meanwhile:** `docker ps` before trusting an integration failure that mentions port
-binding, and `docker rm -f` any orphans.
+Verified at closure: `make verify-sandbox` exit 0 over `374ca12`; `producer_perf_test`
+p99 13-15 ms across six serial runs against the 70 ms budget (no send-path latency
+regression); all eleven DoD clauses pass.
 
 ---
 
