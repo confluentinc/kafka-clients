@@ -37,8 +37,8 @@ use std::time::Duration;
 #[allow(deprecated)]
 use confluent_kafka::admin::ListConsumerGroupsOptions;
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreateTopicsOptions, DeleteConsumerGroupsOptions, DescribeConsumerGroupsOptions,
-    ListGroupsOptions, MemberToRemove, NewTopic, RemoveMembersFromConsumerGroupOptions, new_admin_client,
+    Admin, AdminClientConfig, DeleteConsumerGroupsOptions, DescribeConsumerGroupsOptions, ListGroupsOptions,
+    MemberToRemove, RemoveMembersFromConsumerGroupOptions, new_admin_client,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
@@ -47,6 +47,7 @@ use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
 
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
 
 /// Auto-created topics get this many partitions (see [`kip848_3_broker`]).
 const NUM_PARTITIONS: i32 = 2;
@@ -128,12 +129,7 @@ async fn test_list_groups_and_list_consumer_groups_show_live_group() {
     let group_id = ctx.group_id("g_list");
 
     // Create the topic explicitly so the assignment is deterministic.
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, NUM_PARTITIONS, 1).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         consumer_config(ctx.bootstrap_servers(), &group_id),
@@ -192,12 +188,7 @@ async fn test_describe_consumer_groups_live_group() {
     let topic = ctx.topic("admin_groups_describe");
     let group_id = ctx.group_id("g_describe");
 
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, NUM_PARTITIONS, 1).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         consumer_config(ctx.bootstrap_servers(), &group_id),
@@ -292,12 +283,7 @@ async fn test_delete_consumer_groups_empty_and_non_empty() {
     let empty_group = ctx.group_id("g_delete_empty");
     let live_group = ctx.group_id("g_delete_live");
 
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, NUM_PARTITIONS, 1).await;
 
     // Bring a group up, commit an offset so it is retained, then close the
     // consumer so the group becomes empty (member-less) but still exists.
@@ -369,12 +355,7 @@ async fn test_remove_one_member_from_consumer_group() {
     let topic = ctx.topic("admin_remove_member");
     let group_id = ctx.group_id("g_remove_one");
 
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, NUM_PARTITIONS, 1).await;
 
     // Two static members share the topic's partitions.
     let mut member_one = new_consumer::<Vec<u8>, Vec<u8>>(
@@ -437,12 +418,7 @@ async fn test_remove_all_members_from_consumer_group() {
     let topic = ctx.topic("admin_remove_all");
     let group_id = ctx.group_id("g_remove_all");
 
-    admin
-        .create_topics(&[NewTopic::new(topic.clone(), NUM_PARTITIONS, 1)], CreateTopicsOptions::new())
-        .all()
-        .get()
-        .await
-        .expect("create topic");
+    create_topic(admin.as_ref(), &topic, NUM_PARTITIONS, 1).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         static_consumer_config(ctx.bootstrap_servers(), &group_id, "instance-1"),
