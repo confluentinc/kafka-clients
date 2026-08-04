@@ -312,22 +312,31 @@ than a weak justification, because a scope expansion I made on my own initiative
 is only reviewable through its stated reason.
 
 **Replaced** in all three records (`transaction_manager.rs`'s `close` doc, PLAN
-§Phase-3's added-methods bullet, PLAN §9.15) with the true reasons, which are two:
+§Phase-3's added-methods bullet, PLAN §9.15). At the time this section was written
+the replacement was given as two reasons:
 
   1. **Scheduling.** `close` was unscheduled in every phase — the same gap that
      left `authenticationFailed` out, which is what Issue 1 filed. Twelve lines,
      no Phase-5 dependency beyond the `pendingTransition` branch. Leaving it
      unscheduled risks it being missed again.
-  2. **Behaviour.** Its observable effect idempotently is the `FATAL_ERROR`
+  2. ~~**Behaviour.** Its observable effect idempotently is the `FATAL_ERROR`
      transition, which stops `Sender.runOnce` at `:318` before
-     `bumpIdempotentEpochAndResetIdIfNeeded` can enqueue a new `InitProducerId` —
-     a force-closing producer must not go on to acquire a new producer id.
+     `bumpIdempotentEpochAndResetIdIfNeeded` can enqueue a new `InitProducerId`.~~
+     **Also false — retracted under Issue 7 below.** `close()` is the Sender task's
+     terminal act; no `runOnce` follows it, and the `!forceClose` loop guards
+     already end iteration. Only reason (1) survives, plus a Phase-6 payoff.
 
-I have also stated plainly, in the new text, that (2) is real but **not urgent
-before Phase 6**, since Phase 4 does not translate the shutdown block at all. The
-honest shape of the decision is "cheap, unscheduled, and reachable", not "fixes a
-live defect". The retracted claim is kept as a marked **Correction** block in
-§9.15 rather than deleted, for the same reason Issue 2's is.
+The framing this section added — that the payoff is **not urgent before Phase 6**,
+since Phase 4 does not translate the shutdown block at all, and that the honest
+shape of the decision is "cheap, unscheduled, and reachable" rather than "fixes a
+live defect" — is the accurate half and stands. The retracted claims are kept as a
+marked **Correction** block in §9.15 rather than deleted, for the same reason
+Issue 2's is.
+
+*(This paragraph was itself caught by the "grep for present-tense behavioural
+verbs" rule that Issue 7's audit produced — the rule found its first residual
+instance in the record that introduced the error, one commit after the rule was
+written.)*
 
 The hanging-future concern is bounded rather than dropped: it becomes real in
 **Phase 6**, on the **transactional** path, where `KafkaProducer.initTransactions`
