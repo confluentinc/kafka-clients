@@ -1127,14 +1127,19 @@ zero-finding pass — once on the Critic's own "does not warrant a fourth round"
 were premature; `agent-roles.md` §2's gate is a clean pass, and nothing else
 substitutes for it.
 
-### 9.9 `generator/messages/` is a pre-4.2 snapshot and diverges from `kafka/`
+### 9.9 `generator/messages/` was a pre-4.2 snapshot diverging from `kafka/`
 
-**Status:** open. Found by Critic 42's fifth pass, while checking a §9.7 claim.
+**Status:** DONE — refreshed from the submodule 2026-08-04. The two trees are now
+byte-identical for all 197 schemas (`kafka/`'s `README.md` is not copied; it
+documents the schema format for Java's generator and is not an input to ours).
 
-CLAUDE.md's "Source Reference" names `kafka/` (Apache Kafka 4.2) as the contract,
-but `build.rs:44` generates all 197 wire types from **`generator/messages/`**, a
-separate copy that has been touched by exactly one commit — `6cd275c Initial branch
-(#1)` — and never refreshed. The two corpora disagree:
+**What it was.** CLAUDE.md's "Source Reference" names `kafka/` (Apache Kafka 4.2) as
+the contract, but `build.rs:44` generates all 197 wire types from
+**`generator/messages/`**, a separate copy touched by exactly one commit —
+`6cd275c Initial branch (#1)`, 31 Mar 2026 — and never refreshed. The copy predates
+the `kafka/` submodule (added 10 Apr 2026, `cdb8ae6`), which is why it existed at
+all: there was no submodule to read from when the project started. It became
+redundant ten days later and was never removed. The two trees had diverged:
 
 | | `generator/messages/` (built) | `kafka/` 4.2 (documented) |
 |---|---|---|
@@ -1171,20 +1176,46 @@ version range plus a comment — KIP-1023 adds a sentinel *timestamp value*, not
 field. Version negotiation settles on v10, so a v10-capable client is compatible;
 the gap is an unexposed capability, not an incompatibility.
 
-**Options when this is picked up:**
+**What the refresh actually cost.** Copying the 197 schemas changed 36 files
+(+116/−67) and broke the build's **test** compilation — the library itself compiled
+clean. Three schemas failed to parse:
 
-  1. **Refresh the copy** from the submodule. Keeps the build submodule-independent,
-     but it drifted silently for the project's entire history and would again.
-  2. **Point `build.rs` at `kafka/clients/src/main/resources/common/message/`.**
-     Single source of truth, cannot drift; costs `git submodule update --init` as a
-     build prerequisite. Both trees hold the *same 197 filenames* with nothing
-     custom in `generator/messages/`, so nothing is lost by deleting it.
+    invalid type: string "true", expected a boolean
 
-Option 2 is preferred: silent drift caused this, and a missing submodule fails
-loudly. Either way, verify by rebuilding and running the suite — the generated code
-for `ListOffsets` v11 and the out-of-scope version bumps is the only real unknown.
+`WriteShareGroupStateRequest`, `ReadShareGroupStateSummaryResponse` and
+`DescribeShareGroupOffsetsResponse` each gained a field writing
+`"ignorable": "true"` **as a quoted string**. Java accepts it because Jackson
+coerces a `"true"` string to a boolean; `serde` is strict. Across all 197 schemas
+`ignorable` appears quoted 3 times and unquoted 177 times, so both forms are
+legitimate — only `ignorable` is ever quoted, and `mapKey` / `zeroCopy` /
+`latestVersionUnstable` never are.
 
-**No known live defect** — audited by Critic 42's sixth pass, not merely assumed.
+Fixed by `deserialize_lenient_bool` in `generator/src/message/mod.rs`, applied to
+**every** boolean schema property rather than only the one quoted today, because the
+strict form fails silently (§9.10). Three tests cover it, including that a
+non-boolean string is still rejected — leniency extends to `"true"` / `"false"`
+only, so a typo stays a parse error instead of becoming `false`.
+
+After the fix: 197 schemas byte-identical to the submodule, stub count back to the
+8 intentional ones, `ListOffsets` v11 and the Share/Raft version bumps all generate,
+`delivery_complete_count` present with its `-1` default. **2348 tests passing**,
+format-check / lint / check-generated clean.
+
+**Still open — the second copy remains.** This item refreshed the snapshot; it did
+not eliminate the duplication, so it can drift again. The structural fix is to point
+`build.rs:44` at `kafka/clients/src/main/resources/common/message/` and delete
+`generator/messages/`: single source of truth, cannot drift, at the cost of
+`git submodule update --init` as a build prerequisite. Both trees hold the same 197
+filenames with nothing custom on our side, so nothing is lost. Preferred, because
+silent drift caused this whole item and a missing submodule fails loudly.
+
+`generator/test-messages/` has the same shape of gap on a smaller scale: 3 files
+against Kafka's 4, the 3 shared ones identical, `SimpleRecordsMessage.json` absent.
+Not refreshed here — adding a schema adds generated test types, which is a separate
+change from syncing existing ones.
+
+**No known live defect from the divergence** — audited by Critic 42's sixth pass
+before the refresh, not merely assumed.
 `latest_version_unstable()` has no caller outside the generated file. The only
 production `latest_version_with_unstable(false)` sites are the five txn builders,
 whose specs are flag-identical across corpora. The two other readers
@@ -1195,9 +1226,50 @@ whose specs are flag-identical across corpora. The two other readers
 identical in both corpora (highest = 0), so `latest_version()` returns 0 = Java;
 only the uncalled `with_unstable(false)` would yield −1.
 
-The `OffsetCommit` / `OffsetFetch` flag delta is therefore **latent**: it becomes
-real only if §9.7 is executed mechanically, which §9.7's warning block prevents.
-Resolving this item removes that hazard at the source instead of annotating it.
+The `OffsetCommit` / `OffsetFetch` flag delta was therefore **latent**. It is now
+**gone**: after the refresh only `InitProducerIdRequest` sets the flag, matching 4.2,
+so the two accessors agree for `OFFSET_COMMIT` / `OFFSET_FETCH` and the §9.7 hazard
+no longer exists. §9.7's warning block is now belt-and-braces rather than
+load-bearing — the four "faithful group" builders must still keep
+`latest_version()` to mirror Java's `super(...)`, but getting it wrong is no longer a
+wire-visible regression.
+
+### 9.10 A schema that fails to parse becomes a silent stub
+
+**Status:** open. Found 2026-08-04 while refreshing §9.9.
+
+`generator/src/lib.rs:45-54` catches a per-schema parse error, prints it with
+`eprintln!`, writes a **stub** in its place, and continues:
+
+    #[derive(Debug, Clone)]
+    pub struct WriteShareGroupStateRequestData {
+        // Fields will be generated when spec can be parsed
+    }
+
+`generate_messages` then returns `Ok(())`, so `build.rs`'s `panic!` arm never fires
+and the build succeeds. Cargo hides build-script stderr unless the build fails, so
+the only trace is a line — `Successfully generated 186 out of 197 message types` —
+that requires `cargo build -vv` to see.
+
+A stub has no fields, no `read`/`write`, and no version constants. Any code path
+using that message type silently does nothing instead of speaking the protocol.
+
+**Why this matters more than the bug it hid.** §9.9's quoted-boolean failure only
+surfaced because `message_test.rs` happens to reference
+`HIGHEST_SUPPORTED_VERSION` on those three types — a compile error in a *test*. Had
+the affected schemas been ones no test names, the refresh would have reported
+success while three message types quietly became empty shells.
+
+**8 stubs exist today and are intentional:** `ControlledShutdown`, `LeaderAndIsr`,
+`StopReplica`, `UpdateMetadata` (request + response each) declare
+`"validVersions": "none"` — they were removed from the protocol in Kafka 4.0 — and
+the parser reports "You must specify the version of the X structure". So parse
+failure cannot simply be made fatal.
+
+**Fix:** an explicit allowlist of known-unsupported schemas (those 8, with the
+reason), and make any *other* parse failure fatal — `generate_messages` returns
+`Err`, `build.rs` already panics on it. Loud by default, silent only where silence
+was chosen deliberately.
 
 
 ---
