@@ -494,7 +494,7 @@ A Rust request builder's `latest_allowed_version` MUST mirror whichever Java
 |---|---|
 | `super(apiKey)` | `latest_version_with_unstable(false)` |
 | `super(apiKey, enableUnstableLastVersion)` | pass the same flag through |
-| `super(apiKey, oldest, latest)` | the literal `latest` value |
+| `super(apiKey, oldest, latest)` | translate the `latest` **expression** verbatim — a constant where Java passes a constant, `latest_version()` where Java passes `latestVersion()` |
 
 `super(apiKey)` delegates to `Builder(apiKey, false)` → `latestVersion(false)`
 (`AbstractRequest.java:46-51`), whose own comment reads "any supported and
@@ -518,15 +518,40 @@ release, so a coincidence today is not a guarantee tomorrow.
   - Check the Java builder's `super(...)` call, not the spec flag. The call is the
     contract; the flag is why it matters.
   - Where Java deliberately uses the unstable-inclusive `latestVersion()` —
-    `OffsetCommitRequest.java:56`, `OffsetFetchRequest.java:64` — translate *that*
+    `OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64` — translate *that*
     as `latest_version()` and say so at the site, so a reviewer can tell
     "deliberate" from "not yet reached".
   - Apply uniformly across a phase. Mixed treatment with no stated criterion is
     itself a defect (Critic 42 finding 6): before the first fixup all five txn
     builders were uniformly wrong, which was at least legible.
 
+**Scope — this rule is not retroactive on its own.** Nine `RequestBuilder`s
+predating it still call `latest_version()`. All are behaviourally correct today;
+four are faithful (Java's own bound is `latestVersion()`) and five match the
+anti-pattern above:
+
+  - Faithful, but unmarked: `api_versions_request.rs`, `offset_commit_request.rs`,
+    `offset_fetch_request.rs`, `offsets_for_leader_epoch_request.rs`.
+  - Implicated: `metadata_request.rs:191`, `find_coordinator_request.rs:192`,
+    `sasl_handshake_request.rs:116`, `sasl_authenticate_request.rs:122`,
+    `consumer_group_heartbeat_request.rs:138` — the last is the notable one, since
+    Java's builder takes `enableUnstableLastVersion` as a parameter the Rust
+    builder does not model.
+
+Bringing them in line is tracked as `design/history/Milestone-11/PLAN.md` §9.7, as
+its own piece of work. **Do NOT flag these in a transactions-phase review** — nine
+files across the common and consumer surface with zero behaviour change is a poor
+fit for a transactions phase and would make any regression ambiguous. A Critic
+reviewing a *new* translation should apply this rule fully; a Critic reviewing
+pre-existing code should cite §9.7 instead.
+
 **Anti-patterns to flag in review:**
 
   - `latest_version()` in a builder whose Java counterpart calls `super(apiKey)`.
-  - An explicit-range Java `super(apiKey, oldest, latest)` translated as an
-    accessor call instead of the literal bound.
+  - An explicit-range Java `super(apiKey, oldest, latest)` where Java passes a
+    **constant** (e.g. `AddPartitionsToTxnRequest.java:73`'s `LAST_CLIENT_VERSION`)
+    but Rust substitutes an accessor call. Note this does NOT apply where Java's
+    own bound *is* an accessor call — `ApiVersionsRequest.java:43`,
+    `OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64`,
+    `OffsetsForLeaderEpochRequest.java:57` all pass `latestVersion()` explicitly,
+    and `latest_version()` is the faithful translation there.
