@@ -1845,6 +1845,39 @@ here it is a different author.
     control-flow model was fully green, in an artifact §Phase-4 names as its reference.
     Now pinned in both directions.
 
+### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
+
+**Status:** open. Found in Phase 4 while translating
+`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3049). **Not a Phase 4
+defect** — it predates the transaction manager and affects idempotent and
+non-idempotent producers alike.
+
+`Sender.completeBatch` splits and re-enqueues a batch when the broker answers
+`MESSAGE_TOO_LARGE` (`Sender.java:675-689`). In Rust that path panics with
+`build() called but no records built` (`memory_records_builder.rs:298`).
+
+Cause: `Sender::send_producer_data` obtains the wire bytes with
+`ProducerBatch::records()` (`producer_batch.rs:653`), which is
+`MemoryRecordsBuilder::take_built_records()` — it **moves** the built buffer out of
+the batch. That move is deliberate; it is what makes the send path zero-copy under
+CLAUDE.md §12. But `MESSAGE_TOO_LARGE` can only arrive *after* the batch was sent,
+so `ProducerBatch::split` → `validate_and_get_records` → `build()` finds nothing.
+
+Reachability: `completeBatch`'s split arm requires
+`recordCount > 1 && !batch.isDone() && magic >= v2`. The existing
+`test_expired_batch_does_not_split_on_message_too_large_error` passes only because it
+expires the batch first, taking the `!isDone()` branch and skipping the split. No
+test covered the live path, which is why this went unnoticed.
+
+**Reproducer:** `sender.rs`'s `test_too_large_batches_are_safely_removed`, left in
+place and `#[ignore]`d with this section cited.
+
+**Fix direction (not attempted here):** the batch needs its serialised bytes to stay
+readable after the send without reintroducing a copy — e.g. keep the `bytes::Bytes`
+in the builder and hand out a cheap clone to the request, since `Bytes` is already
+refcounted. That is a write-path change, so it does not belong in a transactions
+phase; it also needs its own allocation audit against DoD §10.
+
 ### 9.17 `KafkaCluster` leaks broker containers when a run aborts
 
 **Status:** open. Found by Actor 43 while running the gate repeatedly; diagnosis

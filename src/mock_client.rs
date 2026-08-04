@@ -284,6 +284,40 @@ impl MockClient {
         self.responses.push_back(client_response);
     }
 
+    /// Respond to the pending request at `index` in arrival order.
+    ///
+    /// The Rust analogue of Java's `MockClient.respondToRequest(ClientRequest,
+    /// AbstractResponse)`, which `SenderTest` uses to answer in-flight requests out of
+    /// order (e.g. `testCorrectHandlingOfDuplicateSequenceError`). Java identifies the
+    /// request by identity; `ClientRequest` is not `Clone` here, so it is identified by
+    /// position instead.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is out of range.
+    pub fn respond_to_request_at(&mut self, index: usize, response: ConcreteResponse) {
+        let now = (self.time_provider)();
+        let mut request = self
+            .requests
+            .remove(index)
+            .unwrap_or_else(|| panic!("No pending request at index {index}"));
+        let version = request.request_builder().latest_allowed_version();
+        let header = request.make_header(version).expect("Failed to create header");
+        let callback = request.take_callback();
+        let client_response = ClientResponse::new(
+            header,
+            callback,
+            request.destination(),
+            request.created_time_ms(),
+            now,
+            false,
+            None,
+            None,
+            Some(response),
+        );
+        self.responses.push_back(client_response);
+    }
+
     /// Respond to the first pending request to the given node.
     pub fn respond_from(&mut self, response: ConcreteResponse, node: &Node) {
         self.respond_from_with_disconnect(response, node, false);
