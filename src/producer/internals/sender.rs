@@ -5621,35 +5621,150 @@ mod tests {
 
     /// Translated from
     /// `SenderTest.testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown`
-    /// (Java 1942-1998), reduced to the branch it exists for: an
-    /// `UNKNOWN_PRODUCER_ID` whose `logStartOffset` is `-1` is retried *without*
-    /// bumping the epoch, because the broker could not report where the log starts
-    /// (`TransactionManager.java:1969-1977`).
+    /// (Java 1939-1996): an `UNKNOWN_PRODUCER_ID` whose `logStartOffset` is `-1` is
+    /// retried *without* resetting the sequence numbers, because the broker could not
+    /// report where the log starts (`TransactionManager.java:1969-1977`).
     #[tokio::test]
-    async fn test_unknown_producer_error_is_retried_when_log_start_offset_is_unknown() {
+    async fn test_unknown_producer_error_should_be_retried_when_log_start_offset_is_unknown() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
 
-        let request1 = ctx.append_to_accumulator(&tp0).await;
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
         ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
 
-        let response = ctx.produce_response_with_message(&tp0, -1, Errors::UnknownProducerId, 0, -1, None);
-        ctx.sender.client_mut().respond(response);
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 1000, 10);
         ctx.sender.run_once().await.expect("run_once");
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 1000);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1000));
 
-        assert!(!request1.is_done(), "the batch is retried, not failed");
-        assert!(
-            !ctx.transaction_manager().lock().unwrap().client_side_epoch_bump_required(),
-            "an unknown logStartOffset must not trigger an epoch bump"
-        );
-        assert_eq!(
-            ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch,
-            0,
-            "the epoch is unchanged"
-        );
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::UnknownProducerId, -1, -1);
+        // Retried without resetting the sequence numbers, since the log start offset is
+        // unknown.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!request2.is_done());
+        assert!(!ctx.sender.client().has_in_flight_requests());
+
+        ctx.sender.run_once().await.expect("run_once"); // retry request 1
+        // The expected sequence is still 1: we never learned the logStartOffset, so the
+        // sequence numbers were not reset.
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::None, 1011, 1010);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1011);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1011));
+    }
+
+    /// Translated from
+    /// `SenderTest.testIdempotentUnknownProducerHandlingWhenRetentionLimitReached`
+    /// (Java 1882-1937): the broker's `logStartOffset` has moved past our last acked
+    /// offset, so the producer state was lost to retention — bump the epoch and restart
+    /// the sequence at 0 (`TransactionManager.java:1990-2010`).
+    #[tokio::test]
+    async fn test_idempotent_unknown_producer_handling_when_retention_limit_reached() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 1000, 10);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 1000);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1000));
+
+        // A single batch with two records.
+        ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k3", "v3").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 3);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::UnknownProducerId, -1, 1010);
+        // Retried because logStartOffset > lastAckedOffset.
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender.run_once().await.expect("run_once"); // bump the epoch and retry
+
+        // The partition's sequence state is reset, because the broker lost it.
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!request2.is_done());
+        assert!(ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+
+        // The resent request starts from sequence 0, since the broker lost our state.
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 1011, 1010);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1012);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1012));
+    }
+
+    /// Translated from
+    /// `SenderTest.testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated`
+    /// (Java 2085-2126): the `logStartOffset` has *not* moved past our last acked
+    /// offset, so the idempotent producer still bumps the epoch and retries rather than
+    /// failing the batch.
+    #[tokio::test]
+    async fn test_should_raise_out_of_order_sequence_exception_to_user_if_log_was_not_truncated() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 1000, 10);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 1000);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1000));
+
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::UnknownProducerId, -1, 10);
+        ctx.sender.run_once().await.expect("run_once"); // request an epoch bump
+        ctx.sender.run_once().await.expect("run_once"); // bump the epoch
+        assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert!(!request2.is_done());
     }
 
     /// Translated from `SenderTest.testTooLargeBatchesAreSafelyRemoved`
