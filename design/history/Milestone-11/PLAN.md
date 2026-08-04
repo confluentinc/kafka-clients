@@ -839,6 +839,35 @@ and it covers `InitProducerId`. Verified: none of the other Phase 2 pairs'
 dedicated test files contain such an assertion, so no further phases will
 surface additional skips from this gap.
 
+#### Refinement (found in Phase 2, `TxnOffsetCommit`): the check applies only to
+#### **non-ignorable** fields
+
+Java's generator emits the non-default-at-unsupported-version check **only** when
+the field is not marked ignorable — `MessageDataGenerator.java:792`:
+
+    if (!field.ignorable()) {
+        cond.ifNotMember(__ -> {
+            field.generateNonIgnorableFieldCheck(...);
+        });
+    }
+
+So the spec's `"ignorable": true` flag is load-bearing, and the two cases differ:
+
+| Field | `ignorable` | Java | Rust today |
+|---|---|---|---|
+| `InitProducerIdRequest.ProducerId` (v3+) | absent | **throws** | silently drops ← the gap |
+| `TxnOffsetCommitRequest.CommittedLeaderEpoch` (v2+) | `true` | silently drops | silently drops ← **correct** |
+
+This materially narrows the fix: **the generator must consult the `ignorable`
+flag, not add the check unconditionally.** Adding it everywhere would start
+rejecting legitimate ignorable-field drops that Java accepts — turning a
+missing-error bug into a spurious-error bug, across all 197 message types.
+
+Discovered by an all-versions round-trip test in
+`txn_offset_commit_request.rs`, which initially failed because it asserted the
+leader epoch survived at v0/v1. The expectation was wrong, not the code; the test
+is now version-aware and documents why.
+
 **How to verify the fix:** remove the `#[ignore]` from
 `test_init_producer_id_request_versions` in
 `src/common/requests/init_producer_id_request.rs`. The assertion is already

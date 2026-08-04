@@ -434,3 +434,30 @@ behaviour-preserving on the wire and strictly more testable.
   - A `HashMap` iterated directly into a `set_*` call on generated wire data.
   - A byte-level test that passes only because the map happened to iterate in a
     convenient order.
+
+## 11. Version-gated field checks apply only to non-`ignorable` fields
+
+When reasoning about whether a value may be silently dropped at a version that
+does not support its field, consult the spec's `"ignorable"` flag.
+
+Java's generator emits the "attempted to write a non-default X at version N"
+check **only** for fields that are NOT ignorable
+(`MessageDataGenerator.java:792`). An `"ignorable": true` field is silently
+dropped by Java too.
+
+**Why this matters:** the Rust generator currently emits no such check for *any*
+field (PLAN §9.1). Fixing that must respect the flag. Adding the check
+unconditionally would begin rejecting legitimate drops that Java accepts, turning
+a missing-error bug into a spurious-error bug across all 197 generated types.
+
+**How to apply:**
+
+  - Before treating a dropped field as a defect, check the spec entry. If it says
+    `"ignorable": true`, Rust dropping it matches Java and there is nothing to
+    fix.
+  - Known cases: `InitProducerIdRequest.ProducerId` is **not** ignorable, so
+    Java throws and Rust's silence is the real gap.
+    `TxnOffsetCommitRequest.CommittedLeaderEpoch` **is** ignorable, so Rust's
+    silence is correct.
+  - An all-versions serialize/parse round-trip test must therefore be
+    version-aware for ignorable fields, and must state which field and why.
