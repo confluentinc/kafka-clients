@@ -22,6 +22,11 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
+// GC.GetTotalAllocatedBytes has no net462 equivalent, and this is a runtime-behavior
+// test (net462 runs are Windows/CI-only anyway) — so the whole class is net8.0+ only,
+// keeping the net462 TFM smoke leg (PLAN §5.7) compiling.
+#if NET8_0_OR_GREATER
+
 /// <summary>
 /// Per-record receive-path allocation budget (ffi-marshalling.md §B4,
 /// consumer-threading §27, DoD §10). The copy-out (§6.4) allocates only the owned
@@ -153,3 +158,5 @@ public sealed class ConsumerPollAllocationBudgetTests
         return bytes;
     }
 }
+
+#endif
