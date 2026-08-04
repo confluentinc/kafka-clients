@@ -1201,13 +1201,8 @@ After the fix: 197 schemas byte-identical to the submodule, stub count back to t
 `delivery_complete_count` present with its `-1` default. **2348 tests passing**,
 format-check / lint / check-generated clean.
 
-**Still open — the second copy remains.** This item refreshed the snapshot; it did
-not eliminate the duplication, so it can drift again. The structural fix is to point
-`build.rs:44` at `kafka/clients/src/main/resources/common/message/` and delete
-`generator/messages/`: single source of truth, cannot drift, at the cost of
-`git submodule update --init` as a build prerequisite. Both trees hold the same 197
-filenames with nothing custom on our side, so nothing is lost. Preferred, because
-silent drift caused this whole item and a missing submodule fails loudly.
+**The duplication itself remains** — this item refreshed the snapshot but did not
+remove the second copy, so it can drift again. Tracked as **§9.11**.
 
 `generator/test-messages/` has the same shape of gap on a smaller scale: 3 files
 against Kafka's 4, the 3 shared ones identical, `SimpleRecordsMessage.json` absent.
@@ -1270,6 +1265,59 @@ failure cannot simply be made fatal.
 reason), and make any *other* parse failure fatal — `generate_messages` returns
 `Err`, `build.rs` already panics on it. Loud by default, silent only where silence
 was chosen deliberately.
+
+### 9.11 Build from the submodule directly and delete `generator/messages/`
+
+**Status:** open. The structural half of §9.9, which fixed the symptom (a stale
+snapshot) but left the cause (two copies of the same 197 schemas).
+
+**Change:** point `build.rs:44` — and the `generate_api_message_type` call on
+`build.rs:56` — at `kafka/clients/src/main/resources/common/message/`, then delete
+`generator/messages/`. Do the same for `generator/test-messages/` →
+`kafka/clients/src/test/resources/common/message/`, which has the same problem at
+smaller scale (3 files against Kafka's 4; `SimpleRecordsMessage.json` absent).
+
+**Why this and not "remember to re-sync".** The copy drifted for the project's entire
+history — 31 Mar to 4 Aug 2026, one commit, never revisited — and nobody noticed
+until a review happened to check the same detail in both trees and get two different
+answers. It then cost three findings across a six-pass review loop, the worst of
+which was a warning block whose own cited evidence contradicted it. A process that
+depends on remembering to copy files has already failed once here; removing the
+second copy makes the failure structurally impossible rather than merely documented.
+
+Nothing is lost: both trees hold the same 197 filenames and `generator/messages/`
+contains nothing custom — verified byte-identical after §9.9's refresh.
+
+**Cost:** the build gains a prerequisite. `cargo build` in a fresh clone without
+`git submodule update --init --recursive` will fail because the schema directory is
+empty. This is the deliberate trade — a missing submodule fails immediately and
+legibly, whereas a stale copy builds successfully and produces subtly wrong wire
+code. Prefer that failure to be a clear message rather than a `NotFound` from
+`read_dir`: have `build.rs` check whether the directory exists or is empty and
+`panic!` with the exact `git submodule` command to run.
+
+**CI already satisfies the prerequisite** — checked, not assumed. Both pipelines run
+`git submodule update --init --depth=1 kafka` (`.semaphore/semaphore.yml:49`,
+`.semaphore/plan-approve.yml:19`), so no CI change is needed and the shallow checkout
+is sufficient for reading schema files. The cost therefore falls only on a developer
+building a fresh clone by hand.
+
+**Publishing is the one real blocker, and it is not currently a constraint.** A
+published crate cannot reference a path outside its own tree, so `cargo publish`
+would need a vendored copy. `publish` is not set in `Cargo.toml` today and the crate
+is not on crates.io, so this does not block the change — but it decides the design if
+distribution is ever intended. In that case keep the copy and add a CI step that
+fails when it differs from the submodule: that preserves "cannot drift silently"
+without the build prerequisite, and is the better option under a publishing
+requirement.
+
+**Also audit** `cargo xtask check-generated` and the `message_generator` binary for
+their own assumptions about the schema location before deleting anything.
+
+**Verify:** fresh clone without submodules → build fails with the intended message;
+with submodules → `cargo build`, full suite, `format-check`, `lint`,
+`check-generated` all clean, and the stub count stays at the 8 intentional ones
+(§9.10).
 
 
 ---
