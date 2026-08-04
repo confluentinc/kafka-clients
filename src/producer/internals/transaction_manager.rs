@@ -1810,3 +1810,1134 @@ impl TransactionManager {
 pub(crate) fn is_out_of_order_sequence(code: Errors) -> bool {
     matches!(code, Errors::OutOfOrderSequenceNumber | Errors::UnknownProducerId)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NodeApiVersions;
+    use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
+    use crate::common::compress::Compression;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::record::TimestampType;
+    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::requests::{InitProducerIdResponse, RequestHeader};
+    use crate::init_producer_id_response_data::InitProducerIdResponseData;
+
+    // Constants mirroring `TransactionManagerTest`'s fields (Java 125-155).
+    const TRANSACTION_TIMEOUT_MS: i32 = 1121;
+    const DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
+    const TOPIC: &str = "test";
+    const PRODUCER_ID: i64 = 13131;
+    const EPOCH: i16 = 1;
+    /// Correlation id used for every simulated transactional round trip. Java's
+    /// `MockClient` allocates it; here the test plays the Sender's part, which is
+    /// what sets it (`Sender.java:508`).
+    const CORRELATION_ID: i32 = 7;
+
+    fn tp0() -> TopicPartition {
+        TopicPartition::new(TOPIC.to_string(), 0)
+    }
+
+    fn tp1() -> TopicPartition {
+        TopicPartition::new(TOPIC.to_string(), 1)
+    }
+
+    /// Java's `new KafkaException()`, which carries no wire error code.
+    fn kafka_exception() -> KafkaError {
+        KafkaError::with_message(Errors::UnknownServerError, "")
+    }
+
+    /// Java's `new TimeoutException()`.
+    fn timeout_exception() -> KafkaError {
+        KafkaError::timeout("")
+    }
+
+    /// Builds an idempotent (non-transactional) manager.
+    ///
+    /// Mirrors `initializeTransactionManager(Optional.empty(), transactionV2Enabled)`
+    /// (Java 174-221), including the `ApiVersions` contents, so the
+    /// `transactionV2Enabled` parameterisation is reproduced faithfully.
+    ///
+    /// # `transaction_v2_enabled` is not observable in this phase
+    ///
+    /// Java threads the flag only into `apiVersions`, and the manager reads
+    /// `apiVersions` from exactly two methods — `handleCoordinatorReady`
+    /// (Java 1104) and `maybeUpdateTransactionV2Enabled` (Java 493) — both of
+    /// which are Phase 5. `isTransactionV2Enabled` therefore stays `false` in
+    /// both iterations, and its only Phase-3 reader
+    /// ([`TransactionManager::set_producer_id_and_epoch`], Java 605) is
+    /// short-circuited by `!isTransactional()` anyway. So both parameterisations
+    /// execute identical code here. The loops are kept regardless: they cost
+    /// nothing and will start discriminating in Phase 5.
+    fn idempotent_manager(transaction_v2_enabled: bool) -> TransactionManager {
+        fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
+            let mut version = ApiVersion::new();
+            version.set_api_key(api_key.id());
+            version.set_min_version(0);
+            version.set_max_version(max_version);
+            version
+        }
+
+        let transaction_version = if transaction_v2_enabled { 2 } else { 1 };
+        let mut supported_feature = SupportedFeatureKey::new();
+        supported_feature.set_name("transaction.version".to_string());
+        supported_feature.set_max_version(transaction_version);
+        supported_feature.set_min_version(0);
+        let mut finalized_feature = FinalizedFeatureKey::new();
+        finalized_feature.set_name("transaction.version".to_string());
+        finalized_feature.set_max_version_level(transaction_version);
+        finalized_feature.set_min_version_level(transaction_version);
+
+        let api_versions = Arc::new(ApiVersions::new());
+        api_versions.update(
+            "0",
+            NodeApiVersions::new(
+                &[
+                    api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
+                    api_version(
+                        &ApiKeys::PRODUCE,
+                        if transaction_v2_enabled {
+                            ApiKeys::PRODUCE.latest_version()
+                        } else {
+                            11
+                        },
+                    ),
+                    api_version(
+                        &ApiKeys::TXN_OFFSET_COMMIT,
+                        if transaction_v2_enabled {
+                            ApiKeys::TXN_OFFSET_COMMIT.latest_version()
+                        } else {
+                            4
+                        },
+                    ),
+                ],
+                &[supported_feature],
+                &[finalized_feature],
+                0,
+            ),
+        );
+
+        TransactionManager::new(
+            LogContext::empty(),
+            None,
+            TRANSACTION_TIMEOUT_MS,
+            DEFAULT_RETRY_BACKOFF_MS,
+            api_versions,
+            false,
+        )
+        .expect("an idempotent manager is constructible")
+    }
+
+    /// A single-record batch, mirroring `batchWithValue` (Java 840).
+    fn batch_with_value(topic_partition: &TopicPartition, value: &str) -> ProducerBatch {
+        let builder = MemoryRecords::builder(64, Compression::none(), TimestampType::CreateTime, 0);
+        let mut batch = ProducerBatch::new(topic_partition.clone(), builder, 0);
+        assert!(
+            batch.try_append(0, Some(&[]), Some(value.as_bytes()), &[], None, 0).is_ok(),
+            "a 64-byte batch has room for one small record"
+        );
+        batch
+    }
+
+    /// Assigns the next sequence to a new batch and tracks it in flight.
+    ///
+    /// Mirrors `writeIdempotentBatchWithValue` (Java 812).
+    ///
+    /// `maybe_update_producer_id_and_epoch` is given an empty batch pool: its
+    /// guard is `has_stale_producer_id_and_epoch && !has_inflight_batches`, so
+    /// the entry tracks nothing whenever the rewrite runs.
+    fn write_idempotent_batch_with_value(
+        manager: &mut TransactionManager,
+        topic_partition: &TopicPartition,
+        value: &str,
+    ) -> ProducerBatch {
+        manager
+            .maybe_update_producer_id_and_epoch(topic_partition, &mut [])
+            .expect("no in-flight batches to rewrite");
+        let sequence = manager.sequence_number(topic_partition);
+        manager.increment_sequence_number(topic_partition, 1).expect("the entry exists");
+        let mut batch = batch_with_value(topic_partition, value);
+        let producer_id_and_epoch = manager.producer_id_and_epoch();
+        batch.set_producer_state(producer_id_and_epoch.producer_id, producer_id_and_epoch.epoch, sequence, false);
+        manager.add_in_flight_batch(&batch).expect("the sequence is set");
+        batch.close();
+        batch
+    }
+
+    /// The ordering key `next_batch_by_sequence` returns for `batch`.
+    ///
+    /// Java compares the returned `ProducerBatch` by identity; this type tracks
+    /// keys rather than owning batches (rules §7), so the key is compared
+    /// instead.
+    fn in_flight_key(batch: &ProducerBatch) -> InFlightBatchKey {
+        (batch.producer_id(), batch.producer_epoch(), batch.base_sequence())
+    }
+
+    /// Feeds an `InitProducerId` response back into `manager`, playing the part
+    /// `Sender` plus `MockClient` play in Java.
+    fn complete_init_producer_id(
+        manager: &mut TransactionManager,
+        handler: TxnRequestHandler,
+        error: Errors,
+        producer_id: i64,
+        epoch: i16,
+    ) -> Result<(), KafkaError> {
+        manager.set_in_flight_correlation_id(CORRELATION_ID);
+        let mut data = InitProducerIdResponseData::new();
+        data.set_error_code(error.code())
+            .set_producer_id(producer_id)
+            .set_producer_epoch(epoch)
+            .set_throttle_time_ms(0);
+        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", CORRELATION_ID)
+            .expect("INIT_PRODUCER_ID is a known api key");
+        let response = ClientResponse::new(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data))),
+        );
+        manager.on_complete(handler, &response)
+    }
+
+    /// Acquires a producer id for an idempotent producer.
+    ///
+    /// Mirrors `initializeIdempotentProducerId` (Java 4333). Java drives
+    /// `Sender.runOnce` against a `MockClient`; the send path is Phase 4, so the
+    /// same manager path is driven directly: the pending `InitProducerId` is
+    /// dequeued through [`TransactionManager::next_request`] exactly as
+    /// `Sender.java:472` does, and the response is fed back through
+    /// [`TransactionManager::on_complete`] exactly as `NetworkClient.poll` does.
+    fn initialize_idempotent_producer_id(manager: &mut TransactionManager, producer_id: i64, epoch: i16) {
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("enqueueing the initial InitProducerId succeeds");
+        let mut handler = manager.next_request(false).expect("an InitProducerId request must be pending");
+        // Java's helper asserts the same thing on the outgoing request.
+        assert!(
+            handler.request_builder().data().transactional_id.is_none(),
+            "an idempotent producer must not send a transactional id"
+        );
+        complete_init_producer_id(manager, handler, Errors::None, producer_id, epoch)
+            .expect("a successful InitProducerId response is handled");
+        assert!(manager.has_producer_id());
+    }
+
+    /// Runs the two `TransactionManager` calls that `Sender.runOnce` makes
+    /// before sending, in that order (`Sender.java:313` then `:331`).
+    ///
+    /// Java's tests reach the epoch bump through
+    /// `runUntil(() -> transactionManager.producerIdAndEpoch().epoch == N)`,
+    /// which spins `Sender.runOnce`. The send path is Phase 4, so the two
+    /// manager entry points are invoked directly.
+    fn run_sender_transaction_phase(manager: &mut TransactionManager, batches: &mut InFlightBatchPool<'_>) {
+        manager.maybe_resolve_sequences().expect("resolving sequences succeeds");
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(batches, Caller::Sender)
+            .expect("bumping the epoch succeeds");
+    }
+
+    // ---------------------------------------------------------------------
+    // Rust-side unit tests for the pieces Java covers only indirectly.
+    // ---------------------------------------------------------------------
+
+    /// The MILESTONE-11 GUARD: Phase 3 refuses a transactional id so the
+    /// untranslated transactional arms cannot be reached.
+    #[test]
+    fn test_transactional_id_is_refused_until_phase_5() {
+        let result = TransactionManager::new(
+            LogContext::empty(),
+            Some("foobar".to_string()),
+            TRANSACTION_TIMEOUT_MS,
+            DEFAULT_RETRY_BACKOFF_MS,
+            Arc::new(ApiVersions::new()),
+            false,
+        );
+        let Err(error) = result else {
+            panic!("a transactional manager is not constructible yet");
+        };
+        assert_eq!(error.error(), Errors::UnsupportedVersion);
+        assert!(
+            error.message().contains("Milestone 11, Phase 5"),
+            "unexpected message: {}",
+            error.message()
+        );
+    }
+
+    /// The full nine-by-nine transition table, checked against Java 162-188.
+    ///
+    /// Java has no direct test for `isTransitionValid`; it is exercised
+    /// indirectly through the state machine. Asserting the table wholesale is
+    /// the only way to verify the four states Phase 3 cannot reach, which is
+    /// the point of translating it whole.
+    #[test]
+    fn test_transition_table_matches_java() {
+        use State::*;
+        let all = [
+            Uninitialized,
+            Initializing,
+            Ready,
+            InTransaction,
+            PreparedTransaction,
+            CommittingTransaction,
+            AbortingTransaction,
+            AbortableError,
+            FatalError,
+        ];
+        // (target, permitted sources). FATAL_ERROR accepts every source.
+        let permitted: [(State, &[State]); 9] = [
+            (Uninitialized, &[Ready, AbortableError]),
+            (Initializing, &[Uninitialized, CommittingTransaction, AbortingTransaction]),
+            (Ready, &[Initializing, CommittingTransaction, AbortingTransaction]),
+            (InTransaction, &[Ready]),
+            (PreparedTransaction, &[InTransaction, Initializing]),
+            (CommittingTransaction, &[InTransaction, PreparedTransaction]),
+            (AbortingTransaction, &[InTransaction, PreparedTransaction, AbortableError]),
+            (
+                AbortableError,
+                &[InTransaction, CommittingTransaction, AbortableError, Initializing],
+            ),
+            (FatalError, &all),
+        ];
+
+        for (target, sources) in permitted {
+            for source in all {
+                let expected = sources.contains(&source);
+                assert_eq!(
+                    target.is_transition_valid(source),
+                    expected,
+                    "{source} -> {target} should be {}",
+                    if expected { "valid" } else { "invalid" }
+                );
+            }
+        }
+
+        // The two arms most easily got wrong, called out explicitly.
+        assert!(
+            AbortableError.is_transition_valid(AbortableError),
+            "ABORTABLE_ERROR self-loop is valid"
+        );
+        assert!(!Ready.is_transition_valid(Ready), "READY -> READY is invalid");
+    }
+
+    /// An invalid transition poisons the manager on the Sender side and leaves
+    /// it alone on the application side (Java 234-289, KAFKA-14831).
+    #[test]
+    fn test_invalid_transition_poisons_only_on_the_sender_side() {
+        for transaction_v2_enabled in [true, false] {
+            // Application side: state unchanged, error returned.
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            let error = manager
+                .transition_to(State::Ready, None, Caller::App)
+                .expect_err("UNINITIALIZED -> READY is invalid");
+            assert_eq!(
+                error.message(),
+                "Invalid transition attempted from state UNINITIALIZED to state READY",
+                "the message interpolates the Java enum constant names"
+            );
+            assert_eq!(manager.current_state(), State::Uninitialized);
+            assert!(manager.last_error().is_none());
+
+            // Sender side: state poisoned to FATAL_ERROR and the error recorded.
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            let error = manager
+                .transition_to(State::Ready, None, Caller::Sender)
+                .expect_err("UNINITIALIZED -> READY is invalid");
+            assert_eq!(
+                error.message(),
+                "Invalid transition attempted from state UNINITIALIZED to state READY"
+            );
+            assert_eq!(manager.current_state(), State::FatalError);
+            assert!(manager.has_fatal_error());
+            assert_eq!(manager.last_error().expect("poisoned").message(), error.message());
+        }
+    }
+
+    /// Moving to an error state without an error is rejected (Java 1131-1134).
+    #[test]
+    fn test_transition_to_error_state_requires_an_error() {
+        for (target, name) in [
+            (State::FatalError, "FATAL_ERROR"),
+            (State::AbortableError, "ABORTABLE_ERROR"),
+        ] {
+            let mut manager = idempotent_manager(false);
+            // Reach a state from which ABORTABLE_ERROR is a valid target.
+            manager
+                .transition_to(State::Initializing, None, Caller::App)
+                .expect("UNINITIALIZED -> INITIALIZING is valid");
+            let error = manager
+                .transition_to(target, None, Caller::App)
+                .expect_err("an error is required");
+            assert_eq!(error.message(), format!("Cannot transition to {name} with a null exception"));
+        }
+    }
+
+    /// `ABORTABLE_ERROR` is reachable without a transactional id: a
+    /// non-transactional `InitProducerId` can come back
+    /// `CLUSTER_AUTHORIZATION_FAILED`, and Java's handler calls `abortableError`
+    /// for it without testing `isTransactional()` (Java 1524-1528). See
+    /// [`TransactionManager::transition_to_abortable_error`].
+    #[test]
+    fn test_cluster_authorization_failure_moves_an_idempotent_producer_to_abortable_error() {
+        for error_code in [
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+        ] {
+            let mut manager = idempotent_manager(false);
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("the initial InitProducerId is enqueued");
+            let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+            let result = Arc::clone(handler.result());
+
+            complete_init_producer_id(&mut manager, handler, error_code, -1, -1)
+                .expect("the authorization error is handled, not propagated");
+
+            assert!(manager.has_abortable_error(), "{error_code:?} must produce an abortable error");
+            assert!(manager.has_error());
+            assert!(!manager.has_fatal_error());
+            assert_eq!(manager.last_error().expect("recorded").error(), error_code);
+            assert!(result.is_completed());
+            assert!(!result.is_successful());
+            assert!(!manager.has_producer_id());
+        }
+    }
+
+    /// A `PRODUCER_FENCED` / `INVALID_PRODUCER_EPOCH` `InitProducerId` response
+    /// is fatal, and both report `PRODUCER_FENCED` (Java 1529-1532).
+    #[test]
+    fn test_producer_fenced_init_producer_id_response_is_fatal() {
+        for error_code in [Errors::InvalidProducerEpoch, Errors::ProducerFenced] {
+            let mut manager = idempotent_manager(false);
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("the initial InitProducerId is enqueued");
+            let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+            let result = Arc::clone(handler.result());
+
+            complete_init_producer_id(&mut manager, handler, error_code, -1, -1).expect("the error is handled");
+
+            assert!(manager.has_fatal_error());
+            assert_eq!(
+                manager.last_error().expect("recorded").error(),
+                Errors::ProducerFenced,
+                "INVALID_PRODUCER_EPOCH is reported as PRODUCER_FENCED"
+            );
+            assert_eq!(result.error().expect("failed").error(), Errors::ProducerFenced);
+        }
+    }
+
+    /// A retriable `InitProducerId` error re-enqueues the request rather than
+    /// failing it (Java 1522-1523).
+    #[test]
+    fn test_retriable_init_producer_id_response_is_reenqueued() {
+        let mut manager = idempotent_manager(false);
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+        let result = Arc::clone(handler.result());
+
+        complete_init_producer_id(&mut manager, handler, Errors::CoordinatorLoadInProgress, -1, -1)
+            .expect("a retriable error is handled");
+
+        assert!(!result.is_completed(), "a retried request must not complete");
+        assert!(!manager.has_error());
+        assert!(manager.has_pending_requests());
+        let handler = manager.next_request(false).expect("the request was re-enqueued");
+        assert!(handler.is_retry());
+        assert!(!manager.has_in_flight_request(), "the correlation id is cleared on completion");
+    }
+
+    /// An unexpected `InitProducerId` error is fatal, with Java's message
+    /// (Java 1536).
+    #[test]
+    fn test_unexpected_init_producer_id_response_is_fatal() {
+        let mut manager = idempotent_manager(false);
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+
+        complete_init_producer_id(&mut manager, handler, Errors::InvalidRequest, -1, -1).expect("the error is handled");
+
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            format!(
+                "Unexpected error in InitProducerIdResponse; {}",
+                Errors::InvalidRequest.message()
+            )
+        );
+    }
+
+    /// A response whose correlation id does not match the in-flight one is
+    /// fatal (Java 1407-1408).
+    #[test]
+    fn test_mismatched_correlation_id_is_fatal() {
+        let mut manager = idempotent_manager(false);
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+
+        manager.set_in_flight_correlation_id(CORRELATION_ID + 1);
+        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", CORRELATION_ID)
+            .expect("INIT_PRODUCER_ID is a known api key");
+        let response = ClientResponse::new(header, None, "0", 0, 0, false, None, None, None);
+        manager
+            .on_complete(handler, &response)
+            .expect("the mismatch is handled, not propagated");
+
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            "Detected more than one in-flight transactional request."
+        );
+        assert!(
+            manager.has_in_flight_request(),
+            "a mismatch must not clear the in-flight correlation id"
+        );
+    }
+
+    /// A disconnect re-enqueues the request; an idempotent `InitProducerId`
+    /// needs no coordinator, so no lookup is attempted (Java 1411-1415, 1482).
+    #[test]
+    fn test_disconnect_reenqueues_without_a_coordinator_lookup() {
+        let mut manager = idempotent_manager(false);
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+        assert!(
+            !manager.needs_coordinator(&handler),
+            "a non-transactional InitProducerId has no coordinator type"
+        );
+        let result = Arc::clone(handler.result());
+
+        manager.set_in_flight_correlation_id(CORRELATION_ID);
+        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", CORRELATION_ID)
+            .expect("INIT_PRODUCER_ID is a known api key");
+        let response = ClientResponse::new(header, None, "0", 0, 0, true, None, None, None);
+        manager.on_complete(handler, &response).expect("a disconnect is handled");
+
+        assert!(!result.is_completed());
+        assert!(!manager.has_error());
+        assert!(manager.next_request(false).expect("re-enqueued").is_retry());
+    }
+
+    /// A pending request is failed rather than sent while the manager is in an
+    /// error state (Java 1174-1184).
+    #[test]
+    fn test_next_request_terminates_pending_requests_in_an_error_state() {
+        let mut manager = idempotent_manager(false);
+        let mut pool = InFlightBatchPool::new();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        manager
+            .transition_to_fatal_error(kafka_exception(), Caller::Sender)
+            .expect("FATAL_ERROR is always a valid target");
+
+        assert!(manager.has_pending_requests());
+        assert!(manager.next_request(false).is_none(), "the request is terminated, not returned");
+        assert!(!manager.has_pending_requests());
+    }
+
+    /// `add_in_flight_batch` rejects a batch with no sequence (Java 698-699).
+    #[test]
+    fn test_add_in_flight_batch_requires_a_sequence() {
+        let mut manager = idempotent_manager(false);
+        let batch = batch_with_value(&tp0(), "1");
+        assert!(!batch.has_sequence());
+        let error = manager.add_in_flight_batch(&batch).expect_err("a sequence is required");
+        assert_eq!(
+            error.message(),
+            format!("Can't track batch for partition {} when sequence is not set.", tp0())
+        );
+    }
+
+    /// `firstInFlightSequence` reports [`RecordBatch::NO_SEQUENCE`] when nothing
+    /// is in flight, and the lowest base sequence otherwise (Java 710-715).
+    #[test]
+    fn test_first_in_flight_sequence() {
+        let mut manager = idempotent_manager(false);
+        initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, EPOCH);
+        assert_eq!(
+            manager.first_in_flight_sequence(&tp0()).expect("no entry needed"),
+            RecordBatch::NO_SEQUENCE
+        );
+
+        let b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
+        let b2 = write_idempotent_batch_with_value(&mut manager, &tp0(), "2");
+        assert_eq!(manager.first_in_flight_sequence(&tp0()).expect("in flight"), 0);
+        assert_eq!(
+            manager.next_batch_by_sequence(&tp0()).expect("entry exists"),
+            Some(in_flight_key(&b1))
+        );
+
+        manager.remove_in_flight_batch(&b1).expect("the entry exists");
+        assert_eq!(manager.first_in_flight_sequence(&tp0()).expect("in flight"), 1);
+        assert_eq!(
+            manager.next_batch_by_sequence(&tp0()).expect("entry exists"),
+            Some(in_flight_key(&b2))
+        );
+    }
+
+    /// The two halves of "a queued partition has no in-flight batches", which
+    /// [`TransactionManager::bump_idempotent_producer_epoch`] distinguishes:
+    /// an existing entry with an empty in-flight set is rewritten, while a
+    /// partition with no entry at all surfaces Java's `IllegalStateException`
+    /// from `TxnPartitionMap.get` (Java 78).
+    ///
+    /// The first half is also what `testProducerIdReset` pins; this test adds
+    /// the second, which Java has no coverage for because it is unreachable
+    /// there too. Keeping both in one place makes the distinction reviewable.
+    #[test]
+    fn test_epoch_bump_distinguishes_an_empty_in_flight_set_from_a_missing_entry() {
+        // No entry for tp0: `request_idempotent_epoch_bump_for_partition` alone
+        // does not create one, so the rewrite has nothing to rewrite *into*.
+        let mut manager = idempotent_manager(false);
+        initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, i16::MAX);
+        manager.request_idempotent_epoch_bump_for_partition(&tp0());
+        let mut pool = InFlightBatchPool::new();
+        let error = manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect_err("a queued partition with no entry is Java's IllegalStateException");
+        assert_eq!(
+            error.message(),
+            format!(
+                "Trying to get txnPartitionEntry for {}, but it was never set for this partition.",
+                tp0()
+            )
+        );
+
+        // An entry with an empty in-flight set is rewritten instead, and an
+        // exhausted epoch resets the producer id (Java 646-647).
+        let mut manager = idempotent_manager(false);
+        initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, i16::MAX);
+        manager.increment_sequence_number(&tp0(), 4).expect_err("no entry yet");
+        assert_eq!(manager.sequence_number(&tp0()), 0, "the accessor creates the entry");
+        manager.increment_sequence_number(&tp0(), 4).expect("the entry now exists");
+        manager.request_idempotent_epoch_bump_for_partition(&tp0());
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .expect("an empty in-flight set is rewritten, not rejected");
+        assert_eq!(
+            manager.producer_id_and_epoch(),
+            ProducerIdAndEpoch::NONE,
+            "an exhausted epoch resets the id"
+        );
+        assert!(!manager.has_producer_id());
+        assert_eq!(manager.sequence_number(&tp0()), 0, "the sequence counter was rewound");
+    }
+
+    // ---------------------------------------------------------------------
+    // TransactionManagerTest translations.
+    //
+    // Only the methods that call `initializeTransactionManager(Optional.empty(),
+    // ..)` are in scope for this phase (PLAN §2). Three of those need the
+    // Phase-4 send path and are named in the block at the end of this module.
+    // ---------------------------------------------------------------------
+
+    /// Translated from `testFailIfNotReadyForSendIdempotentProducer`
+    /// (Java 267-273).
+    #[test]
+    fn test_fail_if_not_ready_for_send_idempotent_producer() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            manager
+                .maybe_add_partition(&tp0())
+                .expect("an idempotent producer may send to any partition");
+        }
+    }
+
+    /// Translated from `testFailIfNotReadyForSendIdempotentProducerFatalError`
+    /// (Java 275-281).
+    #[test]
+    fn test_fail_if_not_ready_for_send_idempotent_producer_fatal_error() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            manager
+                .transition_to_fatal_error(kafka_exception(), Caller::App)
+                .expect("FATAL_ERROR is always a valid target");
+            let error = manager.maybe_add_partition(&tp0()).expect_err("a fatal error fails the send");
+            assert_eq!(
+                error.message(),
+                "Cannot execute transactional method because we are in an error state"
+            );
+        }
+    }
+
+    /// Translated from `testDefaultSequenceNumber` (Java 623-630).
+    #[test]
+    fn test_default_sequence_number() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            assert_eq!(manager.sequence_number(&tp0()), 0);
+            manager.increment_sequence_number(&tp0(), 3).expect("the entry exists");
+            assert_eq!(manager.sequence_number(&tp0()), 3);
+        }
+    }
+
+    /// Translated from
+    /// `testBumpEpochAndResetSequenceNumbersAfterUnknownProducerId`
+    /// (Java 632-668).
+    #[test]
+    fn test_bump_epoch_and_reset_sequence_numbers_after_unknown_producer_id() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, EPOCH);
+
+            let b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
+            let mut b2 = write_idempotent_batch_with_value(&mut manager, &tp0(), "2");
+            let mut b3 = write_idempotent_batch_with_value(&mut manager, &tp0(), "3");
+            let mut b4 = write_idempotent_batch_with_value(&mut manager, &tp0(), "4");
+            let mut b5 = write_idempotent_batch_with_value(&mut manager, &tp0(), "5");
+            assert_eq!(manager.sequence_number(&tp0()), 5);
+
+            // First batch succeeds
+            let b1_append_time = 0;
+            let b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+            b1.complete(500, b1_append_time);
+            manager
+                .handle_completed_batch(&b1, &b1_response)
+                .expect("the completion is recorded");
+
+            // We get an UNKNOWN_PRODUCER_ID, so bump the epoch and set sequence numbers back to 0
+            let b2_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 500, Vec::new(), None);
+            assert!(
+                manager
+                    .can_retry(&b2_response, &b2, &mut [])
+                    .expect("the retry decision is made")
+            );
+
+            {
+                // Java reaches the bump through `runUntil(.. epoch == 2)`.
+                let mut pool = InFlightBatchPool::new();
+                pool.insert(tp0(), vec![&mut b2, &mut b3, &mut b4, &mut b5]);
+                run_sender_transaction_phase(&mut manager, &mut pool);
+            }
+            assert_eq!(manager.producer_id_and_epoch().epoch, 2);
+            assert_eq!(b2.producer_epoch(), 2);
+            assert_eq!(b2.base_sequence(), 0);
+            assert_eq!(b3.base_sequence(), 1);
+            assert_eq!(b4.base_sequence(), 2);
+            assert_eq!(b5.base_sequence(), 3);
+        }
+    }
+
+    /// Translated from `testBatchFailureAfterProducerReset` (Java 670-710).
+    #[test]
+    fn test_batch_failure_after_producer_reset() {
+        // This tests a scenario where the producerId is reset while pending requests are still inflight.
+        // The partition(s) that triggered the reset will have their sequence number reset, while any others will not
+        for transaction_v2_enabled in [true, false] {
+            let epoch = i16::MAX;
+
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, epoch);
+
+            let tp0b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
+            let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
+
+            let tp0b1_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            manager
+                .handle_completed_batch(&tp0b1, &tp0b1_response)
+                .expect("the completion is recorded");
+
+            let tp1b1_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            manager
+                .handle_completed_batch(&tp1b1, &tp1b1_response)
+                .expect("the completion is recorded");
+
+            let mut tp0b2 = write_idempotent_batch_with_value(&mut manager, &tp0(), "2");
+            let mut tp1b2 = write_idempotent_batch_with_value(&mut manager, &tp1(), "2");
+            assert_eq!(manager.sequence_number(&tp0()), 2);
+            assert_eq!(manager.sequence_number(&tp1()), 2);
+
+            let b1_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 400, Vec::new(), None);
+            assert!(
+                manager
+                    .can_retry(&b1_response, &tp0b1, &mut [])
+                    .expect("the retry decision is made")
+            );
+
+            let b2_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            manager
+                .handle_completed_batch(&tp1b1, &b2_response)
+                .expect("the completion is recorded");
+
+            let tp0b2_key = in_flight_key(&tp0b2);
+            let tp1b2_key = in_flight_key(&tp1b2);
+            {
+                let mut pool = InFlightBatchPool::new();
+                pool.insert(tp0(), vec![&mut tp0b2]);
+                pool.insert(tp1(), vec![&mut tp1b2]);
+                manager
+                    .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                    .expect("an exhausted epoch resets the producer id");
+            }
+
+            assert_eq!(manager.sequence_number(&tp0()), 1);
+            assert_eq!(
+                manager.next_batch_by_sequence(&tp0()).expect("entry exists"),
+                Some(in_flight_key(&tp0b2))
+            );
+            assert_ne!(in_flight_key(&tp0b2), tp0b2_key, "tp0's batch was rewritten");
+            assert_eq!(manager.sequence_number(&tp1()), 2);
+            assert_eq!(
+                manager.next_batch_by_sequence(&tp1()).expect("entry exists"),
+                Some(in_flight_key(&tp1b2))
+            );
+            assert_eq!(
+                in_flight_key(&tp1b2),
+                tp1b2_key,
+                "tp1 was not queued, so its batch is untouched"
+            );
+        }
+    }
+
+    /// Translated from `testBatchCompletedAfterProducerReset` (Java 712-747).
+    #[test]
+    fn test_batch_completed_after_producer_reset() {
+        for transaction_v2_enabled in [true, false] {
+            let epoch = i16::MAX;
+
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, epoch);
+
+            let b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
+            // Java discards this reference because its `TreeSet` holds the batch;
+            // Rust tracks ordering keys only (rules §7), so the caller has to
+            // keep it to supply it to the rewrite below.
+            let mut tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
+
+            let b2 = write_idempotent_batch_with_value(&mut manager, &tp0(), "2");
+            assert_eq!(manager.sequence_number(&tp0()), 2);
+
+            // The producerId might be reset due to a failure on another partition
+            manager.request_idempotent_epoch_bump_for_partition(&tp1());
+            {
+                let mut pool = InFlightBatchPool::new();
+                pool.insert(tp1(), vec![&mut tp1b1]);
+                manager
+                    .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                    .expect("an exhausted epoch resets the producer id");
+            }
+            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID + 1, 0);
+
+            // We continue to track the state of tp0 until in-flight requests complete
+            let b1_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
+            manager
+                .handle_completed_batch(&b1, &b1_response)
+                .expect("the completion is recorded");
+
+            assert_eq!(manager.sequence_number(&tp0()), 2);
+            assert_eq!(manager.last_acked_sequence(&tp0()), Some(0));
+            assert_eq!(
+                manager.next_batch_by_sequence(&tp0()).expect("entry exists"),
+                Some(in_flight_key(&b2))
+            );
+            assert_eq!(
+                manager
+                    .next_batch_by_sequence(&tp0())
+                    .expect("entry exists")
+                    .map(|(_, batch_epoch, _)| batch_epoch),
+                Some(epoch)
+            );
+
+            let b2_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
+            manager
+                .handle_completed_batch(&b2, &b2_response)
+                .expect("the completion is recorded");
+
+            manager
+                .maybe_update_producer_id_and_epoch(&tp0(), &mut [])
+                .expect("tp0 has drained, so there is nothing to rewrite");
+            assert_eq!(manager.sequence_number(&tp0()), 0);
+            assert_eq!(manager.last_acked_sequence(&tp0()), None);
+            assert_eq!(manager.next_batch_by_sequence(&tp0()).expect("entry exists"), None);
+        }
+    }
+
+    /// Translated from `testSequenceNumberOverflow` (Java 849-861).
+    #[test]
+    fn test_sequence_number_overflow() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            assert_eq!(manager.sequence_number(&tp0()), 0);
+            manager.increment_sequence_number(&tp0(), i32::MAX).expect("the entry exists");
+            assert_eq!(manager.sequence_number(&tp0()), i32::MAX);
+            manager.increment_sequence_number(&tp0(), 100).expect("the entry exists");
+            assert_eq!(manager.sequence_number(&tp0()), 99);
+            manager.increment_sequence_number(&tp0(), i32::MAX).expect("the entry exists");
+            assert_eq!(manager.sequence_number(&tp0()), 98);
+        }
+    }
+
+    /// Translated from `testProducerIdReset` (Java 863-880).
+    ///
+    /// This is the test that pins the "queued partition with no in-flight
+    /// batches" behaviour: `tp0` gets an entry and sequence 3 from
+    /// `increment_sequence_number` but never an in-flight batch, and the epoch
+    /// bump must still reset its sequence to 0 while leaving the unqueued `tp1`
+    /// at 3. See [`TransactionManager::bump_idempotent_producer_epoch`].
+    #[test]
+    fn test_producer_id_reset() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            initialize_idempotent_producer_id(&mut manager, 15, i16::MAX);
+            assert_eq!(manager.sequence_number(&tp0()), 0);
+            assert_eq!(manager.sequence_number(&tp1()), 0);
+            manager.increment_sequence_number(&tp0(), 3).expect("the entry exists");
+            assert_eq!(manager.sequence_number(&tp0()), 3);
+            manager.increment_sequence_number(&tp1(), 3).expect("the entry exists");
+            assert_eq!(manager.sequence_number(&tp1()), 3);
+
+            manager.request_idempotent_epoch_bump_for_partition(&tp0());
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("a queued partition with no in-flight batches is still rewritten");
+            assert_eq!(manager.sequence_number(&tp0()), 0);
+            assert_eq!(manager.sequence_number(&tp1()), 3);
+        }
+    }
+
+    /// Translated from `testBumpEpochAfterTimeoutWithoutPendingInflightRequests`
+    /// (Java 3038-3081).
+    #[test]
+    fn test_bump_epoch_after_timeout_without_pending_inflight_requests() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            let producer_id = 15;
+            let epoch = 5;
+            let producer_id_and_epoch = ProducerIdAndEpoch::new(producer_id, epoch);
+            initialize_idempotent_producer_id(&mut manager, producer_id, epoch);
+
+            // Nothing to resolve, so no reset is needed
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("nothing to bump");
+            assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
+
+            let tp0 = TopicPartition::new("foo".to_string(), 0);
+            assert_eq!(manager.sequence_number(&tp0), 0);
+
+            let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
+            assert_eq!(manager.sequence_number(&tp0), 1);
+            manager
+                .handle_completed_batch(&b1, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .expect("the completion is recorded");
+            assert_eq!(manager.last_acked_sequence(&tp0), Some(0));
+
+            // Marking sequence numbers unresolved without inflight requests is basically a no-op.
+            manager.mark_sequence_unresolved(&b1);
+            manager.maybe_resolve_sequences().expect("resolving succeeds");
+            assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
+            assert!(!manager.has_unresolved_sequences());
+
+            // We have a new batch which fails with a timeout
+            let b2 = write_idempotent_batch_with_value(&mut manager, &tp0, "2");
+            assert_eq!(manager.sequence_number(&tp0), 2);
+            manager.mark_sequence_unresolved(&b2);
+            manager
+                .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
+                .expect("the failure is recorded");
+            assert!(manager.has_unresolved_sequences());
+
+            // We only had one inflight batch, so we should be able to clear the unresolved status
+            // and bump the epoch
+            manager.maybe_resolve_sequences().expect("resolving succeeds");
+            assert!(!manager.has_unresolved_sequences());
+
+            // Java reaches the bump through `runUntil(.. epoch == 6)`.
+            let mut pool = InFlightBatchPool::new();
+            run_sender_transaction_phase(&mut manager, &mut pool);
+            assert_eq!(manager.producer_id_and_epoch().epoch, 6);
+        }
+    }
+
+    /// Translated from `testNoProducerIdResetAfterLastInFlightBatchSucceeds`
+    /// (Java 3083-3121).
+    #[test]
+    fn test_no_producer_id_reset_after_last_in_flight_batch_succeeds() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            let producer_id = 15;
+            let epoch = 5;
+            let producer_id_and_epoch = ProducerIdAndEpoch::new(producer_id, epoch);
+            initialize_idempotent_producer_id(&mut manager, producer_id, epoch);
+
+            let tp0 = TopicPartition::new("foo".to_string(), 0);
+            let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
+            let b2 = write_idempotent_batch_with_value(&mut manager, &tp0, "2");
+            let b3 = write_idempotent_batch_with_value(&mut manager, &tp0, "3");
+            assert_eq!(manager.sequence_number(&tp0), 3);
+
+            // The first batch fails with a timeout
+            manager.mark_sequence_unresolved(&b1);
+            manager
+                .handle_failed_batch(&b1, &timeout_exception(), false, &mut [], Caller::Sender)
+                .expect("the failure is recorded");
+            assert!(manager.has_unresolved_sequences());
+
+            // The reset should not occur until sequence numbers have been resolved
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("nothing to bump");
+            assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
+            assert!(manager.has_unresolved_sequences());
+
+            // The second batch fails as well with a timeout
+            manager
+                .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
+                .expect("the failure is recorded");
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("nothing to bump");
+            assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
+            assert!(manager.has_unresolved_sequences());
+
+            // The third batch succeeds, which should resolve the sequence number without
+            // requiring a producerId reset.
+            manager
+                .handle_completed_batch(&b3, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .expect("the completion is recorded");
+            manager.maybe_resolve_sequences().expect("resolving succeeds");
+            assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
+            assert!(!manager.has_unresolved_sequences());
+            assert_eq!(manager.sequence_number(&tp0), 3);
+        }
+    }
+
+    /// Translated from
+    /// `testEpochBumpAfterLastInFlightBatchFailsIdempotentProducer`
+    /// (Java 3123-3155).
+    #[test]
+    fn test_epoch_bump_after_last_in_flight_batch_fails_idempotent_producer() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            let producer_id_and_epoch = ProducerIdAndEpoch::new(PRODUCER_ID, EPOCH);
+            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, EPOCH);
+
+            let tp0 = TopicPartition::new("foo".to_string(), 0);
+            let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
+            let b2 = write_idempotent_batch_with_value(&mut manager, &tp0, "2");
+            let b3 = write_idempotent_batch_with_value(&mut manager, &tp0, "3");
+            assert_eq!(manager.sequence_number(&tp0), 3);
+
+            // The first batch fails with a timeout
+            manager.mark_sequence_unresolved(&b1);
+            manager
+                .handle_failed_batch(&b1, &timeout_exception(), false, &mut [], Caller::Sender)
+                .expect("the failure is recorded");
+            assert!(manager.has_unresolved_sequences());
+
+            // The second batch succeeds, but sequence numbers are still not resolved
+            manager
+                .handle_completed_batch(&b2, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .expect("the completion is recorded");
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("nothing to bump");
+            assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
+            assert!(manager.has_unresolved_sequences());
+
+            // When the last inflight batch fails, we have to bump the epoch
+            manager
+                .handle_failed_batch(&b3, &timeout_exception(), false, &mut [], Caller::Sender)
+                .expect("the failure is recorded");
+
+            // Java reaches the bump through `runUntil(.. epoch == 2)`.
+            run_sender_transaction_phase(&mut manager, &mut pool);
+            assert_eq!(manager.producer_id_and_epoch().epoch, 2);
+            assert!(!manager.has_unresolved_sequences());
+            assert_eq!(manager.sequence_number(&tp0), 0);
+        }
+    }
+
+    /// Translated from `testNoFailedBatchHandlingWhenTxnManagerIsInFatalError`
+    /// (Java 3243-3266).
+    #[test]
+    fn test_no_failed_batch_handling_when_txn_manager_is_in_fatal_error() {
+        for transaction_v2_enabled in [true, false] {
+            let mut manager = idempotent_manager(transaction_v2_enabled);
+            let producer_id = 15;
+            let epoch = 5;
+            initialize_idempotent_producer_id(&mut manager, producer_id, epoch);
+
+            let tp0 = TopicPartition::new("foo".to_string(), 0);
+            let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
+            // Handling b1 should bump the epoch after OutOfOrderSequenceException
+            manager
+                .handle_failed_batch(
+                    &b1,
+                    &KafkaError::with_message(Errors::OutOfOrderSequenceNumber, "out of sequence"),
+                    false,
+                    &mut [],
+                    Caller::Sender,
+                )
+                .expect("the failure is recorded");
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("the epoch is bumped");
+            let id_and_epoch_after_first_batch = ProducerIdAndEpoch::new(producer_id, epoch + 1);
+            assert_eq!(manager.producer_id_and_epoch(), id_and_epoch_after_first_batch);
+
+            manager
+                .transition_to_fatal_error(kafka_exception(), Caller::App)
+                .expect("FATAL_ERROR is always a valid target");
+
+            // The second batch should not bump the epoch as txn manager is already in fatal error state
+            let b2 = write_idempotent_batch_with_value(&mut manager, &tp0, "2");
+            manager
+                .handle_failed_batch(&b2, &timeout_exception(), true, &mut [], Caller::Sender)
+                .expect("the failure is ignored in a fatal state");
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .expect("nothing to bump");
+            assert_eq!(manager.producer_id_and_epoch(), id_and_epoch_after_first_batch);
+        }
+    }
+
+    // `TransactionManagerTest` methods that call
+    // `initializeTransactionManager(Optional.empty(), ..)` but cannot be
+    // translated in this phase, with the surface each one needs. All three are
+    // Phase 4 (`Sender` / `RecordAccumulator` idempotence integration), not
+    // skipped:
+    //
+    //   - `testDuplicateSequenceAfterProducerReset` (Java 748-810) — builds its
+    //     own `RecordAccumulator` and `Sender`, appends through
+    //     `accumulator.append(..)` and drives `sender.runOnce()` across request
+    //     and delivery timeouts. Needs the per-batch sequence assignment in
+    //     `RecordAccumulator.drainBatchesForOneNode` and
+    //     `Sender.failExpiredBatches` → `markSequenceUnresolved`, both Phase 4.
+    //   - `testHealthyPartitionRetriesDuringEpochBump` (Java 3600-3672) — after
+    //     the epoch bump it asserts on `accumulator.getDeque(tp1)` to check that
+    //     new batches are not drained while a partition has in-flight batches on
+    //     the old epoch. Needs `shouldStopDrainBatchesForPartition`
+    //     (`RecordAccumulator.java:815`), Phase 4.
+    //   - `testFailedInflightBatchAfterEpochBump` (Java 3725-3810) — same
+    //     accumulator/Sender surface plus `accumulator.reenqueue(..)`.
+    //
+    // Everything else in `TransactionManagerTest` runs against the transactional
+    // manager built by `setup()` (Java 163) and belongs to Phases 5 and 8
+    // (PLAN §2).
+}
