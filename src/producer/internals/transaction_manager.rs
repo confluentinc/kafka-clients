@@ -25,7 +25,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::ApiVersions;
-use crate::client_response::ClientResponse;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
@@ -40,7 +39,47 @@ use crate::producer::internals::{
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
 /// Sentinel for "no transactional request is currently in flight".
-const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
+///
+/// `pub(crate)` because the field it guards lives on the [`Sender`] task
+/// (rules §2); see [`PendingRequests`].
+///
+/// [`Sender`]: crate::producer::internals::Sender
+pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
+
+/// The Sender task's queue of transactional requests waiting to be sent.
+///
+/// # Why this is not a field on [`TransactionManager`]
+///
+/// `.claude/rules/producer-transactions.md` §2 requires Java's
+/// `pendingRequests` (`TransactionManager.java:121`) and
+/// `inFlightRequestCorrelationId` (`:136`) to live on the **Sender task's own
+/// unshared state**, not behind the shared `Arc<Mutex<TransactionManager>>`.
+/// Java touches them from the Sender thread only, and does so *outside* its
+/// `synchronized` blocks: `clearInFlightCorrelationId` is called from
+/// `TxnRequestHandler.onComplete` at `:1410` while that method's `synchronized`
+/// block only begins at `:1421` and wraps `handleResponse` alone, and
+/// `pendingRequests` is mutated through the **unsynchronized**
+/// `lookupCoordinator(TxnRequestHandler)` (`:969`) that `Sender.java:522` calls
+/// directly.
+///
+/// So the queue is a plain field on `Sender` and every manager method that Java
+/// implements by mutating it takes it as a parameter instead. That is the same
+/// shape [`InFlightBatchPool`] already uses for the in-flight batches (rules §7):
+/// *a method that mutates state this type does not own receives that state from
+/// its owner*. The property a reviewer can check mechanically is that neither
+/// name appears as a **field** in this file — only as a parameter — so nothing
+/// else holding the shared mutex can reach either one.
+///
+/// # Why a type alias, and why a `VecDeque`
+///
+/// Java's collection is a `PriorityQueue<TxnRequestHandler>` ordered by
+/// [`Priority`] (`:224`). The only handler the idempotence slice can enqueue is
+/// `InitProducerId`, and [`TransactionManager::bump_idempotent_epoch_and_reset_id_if_needed`]
+/// is guarded on `!has_producer_id()`, so at most one is ever pending and FIFO
+/// coincides with priority order. Phase 5 introduces the ordered queue together
+/// with the five handlers that make ordering observable; the alias is what makes
+/// that a one-line change.
+pub(crate) type PendingRequests = VecDeque<TxnRequestHandler>;
 
 /// The per-partition in-flight batch pool supplied by the batches' owners.
 ///
@@ -354,7 +393,12 @@ impl TxnRequestHandler {
     /// Corresponds to `fail(RuntimeException)` (Java 1390). Distinct from
     /// [`TransactionManager::fatal_error`] and
     /// [`TransactionManager::abortable_error`], which also transition.
-    fn fail(&self, error: KafkaError) {
+    ///
+    /// `pub(crate)` because the [`Sender`] reaches it while implementing the
+    /// unsynchronized half of `TxnRequestHandler.onComplete` (Java 1406-1420).
+    ///
+    /// [`Sender`]: crate::producer::internals::Sender
+    pub(crate) fn fail(&self, error: KafkaError) {
         self.result.fail(error);
     }
 }
@@ -387,35 +431,38 @@ impl fmt::Debug for TxnRequestHandler {
 ///
 /// # Lock topology
 ///
-/// `.claude/rules/producer-transactions.md` §2 requires a deliberate split when
-/// this type becomes shared: four Java fields (`inFlightRequestCorrelationId`,
-/// `transactionCoordinator`, `consumerGroupCoordinator`,
-/// `coordinatorSupportsBumpingEpoch`) plus `pendingRequests` are non-volatile
-/// and not consistently guarded by Java's `synchronized` blocks, because only
-/// the Sender thread touches them. They must NOT go behind the shared mutex.
+/// The manager is shared as `Arc<Mutex<TransactionManager>>` between
+/// `KafkaProducer`, `Sender` and `RecordAccumulator` (PLAN §6.3), and
+/// `.claude/rules/producer-transactions.md` §2 requires a deliberate split:
+/// five pieces of Java state are non-volatile and not consistently guarded by
+/// Java's `synchronized` blocks, because only the Sender thread touches them, and
+/// they must NOT go behind the shared mutex.
 ///
-/// Phase 3 introduces no mutex, so the rule cannot be *violated* here — but it
-/// is already **constrained**, and that is the operative point. PLAN §10.5
-/// deviation 2 hosts `on_complete` / `handle_response` on the manager (Java's
-/// inner class reaches its owner through an implicit `TransactionManager.this`,
-/// which Rust cannot express), so every touch of `pending_requests` and
-/// `in_flight_request_correlation_id` is a `&mut TransactionManager` method.
-/// Complying with §2 in Phase 4 is therefore not a field move: it means
-/// reshaping thirteen signatures. PLAN §10.5 deviation 7 names them and PLAN
-/// §Phase-4 budgets the work.
+/// Phase 4 makes that split. `pendingRequests` and
+/// `inFlightRequestCorrelationId` are now fields on `Sender`, and the thirteen
+/// manager methods that Java implements by touching them take them as
+/// parameters instead — see [`PendingRequests`] for the mechanism and PLAN §10.5
+/// deviation 7 for the enumeration. Four of those thirteen touch *only*
+/// Sender-confined state and so moved to `Sender` outright:
+/// `setInFlightCorrelationId` (Java 973), `clearInFlightCorrelationId` (977),
+/// `hasInFlightRequest` (981) and `hasPendingRequests` (1005), together with the
+/// unsynchronized half of `TxnRequestHandler.onComplete` (1406-1420).
 ///
-/// Phase 4 wraps the manager as `Arc<Mutex<TransactionManager>>` (see PLAN
-/// §6.3) and is where the split has to be made; the fields that belong to the
-/// Sender are marked below.
+/// The other three pieces of §2 state — `transactionCoordinator` (Java 137),
+/// `consumerGroupCoordinator` (138) and `coordinatorSupportsBumpingEpoch` (139)
+/// — have **no field here to move**: the whole coordinator subsystem
+/// (`coordinator` 958, `lookupCoordinator` 969, `handleCoordinatorReady` 1103)
+/// is Phase 5, because `InitProducerIdHandler.coordinatorType()` returns `null`
+/// for a non-transactional producer. When Phase 5 adds them they belong on
+/// `Sender` for the same reason, not here.
+///
+/// Two hard rules apply to every holder of the guard (rules §4): no guard may be
+/// held across an `.await`, and the network poll is never raced in a
+/// `tokio::select!`.
 ///
 /// # Send-path allocations
 ///
-/// Nothing here is on a live path yet — Phase 4 wires the manager into
-/// `RecordAccumulator`'s drain and `Sender::run_once`. The budget below is
-/// therefore a property of the methods, stated so Phase 4 inherits it rather than
-/// re-deriving it.
-///
-/// The methods the drain path will reach — [`Self::sequence_number`],
+/// The methods the drain path reaches — [`Self::sequence_number`],
 /// [`Self::increment_sequence_number`], [`Self::add_in_flight_batch`],
 /// [`Self::maybe_update_producer_id_and_epoch`] — run once per **batch**, not
 /// per record, and allocate no more than Java: a `TopicPartition` clone only
@@ -425,7 +472,7 @@ impl fmt::Debug for TxnRequestHandler {
 /// Two methods collect a `Vec` of partition keys where Java iterates its
 /// collection in place ([`Self::bump_idempotent_producer_epoch`] and
 /// [`Self::maybe_resolve_sequences`]), because the loop bodies need `&mut self`.
-/// Both will run once per `Sender.runOnce`, i.e. per network poll, and only over
+/// Both run once per `Sender.runOnce`, i.e. per network poll, and only over
 /// partitions in an error state.
 pub(crate) struct TransactionManager {
     log_context: LogContext,
@@ -453,24 +500,15 @@ pub(crate) struct TransactionManager {
     // partitions will have the sequences of their in-flight batches rewritten
     partitions_to_rewrite_sequences: HashSet<TopicPartition>,
 
-    /// Sender-owned (rules §2).
-    ///
-    /// Java's `PriorityQueue<TxnRequestHandler>` ordered by
-    /// [`Priority`] (Java 224). A `VecDeque` suffices for the idempotence
-    /// slice: the only handler it can enqueue is `InitProducerId`, and
-    /// [`Self::bump_idempotent_epoch_and_reset_id_if_needed`] enqueues at most
-    /// one at a time (it is guarded on `!has_producer_id()`), so FIFO and
-    /// priority order coincide. Phase 5 introduces the ordered queue along with
-    /// the handlers that make ordering observable.
-    pending_requests: VecDeque<TxnRequestHandler>,
-
+    // NOTE (rules §2): Java's `pendingRequests` (Java 121) and
+    // `inFlightRequestCorrelationId` (136) are deliberately absent here. They are
+    // fields on `Sender`, and the manager methods that touch them take them as
+    // parameters — see [`PendingRequests`].
+    //
     // This is used by the TxnRequestHandlers to control how long to back off before a given request is retried.
     // For instance, this value is lowered by the AddPartitionsToTxnHandler when it receives a CONCURRENT_TRANSACTIONS
     // error for the first AddPartitionsRequest in a transaction.
     retry_backoff_ms: i64,
-
-    /// Sender-owned (rules §2).
-    in_flight_request_correlation_id: i32,
 
     current_state: State,
     last_error: Option<KafkaError>,
@@ -521,9 +559,7 @@ impl TransactionManager {
             api_versions,
             partitions_with_unresolved_sequences: HashMap::new(),
             partitions_to_rewrite_sequences: HashSet::new(),
-            pending_requests: VecDeque::new(),
             retry_backoff_ms,
-            in_flight_request_correlation_id: NO_INFLIGHT_REQUEST_CORRELATION_ID,
             current_state: State::Uninitialized,
             last_error: None,
             producer_id_and_epoch: ProducerIdAndEpoch::NONE,
@@ -627,7 +663,10 @@ impl TransactionManager {
     /// `bump_idempotent_epoch_and_reset_id_if_needed` is state-guarded, so a
     /// test-only door is needed instead.
     #[cfg(test)]
-    fn force_enqueue_init_producer_id_for_test(&mut self) -> Arc<TransactionalRequestResult> {
+    fn force_enqueue_init_producer_id_for_test(
+        &mut self,
+        pending_requests: &mut PendingRequests,
+    ) -> Arc<TransactionalRequestResult> {
         let mut request_data = InitProducerIdRequestData::new();
         request_data.set_transactional_id(None).set_transaction_timeout_ms(i32::MAX);
         let handler = TxnRequestHandler::new(
@@ -639,7 +678,7 @@ impl TransactionManager {
             },
         );
         let result = Arc::clone(handler.result());
-        self.enqueue_request(handler);
+        self.enqueue_request(pending_requests, handler);
         result
     }
 
@@ -737,15 +776,21 @@ impl TransactionManager {
     /// [`Self::transition_to_uninitialized`].
     ///
     /// Java iterates the live `PriorityQueue` and does **not** clear it, so a
-    /// failed handler stays queued; that is preserved. Iterating by index rather
-    /// than with an iterator is required because
-    /// [`Self::transition_to_abortable_error`] needs `&mut self`, which Java gets
-    /// for free from the enclosing monitor.
-    pub(crate) fn fail_pending_requests(&mut self, error: &KafkaError, caller: Caller) -> Result<(), KafkaError> {
-        for index in 0..self.pending_requests.len() {
+    /// failed handler stays queued; that is preserved. The iteration is now a
+    /// direct `forEach` equivalent — before the rules §2 split the queue was a
+    /// field on this struct, so the loop had to go by index to leave `&mut self`
+    /// free for [`Self::transition_to_abortable_error`]; with the queue passed in
+    /// the two borrows are disjoint.
+    pub(crate) fn fail_pending_requests(
+        &mut self,
+        pending_requests: &mut PendingRequests,
+        error: &KafkaError,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        for handler in pending_requests.iter() {
             // Java: handler.abortableError(exception), i.e. result.fail(e) then
             // transitionToAbortableError(e), per handler and in that order.
-            self.pending_requests[index].fail(error.clone());
+            handler.fail(error.clone());
             self.transition_to_abortable_error(error.clone(), caller)?;
         }
         Ok(())
@@ -768,11 +813,16 @@ impl TransactionManager {
     /// carried inside an `io::Error` at the transport layer — so the parameter is
     /// a plain [`KafkaError`] and the caller supplies it. The body treats it as a
     /// `RuntimeException` in Java too.
-    pub(crate) fn authentication_failed(&mut self, error: &KafkaError, caller: Caller) -> Result<(), KafkaError> {
-        for index in 0..self.pending_requests.len() {
+    pub(crate) fn authentication_failed(
+        &mut self,
+        pending_requests: &mut PendingRequests,
+        error: &KafkaError,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        for handler in pending_requests.iter() {
             // Java: request.fatalError(e), i.e. result.fail(e) then
             // transitionToFatalError(e).
-            self.pending_requests[index].fail(error.clone());
+            handler.fail(error.clone());
             self.transition_to_fatal_error(error.clone(), caller)?;
         }
         Ok(())
@@ -828,10 +878,10 @@ impl TransactionManager {
     /// false, the second refuted by the twenty lines of `Sender.run` around the
     /// call site it cited. Recorded because the pull toward inventing a
     /// present-tense payoff is what produced both.
-    pub(crate) fn close(&mut self, caller: Caller) -> Result<(), KafkaError> {
+    pub(crate) fn close(&mut self, pending_requests: &mut PendingRequests, caller: Caller) -> Result<(), KafkaError> {
         let shutdown_error = KafkaError::with_message(Errors::UnknownServerError, "The producer closed forcefully");
-        for index in 0..self.pending_requests.len() {
-            self.pending_requests[index].fail(shutdown_error.clone());
+        for handler in pending_requests.iter() {
+            handler.fail(shutdown_error.clone());
             self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
         }
         // Java also fails `pendingTransition` here (Java 953-955); see
@@ -1210,6 +1260,7 @@ impl TransactionManager {
     pub(crate) fn bump_idempotent_epoch_and_reset_id_if_needed(
         &mut self,
         batches: &mut InFlightBatchPool<'_>,
+        pending_requests: &mut PendingRequests,
         caller: Caller,
     ) -> Result<(), KafkaError> {
         if !self.is_transactional() {
@@ -1228,10 +1279,36 @@ impl TransactionManager {
                         is_epoch_bump: false,
                     },
                 );
-                self.enqueue_request(handler);
+                self.enqueue_request(pending_requests, handler);
             }
         }
         Ok(())
+    }
+
+    /// Whether a client-side epoch bump has been requested and not yet applied.
+    ///
+    /// Java reads the `clientSideEpochBumpRequired` field (Java 141) directly
+    /// from inside the class; this accessor exists because the `Sender` must know
+    /// whether [`Self::bump_idempotent_epoch_and_reset_id_if_needed`] is going to
+    /// need a populated [`InFlightBatchPool`] *before* it takes the manager lock —
+    /// assembling the pool means locking the accumulator's per-partition deques
+    /// first (rules §3), which is pure waste on the overwhelmingly common path
+    /// where no bump is pending. Java needs no equivalent because its
+    /// `TxnPartitionEntry` holds live references to the batches (rules §7).
+    pub(crate) fn client_side_epoch_bump_required(&self) -> bool {
+        self.client_side_epoch_bump_required
+    }
+
+    /// The partitions whose in-flight sequences will be rewritten by the next
+    /// epoch bump.
+    ///
+    /// Java reads the `partitionsToRewriteSequences` field (Java 133) directly.
+    /// Exposed for the same reason as [`Self::client_side_epoch_bump_required`]:
+    /// the `Sender` assembles the [`InFlightBatchPool`] for exactly these
+    /// partitions and no others, because
+    /// [`Self::bump_idempotent_producer_epoch`] iterates only this set.
+    pub(crate) fn partitions_to_rewrite_sequences(&self) -> &HashSet<TopicPartition> {
+        &self.partitions_to_rewrite_sequences
     }
 
     // -- Sequence numbers ---------------------------------------------------
@@ -1595,10 +1672,12 @@ impl TransactionManager {
 
     /// Enqueues `handler` for the Sender to pick up.
     ///
-    /// Corresponds to `enqueueRequest(TxnRequestHandler)` (Java 1186).
-    fn enqueue_request(&mut self, handler: TxnRequestHandler) {
+    /// Corresponds to `enqueueRequest(TxnRequestHandler)` (Java 1186). Takes the
+    /// queue from its owner (rules §2, see [`PendingRequests`]); `&self` is only
+    /// needed for the log prefix.
+    fn enqueue_request(&self, pending_requests: &mut PendingRequests, handler: TxnRequestHandler) {
         kafka_debug!(self.log_context, "Enqueuing transactional request {:?}", handler);
-        self.pending_requests.push_back(handler);
+        pending_requests.push_back(handler);
     }
 
     /// The next transactional request to send, if any.
@@ -1611,15 +1690,19 @@ impl TransactionManager {
     /// transaction-only, and [`TxnRequestHandler::is_end_txn`] is `false` for
     /// every handler this phase can build, so neither is reachable; Phase 5 adds
     /// them with the handlers they need.
-    pub(crate) fn next_request(&mut self, has_incomplete_batches: bool) -> Option<TxnRequestHandler> {
-        let next_request_handler = self.pending_requests.front()?;
+    pub(crate) fn next_request(
+        &mut self,
+        pending_requests: &mut PendingRequests,
+        has_incomplete_batches: bool,
+    ) -> Option<TxnRequestHandler> {
+        let next_request_handler = pending_requests.front()?;
 
         // Do not send the EndTxn until all batches have been flushed
         if next_request_handler.is_end_txn() && has_incomplete_batches {
             return None;
         }
 
-        let next_request_handler = self.pending_requests.pop_front()?;
+        let next_request_handler = pending_requests.pop_front()?;
         if self.maybe_terminate_request_with_error(&next_request_handler) {
             kafka_trace!(
                 self.log_context,
@@ -1633,12 +1716,8 @@ impl TransactionManager {
         Some(next_request_handler)
     }
 
-    /// Whether any transactional request is pending.
-    ///
-    /// Corresponds to `hasPendingRequests()` (Java 1005).
-    pub(crate) fn has_pending_requests(&self) -> bool {
-        !self.pending_requests.is_empty()
-    }
+    // `hasPendingRequests()` (Java 1005) is `Sender::has_pending_requests`: its
+    // body reads only the Sender-confined queue (rules §2).
 
     /// Fails `handler` when the manager is in an error state.
     ///
@@ -1662,37 +1741,27 @@ impl TransactionManager {
     /// Corresponds to `retry(TxnRequestHandler)` (Java 934), which is what
     /// `Sender` calls; `TxnRequestHandler.reenqueue()` (Java 1394) is the same
     /// two statements reached from the response path.
-    pub(crate) fn retry(&mut self, mut handler: TxnRequestHandler) {
+    pub(crate) fn retry(&self, pending_requests: &mut PendingRequests, mut handler: TxnRequestHandler) {
         handler.set_retry();
-        self.enqueue_request(handler);
+        self.enqueue_request(pending_requests, handler);
     }
 
-    /// Records the correlation id of the transactional request now in flight.
-    ///
-    /// Corresponds to `setInFlightCorrelationId(int)` (Java 973).
-    pub(crate) fn set_in_flight_correlation_id(&mut self, correlation_id: i32) {
-        self.in_flight_request_correlation_id = correlation_id;
-    }
-
-    /// Clears the in-flight correlation id.
-    ///
-    /// Corresponds to `clearInFlightCorrelationId()` (Java 977).
-    fn clear_in_flight_correlation_id(&mut self) {
-        self.in_flight_request_correlation_id = NO_INFLIGHT_REQUEST_CORRELATION_ID;
-    }
-
-    /// Whether a transactional request is in flight.
-    ///
-    /// Corresponds to `hasInFlightRequest()` (Java 981).
-    pub(crate) fn has_in_flight_request(&self) -> bool {
-        self.in_flight_request_correlation_id != NO_INFLIGHT_REQUEST_CORRELATION_ID
-    }
+    // `setInFlightCorrelationId` (Java 973), `clearInFlightCorrelationId` (977)
+    // and `hasInFlightRequest` (981) are `Sender` methods: each is a pure accessor
+    // of `inFlightRequestCorrelationId`, which is Sender-confined (rules §2, see
+    // [`PendingRequests`]). Java leaves all three unsynchronized, which is the
+    // evidence for the confinement.
 
     /// Fails `handler` and moves the manager to [`State::FatalError`].
     ///
     /// Corresponds to `TxnRequestHandler.fatalError(RuntimeException)`
     /// (Java 1357).
-    fn fatal_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
+    ///
+    /// `pub(crate)` because the [`Sender`] reaches it from the unsynchronized half
+    /// of `onComplete` (Java 1408, 1417, 1425).
+    ///
+    /// [`Sender`]: crate::producer::internals::Sender
+    pub(crate) fn fatal_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
         handler.result.fail(error.clone());
         // Every caller is on the response path, which runs on the Sender task.
         self.transition_to_fatal_error(error, Caller::Sender)
@@ -1749,79 +1818,39 @@ impl TransactionManager {
         self.coordinator_type(handler).is_some()
     }
 
-    /// Handles the response to a transactional request.
-    ///
-    /// Translated from `TxnRequestHandler.onComplete(ClientResponse)`
-    /// (Java 1406). Moved from the handler onto the manager because Java's inner
-    /// class reaches the manager through an implicit `TransactionManager.this`,
-    /// which Rust has no equivalent for.
-    ///
-    /// `handler` is taken by value: Java's `reenqueue()` puts `this` back on the
-    /// pending queue, so ownership has to move.
-    ///
-    /// The `Caller` is always [`Caller::Sender`]: Java invokes this from
-    /// `NetworkClient.poll`, i.e. on the Sender thread, at every call site.
-    pub(crate) fn on_complete(
-        &mut self,
-        handler: TxnRequestHandler,
-        response: &ClientResponse,
-    ) -> Result<(), KafkaError> {
-        if response.request_header().correlation_id() != self.in_flight_request_correlation_id {
-            return self.fatal_error(
-                &handler,
-                KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    "Detected more than one in-flight transactional request.",
-                ),
-            );
-        }
-
-        self.clear_in_flight_correlation_id();
-        if response.was_disconnected() {
-            kafka_debug!(self.log_context, "Disconnected from {}. Will retry.", response.destination());
-            if self.needs_coordinator(&handler) {
-                // Java 1414 looks the coordinator up again. Unreachable for an
-                // idempotent producer, whose `coordinatorType()` is null; Phase 5
-                // adds `lookupCoordinator` with the FindCoordinator handler.
-                return Err(KafkaError::unsupported_version(
-                    "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
-                ));
-            }
-            self.retry(handler);
-            return Ok(());
-        }
-        if let Some(version_mismatch) = response.version_mismatch() {
-            let error = KafkaError::unsupported_version(version_mismatch.to_string());
-            return self.fatal_error(&handler, error);
-        }
-        match response.response_body() {
-            Some(response_body) => {
-                kafka_trace!(
-                    self.log_context,
-                    "Received transactional response {} for request {:?}",
-                    response_body,
-                    handler
-                );
-                self.handle_response(handler, response_body)
-            },
-            None => self.fatal_error(
-                &handler,
-                KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    "Could not execute transactional request for unknown reasons",
-                ),
-            ),
-        }
-    }
+    // `TxnRequestHandler.onComplete(ClientResponse)` (Java 1406-1428) is split.
+    // Everything Java runs *outside* the `synchronized (TransactionManager.this)`
+    // block that begins at `:1421` — the correlation-id check, the clear, the
+    // disconnect branch and the version-mismatch branch — is
+    // `Sender::on_transactional_response`, because it touches the Sender-confined
+    // correlation id (rules §2) and because taking the shared lock for it would
+    // block the application task's `maybe_add_partition` where Java does not. The
+    // `synchronized` half is [`Self::handle_response`] below, which the Sender
+    // calls under the lock exactly as Java's block does. PLAN §10.5 deviation 7
+    // named this split as the price of hosting the handler methods here.
 
     /// Dispatches a parsed response body to the handler that requested it.
     ///
     /// Corresponds to the abstract `handleResponse(AbstractResponse)`
-    /// (Java 1456).
-    fn handle_response(&mut self, handler: TxnRequestHandler, response: &ConcreteResponse) -> Result<(), KafkaError> {
+    /// (Java 1456), invoked inside `onComplete`'s `synchronized` block
+    /// (Java 1421-1423).
+    ///
+    /// `handler` is taken by value: Java's `reenqueue()` puts `this` back on the
+    /// pending queue, so ownership has to move. `pending_requests` is the
+    /// Sender-owned queue that the retriable-error arm re-enqueues into
+    /// (Java 1533 → `reenqueue()` at 1394).
+    ///
+    /// The [`Caller`] is always [`Caller::Sender`]: Java invokes this from
+    /// `NetworkClient.poll`, i.e. on the Sender thread, at every call site.
+    pub(crate) fn handle_response(
+        &mut self,
+        handler: TxnRequestHandler,
+        response: &ConcreteResponse,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<(), KafkaError> {
         // One handler kind in this phase, so no dispatch is needed yet; Phase 5
         // matches on `handler.kind` here as Java dispatches on the subclass.
-        self.handle_init_producer_id_response(handler, response)
+        self.handle_init_producer_id_response(handler, response, pending_requests)
     }
 
     /// Handles an `InitProducerId` response.
@@ -1832,6 +1861,7 @@ impl TransactionManager {
         &mut self,
         handler: TxnRequestHandler,
         response: &ConcreteResponse,
+        pending_requests: &mut PendingRequests,
     ) -> Result<(), KafkaError> {
         // Irrefutable while `TxnRequestHandlerKind` has a single variant; Phase 5
         // moves the dispatch up into `handle_response`.
@@ -1884,7 +1914,7 @@ impl TransactionManager {
             ));
         }
         if error.is_retriable() {
-            self.retry(handler);
+            self.retry(pending_requests, handler);
             return Ok(());
         }
         if error == Errors::TransactionalIdAuthorizationFailed || error == Errors::ClusterAuthorizationFailed {
@@ -2060,8 +2090,9 @@ mod tests {
     use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
     use crate::common::record::memory_records::MemoryRecords;
-    use crate::common::requests::{InitProducerIdResponse, RequestHeader};
+    use crate::common::requests::InitProducerIdResponse;
     use crate::init_producer_id_response_data::InitProducerIdResponseData;
+    use crate::producer::internals::sender::is_authorization_error_handled_by_sender;
 
     // Constants mirroring `TransactionManagerTest`'s fields (Java 125-155).
     const TRANSACTION_TIMEOUT_MS: i32 = 1121;
@@ -2213,99 +2244,104 @@ mod tests {
         (batch.producer_id(), batch.producer_epoch(), batch.base_sequence())
     }
 
-    /// Feeds an `InitProducerId` response back into `manager`, playing the part
-    /// `Sender` plus `MockClient` play in Java.
+    /// Feeds an `InitProducerId` response body into `manager`, playing the part
+    /// the `synchronized` block of `TxnRequestHandler.onComplete`
+    /// (Java 1421-1423) plays.
+    ///
+    /// Java's `onComplete` also compares the response's correlation id against
+    /// `inFlightRequestCorrelationId` and handles disconnect / version-mismatch
+    /// (Java 1407-1417). Since Phase 4 that half is
+    /// `Sender::on_transactional_response` — the field it reads is Sender-confined
+    /// (rules §2) — so those three branches are tested in `sender.rs` against a
+    /// `MockClient` rather than here.
     fn complete_init_producer_id(
         manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
         handler: TxnRequestHandler,
         error: Errors,
         producer_id: i64,
         epoch: i16,
     ) -> Result<(), KafkaError> {
-        manager.set_in_flight_correlation_id(CORRELATION_ID);
         let mut data = InitProducerIdResponseData::new();
         data.set_error_code(error.code())
             .set_producer_id(producer_id)
             .set_producer_epoch(epoch)
             .set_throttle_time_ms(0);
-        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", CORRELATION_ID)
-            .expect("INIT_PRODUCER_ID is a known api key");
-        let response = ClientResponse::new(
-            header,
-            None,
-            "0",
-            0,
-            0,
-            false,
-            None,
-            None,
-            Some(ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data))),
-        );
-        manager.on_complete(handler, &response)
+        let response = ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data));
+        manager.handle_response(handler, &response, pending_requests)
     }
 
     /// Acquires a producer id for an idempotent producer.
     ///
     /// Mirrors `initializeIdempotentProducerId` (Java 4333). Java drives
-    /// `Sender.runOnce` against a `MockClient`; the send path is Phase 4, so the
-    /// same manager path is driven directly: the pending `InitProducerId` is
-    /// dequeued through [`TransactionManager::next_request`] exactly as
-    /// `Sender.java:472` does, and the response is fed back through
-    /// [`TransactionManager::on_complete`] exactly as `NetworkClient.poll` does.
-    fn initialize_idempotent_producer_id(manager: &mut TransactionManager, producer_id: i64, epoch: i16) {
+    /// `Sender.runOnce` against a `MockClient`; these manager-level tests drive
+    /// the same manager path directly: the pending `InitProducerId` is dequeued
+    /// through [`TransactionManager::next_request`] exactly as `Sender.java:472`
+    /// does, and the response body is fed back through
+    /// [`TransactionManager::handle_response`] exactly as `NetworkClient.poll` →
+    /// `onComplete`'s `synchronized` block does.
+    fn initialize_idempotent_producer_id(
+        manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
+        producer_id: i64,
+        epoch: i16,
+    ) {
         let mut pool = InFlightBatchPool::new();
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, pending_requests, Caller::Sender)
             .expect("enqueueing the initial InitProducerId succeeds");
-        let mut handler = manager.next_request(false).expect("an InitProducerId request must be pending");
+        let mut handler = manager
+            .next_request(pending_requests, false)
+            .expect("an InitProducerId request must be pending");
         // Java's helper asserts the same thing on the outgoing request.
         assert!(
             handler.request_builder().data().transactional_id.is_none(),
             "an idempotent producer must not send a transactional id"
         );
-        complete_init_producer_id(manager, handler, Errors::None, producer_id, epoch)
+        complete_init_producer_id(manager, pending_requests, handler, Errors::None, producer_id, epoch)
             .expect("a successful InitProducerId response is handled");
         assert!(manager.has_producer_id());
     }
 
-    /// Whether `error` is one of the two authorization exceptions that
-    /// `Sender.shouldHandleAuthorizationError` matches (`Sender.java:352-353`).
-    ///
-    /// A `Sender` private method, modelled here so the test harness can mirror
-    /// `runOnce`'s transaction block. Phase 4 owns the real one.
-    fn should_handle_authorization_error(error: &KafkaError) -> bool {
-        matches!(
-            error.error(),
-            Errors::TransactionalIdAuthorizationFailed | Errors::ClusterAuthorizationFailed
-        )
-    }
-
-    /// Mirrors the whole `transactionManager != null` block of `Sender.runOnce`
-    /// (`Sender.java:311-335`), all four exits included, and reports which one
+    /// Drives the manager entry points of `Sender.runOnce`'s
+    /// `transactionManager != null` block (`Sender.java:311-335`) in `runOnce`'s
+    /// order and behind `runOnce`'s guards, and reports which of the four exits
     /// `runOnce` would have taken.
     ///
-    /// Java's tests reach the epoch bump through
-    /// `runUntil(() -> transactionManager.producerIdAndEpoch().epoch == N)`,
-    /// which spins `Sender.runOnce`. The send path is Phase 4, so the manager
-    /// entry points are invoked directly — but in `runOnce`'s order and behind
-    /// `runOnce`'s guards, because skipping the `:318` / `:325` guards and going
-    /// straight from `:313` to `:331` produces exactly the wrong behaviour on the
-    /// abortable-error path (an `ABORTABLE_ERROR → INITIALIZING` attempt Java
+    /// # This is no longer the reference implementation
+    ///
+    /// Phase 3 had no `Sender`, so this harness *was* the only model of the block.
+    /// Since Phase 4 the production implementation is
+    /// `Sender::run_transaction_phase`, tested against a `MockClient` in
+    /// `sender.rs` (`test_run_once_returns_on_a_fatal_transaction_manager_error`,
+    /// `test_run_once_recovers_an_idempotent_producer_from_an_authorization_error`,
+    /// `test_run_once_returns_without_producing_while_init_producer_id_is_pending`,
+    /// `test_run_once_produces_once_a_producer_id_is_held`) — that is what
+    /// PLAN §Phase-4 means by "replaces the predicate with the real call".
+    ///
+    /// This harness survives because the tests below assert on *manager* state
+    /// (sequence numbers, epochs, unresolved partitions) and need neither a
+    /// network client nor an accumulator. Java's own tests reach the epoch bump
+    /// through `runUntil(() -> transactionManager.producerIdAndEpoch().epoch == N)`,
+    /// which spins `Sender.runOnce`; this is the manager-level equivalent.
+    ///
+    /// Its order and guards still matter: skipping the `:318` / `:325` guards and
+    /// going straight from `:313` to `:331` produces exactly the wrong behaviour on
+    /// the abortable-error path (an `ABORTABLE_ERROR → INITIALIZING` attempt Java
     /// never makes).
     ///
     /// # What is not executed here, and why
     ///
-    /// Three of `runOnce`'s steps have no Phase-3 counterpart:
+    /// Three of `runOnce`'s steps need collaborators this harness does not have:
     ///
-    ///   - `maybeAbortBatches` (`:320`, `:355`) needs the accumulator — Phase 4;
+    ///   - `maybeAbortBatches` (`:320`, `:355`) needs the accumulator;
     ///   - `client.poll` (`:322`, and inside
-    ///     `maybeSendAndPollTransactionalRequest`) needs the network client —
-    ///     Phase 4;
-    ///   - `maybeSendAndPollTransactionalRequest` (`:333-335`) needs both, so the
-    ///     harness cannot *send*. It is nonetheless **modelled**, as an outcome,
-    ///     because its return value decides whether `runOnce` reaches
-    ///     `sendProducerData` at `:344` — and the tests supply the send by hand
-    ///     immediately afterwards through [`TransactionManager::next_request`] and
+    ///     `maybeSendAndPollTransactionalRequest`) needs the network client;
+    ///   - `maybeSendAndPollTransactionalRequest` (`:333-335`) needs both, so this
+    ///     cannot *send*. It is nonetheless **modelled**, as an outcome, because
+    ///     its return value decides whether `runOnce` reaches `sendProducerData` at
+    ///     `:344` — and the tests supply the send by hand immediately afterwards
+    ///     through [`TransactionManager::next_request`] and
     ///     `complete_init_producer_id`.
     ///
     /// # Why a predicate is a faithful model of `:333-335`
@@ -2327,9 +2363,18 @@ mod tests {
     /// returning `null` for an `EndTxn` with incomplete batches (`:903`) — cannot
     /// arise, because [`TxnRequestHandler::is_end_txn`] is `false` for every
     /// handler this phase can build.
-    fn run_sender_transaction_phase(
+    ///
+    /// `pending_requests` and `in_flight_request_correlation_id` are passed in
+    /// because they are Sender-confined (rules §2, see [`PendingRequests`]); the
+    /// callers all pass [`NO_INFLIGHT_REQUEST_CORRELATION_ID`] because these tests
+    /// complete each `InitProducerId` synchronously and so never leave one in
+    /// flight. The term is kept rather than dropped so the predicate stays the one
+    /// Java computes.
+    fn run_manager_transaction_phase(
         manager: &mut TransactionManager,
         batches: &mut InFlightBatchPool<'_>,
+        pending_requests: &mut PendingRequests,
+        in_flight_request_correlation_id: i32,
     ) -> SenderPhaseOutcome {
         // Sender.java:313
         manager.maybe_resolve_sequences().expect("resolving sequences succeeds");
@@ -2344,7 +2389,7 @@ mod tests {
 
         // Sender.java:325-327 → shouldHandleAuthorizationError, :351-360.
         let authorization_error =
-            last_error.filter(|error| manager.has_abortable_error() && should_handle_authorization_error(error));
+            last_error.filter(|error| manager.has_abortable_error() && is_authorization_error_handled_by_sender(error));
         if let Some(error) = authorization_error {
             // Java wraps the cause in `new AuthenticationException(exception)`
             // (Sender.java:354). Java's `AuthenticationException` base class
@@ -2354,7 +2399,11 @@ mod tests {
             // `SaslAuthenticationFailed`: the cause here is a cluster
             // authorization failure and nothing about it is SASL.
             manager
-                .fail_pending_requests(&KafkaError::fatal(Errors::UnknownServerError, error.message()), Caller::Sender)
+                .fail_pending_requests(
+                    pending_requests,
+                    &KafkaError::fatal(Errors::UnknownServerError, error.message()),
+                    Caller::Sender,
+                )
                 .expect("failing pending requests succeeds");
             manager
                 .transition_to_uninitialized(Caller::Sender)
@@ -2364,11 +2413,13 @@ mod tests {
 
         // Sender.java:331
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(batches, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(batches, pending_requests, Caller::Sender)
             .expect("bumping the epoch succeeds");
 
         // Sender.java:333-335 — see the doc comment for why this is a predicate.
-        if manager.has_in_flight_request() || (manager.has_pending_requests() && !manager.has_error()) {
+        if in_flight_request_correlation_id != NO_INFLIGHT_REQUEST_CORRELATION_ID
+            || (!pending_requests.is_empty() && !manager.has_error())
+        {
             return SenderPhaseOutcome::ReturnedOnTransactionalRequest;
         }
         SenderPhaseOutcome::Continued
@@ -2540,14 +2591,17 @@ mod tests {
             Errors::TransactionalIdAuthorizationFailed,
         ] {
             let mut manager = idempotent_manager(false);
+            let mut pending = PendingRequests::new();
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("the initial InitProducerId is enqueued");
-            let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+            let handler = manager
+                .next_request(&mut pending, false)
+                .expect("an InitProducerId request is pending");
             let result = Arc::clone(handler.result());
 
-            complete_init_producer_id(&mut manager, handler, error_code, -1, -1)
+            complete_init_producer_id(&mut manager, &mut pending, handler, error_code, -1, -1)
                 .expect("the authorization error is handled, not propagated");
 
             assert!(manager.has_abortable_error(), "{error_code:?} must produce an abortable error");
@@ -2589,18 +2643,27 @@ mod tests {
             Errors::TransactionalIdAuthorizationFailed,
         ] {
             let mut manager = idempotent_manager(false);
+            let mut pending = PendingRequests::new();
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("the initial InitProducerId is enqueued");
-            let handler = manager.next_request(false).expect("an InitProducerId request is pending");
-            complete_init_producer_id(&mut manager, handler, error_code, -1, -1).expect("the error is handled");
+            let handler = manager
+                .next_request(&mut pending, false)
+                .expect("an InitProducerId request is pending");
+            complete_init_producer_id(&mut manager, &mut pending, handler, error_code, -1, -1)
+                .expect("the error is handled");
             assert!(manager.has_abortable_error());
 
             // Sender.runOnce intercepts at :325 and recovers; it does NOT reach
             // the epoch bump at :331.
             assert_eq!(
-                run_sender_transaction_phase(&mut manager, &mut pool),
+                run_manager_transaction_phase(
+                    &mut manager,
+                    &mut pool,
+                    &mut pending,
+                    NO_INFLIGHT_REQUEST_CORRELATION_ID
+                ),
                 SenderPhaseOutcome::RecoveredFromAuthorizationError
             );
             assert_eq!(manager.current_state(), State::Uninitialized);
@@ -2611,7 +2674,7 @@ mod tests {
             assert!(!manager.has_error());
             assert!(!manager.has_abortable_error());
             assert!(
-                !manager.has_pending_requests(),
+                pending.is_empty(),
                 "the failed handler was consumed by on_complete, so nothing is queued"
             );
 
@@ -2626,12 +2689,19 @@ mod tests {
             // `sendProducerData` in the same iteration that acquires the producer
             // id. Asserting `Continued` here would document the opposite.
             assert_eq!(
-                run_sender_transaction_phase(&mut manager, &mut pool),
+                run_manager_transaction_phase(
+                    &mut manager,
+                    &mut pool,
+                    &mut pending,
+                    NO_INFLIGHT_REQUEST_CORRELATION_ID
+                ),
                 SenderPhaseOutcome::ReturnedOnTransactionalRequest
             );
             assert_eq!(manager.current_state(), State::Initializing);
-            let handler = manager.next_request(false).expect("a fresh InitProducerId is pending");
-            complete_init_producer_id(&mut manager, handler, Errors::None, PRODUCER_ID, EPOCH)
+            let handler = manager
+                .next_request(&mut pending, false)
+                .expect("a fresh InitProducerId is pending");
+            complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH)
                 .expect("the retry succeeds");
             assert_eq!(manager.current_state(), State::Ready);
             assert_eq!(manager.producer_id_and_epoch(), ProducerIdAndEpoch::new(PRODUCER_ID, EPOCH));
@@ -2642,15 +2712,16 @@ mod tests {
     /// `close` (Java 949) each fail every queued handler and transition.
     ///
     /// The recovery path above reaches `fail_pending_requests` with an empty
-    /// queue, because `on_complete` consumed the only handler. These drive the
+    /// queue, because `handle_response` consumed the only handler. These drive the
     /// non-empty case, which is where the per-handler loop is observable.
     #[test]
     fn test_pending_requests_are_failed_in_bulk() {
         // failPendingRequests → abortableError per handler.
         let mut manager = idempotent_manager(false);
+        let mut pending = PendingRequests::new();
         let mut pool = InFlightBatchPool::new();
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
         // Reach ABORTABLE_ERROR from INITIALIZING, the transition
         // `InitProducerIdHandler`'s authorization arm makes (Java 1528), while
@@ -2658,27 +2729,29 @@ mod tests {
         manager
             .transition_to_abortable_error(KafkaError::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
             .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
-        let queued_result = manager.force_enqueue_init_producer_id_for_test();
-        assert!(manager.has_pending_requests());
+        let queued_result = manager.force_enqueue_init_producer_id_for_test(&mut pending);
+        assert!(!pending.is_empty());
         // `Sender.java:354` passes `new AuthenticationException(exception)`. Java's
         // `AuthenticationException` base class has no wire code, which this crate
         // spells as `Errors::UnknownServerError` — the same convention
         // `maybe_fail_with_error` and `close` use.
         let authentication_error = KafkaError::fatal(Errors::UnknownServerError, "authentication failed");
         manager
-            .fail_pending_requests(&authentication_error, Caller::Sender)
+            .fail_pending_requests(&mut pending, &authentication_error, Caller::Sender)
             .expect("ABORTABLE_ERROR self-loop is valid");
         assert!(queued_result.is_completed());
         assert_eq!(queued_result.error().expect("failed").message(), "authentication failed");
         assert!(manager.has_abortable_error(), "the state stays ABORTABLE_ERROR (self-loop)");
         assert_eq!(manager.last_error().expect("recorded").message(), "authentication failed");
-        assert!(manager.has_pending_requests(), "Java does not clear the queue (Java 945-946)");
+        assert!(!pending.is_empty(), "Java does not clear the queue (Java 945-946)");
 
-        // authenticationFailed → fatalError per handler.
+        // authenticationFailed → fatalError per handler. A fresh manager gets a
+        // fresh queue, as Java's `initializeTransactionManager` does.
         let mut manager = idempotent_manager(false);
-        let queued_result = manager.force_enqueue_init_producer_id_for_test();
+        let mut pending = PendingRequests::new();
+        let queued_result = manager.force_enqueue_init_producer_id_for_test(&mut pending);
         manager
-            .authentication_failed(&authentication_error, Caller::Sender)
+            .authentication_failed(&mut pending, &authentication_error, Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
         assert!(manager.has_fatal_error());
         assert_eq!(queued_result.error().expect("failed").message(), "authentication failed");
@@ -2686,8 +2759,11 @@ mod tests {
 
         // close → fatalError with Java's message.
         let mut manager = idempotent_manager(false);
-        let queued_result = manager.force_enqueue_init_producer_id_for_test();
-        manager.close(Caller::Sender).expect("FATAL_ERROR is always a valid target");
+        let mut pending = PendingRequests::new();
+        let queued_result = manager.force_enqueue_init_producer_id_for_test(&mut pending);
+        manager
+            .close(&mut pending, Caller::Sender)
+            .expect("FATAL_ERROR is always a valid target");
         assert!(manager.has_fatal_error());
         assert_eq!(
             queued_result.error().expect("failed").message(),
@@ -2705,14 +2781,18 @@ mod tests {
     fn test_producer_fenced_init_producer_id_response_is_fatal() {
         for error_code in [Errors::InvalidProducerEpoch, Errors::ProducerFenced] {
             let mut manager = idempotent_manager(false);
+            let mut pending = PendingRequests::new();
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("the initial InitProducerId is enqueued");
-            let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+            let handler = manager
+                .next_request(&mut pending, false)
+                .expect("an InitProducerId request is pending");
             let result = Arc::clone(handler.result());
 
-            complete_init_producer_id(&mut manager, handler, error_code, -1, -1).expect("the error is handled");
+            complete_init_producer_id(&mut manager, &mut pending, handler, error_code, -1, -1)
+                .expect("the error is handled");
 
             assert!(manager.has_fatal_error());
             assert_eq!(
@@ -2729,22 +2809,29 @@ mod tests {
     #[test]
     fn test_retriable_init_producer_id_response_is_reenqueued() {
         let mut manager = idempotent_manager(false);
+        let mut pending = PendingRequests::new();
         let mut pool = InFlightBatchPool::new();
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
-        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("an InitProducerId request is pending");
         let result = Arc::clone(handler.result());
 
-        complete_init_producer_id(&mut manager, handler, Errors::CoordinatorLoadInProgress, -1, -1)
+        complete_init_producer_id(&mut manager, &mut pending, handler, Errors::CoordinatorLoadInProgress, -1, -1)
             .expect("a retriable error is handled");
 
         assert!(!result.is_completed(), "a retried request must not complete");
         assert!(!manager.has_error());
-        assert!(manager.has_pending_requests());
-        let handler = manager.next_request(false).expect("the request was re-enqueued");
+        assert!(!pending.is_empty());
+        let handler = manager.next_request(&mut pending, false).expect("the request was re-enqueued");
         assert!(handler.is_retry());
-        assert!(!manager.has_in_flight_request(), "the correlation id is cleared on completion");
+        // Java also clears the in-flight correlation id here (Java 1410), but that
+        // now happens in `Sender::on_transactional_response` before the response
+        // body reaches `handle_response` (rules §2). `sender.rs`'s
+        // `test_transactional_response_clears_the_in_flight_correlation_id` covers
+        // it.
     }
 
     /// An unexpected `InitProducerId` error is fatal, with Java's message
@@ -2752,13 +2839,17 @@ mod tests {
     #[test]
     fn test_unexpected_init_producer_id_response_is_fatal() {
         let mut manager = idempotent_manager(false);
+        let mut pending = PendingRequests::new();
         let mut pool = InFlightBatchPool::new();
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
-        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("an InitProducerId request is pending");
 
-        complete_init_producer_id(&mut manager, handler, Errors::InvalidRequest, -1, -1).expect("the error is handled");
+        complete_init_producer_id(&mut manager, &mut pending, handler, Errors::InvalidRequest, -1, -1)
+            .expect("the error is handled");
 
         assert!(manager.has_fatal_error());
         assert_eq!(
@@ -2770,46 +2861,28 @@ mod tests {
         );
     }
 
-    /// A response whose correlation id does not match the in-flight one is
-    /// fatal (Java 1407-1408).
+    // `test_mismatched_correlation_id_is_fatal` (Java 1407-1408) and
+    // `test_disconnect_reenqueues_without_a_coordinator_lookup`
+    // (Java 1411-1415, 1482) moved to `sender.rs` in Phase 4, along with the
+    // unsynchronized half of `onComplete` that they exercise
+    // (`Sender::on_transactional_response`, rules §2). Their coordinator-typing
+    // assertions live on in `test_idempotent_init_producer_id_needs_no_coordinator`
+    // below, which needs no `ClientResponse`.
+
+    /// An idempotent `InitProducerId` is routed to no coordinator, which is why
+    /// the whole `FindCoordinator` subsystem is out of scope for the idempotence
+    /// slice (Java 1482-1488).
     #[test]
-    fn test_mismatched_correlation_id_is_fatal() {
+    fn test_idempotent_init_producer_id_needs_no_coordinator() {
         let mut manager = idempotent_manager(false);
+        let mut pending = PendingRequests::new();
         let mut pool = InFlightBatchPool::new();
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
-        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
-
-        manager.set_in_flight_correlation_id(CORRELATION_ID + 1);
-        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", CORRELATION_ID)
-            .expect("INIT_PRODUCER_ID is a known api key");
-        let response = ClientResponse::new(header, None, "0", 0, 0, false, None, None, None);
-        manager
-            .on_complete(handler, &response)
-            .expect("the mismatch is handled, not propagated");
-
-        assert!(manager.has_fatal_error());
-        assert_eq!(
-            manager.last_error().expect("recorded").message(),
-            "Detected more than one in-flight transactional request."
-        );
-        assert!(
-            manager.has_in_flight_request(),
-            "a mismatch must not clear the in-flight correlation id"
-        );
-    }
-
-    /// A disconnect re-enqueues the request; an idempotent `InitProducerId`
-    /// needs no coordinator, so no lookup is attempted (Java 1411-1415, 1482).
-    #[test]
-    fn test_disconnect_reenqueues_without_a_coordinator_lookup() {
-        let mut manager = idempotent_manager(false);
-        let mut pool = InFlightBatchPool::new();
-        manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
-            .expect("the initial InitProducerId is enqueued");
-        let handler = manager.next_request(false).expect("an InitProducerId request is pending");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("an InitProducerId request is pending");
         assert_eq!(
             manager.coordinator_type(&handler),
             None,
@@ -2817,17 +2890,6 @@ mod tests {
         );
         assert_eq!(manager.coordinator_key(&handler), None);
         assert!(!manager.needs_coordinator(&handler));
-        let result = Arc::clone(handler.result());
-
-        manager.set_in_flight_correlation_id(CORRELATION_ID);
-        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", CORRELATION_ID)
-            .expect("INIT_PRODUCER_ID is a known api key");
-        let response = ClientResponse::new(header, None, "0", 0, 0, true, None, None, None);
-        manager.on_complete(handler, &response).expect("a disconnect is handled");
-
-        assert!(!result.is_completed());
-        assert!(!manager.has_error());
-        assert!(manager.next_request(false).expect("re-enqueued").is_retry());
     }
 
     /// A pending request is failed rather than sent while the manager is in an
@@ -2835,17 +2897,21 @@ mod tests {
     #[test]
     fn test_next_request_terminates_pending_requests_in_an_error_state() {
         let mut manager = idempotent_manager(false);
+        let mut pending = PendingRequests::new();
         let mut pool = InFlightBatchPool::new();
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
         manager
             .transition_to_fatal_error(kafka_exception(), Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
 
-        assert!(manager.has_pending_requests());
-        assert!(manager.next_request(false).is_none(), "the request is terminated, not returned");
-        assert!(!manager.has_pending_requests());
+        assert!(!pending.is_empty());
+        assert!(
+            manager.next_request(&mut pending, false).is_none(),
+            "the request is terminated, not returned"
+        );
+        assert!(pending.is_empty());
     }
 
     /// `add_in_flight_batch` rejects a batch with no sequence (Java 698-699).
@@ -2866,7 +2932,8 @@ mod tests {
     #[test]
     fn test_first_in_flight_sequence() {
         let mut manager = idempotent_manager(false);
-        initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, EPOCH);
+        let mut pending = PendingRequests::new();
+        initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, EPOCH);
         assert_eq!(
             manager.first_in_flight_sequence(&tp0()).expect("no entry needed"),
             RecordBatch::NO_SEQUENCE
@@ -2902,11 +2969,12 @@ mod tests {
         // No entry for tp0: `request_idempotent_epoch_bump_for_partition` alone
         // does not create one, so the rewrite has nothing to rewrite *into*.
         let mut manager = idempotent_manager(false);
-        initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, i16::MAX);
+        let mut pending = PendingRequests::new();
+        initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, i16::MAX);
         manager.request_idempotent_epoch_bump_for_partition(&tp0());
         let mut pool = InFlightBatchPool::new();
         let error = manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect_err("a queued partition with no entry is Java's IllegalStateException");
         assert_eq!(
             error.message(),
@@ -2919,13 +2987,13 @@ mod tests {
         // An entry with an empty in-flight set is rewritten instead, and an
         // exhausted epoch resets the producer id (Java 646-647).
         let mut manager = idempotent_manager(false);
-        initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, i16::MAX);
+        initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, i16::MAX);
         manager.increment_sequence_number(&tp0(), 4).expect_err("no entry yet");
         assert_eq!(manager.sequence_number(&tp0()), 0, "the accessor creates the entry");
         manager.increment_sequence_number(&tp0(), 4).expect("the entry now exists");
         manager.request_idempotent_epoch_bump_for_partition(&tp0());
         manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("an empty in-flight set is rewritten, not rejected");
         assert_eq!(
             manager.producer_id_and_epoch(),
@@ -2991,7 +3059,8 @@ mod tests {
     fn test_bump_epoch_and_reset_sequence_numbers_after_unknown_producer_id() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
-            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, EPOCH);
+            let mut pending = PendingRequests::new();
+            initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, EPOCH);
 
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             let mut b2 = write_idempotent_batch_with_value(&mut manager, &tp0(), "2");
@@ -3024,7 +3093,12 @@ mod tests {
                 // `runOnce` falls through to the produce path — the other side of
                 // the `:333-335` guard from the recovery test.
                 assert_eq!(
-                    run_sender_transaction_phase(&mut manager, &mut pool),
+                    run_manager_transaction_phase(
+                        &mut manager,
+                        &mut pool,
+                        &mut pending,
+                        NO_INFLIGHT_REQUEST_CORRELATION_ID
+                    ),
                     SenderPhaseOutcome::Continued
                 );
             }
@@ -3046,7 +3120,8 @@ mod tests {
             let epoch = i16::MAX;
 
             let mut manager = idempotent_manager(transaction_v2_enabled);
-            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, epoch);
+            let mut pending = PendingRequests::new();
+            initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, epoch);
 
             let tp0b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
@@ -3085,7 +3160,7 @@ mod tests {
                 pool.insert(tp0(), vec![&mut tp0b2]);
                 pool.insert(tp1(), vec![&mut tp1b2]);
                 manager
-                    .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                    .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                     .expect("an exhausted epoch resets the producer id");
             }
 
@@ -3115,7 +3190,8 @@ mod tests {
             let epoch = i16::MAX;
 
             let mut manager = idempotent_manager(transaction_v2_enabled);
-            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, epoch);
+            let mut pending = PendingRequests::new();
+            initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, epoch);
 
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             // Java discards this reference because its `TreeSet` holds the batch;
@@ -3132,10 +3208,10 @@ mod tests {
                 let mut pool = InFlightBatchPool::new();
                 pool.insert(tp1(), vec![&mut tp1b1]);
                 manager
-                    .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                    .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                     .expect("an exhausted epoch resets the producer id");
             }
-            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID + 1, 0);
+            initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID + 1, 0);
 
             // We continue to track the state of tp0 until in-flight requests complete
             let b1_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
@@ -3197,7 +3273,8 @@ mod tests {
     fn test_producer_id_reset() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
-            initialize_idempotent_producer_id(&mut manager, 15, i16::MAX);
+            let mut pending = PendingRequests::new();
+            initialize_idempotent_producer_id(&mut manager, &mut pending, 15, i16::MAX);
             assert_eq!(manager.sequence_number(&tp0()), 0);
             assert_eq!(manager.sequence_number(&tp1()), 0);
             manager.increment_sequence_number(&tp0(), 3).expect("the entry exists");
@@ -3208,7 +3285,7 @@ mod tests {
             manager.request_idempotent_epoch_bump_for_partition(&tp0());
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("a queued partition with no in-flight batches is still rewritten");
             assert_eq!(manager.sequence_number(&tp0()), 0);
             assert_eq!(manager.sequence_number(&tp1()), 3);
@@ -3221,15 +3298,16 @@ mod tests {
     fn test_bump_epoch_after_timeout_without_pending_inflight_requests() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
+            let mut pending = PendingRequests::new();
             let producer_id = 15;
             let epoch = 5;
             let producer_id_and_epoch = ProducerIdAndEpoch::new(producer_id, epoch);
-            initialize_idempotent_producer_id(&mut manager, producer_id, epoch);
+            initialize_idempotent_producer_id(&mut manager, &mut pending, producer_id, epoch);
 
             // Nothing to resolve, so no reset is needed
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("nothing to bump");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
 
@@ -3265,7 +3343,7 @@ mod tests {
 
             // Java reaches the bump through `runUntil(.. epoch == 6)`.
             let mut pool = InFlightBatchPool::new();
-            run_sender_transaction_phase(&mut manager, &mut pool);
+            run_manager_transaction_phase(&mut manager, &mut pool, &mut pending, NO_INFLIGHT_REQUEST_CORRELATION_ID);
             assert_eq!(manager.producer_id_and_epoch().epoch, 6);
         }
     }
@@ -3276,10 +3354,11 @@ mod tests {
     fn test_no_producer_id_reset_after_last_in_flight_batch_succeeds() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
+            let mut pending = PendingRequests::new();
             let producer_id = 15;
             let epoch = 5;
             let producer_id_and_epoch = ProducerIdAndEpoch::new(producer_id, epoch);
-            initialize_idempotent_producer_id(&mut manager, producer_id, epoch);
+            initialize_idempotent_producer_id(&mut manager, &mut pending, producer_id, epoch);
 
             let tp0 = TopicPartition::new("foo".to_string(), 0);
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
@@ -3297,7 +3376,7 @@ mod tests {
             // The reset should not occur until sequence numbers have been resolved
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("nothing to bump");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
             assert!(manager.has_unresolved_sequences());
@@ -3307,7 +3386,7 @@ mod tests {
                 .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("nothing to bump");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
             assert!(manager.has_unresolved_sequences());
@@ -3331,8 +3410,9 @@ mod tests {
     fn test_epoch_bump_after_last_in_flight_batch_fails_idempotent_producer() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
+            let mut pending = PendingRequests::new();
             let producer_id_and_epoch = ProducerIdAndEpoch::new(PRODUCER_ID, EPOCH);
-            initialize_idempotent_producer_id(&mut manager, PRODUCER_ID, EPOCH);
+            initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID, EPOCH);
 
             let tp0 = TopicPartition::new("foo".to_string(), 0);
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
@@ -3353,7 +3433,7 @@ mod tests {
                 .expect("the completion is recorded");
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("nothing to bump");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
             assert!(manager.has_unresolved_sequences());
@@ -3364,7 +3444,7 @@ mod tests {
                 .expect("the failure is recorded");
 
             // Java reaches the bump through `runUntil(.. epoch == 2)`.
-            run_sender_transaction_phase(&mut manager, &mut pool);
+            run_manager_transaction_phase(&mut manager, &mut pool, &mut pending, NO_INFLIGHT_REQUEST_CORRELATION_ID);
             assert_eq!(manager.producer_id_and_epoch().epoch, 2);
             assert!(!manager.has_unresolved_sequences());
             assert_eq!(manager.sequence_number(&tp0), 0);
@@ -3377,9 +3457,10 @@ mod tests {
     fn test_no_failed_batch_handling_when_txn_manager_is_in_fatal_error() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
+            let mut pending = PendingRequests::new();
             let producer_id = 15;
             let epoch = 5;
-            initialize_idempotent_producer_id(&mut manager, producer_id, epoch);
+            initialize_idempotent_producer_id(&mut manager, &mut pending, producer_id, epoch);
 
             let tp0 = TopicPartition::new("foo".to_string(), 0);
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
@@ -3395,7 +3476,7 @@ mod tests {
                 .expect("the failure is recorded");
             let mut pool = InFlightBatchPool::new();
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("the epoch is bumped");
             let id_and_epoch_after_first_batch = ProducerIdAndEpoch::new(producer_id, epoch + 1);
             assert_eq!(manager.producer_id_and_epoch(), id_and_epoch_after_first_batch);
@@ -3410,7 +3491,7 @@ mod tests {
                 .handle_failed_batch(&b2, &timeout_exception(), true, &mut [], Caller::Sender)
                 .expect("the failure is ignored in a fatal state");
             manager
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
                 .expect("nothing to bump");
             assert_eq!(manager.producer_id_and_epoch(), id_and_epoch_after_first_batch);
         }

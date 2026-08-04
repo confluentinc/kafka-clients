@@ -43,10 +43,14 @@ use crate::produce_request_data::{PartitionProduceData, ProduceRequestData, Topi
 
 use crate::common::utils::LogContext;
 
+use super::PendingRequests;
 use super::ProducerBatch;
 use super::ProducerMetadata;
 use super::RecordAccumulator;
 use super::TransactionManager;
+use super::TxnRequestHandler;
+// Constants are exported only by the file defining them (CLAUDE.md §2).
+use super::transaction_manager::NO_INFLIGHT_REQUEST_CORRELATION_ID;
 
 /// The action to take after `complete_batch` has processed a batch.
 ///
@@ -61,6 +65,30 @@ enum BatchAction {
     Reenqueue,
     /// The batch should be split into smaller batches and re-enqueued.
     SplitAndReenqueue,
+}
+
+/// Whether `error` is one of the two authorization failures that
+/// `Sender.shouldHandleAuthorizationError` (`Sender.java:351-360`) recovers from
+/// by failing the pending requests and transitioning back to `UNINITIALIZED`.
+///
+/// This is the `instanceof` half of that method:
+///
+/// ```java
+/// if (exception instanceof TransactionalIdAuthorizationException ||
+///                 exception instanceof ClusterAuthorizationException) {
+/// ```
+///
+/// Extracted as a free function so `TransactionManager`'s manager-level test
+/// harness computes the *same* predicate as production instead of a copy that can
+/// drift. Note this is deliberately the two-code test Java writes, **not** the
+/// whole `AuthorizationException` family (contrast
+/// `.claude/rules/producer-transactions.md` §9, which is about the sites where
+/// Java does test the family).
+pub(crate) fn is_authorization_error_handled_by_sender(error: &KafkaError) -> bool {
+    matches!(
+        error.error(),
+        Errors::TransactionalIdAuthorizationFailed | Errors::ClusterAuthorizationFailed
+    )
 }
 
 /// Format the error from a `PartitionResponse` in a user-friendly string.
@@ -140,9 +168,44 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// The fields Java deliberately leaves *outside* its `synchronized` blocks
     /// because only the Sender thread touches them live on this struct instead of
-    /// behind this mutex — the pending transactional request queue and the
-    /// in-flight correlation id.
+    /// behind this mutex — see [`Self::pending_requests`] and
+    /// [`Self::in_flight_request_correlation_id`].
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+    /// The queue of transactional requests waiting to be sent.
+    ///
+    /// Translated from `TransactionManager.pendingRequests`
+    /// (`TransactionManager.java:121`), which lives **here** rather than behind
+    /// [`Self::transaction_manager`] because Java touches it from the Sender
+    /// thread only and mutates it through the *unsynchronized*
+    /// `lookupCoordinator(TxnRequestHandler)` (`TransactionManager.java:969`) that
+    /// `Sender.java:522` calls directly. See
+    /// `.claude/rules/producer-transactions.md` §2 and the
+    /// [`PendingRequests`] docs.
+    pending_requests: PendingRequests,
+    /// The correlation id of the transactional request currently in flight, or
+    /// [`NO_INFLIGHT_REQUEST_CORRELATION_ID`] when there is none.
+    ///
+    /// Translated from `TransactionManager.inFlightRequestCorrelationId`
+    /// (`TransactionManager.java:136`). Sender-confined for the same reason as
+    /// [`Self::pending_requests`], with stronger evidence: Java's three accessors
+    /// (`:973`, `:977`, `:981`) are *all* unsynchronized, and `onComplete` reads
+    /// the field at `:1407` while its `synchronized` block only starts at `:1421`.
+    in_flight_request_correlation_id: i32,
+    /// The transactional request awaiting a response, keyed by the correlation id
+    /// it was sent with.
+    ///
+    /// Java attaches the `TxnRequestHandler` itself to the `ClientRequest` as its
+    /// `RequestCompletionHandler` (`Sender.java:504-505`), so the network client
+    /// hands the handler back when the response arrives. A Rust
+    /// `RequestCompletionHandler` cannot capture `&mut self`, so the handler is
+    /// parked here and matched against the response's correlation id after
+    /// `poll()` returns — the same shape [`PendingProduceRequest`] already uses for
+    /// produce responses (CLAUDE.md §9.2).
+    ///
+    /// An [`Option`] rather than a map because Java allows at most one in-flight
+    /// transactional request: `maybeSendAndPollTransactionalRequest` returns early
+    /// at `Sender.java:460` while `hasInFlightRequest()` holds.
+    pending_transactional_response: Option<(i32, TxnRequestHandler)>,
     /// A per-partition queue of batches ordered by creation time for tracking in-flight batches.
     in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
@@ -187,10 +250,135 @@ impl<C: KafkaClient> Sender<C> {
             running,
             force_close,
             transaction_manager,
+            pending_requests: PendingRequests::new(),
+            in_flight_request_correlation_id: NO_INFLIGHT_REQUEST_CORRELATION_ID,
+            pending_transactional_response: None,
             in_flight_batches: HashMap::new(),
             pending_produce_responses: HashMap::new(),
             time_provider,
             log_context,
+        }
+    }
+
+    // -- Sender-confined transactional state (rules §2) ---------------------
+    //
+    // The four methods below are `TransactionManager` methods in Java whose
+    // bodies touch *only* state that is confined to the Sender thread, which is
+    // why Java leaves three of them unsynchronized. Once that state lives here
+    // (see `Self::pending_requests` / `Self::in_flight_request_correlation_id`)
+    // so must they; the alternative — manager methods taking `&mut i32` — would
+    // put the shared guard around work Java deliberately performs without it.
+
+    /// Whether any transactional request is pending.
+    ///
+    /// Translated from `TransactionManager.hasPendingRequests()`
+    /// (`TransactionManager.java:1005`).
+    pub fn has_pending_requests(&self) -> bool {
+        !self.pending_requests.is_empty()
+    }
+
+    /// Records the correlation id of the transactional request now in flight.
+    ///
+    /// Translated from `TransactionManager.setInFlightCorrelationId(int)`
+    /// (`TransactionManager.java:973`).
+    fn set_in_flight_correlation_id(&mut self, correlation_id: i32) {
+        self.in_flight_request_correlation_id = correlation_id;
+    }
+
+    /// Clears the in-flight correlation id.
+    ///
+    /// Translated from `TransactionManager.clearInFlightCorrelationId()`
+    /// (`TransactionManager.java:977`).
+    fn clear_in_flight_correlation_id(&mut self) {
+        self.in_flight_request_correlation_id = NO_INFLIGHT_REQUEST_CORRELATION_ID;
+    }
+
+    /// Whether a transactional request is in flight.
+    ///
+    /// Translated from `TransactionManager.hasInFlightRequest()`
+    /// (`TransactionManager.java:981`).
+    pub fn has_in_flight_request(&self) -> bool {
+        self.in_flight_request_correlation_id != NO_INFLIGHT_REQUEST_CORRELATION_ID
+    }
+
+    /// Handles the response to a transactional request.
+    ///
+    /// Translated from `TxnRequestHandler.onComplete(ClientResponse)`
+    /// (`TransactionManager.java:1406-1428`) — specifically everything Java runs
+    /// *outside* the `synchronized (TransactionManager.this)` block that begins at
+    /// `:1421`. The synchronized half is
+    /// [`TransactionManager::handle_response`], called below under the lock
+    /// exactly as Java's block does.
+    ///
+    /// The split is required by rules §2: the correlation-id comparison and clear
+    /// touch Sender-confined state, and wrapping them in the shared guard would
+    /// block the application task's `maybe_add_partition` where Java does not.
+    ///
+    /// The `Caller` passed on into the manager is always [`Caller::Sender`]: Java
+    /// reaches this from `NetworkClient.poll`, i.e. on the Sender thread, at every
+    /// call site.
+    fn on_transactional_response(
+        &mut self,
+        handler: TxnRequestHandler,
+        response: &ClientResponse,
+    ) -> Result<(), KafkaError> {
+        let transaction_manager = match &self.transaction_manager {
+            Some(transaction_manager) => Arc::clone(transaction_manager),
+            // Unreachable: a handler only exists when a manager does.
+            None => return Ok(()),
+        };
+
+        if response.request_header().correlation_id() != self.in_flight_request_correlation_id {
+            let error = KafkaError::with_message(
+                Errors::UnknownServerError,
+                "Detected more than one in-flight transactional request.",
+            );
+            return transaction_manager.lock().unwrap().fatal_error(&handler, error);
+        }
+
+        self.clear_in_flight_correlation_id();
+        if response.was_disconnected() {
+            kafka_debug!(self.log_context, "Disconnected from {}. Will retry.", response.destination());
+            let needs_coordinator = transaction_manager.lock().unwrap().needs_coordinator(&handler);
+            if needs_coordinator {
+                // Java 1414 looks the coordinator up again. Unreachable for an
+                // idempotent producer, whose `coordinatorType()` is null; Phase 5
+                // adds `lookupCoordinator` with the FindCoordinator handler.
+                return Err(KafkaError::unsupported_version(
+                    "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
+                ));
+            }
+            // Java's `reenqueue()` (1394) takes the manager monitor for the two
+            // statements `isRetry = true; enqueueRequest(this)`, so `retry` is
+            // called under the lock here too.
+            transaction_manager.lock().unwrap().retry(&mut self.pending_requests, handler);
+            return Ok(());
+        }
+        if let Some(version_mismatch) = response.version_mismatch() {
+            let error = KafkaError::unsupported_version(version_mismatch.to_string());
+            return transaction_manager.lock().unwrap().fatal_error(&handler, error);
+        }
+        match response.response_body() {
+            Some(response_body) => {
+                kafka_trace!(
+                    self.log_context,
+                    "Received transactional response {} for request {:?}",
+                    response_body,
+                    handler
+                );
+                // Java 1421-1423: this and only this runs under the monitor.
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .handle_response(handler, response_body, &mut self.pending_requests)
+            },
+            None => {
+                let error = KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    "Could not execute transactional request for unknown reasons",
+                );
+                transaction_manager.lock().unwrap().fatal_error(&handler, error)
+            },
         }
     }
 
@@ -1099,6 +1287,7 @@ mod tests {
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::FutureRecordMetadata;
     use crate::producer::internals::PartitionerConfig;
+    use crate::producer::internals::{Caller, InFlightBatchPool};
     use std::sync::atomic::AtomicI64;
 
     // Constants matching Java's SenderTest
@@ -1109,6 +1298,9 @@ mod tests {
     const DELIVERY_TIMEOUT_MS: i32 = 1500;
     const TOPIC_IDLE_MS: i64 = 60 * 1000;
     const MAX_BLOCK_TIMEOUT: i64 = 1000;
+
+    /// Mirrors `TransactionManagerTest.transactionTimeoutMs` (Java 128).
+    const TRANSACTION_TIMEOUT_MS: i32 = 1121;
 
     const TOPIC_NAME: &str = "test";
 
@@ -1146,6 +1338,27 @@ mod tests {
         }
     }
 
+    /// Builds an idempotent (non-transactional) [`TransactionManager`], mirroring
+    /// `TransactionManagerTest.initializeTransactionManager(Optional.empty(), ..)`.
+    ///
+    /// Nothing on the idempotent path reads `ApiVersions` — the manager consults it
+    /// only from `handleCoordinatorReady` (Java 1104) and
+    /// `maybeUpdateTransactionV2Enabled` (Java 493), both transactional and both
+    /// Phase 5 — so an empty instance is sufficient here.
+    fn idempotent_transaction_manager() -> Arc<Mutex<TransactionManager>> {
+        Arc::new(Mutex::new(
+            TransactionManager::new(
+                LogContext::empty(),
+                None,
+                TRANSACTION_TIMEOUT_MS,
+                RETRY_BACKOFF_MS,
+                Arc::new(crate::ApiVersions::new()),
+                false,
+            )
+            .expect("an idempotent manager is constructible"),
+        ))
+    }
+
     /// Test harness holding all state needed for SenderTest-style tests.
     struct SenderTestContext {
         sender: Sender<MockClient>,
@@ -1154,6 +1367,7 @@ mod tests {
         time: Arc<MockTime>,
         tp0: TopicPartition,
         tp1: TopicPartition,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     }
 
     impl SenderTestContext {
@@ -1164,6 +1378,22 @@ mod tests {
 
         /// Setup with guarantee_message_order and custom retries.
         fn with_options(guarantee_message_order: bool, retries: i32) -> Self {
+            Self::with_transaction_state(guarantee_message_order, retries, None)
+        }
+
+        /// Setup with an idempotent [`TransactionManager`] shared between the
+        /// `Sender` and the `RecordAccumulator`, mirroring Java's
+        /// `setupWithTransactionState(transactionManager)`.
+        fn idempotent() -> Self {
+            Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()))
+        }
+
+        /// Setup with an explicit (possibly absent) transaction manager.
+        fn with_transaction_state(
+            guarantee_message_order: bool,
+            retries: i32,
+            transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+        ) -> Self {
             // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
             // which is always > 0. Starting at 0 breaks MockClient because
             // not_throttled(0) returns false when throttled_until_ms is also 0.
@@ -1190,7 +1420,7 @@ mod tests {
                 DELIVERY_TIMEOUT_MS,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
                 Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
-                None,
+                transaction_manager.clone(),
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
@@ -1212,7 +1442,7 @@ mod tests {
                 running,
                 force_close,
                 time_provider,
-                None,
+                transaction_manager.clone(),
                 LogContext::empty(),
             );
 
@@ -1233,7 +1463,16 @@ mod tests {
             );
             metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
 
-            Self { sender, accumulator, metadata, time, tp0, tp1 }
+            Self { sender, accumulator, metadata, time, tp0, tp1, transaction_manager }
+        }
+
+        /// The shared transaction manager, for tests that assert on manager state.
+        fn transaction_manager(&self) -> Arc<Mutex<TransactionManager>> {
+            Arc::clone(
+                self.transaction_manager
+                    .as_ref()
+                    .expect("this context was built with a transaction manager"),
+            )
         }
 
         /// Append a record to the accumulator for the given partition.
@@ -2346,5 +2585,153 @@ mod tests {
             assert_eq!(time3, stats.drain_time_ms);
             assert_eq!(time3, stats.ready_time_ms);
         }
+    }
+
+    // =====================================================================
+    // `TxnRequestHandler.onComplete` — the unsynchronized half
+    // (`TransactionManager.java:1406-1420`)
+    //
+    // These three moved here from `transaction_manager.rs`'s test module in
+    // Phase 4, together with the code they exercise: the correlation-id check and
+    // clear touch Sender-confined state (rules §2), so
+    // `Sender::on_transactional_response` owns them now.
+    // =====================================================================
+
+    /// Enqueues an `InitProducerId` and hands back the dequeued handler, playing
+    /// the part of `Sender.runOnce`'s `:331` + `maybeSendAndPollTransactionalRequest`'s
+    /// `nextRequest` at `:472`.
+    fn pending_init_producer_id_handler(ctx: &mut SenderTestContext) -> TxnRequestHandler {
+        let transaction_manager = ctx.transaction_manager();
+        let mut pool = InFlightBatchPool::new();
+        let mut manager = transaction_manager.lock().unwrap();
+        manager
+            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut ctx.sender.pending_requests, Caller::Sender)
+            .expect("the initial InitProducerId is enqueued");
+        manager
+            .next_request(&mut ctx.sender.pending_requests, false)
+            .expect("an InitProducerId request is pending")
+    }
+
+    /// Builds an `InitProducerId` `ClientResponse` with the given correlation id.
+    fn init_producer_id_client_response(
+        correlation_id: i32,
+        disconnected: bool,
+        error: Option<Errors>,
+    ) -> ClientResponse {
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{InitProducerIdResponse, RequestHeader};
+        use crate::init_producer_id_response_data::InitProducerIdResponseData;
+
+        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", correlation_id)
+            .expect("INIT_PRODUCER_ID is a known api key");
+        let body = error.map(|error| {
+            let mut data = InitProducerIdResponseData::new();
+            data.set_error_code(error.code())
+                .set_producer_id(13131)
+                .set_producer_epoch(1)
+                .set_throttle_time_ms(0);
+            ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data))
+        });
+        ClientResponse::new(header, None, "0", 0, 0, disconnected, None, None, body)
+    }
+
+    /// A response whose correlation id does not match the in-flight one is fatal
+    /// (`TransactionManager.java:1407-1408`).
+    #[test]
+    fn test_mismatched_correlation_id_is_fatal() {
+        let mut ctx = SenderTestContext::idempotent();
+        let handler = pending_init_producer_id_handler(&mut ctx);
+
+        const CORRELATION_ID: i32 = 7;
+        ctx.sender.set_in_flight_correlation_id(CORRELATION_ID + 1);
+        let response = init_producer_id_client_response(CORRELATION_ID, false, None);
+        ctx.sender
+            .on_transactional_response(handler, &response)
+            .expect("the mismatch is handled, not propagated");
+
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            "Detected more than one in-flight transactional request."
+        );
+        assert!(
+            ctx.sender.has_in_flight_request(),
+            "a mismatch must not clear the in-flight correlation id"
+        );
+    }
+
+    /// A disconnect re-enqueues the request; an idempotent `InitProducerId` needs
+    /// no coordinator, so no lookup is attempted
+    /// (`TransactionManager.java:1411-1415`, `:1482`).
+    #[test]
+    fn test_disconnect_reenqueues_a_transactional_request_without_a_coordinator_lookup() {
+        let mut ctx = SenderTestContext::idempotent();
+        let handler = pending_init_producer_id_handler(&mut ctx);
+        let result = Arc::clone(handler.result());
+
+        const CORRELATION_ID: i32 = 7;
+        ctx.sender.set_in_flight_correlation_id(CORRELATION_ID);
+        let response = init_producer_id_client_response(CORRELATION_ID, true, None);
+        ctx.sender
+            .on_transactional_response(handler, &response)
+            .expect("a disconnect is handled");
+
+        assert!(!result.is_completed(), "a re-enqueued request must not complete");
+        let transaction_manager = ctx.transaction_manager();
+        assert!(!transaction_manager.lock().unwrap().has_error());
+        assert!(
+            !ctx.sender.has_in_flight_request(),
+            "the in-flight correlation id is cleared before the retry (Java 1410)"
+        );
+        let requeued = transaction_manager
+            .lock()
+            .unwrap()
+            .next_request(&mut ctx.sender.pending_requests, false)
+            .expect("re-enqueued");
+        assert!(requeued.is_retry());
+    }
+
+    /// A successful response clears the in-flight correlation id before the body
+    /// reaches the manager (`TransactionManager.java:1410`).
+    #[test]
+    fn test_transactional_response_clears_the_in_flight_correlation_id() {
+        let mut ctx = SenderTestContext::idempotent();
+        let handler = pending_init_producer_id_handler(&mut ctx);
+
+        const CORRELATION_ID: i32 = 7;
+        ctx.sender.set_in_flight_correlation_id(CORRELATION_ID);
+        assert!(ctx.sender.has_in_flight_request());
+        let response = init_producer_id_client_response(CORRELATION_ID, false, Some(Errors::None));
+        ctx.sender
+            .on_transactional_response(handler, &response)
+            .expect("a successful InitProducerId response is handled");
+
+        assert!(!ctx.sender.has_in_flight_request());
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+    }
+
+    /// A response with no body at all is fatal
+    /// (`TransactionManager.java:1424-1425`).
+    #[test]
+    fn test_transactional_response_without_a_body_is_fatal() {
+        let mut ctx = SenderTestContext::idempotent();
+        let handler = pending_init_producer_id_handler(&mut ctx);
+
+        const CORRELATION_ID: i32 = 7;
+        ctx.sender.set_in_flight_correlation_id(CORRELATION_ID);
+        let response = init_producer_id_client_response(CORRELATION_ID, false, None);
+        ctx.sender
+            .on_transactional_response(handler, &response)
+            .expect("the failure is recorded, not propagated");
+
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            "Could not execute transactional request for unknown reasons"
+        );
     }
 }
