@@ -1557,6 +1557,24 @@ impl RecordAccumulator {
         self.deallocate(batch);
     }
 
+    /// The base sequences of the batches queued for `tp`, in queue order.
+    ///
+    /// Test-only. Java's `SenderTest` reaches these through
+    /// `accumulator.getDeque(tp)` (package-private) and asserts on
+    /// `peekFirst().baseSequence()` / `peekLast().baseSequence()`; the Rust deques are
+    /// behind a `DashMap` of `Mutex`es, so the sequences are collected here instead of
+    /// handing out a guard.
+    #[cfg(test)]
+    pub(crate) fn base_sequences_for_test(&self, tp: &TopicPartition) -> Vec<i32> {
+        let Some(topic_info) = self.topic_info_map.get(tp.topic()).map(|ti| Arc::clone(ti.value())) else {
+            return Vec::new();
+        };
+        match topic_info.batches.get(&tp.partition()) {
+            Some(deque) => deque.lock().unwrap().iter().map(|batch| batch.base_sequence()).collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Registers `batch` in the incomplete set as [`Self::append`] would.
     ///
     /// Test-only. `TransactionManagerTest`'s `writeIdempotentBatchWithValue`

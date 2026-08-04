@@ -2291,6 +2291,12 @@ mod tests {
             Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None)
         }
 
+        /// Idempotent setup with a bounded retry count, mirroring Java's
+        /// `setupWithTransactionState(transactionManager, false, null, true, retries, 0)`.
+        fn idempotent_with_retries(retries: i32) -> Self {
+            Self::with_transaction_state(false, retries, Some(idempotent_transaction_manager()), None)
+        }
+
         /// Idempotent setup with explicit timeouts and no retry backoff, mirroring the
         /// bespoke `RecordAccumulator` + `Sender` that
         /// `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`
@@ -4528,6 +4534,30 @@ mod tests {
         ctx.sender.client_mut().respond(response);
     }
 
+    /// Asserts a partition's tracked producer id, epoch, next sequence and last-acked
+    /// sequence.
+    ///
+    /// `SenderTest.assertPartitionState` (Java 1230-1242).
+    fn assert_partition_state(
+        transaction_manager: &Arc<Mutex<TransactionManager>>,
+        tp: &TopicPartition,
+        expected_producer_id: i64,
+        expected_producer_epoch: i16,
+        expected_sequence: i32,
+        expected_last_acked_sequence: Option<i32>,
+    ) {
+        let mut manager = transaction_manager.lock().unwrap();
+        let producer_id_and_epoch = manager.producer_id_and_epoch_for_partition(tp);
+        assert_eq!(producer_id_and_epoch.producer_id, expected_producer_id, "Producer Id:");
+        assert_eq!(producer_id_and_epoch.epoch, expected_producer_epoch, "Producer Epoch:");
+        assert_eq!(manager.sequence_number(tp), expected_sequence, "Seq Number:");
+        assert_eq!(
+            manager.last_acked_sequence(tp),
+            expected_last_acked_sequence,
+            "Last Acked Seq Number:"
+        );
+    }
+
     /// Appends one record, sends it and completes it successfully.
     ///
     /// `SenderTest.assertSuccessfulSend` (Java 3871-3885).
@@ -4746,6 +4776,301 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(3));
         assert!(request4.is_done());
         assert_eq!(request4.get().await.expect("succeeds").offset(), 3);
+    }
+
+    /// Translated from
+    /// `SenderTest.testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted`
+    /// (Java 911-968).
+    ///
+    /// The first of two in-flight batches fails fatally with `MESSAGE_TOO_LARGE`
+    /// (`recordCount == 1`, so `completeBatch`'s split arm does not apply and
+    /// `failBatch` runs with `adjustSequenceNumbers = true`), which requests an epoch
+    /// bump; the second batch's sequence is then rewritten from 0.
+    #[tokio::test]
+    async fn test_idempotence_with_multiple_inflights_where_first_fails_fatally() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert!(!request1.is_done());
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::MessageTooLarge, -1, -1);
+        // Receive response 0; this adjusts the sequences of future batches.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            request1.get().await.expect_err("fatal").error(),
+            Errors::MessageTooLarge,
+            "Java asserts RecordTooLargeException, which is MESSAGE_TOO_LARGE's exception"
+        );
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::OutOfOrderSequenceNumber, -1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 1
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+
+        ctx.sender.run_once().await.expect("run_once"); // resend request 1
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 0);
+    }
+
+    /// Translated from `SenderTest.testEpochBumpOnOutOfOrderSequenceForNextBatch`
+    /// (Java 970-1016).
+    #[tokio::test]
+    async fn test_epoch_bump_on_out_of_order_sequence_for_next_batch() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        // First ProduceRequest with two messages in one batch.
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().sequence_number(&tp0),
+            2,
+            "the next sequence accounts for multi-message batches"
+        );
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k3", "v3").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 3);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
+        assert!(!request2.is_done());
+
+        // This OUT_OF_ORDER_SEQUENCE_NUMBER triggers an epoch bump, because it is
+        // returned for the batch succeeding the last acknowledged one.
+        send_idempotent_producer_response(&mut ctx, None, 2, &tp0, Errors::OutOfOrderSequenceNumber, -1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender.run_once().await.expect("run_once");
+
+        let manager = ctx.transaction_manager();
+        let mut manager = manager.lock().unwrap();
+        assert_eq!(manager.producer_id_and_epoch().epoch, 1, "epoch is bumped");
+        assert_eq!(manager.sequence_number(&tp0), 1, "sequence numbers are reset");
+        assert_eq!(manager.first_in_flight_sequence(&tp0).expect("tracked"), 0);
+    }
+
+    /// Translated from
+    /// `SenderTest.testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight`
+    /// (Java 1018-1102): a partition with no in-flight batch when the epoch is bumped
+    /// gets its sequence reset lazily, on its next send.
+    #[tokio::test]
+    async fn test_epoch_bump_on_out_of_order_sequence_when_there_is_no_batch_in_flight() {
+        const PRODUCER_ID: i64 = 343_434;
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, PRODUCER_ID, 0).await;
+        let manager = ctx.transaction_manager();
+
+        // Partition 0 — first batch, state lazily initialized.
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp0, PRODUCER_ID, 0, 1, None);
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp0, PRODUCER_ID, 0, 1, Some(0));
+
+        // Partition 1 — first batch.
+        ctx.append_to_accumulator(&tp1).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp1, PRODUCER_ID, 0, 1, None);
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp1, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp1, PRODUCER_ID, 0, 1, Some(0));
+
+        // Partition 0 — second batch, sequence incremented.
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp0, PRODUCER_ID, 0, 2, Some(0));
+
+        send_idempotent_producer_response(&mut ctx, Some(0), 1, &tp0, Errors::OutOfOrderSequenceNumber, -1, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive
+        ctx.sender.run_once().await.expect("run_once"); // bump epoch and retry
+
+        assert_eq!(manager.lock().unwrap().producer_id_and_epoch().epoch, 1);
+        // Partition 0's state is reset to the current producer epoch.
+        assert_partition_state(&manager, &tp0, PRODUCER_ID, 1, 1, None);
+        // Partition 1's state is unchanged, and now stale.
+        assert_partition_state(&manager, &tp1, PRODUCER_ID, 0, 1, Some(0));
+        assert!(manager.lock().unwrap().has_stale_producer_id_and_epoch(&tp1));
+
+        send_idempotent_producer_response(&mut ctx, Some(1), 0, &tp0, Errors::None, 1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp0, PRODUCER_ID, 1, 1, Some(0));
+
+        // Partition 1 — second batch: the epoch is bumped and the sequence reset then
+        // incremented, lazily, at drain time.
+        ctx.append_to_accumulator(&tp1).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp1, PRODUCER_ID, 1, 1, None);
+        assert!(!manager.lock().unwrap().has_stale_producer_id_and_epoch(&tp1));
+
+        send_idempotent_producer_response(&mut ctx, Some(1), 0, &tp1, Errors::None, 1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_partition_state(&manager, &tp1, PRODUCER_ID, 1, 1, Some(0));
+    }
+
+    /// Translated from `SenderTest.testCorrectHandlingOfOutOfOrderResponses`
+    /// (Java 1244-1322): both in-flight requests fail, their responses arrive in
+    /// reverse order, and the batches must still be re-queued and re-sent in sequence
+    /// order.
+    #[tokio::test]
+    async fn test_correct_handling_of_out_of_order_responses() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
+
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 2);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert!(!request1.is_done());
+        assert!(!request2.is_done());
+
+        // Answer the *second* request first.
+        let second = ctx.produce_response(&tp0, -1, Errors::OutOfOrderSequenceNumber, 0);
+        ctx.sender.client_mut().respond_to_request_at(1, second);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 1
+
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 1, "the second batch is queued first");
+        assert_eq!(ctx.accumulator.base_sequences_for_test(&tp0), vec![1]);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        let first = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, 0);
+        ctx.sender.client_mut().respond_to_request_at(0, first);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 0
+
+        // Both batches are re-queued, in the correct order.
+        assert_eq!(
+            ctx.accumulator.base_sequences_for_test(&tp0),
+            vec![0, 1],
+            "insertInSequenceOrder must put sequence 0 ahead of sequence 1"
+        );
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert!(!request1.is_done());
+        assert!(!request2.is_done());
+
+        ctx.sender.run_once().await.expect("run_once"); // send request 0
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        // Do nothing: only one in flight is allowed once we are retrying.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
+
+        // The requests go out in order even though the responses did not.
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
+
+        ctx.sender.run_once().await.expect("run_once"); // send request 1
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        send_idempotent_producer_response(&mut ctx, None, 1, &tp0, Errors::None, 1, -1);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
+    }
+
+    /// Translated from
+    /// `SenderTest.testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds`
+    /// (Java 1325-1391): the second request succeeds before the first, so the
+    /// last-acked sequence jumps to 1 and must not move back when the first is retried
+    /// and finally succeeds.
+    #[tokio::test]
+    async fn test_correct_handling_of_out_of_order_responses_when_second_succeeds() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 0);
+
+        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert!(!request1.is_done());
+        assert!(!request2.is_done());
+
+        let second = ctx.produce_response(&tp0, 1, Errors::None, 0);
+        ctx.sender.client_mut().respond_to_request_at(1, second);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 1
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
+        assert!(!request1.is_done());
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 0);
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+
+        let first = ctx.produce_response(&tp0, -1, Errors::RequestTimedOut, 0);
+        ctx.sender.client_mut().respond_to_request_at(0, first);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 0
+
+        assert_eq!(ctx.accumulator.base_sequences_for_test(&tp0), vec![0]);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+
+        ctx.sender.run_once().await.expect("run_once"); // resend request 0
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
+
+        // The out-of-order successful responses are handled correctly.
+        send_idempotent_producer_response(&mut ctx, None, 0, &tp0, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 0);
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0),
+            Some(1),
+            "the last acked sequence must not move backwards"
+        );
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
     }
 
     /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
