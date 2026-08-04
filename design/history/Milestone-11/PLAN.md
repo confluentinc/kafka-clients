@@ -1792,6 +1792,75 @@ All nine `State` variants are declared (see §Phase-3), so the arithmetic
      materialises is the same class of defect as one that overstates *whether* it
      exists, and it is harder to spot because the mechanism is real, just not yet.
 
+### 9.16 Critic review of Phase 3
+
+**Status:** DONE — loop **closed 2026-08-04 on a clean fourth pass** (zero findings).
+Archived at `design/history/Milestone-11/Phase-3/COMMENTS.DONE.43.md`.
+
+| Pass | Findings | Where the defect was | Fix |
+|---|---|---|---|
+| 1 | 3 | **1 real code defect** + 2 records | `1bc8a8c` |
+| 2 | 3 | records written by the pass-1 fix | `3131600` |
+| 3 | 1 | third wrong justification for `close` | `d982e13`, `1c29bbc` |
+| 4 | **0** | — | closes the loop |
+
+All seven findings were real and conceded. The Critic's only errors were two citation
+slips it introduced and corrected itself, plus one alternative resolution it withdrew.
+
+**Phase 3 was run twice.** The first attempt had the coordinator acting as its own
+Actor; those commits were dropped (`git reset --hard` to `ca75e95`) and the phase redone
+through the `agent-roles.md` Actor/Critic model. Pass 1 finding 1 is why that mattered:
+
+Both the coordinator *and* Actor 43 independently concluded — correctly, and against this
+plan's stated count of four — that `ABORTABLE_ERROR` is reachable idempotently. Both then
+added the methods that **enter** it. **Neither noticed nothing leaves it.** Java always
+recovers via `Sender.java:325` → `shouldHandleAuthorizationError` →
+`transitionToUninitialized` (`:354`), which is why the table admits
+`UNINITIALIZED ← ABORTABLE_ERROR`. Shipped as-is, one authorization failure would have
+wedged the producer: `maybe_add_partition` rejecting every send with no path out.
+
+Two independent agents produced the same *half* of a finding. More passes over either
+version would not have found the other half — only a reviewer attacking the conclusion
+rather than extending it. Consistent with §9.8, where six passes missed a DoD clause
+because everyone shared one frame; the remedy there was reading a different document,
+here it is a different author.
+
+**Carried to Phase 4:**
+
+  - An all-green suite proves nothing about an exit path nobody tested — the entry-only
+    version passed 26 tests and a clean fidelity sweep.
+  - A plan scheduling an exit method into a later phase than its entry is itself the
+    smell. This plan put `transition_to_uninitialized` / `fail_pending_requests` in
+    Phase 5 while §Phase-4's table already claimed their call site.
+  - A test harness needs mutation-pinning as much as production code. Issue 6's wrong
+    control-flow model was fully green, in an artifact §Phase-4 names as its reference.
+    Now pinned in both directions.
+
+### 9.17 `KafkaCluster` leaks broker containers when a run aborts
+
+**Status:** open. Found by Actor 43 while running the gate repeatedly; diagnosis
+confirmed by Critic 43 and by direct inspection. **Not a Phase 3 defect** — outside its
+diff entirely.
+
+Containers are created inside `tokio::spawn`ed tasks at
+`tests/common/kafka_cluster.rs:361-375` and only become owned by
+`KafkaCluster::_containers` (`:285`) after the collect loop at `:379-382`. There is no
+`impl Drop for KafkaCluster`. An abort between the first container starting and the
+struct being built — a panic at `handle.await.expect(..)` (`:381`), or the whole future
+dropped on a timeout — detaches the surviving tasks, leaving their containers running.
+
+Because host ports are pre-reserved at `:333`, a survivor collides **deterministically**
+on a later run, and the failure surfaces inside `with_mapped_port` as a *test* failure:
+`failed to bind host port ... address already in use`. So it mimics a code regression.
+It cost one gate run in this phase, and four `apache/kafka:4.2.0` containers were found
+up 2-3 hours holding ports.
+
+**Fix:** register teardown as each container starts rather than after all of them do, so
+an abort mid-startup still reclaims what already exists.
+
+**Meanwhile:** `docker ps` before trusting an integration failure that mentions port
+binding, and `docker rm -f` any orphans.
+
 ---
 
 ## 10. Recorded translation deviations

@@ -124,6 +124,34 @@ on the futures"), i.e. the very mechanism just retracted for the idempotent path
    complete and honest reason. Pressure to supply a *behavioural* reason for the
    current phase is what manufactured both false mechanisms.
 
+## Pass 4 — clean; closed after four passes (3 / 3 / 1 / 0 findings)
+
+Issue 7's fix rests on scheduling alone plus an explicitly Phase-6 transactional
+payoff, and the self-audit it triggered was accurate in all three instances. The
+generalisation holds: all four methods pulled into Phase 3
+(`transition_to_uninitialized` 756, `fail_pending_requests` 944,
+`authentication_failed` 939, `close` 949) have their sole Java call site in
+`Sender` (`:356`, `:354`, `:339`, `:292`) and no Rust production caller, so none
+can have a Phase-3 effect.
+
+9. **Reachability of a translated unit ≠ reachability in the phase.** A whole
+   phase can land with *no* production caller (here `on_complete` had none until
+   Phase 4), so "this state is inescapable / every send is rejected" is a claim
+   about the unit, not the shipped client. Phrase such findings in the tense of
+   the phase that makes them true — my own Issue 1 was imprecise in exactly the
+   direction I later filed Issues 5 and 7 against. Checking is cheap: grep the
+   method's call sites and compare against where `mod tests` begins.
+
+10. **Non-blocking follow-ups need a separate heading.** A real defect outside the
+    phase's diff (here: `tests/common/kafka_cluster.rs` leaking broker containers
+    when `start()` aborts, because containers are created in spawned tasks at
+    `:361-375` and only owned at `:285` after the collect loop, with no
+    `impl Drop`) will be read as a blocking comment if filed as a finding.
+    State explicitly that it does not block, and say which phase should own it.
+    Cost worth naming: pre-reserved host ports (`:333`) make a survivor collide
+    deterministically, and it surfaces as a *test* failure inside
+    `with_mapped_port`, so it mimics a code regression.
+
 **Verified sound in pass 3 (don't re-check):** the deliberately-kept single
 `:1420` in PLAN deviation 7 is an inoculation note, not a survivor; `onComplete`
 spans `:1406-1428` and its `synchronized` block is `:1421-1423`, covering
