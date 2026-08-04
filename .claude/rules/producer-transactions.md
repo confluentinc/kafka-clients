@@ -436,6 +436,14 @@ broker treats these as sets) but it blocks two things here: `definition-of-done.
 nondeterministic bytes; and it would make a future byte-diff against the Java
 client — the most direct proof of wire compatibility — impossible.
 
+Note both of those are **prospective**. No byte-level wire test exists above the
+varint layer anywhere in the repo — see PLAN §9.14 — so sorting is currently
+enabling work that has not been done rather than satisfying an existing suite. That
+does not weaken the rule: determinism is a precondition, and retrofitting it after
+the tests are written would mean rewriting their fixtures. But do not cite this
+paragraph as evidence that such tests exist; §9.14 records that two places already
+made that mistake.
+
 Sorting yields the same logical value with a stable encoding, so it is
 behaviour-preserving on the wire and strictly more testable.
 

@@ -1127,6 +1127,27 @@ zero-finding pass — once on the Critic's own "does not warrant a fourth round"
 were premature; `agent-roles.md` §2's gate is a clean pass, and nothing else
 substitutes for it.
 
+**What the clean pass did NOT establish — added after the fact.** A DoD gap was found
+*after* this loop closed: DoD §3's byte-level wire tests do not exist for any of the
+ten wrappers (§9.14). Six Critic passes and two Actor self-audits all missed it, and
+the phase was twice reported to the user as complete before it surfaced.
+
+The instructive part is *how* it was missed. Every pass verified Phase 2 against the
+**Java source** — methods, tests, dispatch arms, error codes — and Phase 2 is faithful
+there. Nobody walked the DoD clause by clause. Both the Critic prompts and the Actor's
+audits inherited the same frame, so agreement between them carried no independent
+information: a shared blind spot is invisible to repetition, and running the loop more
+times would never have found this.
+
+Two concrete take-aways for later phases:
+
+  - A review pass should check the **DoD text itself**, clause by clause, not only
+    Java fidelity. Faithful-to-Java and DoD-complete are different properties and this
+    phase satisfied the first while failing the second.
+  - Treat a document's claim that a test exists as a claim to verify. §9.14 records two
+    places asserting these tests as an existing constraint; either would have exposed
+    the gap if anyone had gone looking for the suite they cite.
+
 ### 9.9 `generator/messages/` was a pre-4.2 snapshot diverging from `kafka/`
 
 **Status:** DONE — refreshed from the submodule 2026-08-04. The two trees are now
@@ -1411,6 +1432,87 @@ generator refuses to emit code it cannot write correctly. Do NOT leave a fallbac
 emits a comment: per CLAUDE.md §5 a TODO in generated output is unfinished work, and
 per §9.10's reasoning silence is the wrong default. Pair this with §9.10, which is the
 same principle applied to whole-schema failures.
+
+### 9.14 DoD §3's byte-level wire tests do not exist above the varint layer
+
+**Status:** open, and **project-wide** — not introduced by Milestone 11. Found
+2026-08-04 while re-auditing Phase 2 against the DoD.
+
+`definition-of-done.md` §3 requires:
+
+> Wire protocol types have byte-level encoding tests against known vectors, not just
+> round-trip tests — a consistently wrong encoding passes round-trips but is
+> wire-incompatible with Java
+
+**What exists.** Exactly one layer is covered: `tests/common/protocol/flexible_version_test.rs`
+has 7 hand-derived byte assertions for varint encoding (`&[0x80, 0x01]`,
+`&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]`, …) across its 11 tests. Those are genuine known
+vectors and they pass.
+
+**What does not exist.** Any assertion that a *whole message* encodes to specific
+bytes:
+
+| Scope | Tests | Whole-message byte vectors |
+|---|---|---|
+| `tests/common/message/` (4 files) | 58 | **0** |
+| Phase 2's 10 txn wrappers | 91 | **0** |
+| Every pre-existing request/response wrapper | — | **0** |
+
+Above the primitive layer, correctness rests entirely on round-trips — precisely the
+case DoD §3 names as insufficient, since our encoder and decoder agreeing with each
+other says nothing about agreeing with Java.
+
+**Why it has not bitten: real brokers have been doing this job empirically.** The
+integration suite runs 91 tests against actual Kafka in Docker (produce, fetch,
+consumer groups, commits, SASL, SSL). A broker rejects or misreads a wrong encoding,
+so for every message type those tests exercise, live interoperability is *stronger*
+evidence than a hand-derived vector. That is the real reason this gap has been
+survivable, and it is why retrofitting ~190 message types is low urgency.
+
+**Where that mitigation does not reach — the sharp edge.** Phase 2's five transaction
+wrappers are **not exercised by anything**: no byte vector, and no integration test,
+because they are unused until Phase 5 wires them into `TransactionManager`. Everywhere
+else in the client one of the two routes applies. These are the one place where
+neither does, so **if `AddPartitionsToTxn` encodes wrongly today, nothing in the repo
+can detect it.** They are also the highest-value target for that reason, and the
+cheapest — five types, not 190.
+
+**Two documents already cite these tests as though they exist**, which is how the gap
+stayed invisible:
+
+  - `add_partitions_to_txn_request.rs` on `build_txn_topic_collection`: the sort exists
+    "so the encoding is deterministic, which byte-level tests depend on";
+  - `producer-transactions.md` §10, justifying the deterministic-sort rule by
+    "`definition-of-done.md` §3 requires byte-level wire tests against known vectors".
+
+The sorting work is correct and worth keeping — determinism is a precondition for the
+tests — but both citations point at a test suite that was never written. **Six Critic
+passes over Phase 2 never raised it, and neither did two Actor self-audits.**
+
+**How to write them — the easy version is worthless.** Three approaches, only two
+worth the effort:
+
+  1. **Assert what our own encoder emits.** Self-referential: passes even when the
+     encoding is wrong, which is the exact failure DoD §3 exists to catch. Do NOT do
+     this. A test of this shape is worse than no test, because it reads as coverage.
+  2. **Hand-derive from the wire format.** Real verification. Laborious per type and
+     per version — flexible-version varints, compact vs. classic string/array lengths,
+     tagged-field terminators, nullable sentinels.
+  3. **Capture bytes from the Java client.** Strongest possible proof, and Kafka's
+     source is already in-tree at `kafka/`. Needs a JVM and a small harness that
+     serialises a fixed message per version and dumps the bytes; the Rust test then
+     asserts against the captured fixture. Highest setup cost, lowest per-type cost,
+     and it scales to all 197 types — which makes it the right answer if the
+     project-wide gap is ever closed rather than just the Phase 2 slice.
+
+**Sequencing:**
+
+  - **Phase 2's five request types, before Phase 5** — approach 2 or 3. This is the
+    only verification they will have, and Phase 5 starts depending on them.
+  - **The 190 others** — their own piece of work, approach 3. Do not start it inside a
+     transactions phase; a repo-wide test addition would make any regression ambiguous.
+  - Responses rank below requests either way: a wrong request is misread by a live
+    broker, whereas a response decoding error surfaces in our own round-trips.
 
 
 ---

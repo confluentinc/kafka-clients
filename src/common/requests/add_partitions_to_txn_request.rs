@@ -224,7 +224,11 @@ impl AddPartitionsToTxnRequestBuilder {
     ///
     /// Corresponds to Java's private static `buildTxnTopicCollection`. Java uses
     /// a `HashMap`, so its output order is unspecified; this sorts by topic name
-    /// so the encoding is deterministic, which byte-level tests depend on.
+    /// so the encoding is deterministic. Determinism is a *precondition* for the
+    /// byte-level wire tests `definition-of-done.md` §3 requires — those do not
+    /// exist yet for this type, tracked as PLAN §9.14. The sort is still correct
+    /// and load-bearing: without it the encoding varies run to run, so the tests
+    /// could not be written at all.
     fn build_txn_topic_collection(partitions: &[TopicPartition]) -> Vec<AddPartitionsToTxnTopic> {
         let mut partition_map: HashMap<&str, Vec<i32>> = HashMap::new();
         for topic_partition in partitions {
