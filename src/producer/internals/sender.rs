@@ -290,6 +290,35 @@ pub struct Sender<C: KafkaClient> {
     pending_transactional_response: Option<(i32, TxnRequestHandler)>,
     /// A per-partition queue of batches ordered by creation time for tracking in-flight batches.
     in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>,
+    /// Batches whose records are already completed but whose pooled buffer must not
+    /// be returned until their produce response arrives.
+    ///
+    /// # The second holder Java gets for free
+    ///
+    /// Three Java paths complete a batch *now* and deallocate it *later*:
+    /// `maybeAbortBatches` → `abortBatches`'s `isInflight()` fork
+    /// (`RecordAccumulator.java:1160-1164`), `failBatch(deallocateBatch=false)` →
+    /// `maybeRemoveAndDeallocateBatchLater` (`Sender.java:177-180`), and
+    /// `abortIncompleteBatches` on a force close. All three rely on the request's
+    /// `RequestCompletionHandler` closing over `recordsByPartition`
+    /// (`Sender.java:918`, `:941`) — a *second* holder of the batch that outlives
+    /// `inFlightBatches.clear()`, so the response can still reach it and deallocate
+    /// (KAFKA-19012: the pooled buffer may still be in use by the network client).
+    ///
+    /// A Rust `RequestCompletionHandler` cannot capture `&mut self`, and
+    /// `PendingProduceRequest` deliberately stores only an
+    /// `Arc<ProduceRequestResult>` identity rather than the batch, so that second
+    /// holder has to be an explicit field. Without it the batch is simply dropped and
+    /// `BufferPool::available_memory` shrinks permanently — Critic 44 issue 2, which
+    /// `handle_authorization_error` re-armed on every recurrence because it recovers
+    /// to `UNINITIALIZED` and keeps the producer running.
+    ///
+    /// [`Self::handle_produce_response_for`] searches this after
+    /// [`Self::in_flight_batches`], so such a batch takes the ordinary response path:
+    /// `complete()` / `complete_exceptionally()` return `false` because it is already
+    /// final, and the `else` arm deallocates — exactly Java's sequence. Anything still
+    /// here when the Sender stops is deallocated in [`Self::run`].
+    batches_awaiting_response: Vec<ProducerBatch>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
     pending_produce_responses: HashMap<i32, PendingProduceRequest>,
     /// Provider of current wall-clock time in milliseconds (epoch).
@@ -336,6 +365,7 @@ impl<C: KafkaClient> Sender<C> {
             in_flight_request_correlation_id: NO_INFLIGHT_REQUEST_CORRELATION_ID,
             pending_transactional_response: None,
             in_flight_batches: HashMap::new(),
+            batches_awaiting_response: Vec::new(),
             pending_produce_responses: HashMap::new(),
             time_provider,
             log_context,
@@ -553,9 +583,27 @@ impl<C: KafkaClient> Sender<C> {
             }
             kafka_debug!(self.log_context, "Aborting incomplete batches due to forced shutdown");
             self.accumulator.abort_incomplete_batches();
+            // `abortIncompleteBatches` covers drained batches in Java because
+            // `abortBatches` walks `incomplete.copyAll()`; here the accumulator can only
+            // reach its own deques, so the Sender aborts its share with the same reason
+            // Java's no-argument `abortBatches()` uses. Critic 44 note 2.
+            self.abort_in_flight_batches(&RecordAccumulator::producer_closed_forcefully_error());
         }
 
         self.client.close().await;
+
+        // Java's `client.close()` aborts the in-flight requests and runs their
+        // completion callbacks with disconnected responses, so every batch the
+        // callback still held reaches `completeBatch` / `failBatch` with
+        // `deallocateBatch = true` and its pooled buffer is returned. Neither
+        // `NetworkClient::close` nor `MockClient::close` yields responses here (both
+        // return `()`), so the equivalent is done directly: anything still waiting for
+        // a response that will never come has its buffer released now, rather than
+        // leaking out of the pool. See `Self::batches_awaiting_response`.
+        for mut batch in std::mem::take(&mut self.batches_awaiting_response) {
+            batch.set_inflight(false);
+            self.accumulator.deallocate(&mut batch);
+        }
 
         kafka_debug!(self.log_context, "Shutdown of Kafka producer I/O task has completed.");
     }
@@ -738,19 +786,34 @@ impl<C: KafkaClient> Sender<C> {
                 // (see `PendingProduceRequest`).
                 let mut batches: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
                 for (tp, identity) in &pending.batches {
+                    // Take the batch this request actually carried, not merely the
+                    // oldest one for the partition — see `PendingProduceRequest`.
+                    let mut taken = None;
                     if let Some(partition_batches) = self.in_flight_batches.get_mut(tp) {
-                        // Take the batch this request actually carried, not merely the
-                        // oldest one for the partition — see `PendingProduceRequest`.
                         if let Some(index) = partition_batches
                             .iter()
                             .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
                         {
-                            let batch = partition_batches.remove(index);
-                            batches.insert(tp.clone(), batch);
+                            taken = Some(partition_batches.remove(index));
                         }
                         if partition_batches.is_empty() {
                             self.in_flight_batches.remove(tp);
                         }
+                    }
+                    // A batch that was completed while still in flight is no longer in
+                    // `in_flight_batches` but is still waiting for exactly this response
+                    // in order to release its buffer — see
+                    // `Self::batches_awaiting_response`.
+                    if taken.is_none()
+                        && let Some(index) = self
+                            .batches_awaiting_response
+                            .iter()
+                            .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
+                    {
+                        taken = Some(self.batches_awaiting_response.remove(index));
+                    }
+                    if let Some(batch) = taken {
+                        batches.insert(tp.clone(), batch);
                     }
                 }
                 let actions = self.handle_produce_response(response, &mut batches, &pending.topic_names, now)?;
@@ -1167,29 +1230,40 @@ impl<C: KafkaClient> Sender<C> {
             return;
         }
         kafka_error!(self.log_context, "Aborting producer batches due to fatal error: {}", error);
-        let accumulator = Arc::clone(&self.accumulator);
-        accumulator.abort_batches(error.clone());
+        self.accumulator.abort_batches(error.clone());
 
-        // Java's `inFlightBatches.clear()` (`Sender.java:536`) merely drops the
-        // Sender's references, because `abortBatches` has already aborted those
-        // batches: it iterates `incomplete.copyAll()`, which returns the batches
-        // themselves and so covers drained ones too. Rust's `IncompleteBatches`
-        // tracks `ProduceRequestResult`s rather than batches (a `ProducerBatch` has
-        // one owner, rules §7), so the accumulator cannot reach the Sender's share.
-        // Dropping them un-aborted would leave every one of their record futures
-        // pending forever, which CLAUDE.md §5 forbids — so they are aborted here,
-        // with the same reason and the same in-flight/deallocate fork Java applies
-        // (`RecordAccumulator.java:1160-1167`).
-        for (_, mut batches) in self.in_flight_batches.drain() {
-            for batch in batches.iter_mut() {
+        self.abort_in_flight_batches(error);
+    }
+
+    /// Aborts every batch the `Sender` still owns, with `reason`.
+    ///
+    /// Java has no counterpart because it does not need one: `abortBatches`
+    /// (`RecordAccumulator.java:1152`) iterates `incomplete.copyAll()`, which returns
+    /// the `ProducerBatch` objects themselves and so covers batches already drained
+    /// into the Sender. Rust's [`IncompleteBatches`](super::IncompleteBatches) tracks
+    /// [`ProduceRequestResult`]s rather than batches — a `ProducerBatch` has exactly
+    /// one owner (rules §7) — so the accumulator can only reach what is still in its
+    /// deques. Without this, the record futures of drained batches are never
+    /// completed, which CLAUDE.md §5 forbids.
+    ///
+    /// Applies Java's in-flight fork (`:1160-1167`): a batch still marked in flight
+    /// keeps its pooled buffer until its response arrives (KAFKA-19012), so it moves
+    /// to [`Self::batches_awaiting_response`] rather than being deallocated or
+    /// dropped.
+    ///
+    /// Called from [`Self::maybe_abort_batches`] (`Sender.java:536`) and from
+    /// [`Self::run`]'s force-close branch (`Sender.java:294-295`).
+    fn abort_in_flight_batches(&mut self, reason: &KafkaError) {
+        let accumulator = Arc::clone(&self.accumulator);
+        for (_, batches) in self.in_flight_batches.drain() {
+            for mut batch in batches {
                 batch.abort_record_appends();
-                batch.abort(error.clone());
+                batch.abort(reason.clone());
                 if batch.is_inflight() {
-                    // KAFKA-19012: the pooled buffer may still be in use by the
-                    // network client, so it is deallocated when the response arrives.
-                    accumulator.complete_batch(batch);
+                    accumulator.complete_batch(&batch);
+                    self.batches_awaiting_response.push(batch);
                 } else {
-                    accumulator.complete_and_deallocate_batch(batch);
+                    accumulator.complete_and_deallocate_batch(&mut batch);
                 }
             }
         }
@@ -1342,11 +1416,11 @@ impl<C: KafkaClient> Sender<C> {
         self.add_to_inflight_batches(&mut batches);
 
         self.accumulator.reset_next_batch_expiry_time();
-        let mut expired_inflight_batches = self.get_expired_inflight_batches(now);
-        let mut expired_batches = self.accumulator.expired_batches(now);
+        let expired_inflight_batches = self.get_expired_inflight_batches(now);
+        let expired_batches = self.accumulator.expired_batches(now);
 
-        self.fail_expired_batches(&mut expired_batches, now, true);
-        self.fail_expired_batches(&mut expired_inflight_batches, now, false);
+        self.fail_expired_batches(expired_batches, now, true);
+        self.fail_expired_batches(expired_inflight_batches, now, false);
 
         // Calculate poll timeout
         let mut poll_timeout = result.next_ready_check_delay_ms.min(not_ready_timeout);
@@ -1362,11 +1436,18 @@ impl<C: KafkaClient> Sender<C> {
         Ok(poll_timeout)
     }
 
-    fn fail_expired_batches(&mut self, expired_batches: &mut [ProducerBatch], now: i64, deallocate_buffer: bool) {
+    /// Fails every expired batch, translating `Sender.failExpiredBatches`
+    /// (Java 362-377).
+    ///
+    /// Takes the batches **by value** because `deallocate_buffer = false` means the
+    /// pooled buffer is released only when the produce response arrives, so the batch
+    /// has to be moved into [`Self::batches_awaiting_response`] rather than dropped
+    /// at the end of the caller's scope.
+    fn fail_expired_batches(&mut self, expired_batches: Vec<ProducerBatch>, now: i64, deallocate_buffer: bool) {
         if !expired_batches.is_empty() {
             kafka_trace!(self.log_context, "Expired {} batches in accumulator", expired_batches.len());
         }
-        for expired_batch in expired_batches.iter_mut() {
+        for mut expired_batch in expired_batches {
             let error_message = format!(
                 "Expiring {} record(s) for {}:{} ms has passed since batch creation",
                 expired_batch.record_count,
@@ -1374,22 +1455,24 @@ impl<C: KafkaClient> Sender<C> {
                 now - expired_batch.created_ms
             );
             let error = KafkaError::with_message(Errors::RequestTimedOut, error_message);
-            self.fail_batch_with_error(expired_batch, error, false, deallocate_buffer);
+            let retain = self.fail_batch_with_error(&mut expired_batch, error, false, deallocate_buffer);
             if let Some(transaction_manager) = self.transaction_manager.clone()
                 && expired_batch.in_retry()
             {
                 // This ensures that no new batches are drained until the current in
                 // flight batches are fully resolved (`Sender.java:372-375`).
-                transaction_manager.lock().unwrap().mark_sequence_unresolved(expired_batch);
+                transaction_manager.lock().unwrap().mark_sequence_unresolved(&expired_batch);
             }
 
-            // In Java, the partition is unmuted by the response callback's `completeBatch()`
-            // call, which always runs even for expired batches because the callback has its
-            // own reference to the batch. In Rust, expired batches are removed from
-            // `in_flight_batches` before response processing, so the response handler can't
-            // find them and never calls `complete_batch`. We unmute here to match Java's
-            // behavior.
-            if self.guarantee_message_order {
+            if retain {
+                // The buffer is released when the response arrives, which means the
+                // batch must stay reachable until then — and it is the response path
+                // that unmutes the partition (`Sender.java:736-737`), exactly as Java
+                // does for an expired in-flight batch.
+                self.batches_awaiting_response.push(expired_batch);
+            } else if self.guarantee_message_order {
+                // Undrained batches never had a request, so no response will ever
+                // unmute them.
                 self.accumulator.unmute_partition(&expired_batch.topic_partition);
             }
         }
@@ -1645,7 +1728,10 @@ impl<C: KafkaClient> Sender<C> {
                 // don't know whether the sequence number was accepted or not, and thus
                 // it is not safe to reassign the sequence.
                 let adjust = batch.attempts() < self.retries;
-                self.fail_batch(batch, response, adjust, true);
+                // `deallocate_batch = true` on the response path, so the buffer is
+                // returned here and nothing needs retaining.
+                let retain = self.fail_batch(batch, response, adjust, true);
+                debug_assert!(!retain, "a response-path failure always deallocates");
                 BatchAction::Done
             }
         } else {
@@ -1733,13 +1819,15 @@ impl<C: KafkaClient> Sender<C> {
         Ok(())
     }
 
+    /// See [`Self::fail_batch_with_record_exceptions`] for the return value.
+    #[must_use]
     fn fail_batch(
         &mut self,
         batch: &mut ProducerBatch,
         response: &PartitionResponse,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
-    ) {
+    ) -> bool {
         let top_level_error = if response.error == Errors::TopicAuthorizationFailed {
             KafkaError::with_message(Errors::TopicAuthorizationFailed, batch.topic_partition.topic().to_string())
         } else if response.error == Errors::ClusterAuthorizationFailed {
@@ -1755,7 +1843,7 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         if response.record_errors.is_empty() {
-            self.fail_batch_with_error(batch, top_level_error, adjust_sequence_numbers, deallocate_batch);
+            self.fail_batch_with_error(batch, top_level_error, adjust_sequence_numbers, deallocate_batch)
         } else {
             // Build per-record error map
             let mut record_error_map: HashMap<i32, KafkaError> = HashMap::with_capacity(response.record_errors.len());
@@ -1801,17 +1889,19 @@ impl<C: KafkaClient> Sender<C> {
                 record_exceptions,
                 adjust_sequence_numbers,
                 deallocate_batch,
-            );
+            )
         }
     }
 
+    /// See [`Self::fail_batch_with_record_exceptions`] for the return value.
+    #[must_use]
     fn fail_batch_with_error(
         &mut self,
         batch: &mut ProducerBatch,
         top_level_exception: KafkaError,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
-    ) {
+    ) -> bool {
         let exception_clone = top_level_exception.clone();
         let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
             Arc::new(move |_| Some(exception_clone.clone()));
@@ -1821,9 +1911,14 @@ impl<C: KafkaClient> Sender<C> {
             record_exceptions,
             adjust_sequence_numbers,
             deallocate_batch,
-        );
+        )
     }
 
+    /// Returns `true` when the caller must keep the batch reachable until its produce
+    /// response arrives, i.e. when this took Java's `maybeRemoveAndDeallocateBatchLater`
+    /// branch (`Sender.java:861`) and the pooled buffer has *not* been returned. See
+    /// [`Self::batches_awaiting_response`].
+    #[must_use]
     fn fail_batch_with_record_exceptions(
         &mut self,
         batch: &mut ProducerBatch,
@@ -1831,7 +1926,7 @@ impl<C: KafkaClient> Sender<C> {
         record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
-    ) {
+    ) -> bool {
         // The batch has already been removed from `in_flight_batches` by the caller
         // (either `handle_produce_responses` or `get_expired_inflight_batches`).
         let error_for_manager = top_level_exception.clone();
@@ -1862,11 +1957,19 @@ impl<C: KafkaClient> Sender<C> {
             }
             if deallocate_batch {
                 self.accumulator.complete_and_deallocate_batch(batch);
+                false
             } else {
+                // Java's `maybeRemoveAndDeallocateBatchLater` (`Sender.java:861`): the
+                // pooled ByteBuffer may still be in use by the network client, so it is
+                // deallocated when the response arrives.
                 self.accumulator.complete_batch(batch);
+                true
             }
         } else if deallocate_batch {
             self.accumulator.deallocate(batch);
+            false
+        } else {
+            false
         }
     }
 
@@ -4349,6 +4452,147 @@ mod tests {
         assert!(manager.has_producer_id());
         assert_eq!(manager.producer_id_and_epoch().producer_id, 343_434);
         assert_eq!(manager.producer_id_and_epoch().epoch, 0);
+    }
+
+    /// A force close must complete the record futures of batches the `Sender` owns,
+    /// not only those still in the accumulator's deques
+    /// (`Sender.java:294-295` → `RecordAccumulator.java:1152-1168`).
+    ///
+    /// Critic 44 note 2: `abort_incomplete_batches` walks the deques only, because
+    /// Rust's `IncompleteBatches` tracks `ProduceRequestResult`s rather than batches,
+    /// so a drained batch's records were never completed on a force close — a
+    /// CLAUDE.md §5 hanging future.
+    #[tokio::test]
+    async fn test_force_close_aborts_the_senders_in_flight_batches() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+
+        let drained = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1, "one batch is drained");
+        // A second record stays undrained, since the first request is still in flight
+        // and there is nothing to send it with.
+        let undrained = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        assert!(!drained.is_done());
+        assert!(!undrained.is_done());
+
+        ctx.sender.force_close.store(true, Ordering::Release);
+        ctx.sender.running.store(false, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(5), ctx.sender.run())
+            .await
+            .expect("run() must terminate on a force close");
+
+        assert!(undrained.is_done(), "the accumulator's own batch is aborted");
+        assert!(
+            drained.is_done(),
+            "the drained batch's records must be completed too, not left pending"
+        );
+        assert_eq!(
+            drained.get().await.expect_err("aborted").message(),
+            "Producer is closed forcefully."
+        );
+    }
+
+    /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
+    /// (Java 2182-2219).
+    ///
+    /// Java asserts with a `MatchingBufferPool` that the aborted in-flight batch's
+    /// buffer is **not** returned when the fatal error aborts it, and **is** returned
+    /// once its response finally arrives (KAFKA-19012). Rust's `BufferPool` exposes
+    /// `available_memory`, so the same property is asserted against that.
+    ///
+    /// This is the test Critic 44 issue 2 identified as the one that would have caught
+    /// the leak: before the fix, `maybe_abort_batches` dropped the batch and the buffer
+    /// was never returned at all.
+    #[tokio::test]
+    async fn test_cancel_in_flight_request_after_fatal_error() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
+
+        // Two requests in flight, one per partition.
+        let future1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        let future2 = ctx.append_to_accumulator_with(&tp1, 0, "k2", "v2").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        assert!(
+            ctx.accumulator.buffer_pool_available_memory() < total_memory,
+            "both batches hold a pooled buffer"
+        );
+
+        // CLUSTER_AUTHORIZATION_FAILED is fatal for the producer.
+        let response = ctx.produce_response(&tp0, -1, Errors::ClusterAuthorizationFailed, 0);
+        ctx.sender.client_mut().respond_to_request_at(0, response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_fatal_error());
+        assert_eq!(
+            future1.get().await.expect_err("fatal").error(),
+            Errors::ClusterAuthorizationFailed
+        );
+
+        // The next iteration takes `runOnce`'s fatal exit, which aborts the batch that
+        // is still in flight for tp1.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(future2.is_done());
+        assert_eq!(
+            future2.get().await.expect_err("aborted").error(),
+            Errors::ClusterAuthorizationFailed
+        );
+        assert!(
+            ctx.accumulator.buffer_pool_available_memory() < total_memory,
+            "Batch should not be deallocated before the response is received"
+        );
+
+        // Should be fine if the second response eventually returns.
+        let response = ctx.produce_response(&tp1, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond_to_request_at(0, response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.accumulator.buffer_pool_available_memory(),
+            total_memory,
+            "The batch should have been de-allocated"
+        );
+    }
+
+    /// The buffer of a batch that expires while still in flight is likewise released
+    /// only when its response arrives — Java's
+    /// `maybeRemoveAndDeallocateBatchLater` path (`Sender.java:856-861`), reached from
+    /// `failExpiredBatches(expiredInflightBatches, now, false)` (`:432`).
+    ///
+    /// The sibling leak Critic 44 issue 2 identified alongside the abort path.
+    #[tokio::test]
+    async fn test_expired_in_flight_batch_buffer_is_released_when_its_response_arrives() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
+
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.accumulator.buffer_pool_available_memory() < total_memory);
+
+        // The delivery timeout expires while the request is still in flight.
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(future.get().await.expect_err("expired").error(), Errors::RequestTimedOut);
+        assert!(
+            ctx.accumulator.buffer_pool_available_memory() < total_memory,
+            "the buffer may still be in use by the network client"
+        );
+
+        // The response finally arrives and releases the buffer.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.accumulator.buffer_pool_available_memory(),
+            total_memory,
+            "the expired batch's buffer must be returned when its response arrives"
+        );
     }
 
     /// Translated from `SenderTest.testCorrectHandlingOfDuplicateSequenceError`

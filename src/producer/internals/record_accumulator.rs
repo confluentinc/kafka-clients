@@ -1478,7 +1478,11 @@ impl RecordAccumulator {
     }
 
     /// The reason Java's no-argument `abortBatches()` passes (Java 1146).
-    fn producer_closed_forcefully_error() -> KafkaError {
+    ///
+    /// `pub(crate)` because `Sender::run`'s force-close branch needs the same reason
+    /// for the batches the accumulator cannot reach — see
+    /// `Sender::abort_in_flight_batches`.
+    pub(crate) fn producer_closed_forcefully_error() -> KafkaError {
         KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
     }
 
@@ -1760,6 +1764,15 @@ impl RecordAccumulator {
             .entry(tp.partition())
             .or_insert_with(|| Mutex::new(VecDeque::new()));
         let mut deque = dq_entry.value().lock().unwrap();
+
+        // Java's caller does `accumulator.splitAndReenqueue(batch)` and then
+        // `maybeRemoveAndDeallocateBatch(batch)` (`Sender.java:686-688`). Rust's
+        // `split_and_reenqueue` consumes the big batch, so the second statement has to
+        // happen here: without it the big batch stays in `incomplete` — so
+        // `has_incomplete()` never falls back to false — and its pooled buffer is never
+        // returned. Unreachable in production until PLAN §9.18 is fixed (the split
+        // itself panics), but the fix needs this. Critic 44 note 1.
+        self.complete_and_deallocate_batch(&mut big_batch);
 
         while let Some(batch) = sub_batches.pop_back() {
             self.incomplete.add(Arc::clone(&batch.produce_future));
@@ -3328,6 +3341,10 @@ mod tests {
         assert!(future2.is_ok());
         batch.close();
 
+        // A real appended batch is in the incomplete set; these hand-built ones are not,
+        // and `split_and_reenqueue` now removes the big batch from it (Java
+        // `Sender.java:686-688`).
+        accum.register_incomplete_for_test(&batch);
         // Enqueue the batch
         accum.reenqueue(batch, now).expect("reenqueue");
 
@@ -3636,6 +3653,9 @@ mod tests {
         }
         big_batch.close();
 
+        // A real appended batch is in the incomplete set (see the note in
+        // `test_split_and_reenqueue`).
+        accum.register_incomplete_for_test(&big_batch);
         // Add the batch to the accumulator
         accum.reenqueue(big_batch, now).expect("reenqueue");
 
@@ -3997,6 +4017,10 @@ mod tests {
                 .expect("the entry exists");
             manager.add_in_flight_batch(&big_batch).expect("the sequence is set");
         }
+
+        // A real appended batch is in the incomplete set (see the note in
+        // `test_split_and_reenqueue`).
+        accum.register_incomplete_for_test(&big_batch);
 
         // `Sender.completeBatch` removes the big batch from the txn map before
         // splitting (`Sender.java:685-686`).

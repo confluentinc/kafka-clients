@@ -2187,13 +2187,32 @@ Each is documented at its call site as well.
    the nearest equivalent that survives the batch moving between owners. This fixed
    a real defect — see commit `0b8c3d0`.
 
-8. **`Sender::maybe_abort_batches` aborts the Sender's in-flight batches itself.**
-   Java's `inFlightBatches.clear()` (`Sender.java:536`) merely drops references,
-   because `abortBatches` already aborted those batches via `incomplete.copyAll()`,
-   which returns batches. Rust's `IncompleteBatches` tracks
-   `ProduceRequestResult`s (a `ProducerBatch` has one owner, rules §7), so the
-   accumulator cannot reach the Sender's share; dropping them un-aborted would leave
-   their record futures pending forever (CLAUDE.md §5).
+8. **`Sender::abort_in_flight_batches` aborts the batches the Sender owns.** Java's
+   `abortBatches` (`RecordAccumulator.java:1152`) iterates `incomplete.copyAll()`,
+   which returns the batch objects and so covers batches already drained into the
+   Sender; `inFlightBatches.clear()` (`Sender.java:536`) then merely drops the map's
+   references. Rust's `IncompleteBatches` tracks `ProduceRequestResult`s (a
+   `ProducerBatch` has one owner, rules §7), so the accumulator can only reach its
+   own deques; dropping the Sender's share un-aborted leaves their record futures
+   pending forever (CLAUDE.md §5). Called from both Java sites that need it —
+   `maybeAbortBatches` and `run()`'s force-close branch (`Sender.java:294-295`), the
+   second added after Critic 44 note 2.
+
+8b. **`Sender::batches_awaiting_response` is the second batch holder Java gets from
+   its completion callback.** Three Java paths complete a batch *now* and deallocate
+   it *later* — `abortBatches`'s `isInflight()` fork
+   (`RecordAccumulator.java:1160-1164`), `failBatch(deallocateBatch=false)` →
+   `maybeRemoveAndDeallocateBatchLater` (`Sender.java:177-180`), and
+   `abortIncompleteBatches` — and all three rely on the `RequestCompletionHandler`
+   closing over `recordsByPartition` (`Sender.java:918`, `:941`) so the response can
+   still reach the batch and return its pooled buffer (KAFKA-19012). A Rust callback
+   cannot capture `&mut self`, and `PendingProduceRequest` stores only an
+   `Arc<ProduceRequestResult>` identity, so that holder is an explicit field.
+   `handle_produce_response_for` searches it after `in_flight_batches`, and
+   `run()` releases whatever remains after `client.close()` — Java's `close()` does
+   that through the aborted requests' callbacks, which the Rust `close()` (returning
+   `()`) cannot. Added after Critic 44 issue 2, which was a permanent
+   `BufferPool::available_memory` shrink on every abort of an in-flight batch.
 
 9. **`transaction_completing` is read once per `ready()`**, not once per batch as
    Java does inside `batchReady` (`RecordAccumulator.java:614`). The value is
