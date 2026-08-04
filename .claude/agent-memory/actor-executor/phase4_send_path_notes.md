@@ -40,6 +40,12 @@ Three-pass lifetime dance inside: own `Arc<TopicInfo>` per partition → collect
 DashMap `Ref`s → lock every deque → build the pool. Each pass borrows the previous
 (now immutable) `Vec`.
 
+## Critic round 1
+
+Five findings, all real, all fixed — see [[phase4-critic-round1-patterns]]. Two of
+them were in code this phase wrote (the per-record topic-name allocation and the
+buffer-pool leak); one was a behaviour mismatch in the response dispatch loop.
+
 ## Two pre-existing defects Phase 4 surfaced
 
 1. **Fixed:** `PendingProduceRequest` recorded only partitions, so
@@ -74,8 +80,8 @@ DashMap `Ref`s → lock every deque → build the pool. Each pass borrows the pr
 
 ## DoD §3 residual debt
 
-33 idempotence-only `SenderTest.java` methods are translatable against the Phase-4
-surface but not written; itemised by name and Java line in a comment block at the end
-of `sender.rs`, carried to Phase 8's parity sweep. 17 more are transactional
-(Phases 5/6). Stated plainly rather than implied — Phase 4 did **not** achieve
-`SenderTest` idempotence parity.
+25 `SenderTest.java` methods translated. The per-method accounting is a comment block
+at the end of `sender.rs`, in four groups: translated, transactional (Phases 5/6, each
+with the line that makes it transactional), blocked on named missing surface, and owed
+with no blocker. PLAN §9.19 owns the residue — **not** Phase 8, whose scope covers
+`TransactionManagerTest` only. That mis-assignment was Critic 44 issue 4.
