@@ -996,71 +996,6 @@ tests are the exception and pass. The Critic verified both Phase 1 plan override
 second one was in the *fix* for the first. Do not treat a single Critic pass as
 sufficient — `agent-roles.md` step 6 loops back to step 2 for a reason.
 
-### 9.8 Critic review of Phase 2
-
-**Status:** DONE — review loop **closed** 2026-08-04. Three Critic 42 passes,
-converged on pass 3 with **zero Phase 2 defects**. Archived at
-`design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
-
-| Pass | Findings | Fixes |
-|---|---|---|
-| 1 | 5 (1 functional) | `1391c69` |
-| 2 | 2 (low, non-behavioural) | `b62e218` |
-| 3 | 1, inside the new rules §12 prose | fixed inline; no Phase 2 defects |
-
-**The functional finding:** `InitProducerIdRequestBuilder` offered v6 where Java
-caps at v5, because `latest_version()` hardwires the unstable-inclusive accessor
-while Java's `super(apiKey)` passes `false`. Compounds with §9.1 — v6 is the 2PC
-version Phase 5 implements, and its two new fields are non-ignorable, so at a
-negotiated v5 the client would silently drop them where Java throws. Produced
-**rules §12** (translate a builder's `super(...)` call literally) and the §9.7
-follow-up.
-
-**Both later passes found the same shape of defect:** a fix reaching some of the
-sites it applied to rather than all — the version-cap convention applied to 2 of 4
-builders, and a PLAN correction appended to a stale claim rather than replacing it.
-Pass 3's finding was three prose imprecisions in the rule written to fix pass 2.
-
-**Confirmed by independent re-derivation:** all four broker-side scoping omissions,
-the deterministic-sort deviation's safety at every version, all 18 dispatch arms,
-and both halves of the `ignorable` distinction.
-
-**Lesson, consistent with §9.5:** across both phases, five of six Critic passes
-found something real, and in each phase a later pass found a defect *in a fix*. A
-single pass is not sufficient.
-
-### 9.7 Bring nine pre-existing `RequestBuilder`s in line with rules §12
-
-**Status:** open. Identified by Critic 42's third pass while reviewing rules §12.
-
-§12 requires a builder's `latest_allowed_version` to mirror whichever Java
-`AbstractRequest.Builder` constructor its counterpart invokes. Nine builders
-predating the rule still call `latest_version()`. **All are behaviourally correct
-today** — every affected API has `latestVersionUnstable: false`, so the two
-accessors agree — so this is faithfulness and future-proofing, not a bug.
-
-Two groups:
-
-| Group | Files | Action |
-|---|---|---|
-| Faithful but unmarked (Java's own bound *is* `latestVersion()`) | `api_versions_request.rs`, `offset_commit_request.rs`, `offset_fetch_request.rs`, `offsets_for_leader_epoch_request.rs` | add the "deliberate" marker §12 requires, so it stays distinguishable from "not yet reached" |
-| Implicated by §12 | `metadata_request.rs:191`, `find_coordinator_request.rs:192`, `sasl_handshake_request.rs:116`, `sasl_authenticate_request.rs:122`, `consumer_group_heartbeat_request.rs:138` | switch to `latest_version_with_unstable(false)` |
-
-`consumer_group_heartbeat_request.rs` needs thought rather than a mechanical
-change: Java's builder takes `enableUnstableLastVersion` as a **parameter**, which
-the Rust builder does not model at all. Decide whether to thread it through or
-document why not.
-
-**Deliberately not folded into Milestone 11.** Nine files across the common and
-consumer surface with zero behaviour change is a poor fit for a transactions phase,
-and mixing it in would make any regression ambiguous between the two. Rules §12
-records this scope explicitly so a Critic reviewing pre-existing code cites this
-item instead of raising nine findings.
-
-**Consider on landing:** §12 is written as a general rule but lives in
-`producer-transactions.md`. Relocating it to a shared rules file would be the
-natural move once it governs code outside the producer.
-
 ### 9.6 C FFI / Python / gRPC multilanguage harness for transactions
 
 **Status:** deferred to a follow-up milestone (§7.2).
@@ -1158,3 +1093,88 @@ Recorded in full elsewhere; listed here for completeness:
   - `ProducerConfig::explicitly_set` replaces Java's
     `AbstractConfig.originals()` — commit `d14d1ec`.
   - The five typed txn error structs deliberately not created — §1.1 and rules §9.
+
+### 9.7 Bring nine pre-existing `RequestBuilder`s in line with rules §12
+
+**Status:** open. Identified by Critic 42's third pass while reviewing rules §12.
+
+§12 requires a builder's `latest_allowed_version` to mirror whichever Java
+`AbstractRequest.Builder` constructor its counterpart invokes. Nine builders
+predating the rule still call `latest_version()`. **All are behaviourally correct
+today, but for two different reasons — and conflating them will introduce a bug.**
+
+> ⚠️ **Do NOT mechanically switch all nine to
+> `latest_version_with_unstable(false)`.** Two of them — `OFFSET_COMMIT` and
+> `OFFSET_FETCH` — carry `latestVersionUnstable: true` with `highest = 10`, so the
+> accessors differ (10 vs 9). Switching those caps them at **9 instead of 10**
+> (`offset_commit_request.rs:183`, `offset_fetch_request.rs:286`), diverging from
+> Java on the consumer's offset-commit and offset-fetch paths. They are correct
+> today because **Java deliberately passes `latestVersion()`**
+> (`OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64`), not because any
+> flag is false.
+
+Per-group reasons:
+
+  - **Faithful group** (`api_versions`, `offset_commit`, `offset_fetch`,
+    `offsets_for_leader_epoch`): correct because Java's own bound is
+    `latestVersion()`. `latest_version()` is the faithful translation and must
+    **stay**. Only the "deliberate" marker is missing.
+  - **Implicated group** (the five below): correct only because their APIs happen to
+    carry `latestVersionUnstable: false`, so the accessors agree. These are the ones
+    to switch.
+
+Two groups:
+
+| Group | Files | Action |
+|---|---|---|
+| Faithful but unmarked (Java's own bound *is* `latestVersion()`) | `api_versions_request.rs`, `offset_commit_request.rs`, `offset_fetch_request.rs`, `offsets_for_leader_epoch_request.rs` | add the "deliberate" marker §12 requires, so it stays distinguishable from "not yet reached" |
+| Implicated by §12 | `metadata_request.rs:191`, `find_coordinator_request.rs:192`, `sasl_handshake_request.rs:116`, `sasl_authenticate_request.rs:122`, `consumer_group_heartbeat_request.rs:138` | switch to `latest_version_with_unstable(false)` |
+
+`consumer_group_heartbeat_request.rs` needs thought rather than a mechanical
+change: Java's builder takes `enableUnstableLastVersion` as a **parameter**, which
+the Rust builder does not model at all. Decide whether to thread it through or
+document why not.
+
+**Deliberately not folded into Milestone 11.** Nine files across the common and
+consumer surface with zero behaviour change is a poor fit for a transactions phase,
+and mixing it in would make any regression ambiguous between the two. Rules §12
+records this scope explicitly so a Critic reviewing pre-existing code cites this
+item instead of raising nine findings.
+
+**Consider on landing:** §12 is written as a general rule but lives in
+`producer-transactions.md`. Relocating it to a shared rules file would be the
+natural move once it governs code outside the producer.
+
+### 9.8 Critic review of Phase 2
+
+**Status:** DONE — review loop **closed** 2026-08-04. Three Critic 42 passes,
+converged on pass 3 with **zero Phase 2 defects**. Archived at
+`design/history/Milestone-11/Phase-2/COMMENTS.DONE.42.md`.
+
+| Pass | Findings | Fixes |
+|---|---|---|
+| 1 | 5 (1 functional) | `1391c69` |
+| 2 | 2 (low, non-behavioural) | `b62e218` |
+| 3 | 1, inside the new rules §12 prose | fixed inline; no Phase 2 defects |
+
+**The functional finding:** `InitProducerIdRequestBuilder` offered v6 where Java
+caps at v5, because `latest_version()` hardwires the unstable-inclusive accessor
+while Java's `super(apiKey)` passes `false`. Compounds with §9.1 — v6 is the 2PC
+version Phase 5 implements, and its two new fields are non-ignorable, so at a
+negotiated v5 the client would silently drop them where Java throws. Produced
+**rules §12** (translate a builder's `super(...)` call literally) and the §9.7
+follow-up.
+
+**Both later passes found the same shape of defect:** a fix reaching some of the
+sites it applied to rather than all — the version-cap convention applied to 2 of 4
+builders, and a PLAN correction appended to a stale claim rather than replacing it.
+Pass 3's finding was three prose imprecisions in the rule written to fix pass 2.
+
+**Confirmed by independent re-derivation:** all four broker-side scoping omissions,
+the deterministic-sort deviation's safety at every version, all 18 dispatch arms,
+and both halves of the `ignorable` distinction.
+
+**Lesson, consistent with §9.5:** across both phases, five of six Critic passes
+found something real, and in each phase a later pass found a defect *in a fix*. A
+single pass is not sufficient.
+

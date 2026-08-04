@@ -549,7 +549,7 @@ pre-existing code should cite §9.7 instead.
 
   - `latest_version()` in a builder whose Java counterpart calls `super(apiKey)`.
   - An explicit-range Java `super(apiKey, oldest, latest)` where Java passes a
-    **constant** (e.g. `AddPartitionsToTxnRequest.java:73`'s `LAST_CLIENT_VERSION`)
+    **constant** (e.g. `AddPartitionsToTxnRequest.java:58`'s `LAST_CLIENT_VERSION`)
     but Rust substitutes an accessor call. Note this does NOT apply where Java's
     own bound *is* an accessor call — `ApiVersionsRequest.java:43`,
     `OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64`,
