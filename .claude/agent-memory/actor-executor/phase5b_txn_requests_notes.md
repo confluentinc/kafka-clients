@@ -58,6 +58,25 @@ coordinator-disconnect path Java's own test exercises. Do not add a setter.
 5. **Guard the extraction.** `test -s` plus a line-count floor. An empty corpus is
    the failure mode both agents have been burned by.
 
+## A justification is a claim about the code — check it like one
+
+Phase 5b's Critic pass 2 found a single defect, and it was not in the code: the fix
+for pass 1 was correct, but the *rustdoc explaining why the test was shaped that way*
+invented a reachability that does not exist ("the application task completing a
+transaction leaves `READY` behind" — `State::Ready` has two writers and both are
+`Caller::Sender`).
+
+**Why:** a test that pins a **contract** rather than a live path is perfectly
+legitimate, and saying so is shorter and truer than manufacturing a scenario. The urge
+to supply a concrete mechanism is where the error came from.
+
+**How to apply:** when documenting why a test uses a particular input, either derive
+the reachability (grep the writers of that state / value and check their callers) or
+say plainly that it is a contract with no live path today and name the phase that will
+open one. Do not narrate a plausible-sounding interleaving. This is the same class as
+the stale-rationale findings below, except the rationale was never true rather than
+having expired.
+
 ## Reclassify, don't preserve, a stale deferral rationale
 
 The `SenderTest` transactional group of 15 was recorded as "blocked on a
