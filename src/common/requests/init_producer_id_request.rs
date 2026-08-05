@@ -146,6 +146,20 @@ impl InitProducerIdRequestBuilder {
     pub fn data(&self) -> &InitProducerIdRequestData {
         &self.data
     }
+
+    /// Returns a mutable reference to the underlying data.
+    ///
+    /// Test-only. `TransactionManager.initializeTransactions` never calls
+    /// `setKeepPreparedTxn` in Apache Kafka 4.2, so the KIP-939 response arm at
+    /// `TransactionManager.java:1501` cannot be reached without setting the flag on
+    /// an already-built request — which is what
+    /// `TransactionManagerTest.prepareInitPidResponse`'s `keepPreparedTxn = true`
+    /// overload asserts the broker sees. Production code has no reason to mutate a
+    /// built request.
+    #[cfg(test)]
+    pub(crate) fn data_mut(&mut self) -> &mut InitProducerIdRequestData {
+        &mut self.data
+    }
 }
 
 impl RequestBuilder for InitProducerIdRequestBuilder {

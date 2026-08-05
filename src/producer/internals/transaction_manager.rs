@@ -836,6 +836,20 @@ impl TxnRequestHandler {
         self.result.operation()
     }
 
+    /// Sets `keepPreparedTxn` on a pending `InitProducerId` request.
+    ///
+    /// Java's `initializeTransactions` never calls `setKeepPreparedTxn` — see
+    /// [`TransactionManager::initialize_transactions_internal`] — so the only way to
+    /// exercise the KIP-939 response arm at Java 1501 is to set the flag on the
+    /// request, which is what Java's `prepareInitPidResponse` overload asserts the
+    /// broker sees. Test-only, because production code has no reason to reach it.
+    #[cfg(test)]
+    fn set_keep_prepared_txn_for_test(&mut self, keep_prepared_txn: bool) {
+        if let TxnRequestHandlerKind::InitProducerId { builder, .. } = &mut self.kind {
+            builder.data_mut().set_keep_prepared_txn(keep_prepared_txn);
+        }
+    }
+
     /// Fails this handler's result without touching the manager's state.
     ///
     /// Corresponds to `fail(RuntimeException)` (Java 1390). Distinct from
@@ -1184,11 +1198,10 @@ pub(crate) struct TransactionManager {
     /// The producer id and epoch of the transaction prepared for a two-phase
     /// commit (Java 148).
     ///
-    /// Always [`ProducerIdAndEpoch::NONE`] in Phase 5a: both writers
-    /// (`prepareTransaction` Java 342 and `InitProducerIdHandler`'s
-    /// `keepPreparedTxn` arm Java 1507) are KIP-939, Phase 5b. The field is here
-    /// because [`Self::reset_transaction_state`] clears it, and
-    /// [`Self::prepared_transaction_state`] reads it.
+    /// Written by [`Self::prepare_transaction`] (Java 342) and by
+    /// `InitProducerIdHandler`'s `keepPreparedTxn` arm (Java 1507); cleared by
+    /// [`Self::reset_transaction_state`] and read by
+    /// [`Self::prepared_transaction_state`].
     prepared_txn_state: ProducerIdAndEpoch,
 }
 
@@ -1390,6 +1403,40 @@ impl TransactionManager {
         self.throw_if_pending_state("beginTransaction")?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::InTransaction, None, Caller::App)
+    }
+
+    /// Prepares a transaction for a two-phase commit (KIP-939).
+    ///
+    /// Translated from `prepareTransaction()` (Java 342). This transitions the
+    /// transaction to [`State::PreparedTransaction`] and records the current
+    /// producer id and epoch in `preparedTxnState`, so
+    /// [`Self::prepared_transaction_state`] can hand them to an external
+    /// transaction coordinator that will later commit or abort on the producer's
+    /// behalf.
+    ///
+    /// Stays synchronous: Java's body is four calls and a field write, with no wait.
+    ///
+    /// # Reachable only from `KafkaProducer`
+    ///
+    /// PLAN §Phase-6 records that `prepareTransaction` is on `KafkaProducer` and
+    /// **not** on the `Producer` interface. It is nonetheless a public method of
+    /// this class with no other Java caller, so the transition is application-side
+    /// (rules §1).
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalState`] on a non-transactional producer, while another
+    /// operation's result is unacknowledged, when the manager is in an error state,
+    /// or when `→ PREPARED_TRANSACTION` is not valid — its only sources are
+    /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
+    pub(crate) fn prepare_transaction(&mut self) -> Result<(), KafkaError> {
+        self.ensure_transactional()?;
+        self.throw_if_pending_state("prepareTransaction")?;
+        self.maybe_fail_with_error()?;
+        self.transition_to(State::PreparedTransaction, None, Caller::App)?;
+        self.prepared_txn_state =
+            ProducerIdAndEpoch::new(self.producer_id_and_epoch.producer_id, self.producer_id_and_epoch.epoch);
+        Ok(())
     }
 
     /// Begins committing the transaction, returning the handle the application
@@ -3763,18 +3810,26 @@ impl TransactionManager {
             if keep_prepared_txn
                 && init_producer_id_response.data().ongoing_txn_producer_id != RecordBatch::NO_PRODUCER_ID
             {
-                // Java 1504-1510 moves to PREPARED_TRANSACTION and records
-                // `preparedTxnState`. Still unreachable, and for Java's own
-                // reason rather than a translation gap: nothing in Apache Kafka
-                // 4.2's `clients/src` calls `setKeepPreparedTxn`, so
-                // `builder.data.keepPreparedTxn()` is always false — see
-                // [`Self::initialize_transactions_internal`]. Phase 5b lands the
-                // KIP-939 surface that would set it.
-                return Err(KafkaError::unsupported_version(
-                    "Two-phase commit is not yet implemented in this client (Milestone 11, Phase 5b).",
-                ));
+                // Java 1504-1510. Unreachable through this crate's own request
+                // builders, and for **Java's own reason** rather than a translation
+                // gap: nothing in Apache Kafka 4.2's `clients/src` calls
+                // `setKeepPreparedTxn`, so `builder.data.keepPreparedTxn()` is
+                // always false on the `initializeTransactions` path — see
+                // [`Self::initialize_transactions_internal`]. Translated in full
+                // anyway, because it is the KIP-939 arm a broker-driven
+                // recovery would take once a caller does set the flag, and because
+                // leaving it out would make `PREPARED_TRANSACTION` reachable from
+                // only one of its two Java sources.
+                self.transition_to(State::PreparedTransaction, None, Caller::Sender)?;
+                // Update the preparedTxnState with the ongoing pid and epoch from the response.
+                // This will be used to complete the transaction later.
+                self.prepared_txn_state = ProducerIdAndEpoch::new(
+                    init_producer_id_response.data().ongoing_txn_producer_id,
+                    init_producer_id_response.data().ongoing_txn_producer_epoch,
+                );
+            } else {
+                self.transition_to(State::Ready, None, Caller::Sender)?;
             }
-            self.transition_to(State::Ready, None, Caller::Sender)?;
             self.last_error = None;
             if is_epoch_bump {
                 self.reset_sequence_numbers();
@@ -4550,6 +4605,8 @@ mod tests {
     const TOPIC: &str = "test";
     const PRODUCER_ID: i64 = 13131;
     const EPOCH: i16 = 1;
+    const ONGOING_PRODUCER_ID: i64 = 999;
+    const BUMPED_ONGOING_EPOCH: i16 = 11;
     const CONSUMER_GROUP_ID: &str = "myConsumerGroup";
     const MEMBER_ID: &str = "member";
     const GENERATION_ID: i32 = 5;
@@ -5055,6 +5112,74 @@ mod tests {
     /// `new OffsetAndMetadata(offset)`, which cannot fail for a non-negative offset.
     fn offset(offset: i64) -> OffsetAndMetadata {
         OffsetAndMetadata::new(offset).expect("a non-negative offset")
+    }
+
+    /// Drives a 2PC-enabled transactional producer from `UNINITIALIZED` through
+    /// `InitProducerId`, mirroring `doInitTransactionsWith2PCEnabled(boolean)`
+    /// (Java 4367).
+    ///
+    /// Java's helper is **declared and never called** in Apache Kafka 4.2 (the
+    /// PHASE-5B TEST ACCOUNTING block below carries the check), so this has no Java
+    /// test above it; it exists because it is the only way to reach the
+    /// `keepPreparedTxn` response arm (Java 1501), which
+    /// `initialize_transactions`'s own request never sets — see
+    /// [`TransactionManager::initialize_transactions_internal`]. The flag is
+    /// therefore forced onto the outgoing request here, which is exactly what
+    /// Java's own `prepareInitPidResponse(.., keepPreparedTxn = true, ..)` overload
+    /// (Java 4076) asserts the broker would see.
+    async fn do_init_transactions_with_2pc_enabled(
+        manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
+        keep_prepared: bool,
+    ) -> Arc<TransactionalRequestResult> {
+        let result = manager
+            .initialize_transactions(keep_prepared, pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+        let mut handler = manager
+            .next_request(pending_requests, false)
+            .expect("next_request does not fail on this path")
+            .expect("an InitProducerId request must be pending");
+        assert_eq!(
+            handler
+                .init_producer_id_request_data()
+                .expect("an InitProducerId handler")
+                .transactional_id
+                .as_deref(),
+            Some(TRANSACTIONAL_ID)
+        );
+        handler.set_keep_prepared_txn_for_test(keep_prepared);
+
+        let (response_producer_id, response_epoch, ongoing_producer_id, ongoing_epoch) = if keep_prepared {
+            // Simulate an ongoing prepared transaction (ongoingProducerId != -1).
+            (
+                ONGOING_PRODUCER_ID,
+                BUMPED_ONGOING_EPOCH,
+                ONGOING_PRODUCER_ID,
+                BUMPED_ONGOING_EPOCH - 1,
+            )
+        } else {
+            (PRODUCER_ID, EPOCH, RecordBatch::NO_PRODUCER_ID, RecordBatch::NO_PRODUCER_EPOCH)
+        };
+        let mut data = InitProducerIdResponseData::new();
+        data.set_error_code(Errors::None.code())
+            .set_producer_id(response_producer_id)
+            .set_producer_epoch(response_epoch)
+            .set_ongoing_txn_producer_id(ongoing_producer_id)
+            .set_ongoing_txn_producer_epoch(ongoing_epoch)
+            .set_throttle_time_ms(0);
+        let response = ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data));
+        let mut coordinators = CoordinatorNodes::new();
+        manager
+            .handle_response(handler, &response, &mut coordinators, pending_requests)
+            .expect("a successful InitProducerId response is handled");
+
+        assert!(manager.has_producer_id());
+        manager.maybe_update_transaction_v2_enabled(true);
+
+        assert!(result.is_successful());
+        result.await_result().await.expect("initTransactions succeeded");
+        assert!(result.is_acked());
+        result
     }
 
     /// Mirrors `assertAbortableError(Class)` (Java 4408): a commit is refused, the
@@ -6502,6 +6627,118 @@ mod tests {
             );
             assert!(manager.has_abortable_error());
         }
+    }
+
+    /// KIP-939 `prepareTransaction()` (Java 342) moves `IN_TRANSACTION` to
+    /// `PREPARED_TRANSACTION` and records the current producer id and epoch, which
+    /// `preparedTransactionState()` (Java 1976) then hands to an external
+    /// coordinator. From `PREPARED_TRANSACTION` both `COMMITTING_TRANSACTION` and
+    /// `ABORTING_TRANSACTION` remain reachable (Java 174, 176).
+    ///
+    /// `TransactionManagerTest` has **no** two-phase-commit test in Apache Kafka
+    /// 4.2 — `prepareTransaction`, `preparedTransactionState` and `enable2pc` appear
+    /// in no method body, and `doInitTransactionsWith2PCEnabled` is declared and
+    /// never called (the accounting block below carries the check). So this and the
+    /// two tests after it are Rust-side, covering a Java surface Java itself leaves
+    /// untested; PLAN §Phase-6 owns the `KafkaProducerTest` cover.
+    #[tokio::test]
+    async fn test_prepare_transaction_records_the_prepared_state() {
+        let mut manager = manager_with_transactional_id_and_2pc(Some(TRANSACTIONAL_ID.to_string()), false, true);
+        let mut pending = PendingRequests::new();
+        assert!(manager.is_2pc_enabled());
+        assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
+
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(!manager.is_prepared());
+
+        // A partition must be added while IN_TRANSACTION — `maybeAddPartition`'s
+        // second guard rejects any other state (Java 445) — and it is what sets
+        // `transactionStarted`, without which `nextRequest` short-circuits the
+        // `EndTxn` (Java 913).
+        manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+
+        manager
+            .prepare_transaction()
+            .expect("IN_TRANSACTION -> PREPARED_TRANSACTION is valid");
+        assert!(manager.is_prepared());
+        assert_eq!(
+            manager.prepared_transaction_state(),
+            ProducerIdAndEpoch::new(PRODUCER_ID, EPOCH)
+        );
+        // Java 1012: a prepared transaction is not "ongoing" — it is neither
+        // IN_TRANSACTION nor completing.
+        assert!(!manager.has_ongoing_transaction());
+
+        // A commit is still reachable from PREPARED_TRANSACTION (Java 174), and
+        // completing it clears the prepared state (Java 1342).
+        manager
+            .begin_commit(&mut pending)
+            .expect("PREPARED_TRANSACTION -> COMMITTING is valid");
+        run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Commit, Errors::None)
+            .expect("a successful EndTxn response is handled");
+        assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
+        assert!(!manager.is_prepared());
+    }
+
+    /// `prepareTransaction` outside a transaction is refused by the transition
+    /// table: `→ PREPARED_TRANSACTION` has only `IN_TRANSACTION` and `INITIALIZING`
+    /// as sources (Java 172).
+    #[tokio::test]
+    async fn test_prepare_transaction_is_refused_outside_a_transaction() {
+        let mut manager = manager_with_transactional_id_and_2pc(Some(TRANSACTIONAL_ID.to_string()), false, true);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+
+        let error = manager
+            .prepare_transaction()
+            .expect_err("READY -> PREPARED_TRANSACTION is not a valid transition");
+        assert!(matches!(error, KafkaError::IllegalState(_)), "unexpected error: {error:?}");
+        assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
+
+        // An idempotent producer is refused earlier, by `ensureTransactional`.
+        let mut idempotent = idempotent_manager(false);
+        let error = idempotent
+            .prepare_transaction()
+            .expect_err("prepareTransaction is a transactional method");
+        assert_eq!(error.message(), "Transactional method invoked on a non-transactional producer.");
+    }
+
+    /// `InitProducerIdHandler`'s `keepPreparedTxn` arm (Java 1501-1511): when the
+    /// broker reports an ongoing transaction, the producer resumes it in
+    /// `PREPARED_TRANSACTION` with the *ongoing* pid and epoch rather than going to
+    /// `READY`.
+    ///
+    /// Note the two producer-id pairs differ: `setProducerIdAndEpoch` takes the
+    /// response's `producerId`/`producerEpoch` (Java 1495-1498) while
+    /// `preparedTxnState` takes its `ongoingTxnProducerId`/`ongoingTxnProducerEpoch`
+    /// (Java 1507-1510), which is what lets the external coordinator finish the old
+    /// transaction under the epoch it was prepared with.
+    #[tokio::test]
+    async fn test_init_producer_id_resumes_a_prepared_transaction() {
+        let mut manager = manager_with_transactional_id_and_2pc(Some(TRANSACTIONAL_ID.to_string()), false, true);
+        let mut pending = PendingRequests::new();
+        do_init_transactions_with_2pc_enabled(&mut manager, &mut pending, true).await;
+
+        assert!(manager.is_prepared());
+        assert_eq!(
+            manager.producer_id_and_epoch(),
+            ProducerIdAndEpoch::new(ONGOING_PRODUCER_ID, BUMPED_ONGOING_EPOCH)
+        );
+        assert_eq!(
+            manager.prepared_transaction_state(),
+            ProducerIdAndEpoch::new(ONGOING_PRODUCER_ID, BUMPED_ONGOING_EPOCH - 1)
+        );
+
+        // Without an ongoing transaction the same flag leaves the producer READY.
+        let mut manager = manager_with_transactional_id_and_2pc(Some(TRANSACTIONAL_ID.to_string()), false, true);
+        let mut pending = PendingRequests::new();
+        do_init_transactions_with_2pc_enabled(&mut manager, &mut pending, false).await;
+        assert!(!manager.is_prepared());
+        assert!(manager.is_ready());
+        assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
     }
 
     /// Translated from `testEndTxnNotSentIfIncompleteBatches` (Java 248-260).
