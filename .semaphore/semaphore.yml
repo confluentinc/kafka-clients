@@ -21,6 +21,21 @@ name: Translation agent
 # A manual promotion ("Approve plan and implement") triggers
 # plan-approve.yml, which flips the PR's status from 2 (plan_created) to 3
 # (plan_approved) and immediately runs the implementation step.
+#
+# Block layout (each Semaphore job is a fresh VM with its own checkout of the
+# pipeline's SHA):
+#   1. "Run translation-agent" -- the only block that needs the orchestrator's
+#      Python package and the `translation_agent.db` artifact, so that setup
+#      lives in this block's prologue rather than in global_job_config.
+#   2. "Verification" -- `make verify` on the checked-out tree. Split out of
+#      the agent job so a tree-validation failure is attributable on its own
+#      job, and so its log isn't buried under the agent's output. The agent
+#      works in a detached git worktree and the orchestrator pushes the
+#      branch, so the main checkout is never mutated by the cascade: this
+#      verifies exactly the same tree the old in-job `make verify` did.
+#   3. "R2 Code Review" -- PR-only. Sequenced after the agent block so the
+#      review does not race an implementation step that is still writing
+#      commits to the PR under review.
 
 agent:
   machine:
@@ -54,10 +69,6 @@ global_job_config:
       # locally installed toolchain and broke lint parity -- see
       # rust-toolchain.toml history).
       - sudo apt install -y cmake rustup && rustc --version
-      - (cd tools/translation_agent && pip install -e '.[dev]')
-      # First sweep on a fresh project will have no artifact yet -- allow
-      # the pull to fail so the orchestrator can create the DB from scratch.
-      - artifact pull project translation_agent.db || true
 
 blocks:
   - name: Run translation-agent
@@ -69,13 +80,24 @@ blocks:
         # only when the build is for this exact branch.
         - name: MAIN_BRANCH
           value: master
-        # Path to the AK repo, relative to the translation_agent cwd set in
-        # the prologue (which is `tools/translation_agent`). Defaults to the
-        # `kafka` git submodule at the repo root.
+        # Path to the AK repo, relative to the job's cwd -- the repo root.
+        # (The prologue's `cd tools/translation_agent` is confined to a
+        # subshell, so it does not move the cwd for the job commands.)
+        # Defaults to the `kafka` git submodule at the repo root.
         - name: AK_REPO_PATH
           value: ./kafka
+      # Only this block needs the orchestrator package and its DB artifact;
+      # the Verification and R2 blocks skip both.
+      prologue:
+        commands:
+          - (cd tools/translation_agent && pip install -e '.[dev]')
+          # First sweep on a fresh project will have no artifact yet -- allow
+          # the pull to fail so the orchestrator can create the DB from scratch.
+          - artifact pull project translation_agent.db || true
       jobs:
-        - name: "Sweep phase or PR planning or implementation (optional) followed by `make verify`"
+        # `make verify` is NOT part of this job -- it runs in the
+        # "Verification" block below.
+        - name: "Sweep phase or PR planning or implementation (optional)"
           commands:
             - |
               set -e
@@ -87,46 +109,51 @@ blocks:
               echo "SEMAPHORE_GIT_PR_BRANCH=${SEMAPHORE_GIT_PR_BRANCH}"
               echo "SEMAPHORE_GIT_PR_NUMBER=${SEMAPHORE_GIT_PR_NUMBER}"
               echo "MAIN_BRANCH=${MAIN_BRANCH}"
-              # Ensure all Python dependencies are installed
-              make
               if [ "${SEMAPHORE_GIT_PR_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
               elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 # The prologue's `artifact pull ... || true` lands the DB at
                 # repo-root `translation_agent.db`. If the artifact does not
                 # exist yet (no DB, or the artifact hub failed to serve it --
-                # e.g. a transient signed-URL error), skip the sweep and fall
-                # through to the `make verify` below instead of letting
-                # `_run_sweep`'s own strict pull raise and abort the job.
+                # e.g. a transient signed-URL error), skip the sweep and let
+                # this job pass instead of letting `_run_sweep`'s own strict
+                # pull raise and abort it. The tree is still validated by the
+                # "Verification" block, which runs regardless.
                 if [ -f translation_agent.db ]; then
+                  # Ensure all Python dependencies are installed
+                  make
                   echo "On main branch (${MAIN_BRANCH}) -- running sweep"
                   translation-agent \
                     --ak-repo-path "${AK_REPO_PATH}" \
                     --rust-branch "${MAIN_BRANCH}"
                 else
-                  echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep, running 'make verify' only"
+                  echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep (the Verification block still runs 'make verify')"
                 fi
               elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 # The prologue's `artifact pull ... || true` lands the DB at
                 # repo-root `translation_agent.db`. If the artifact does not
                 # exist yet (no DB), skip the translation-agent cascade and
-                # fall through to the `make verify` below -- a PR build with
-                # no orchestrator state to act on still validates the tree.
+                # let this job pass -- a PR build with no orchestrator state
+                # to act on is still validated by the "Verification" block.
                 if [ -f translation_agent.db ]; then
+                  # Ensure all Python dependencies are installed
+                  make
                   echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
                   translation-agent \
                     --ak-repo-path "${AK_REPO_PATH}" \
                     --pr "${SEMAPHORE_GIT_PR_NUMBER}"
                 else
-                  echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade, running 'make verify' only"
+                  echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade (the Verification block still runs 'make verify')"
                 fi
               else
                 echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
               fi
-              echo "PR build -- running 'make verify' directly in Semaphore env"
-              make verify
+
   - name: "R2 Code Review"
-    dependencies: []
+    # Sequenced after the agent block: on a PR at status 3 the cascade runs
+    # the implementation step and pushes commits to this very PR, so a
+    # concurrent review would read a half-written diff.
+    dependencies: ["Run translation-agent"]
     run:
       # run on all pull requests except changes in `/.deployed-versions/`
       when: "pull_request =~ '.+' and change_in('/', {exclude: ['/.deployed-versions/']})"
@@ -136,6 +163,20 @@ blocks:
           commands:
             # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
             - r2 code-review --verbose --timeout=15m || true
+
+  - name: "Verification"
+    # No `run: when:` -- build/lint/test validation applies to every build
+    # (main-branch pushes included), matching the unconditional `make verify`
+    # this replaces.
+    dependencies: ["Run translation-agent"]
+    task:
+      jobs:
+        - name: "make verify"
+          commands:
+            # Runs in the Semaphore env against the checked-out tree, as
+            # opposed to the `make verify` the agent runs inside its own
+            # sandboxed worktree during the implementation step.
+            - make verify
 
 promotions:
   - name: Approve plan and implement
