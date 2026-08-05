@@ -976,6 +976,26 @@ mod tests {
         assert_eq!(message, error.message());
     }
 
+    /// Build the `(partition, offset)` map Java spells as an anonymous `HashMap`
+    /// subclass, e.g. `MockProducerTest.java:403-408`.
+    ///
+    /// Java writes `new OffsetAndMetadata(42L, null)`; Rust's `metadata` is a
+    /// non-nullable `String`, so `OffsetAndMetadata::new(offset)` — metadata `""`,
+    /// Java's own one-arg default — is the closest analogue. Every expected and
+    /// actual value below is built through this one helper, so the equality
+    /// comparisons are the comparisons Java makes.
+    fn offsets(entries: &[(i32, i64)]) -> HashMap<TopicPartition, OffsetAndMetadata> {
+        entries
+            .iter()
+            .map(|&(partition, offset)| {
+                (
+                    TopicPartition::new(TOPIC.to_string(), partition),
+                    OffsetAndMetadata::new(offset).expect("offset must be non-negative"),
+                )
+            })
+            .collect()
+    }
+
     /// Assert `result` failed the way Java's `ProducerFencedException` does.
     ///
     /// `MockProducer` raises it with exactly one message, from `verifyNotFenced`
@@ -1095,20 +1115,7 @@ mod tests {
     // list as it does. The list is replaced by the standard test-accounting block
     // once it is empty.
     //
-    //   - shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled
-    //   - shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled
-    //   - shouldDropMessagesOnAbortIfTransactionsAreEnabled
-    //   - shouldThrowOnAbortForNonAutoCompleteIfTransactionsAreEnabled
-    //   - shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled
-    //   - shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled
     //   - shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction
-    //   - shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata
-    //   - shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata
-    //   - shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction
-    //   - shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled
-    //   - shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled
-    //   - shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled
-    //   - shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactionsAreEnabled
     //
     // -----------------------------------------------------------------------
 
@@ -1601,6 +1608,338 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Record staging: published on commit, dropped on abort
+    // -----------------------------------------------------------------------
+
+    /// Translated from
+    /// `MockProducerTest.shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled`
+    /// (Java 310).
+    #[tokio::test]
+    async fn should_publish_messages_only_after_commit_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        producer.send(record1()).await.unwrap();
+        producer.send(record2()).await.unwrap();
+
+        assert!(producer.history().is_empty());
+
+        producer.commit_transaction().await.unwrap();
+
+        assert_eq!(vec![record1(), record2()], producer.history());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled`
+    /// (Java 330).
+    #[tokio::test]
+    async fn should_flush_on_commit_for_non_auto_complete_if_transactions_are_enabled() {
+        let producer = build_mock_producer(false);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let md1 = producer.send(record1()).await.unwrap();
+        let md2 = producer.send(record2()).await.unwrap();
+
+        assert!(!md1.is_done());
+        assert!(!md2.is_done());
+
+        producer.commit_transaction().await.unwrap();
+
+        assert!(md1.is_done());
+        assert!(md2.is_done());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldDropMessagesOnAbortIfTransactionsAreEnabled` (Java 348).
+    #[tokio::test]
+    async fn should_drop_messages_on_abort_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.send(record1()).await.unwrap();
+        producer.send(record2()).await.unwrap();
+        producer.abort_transaction().await.unwrap();
+        assert!(producer.history().is_empty());
+
+        producer.begin_transaction().unwrap();
+        producer.commit_transaction().await.unwrap();
+        assert!(producer.history().is_empty());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnAbortForNonAutoCompleteIfTransactionsAreEnabled`
+    /// (Java 364).
+    ///
+    /// The Java name says "shouldThrow"; the body asserts the opposite — the abort
+    /// succeeds and flushes the pending send. The name is kept as Java spells it
+    /// (as with `shouldNotBeFlushedAfterFlush`) and the assertions follow the body.
+    #[tokio::test]
+    async fn should_throw_on_abort_for_non_auto_complete_if_transactions_are_enabled() {
+        let producer = build_mock_producer(false);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let md1 = producer.send(record1()).await.unwrap();
+        assert!(!md1.is_done());
+
+        producer.abort_transaction().await.unwrap();
+        assert!(md1.is_done());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled`
+    /// (Java 377).
+    #[tokio::test]
+    async fn should_preserve_committed_messages_on_abort_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.send(record1()).await.unwrap();
+        producer.send(record2()).await.unwrap();
+        producer.commit_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.abort_transaction().await.unwrap();
+
+        assert_eq!(vec![record1(), record2()], producer.history());
+    }
+
+    // -----------------------------------------------------------------------
+    // Consumer group offset staging
+    // -----------------------------------------------------------------------
+
+    /// Translated from
+    /// `MockProducerTest.shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`
+    /// (Java 397).
+    #[tokio::test]
+    async fn should_publish_consumer_group_offsets_only_after_commit_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let group1 = "g1";
+        let group1_commit = offsets(&[(0, 42), (1, 73)]);
+        let group2 = "g2";
+        let group2_commit = offsets(&[(0, 101), (1, 21)]);
+        producer
+            .send_offsets_to_transaction(group1_commit.clone(), group_metadata(group1))
+            .await
+            .unwrap();
+        producer
+            .send_offsets_to_transaction(group2_commit.clone(), group_metadata(group2))
+            .await
+            .unwrap();
+
+        assert!(producer.consumer_group_offsets_history().is_empty());
+
+        let expected: ConsumerGroupOffsets =
+            HashMap::from([(group1.to_string(), group1_commit), (group2.to_string(), group2_commit)]);
+
+        producer.commit_transaction().await.unwrap();
+        assert_eq!(vec![expected], producer.consumer_group_offsets_history());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
+    /// (Java 438).
+    #[tokio::test]
+    async fn should_ignore_empty_offsets_when_send_offsets_to_transaction_by_group_metadata() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+        producer
+            .send_offsets_to_transaction(HashMap::new(), group_metadata("groupId"))
+            .await
+            .unwrap();
+        assert!(!producer.sent_offsets());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
+    /// (Java 447).
+    #[tokio::test]
+    async fn should_add_offsets_when_send_offsets_to_transaction_by_group_metadata() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        assert!(!producer.sent_offsets());
+
+        let group_commit = offsets(&[(0, 42)]);
+        producer
+            .send_offsets_to_transaction(group_commit, group_metadata("groupId"))
+            .await
+            .unwrap();
+        assert!(producer.sent_offsets());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction`
+    /// (Java 464).
+    #[tokio::test]
+    async fn should_reset_sent_offsets_flag_only_when_beginning_new_transaction() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        assert!(!producer.sent_offsets());
+
+        let group_commit = offsets(&[(0, 42)]);
+        producer
+            .send_offsets_to_transaction(group_commit.clone(), group_metadata("groupId"))
+            .await
+            .unwrap();
+        producer.commit_transaction().await.unwrap(); // commit should not reset "sentOffsets"
+        assert!(producer.sent_offsets());
+
+        producer.begin_transaction().unwrap();
+        assert!(!producer.sent_offsets());
+
+        producer
+            .send_offsets_to_transaction(group_commit, group_metadata("groupId"))
+            .await
+            .unwrap();
+        producer.commit_transaction().await.unwrap(); // commit should not reset "sentOffsets"
+        assert!(producer.sent_offsets());
+
+        producer.begin_transaction().unwrap();
+        assert!(!producer.sent_offsets());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`
+    /// (Java 492).
+    ///
+    /// The two calls for the same group merge, and partition 1's offset moves from
+    /// 73 to 101 — Java's `putAll` semantics (`MockProducer.java:199`), spelled as
+    /// `HashMap::extend`.
+    #[tokio::test]
+    async fn should_publish_latest_and_cumulative_consumer_group_offsets_only_after_commit_if_transactions_are_enabled()
+    {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let group = "g";
+        let group_commit1 = offsets(&[(0, 42), (1, 73)]);
+        let group_commit2 = offsets(&[(1, 101), (2, 21)]);
+        producer
+            .send_offsets_to_transaction(group_commit1, group_metadata(group))
+            .await
+            .unwrap();
+        producer
+            .send_offsets_to_transaction(group_commit2, group_metadata(group))
+            .await
+            .unwrap();
+
+        assert!(producer.consumer_group_offsets_history().is_empty());
+
+        let expected: ConsumerGroupOffsets =
+            HashMap::from([(group.to_string(), offsets(&[(0, 42), (1, 101), (2, 21)]))]);
+
+        producer.commit_transaction().await.unwrap();
+        assert_eq!(vec![expected], producer.consumer_group_offsets_history());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled`
+    /// (Java 529).
+    #[tokio::test]
+    async fn should_drop_consumer_group_offsets_on_abort_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let group = "g";
+        let group_commit = offsets(&[(0, 42), (1, 73)]);
+        producer
+            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .await
+            .unwrap();
+        producer.abort_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.commit_transaction().await.unwrap();
+        assert!(producer.consumer_group_offsets_history().is_empty());
+
+        producer.begin_transaction().unwrap();
+        producer
+            .send_offsets_to_transaction(group_commit, group_metadata(group))
+            .await
+            .unwrap();
+        producer.abort_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.commit_transaction().await.unwrap();
+        assert!(producer.consumer_group_offsets_history().is_empty());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled`
+    /// (Java 558).
+    #[tokio::test]
+    async fn should_preserve_offsets_from_commit_by_group_id_on_abort_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let group = "g";
+        let group_commit = offsets(&[(0, 42), (1, 73)]);
+        producer
+            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .await
+            .unwrap();
+        producer.commit_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.abort_transaction().await.unwrap();
+
+        let expected: ConsumerGroupOffsets = HashMap::from([(group.to_string(), group_commit)]);
+
+        assert_eq!(vec![expected], producer.consumer_group_offsets_history());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactionsAreEnabled`
+    /// (Java 583).
+    ///
+    /// The load-bearing case for the `mem::take` in `commit_transaction`: the map
+    /// published by the first commit must survive the second transaction's abort,
+    /// which `clear()`s the (now separate) staging map.
+    #[tokio::test]
+    async fn should_preserve_offsets_from_commit_by_group_metadata_on_abort_if_transactions_are_enabled() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        let group = "g";
+        let group_commit = offsets(&[(0, 42), (1, 73)]);
+        producer
+            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .await
+            .unwrap();
+        producer.commit_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+
+        let group2 = "g2";
+        let group_commit2 = offsets(&[(2, 53), (3, 84)]);
+        producer
+            .send_offsets_to_transaction(group_commit2, group_metadata(group2))
+            .await
+            .unwrap();
+        producer.abort_transaction().await.unwrap();
+
+        let expected: ConsumerGroupOffsets = HashMap::from([(group.to_string(), group_commit)]);
+
+        assert_eq!(vec![expected], producer.consumer_group_offsets_history());
+    }
+
+    // -----------------------------------------------------------------------
     // Additional unit tests
     // -----------------------------------------------------------------------
 
@@ -1828,5 +2167,160 @@ mod tests {
     fn test_error_next_no_pending() {
         let producer = build_mock_producer(false);
         assert!(!producer.error_next(KafkaError::new(Errors::UnknownServerError)));
+    }
+
+    /// Tests `uncommitted_records` and `uncommitted_offsets`, the two staging
+    /// accessors `MockProducerTest` never calls — `uncommittedRecords`
+    /// (`MockProducer.java:471`) and `uncommittedOffsets` (`:483`) appear zero
+    /// times in `MockProducerTest.java`; their Java callers are Kafka Streams
+    /// tests, out of scope. Covered here so the accessors are not untested public
+    /// API.
+    #[tokio::test]
+    async fn test_uncommitted_accessors() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        assert!(producer.uncommitted_records().is_empty());
+        assert!(producer.uncommitted_offsets().is_empty());
+
+        producer.send(record1()).await.unwrap();
+        let group_commit = offsets(&[(0, 42)]);
+        producer
+            .send_offsets_to_transaction(group_commit.clone(), group_metadata(GROUP_ID))
+            .await
+            .unwrap();
+
+        assert_eq!(vec![record1()], producer.uncommitted_records());
+        assert_eq!(
+            HashMap::from([(GROUP_ID.to_string(), group_commit)]) as ConsumerGroupOffsets,
+            producer.uncommitted_offsets()
+        );
+
+        // Both are drained by the commit that publishes them.
+        producer.commit_transaction().await.unwrap();
+        assert!(producer.uncommitted_records().is_empty());
+        assert!(producer.uncommitted_offsets().is_empty());
+    }
+
+    /// Tests that `clear` empties the four collections and the flag Java's
+    /// `clear()` resets beyond `sent` (`MockProducer.java:490-497`), and that it
+    /// leaves the transaction flags alone — Java resets `sentOffsets` there but
+    /// not `transactionInitialized` / `transactionInFlight`.
+    #[tokio::test]
+    async fn test_clear_resets_staging_but_not_transaction_flags() {
+        let producer = build_mock_producer(false);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+        producer.send(record1()).await.unwrap();
+        producer
+            .send_offsets_to_transaction(offsets(&[(0, 42)]), group_metadata(GROUP_ID))
+            .await
+            .unwrap();
+        producer.commit_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.send(record2()).await.unwrap();
+        producer
+            .send_offsets_to_transaction(offsets(&[(1, 73)]), group_metadata(GROUP_ID))
+            .await
+            .unwrap();
+
+        assert!(!producer.history().is_empty());
+        assert!(!producer.uncommitted_records().is_empty());
+        assert!(!producer.consumer_group_offsets_history().is_empty());
+        assert!(!producer.uncommitted_offsets().is_empty());
+        assert!(producer.sent_offsets());
+        assert!(!producer.flushed());
+
+        producer.clear();
+
+        assert!(producer.history().is_empty());
+        assert!(producer.uncommitted_records().is_empty());
+        assert!(producer.consumer_group_offsets_history().is_empty());
+        assert!(producer.uncommitted_offsets().is_empty());
+        assert!(!producer.sent_offsets());
+        assert!(producer.flushed());
+
+        // Untouched by `clear()`, so the open transaction can still be committed.
+        assert!(producer.transaction_initialized());
+        assert!(producer.transaction_in_flight());
+        assert_eq!(1, producer.commit_count());
+        producer.commit_transaction().await.unwrap();
+    }
+
+    /// Tests the five transactional error knobs, Java's public
+    /// `initTransactionException` … `abortTransactionException`
+    /// (`MockProducer.java:79-83`). Like `uncommittedRecords`, no
+    /// `MockProducerTest` method touches them; the four non-transactional knobs
+    /// above are covered the same way.
+    ///
+    /// Each is checked at Java's position in its method: after the `verify*`
+    /// guards, so it does not mask them, and — for `beginTransaction` — before the
+    /// in-flight check (`MockProducer.java:167-173`).
+    #[tokio::test]
+    async fn test_set_transactional_errors() {
+        let injected = || KafkaError::new(Errors::CoordinatorNotAvailable);
+
+        // `auto_complete = false` so a pending send stays pending: that is what
+        // shows the commit / abort errors firing *ahead* of Java's `flush()`
+        // (`MockProducer.java:210-214`, `:236-240`).
+        let producer = build_mock_producer(false);
+
+        // init: installed before the first `init_transactions`, so it fires there.
+        producer.set_init_transaction_error(Some(injected()));
+        assert_eq!(
+            Errors::CoordinatorNotAvailable,
+            producer.init_transactions().await.unwrap_err().error()
+        );
+        // The failed init left the producer uninitialized.
+        assert!(!producer.transaction_initialized());
+        producer.set_init_transaction_error(None);
+        producer.init_transactions().await.unwrap();
+
+        // begin: fires ahead of the "Transaction already started" check.
+        producer.set_begin_transaction_error(Some(injected()));
+        assert_eq!(
+            Errors::CoordinatorNotAvailable,
+            producer.begin_transaction().unwrap_err().error()
+        );
+        assert!(!producer.transaction_in_flight());
+        producer.set_begin_transaction_error(None);
+        producer.begin_transaction().unwrap();
+
+        // send_offsets: fires ahead of the empty-map short circuit, so even an
+        // empty map surfaces it.
+        producer.set_send_offsets_to_transaction_error(Some(injected()));
+        let error = producer
+            .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+            .await
+            .unwrap_err();
+        assert_eq!(Errors::CoordinatorNotAvailable, error.error());
+        producer.set_send_offsets_to_transaction_error(None);
+
+        // commit: fires ahead of the flush, so the pending send stays pending.
+        producer.send(record1()).await.unwrap();
+        producer.set_commit_transaction_error(Some(injected()));
+        assert_eq!(
+            Errors::CoordinatorNotAvailable,
+            producer.commit_transaction().await.unwrap_err().error()
+        );
+        assert!(!producer.flushed(), "a failed commit must not have flushed");
+        assert_eq!(0, producer.commit_count());
+        producer.set_commit_transaction_error(None);
+
+        // abort: same, and the transaction is still in flight afterwards.
+        producer.set_abort_transaction_error(Some(injected()));
+        assert_eq!(
+            Errors::CoordinatorNotAvailable,
+            producer.abort_transaction().await.unwrap_err().error()
+        );
+        assert!(!producer.flushed(), "a failed abort must not have flushed");
+        assert!(producer.transaction_in_flight());
+        producer.set_abort_transaction_error(None);
+
+        producer.commit_transaction().await.unwrap();
+        assert_eq!(1, producer.commit_count());
+        assert_eq!(vec![record1()], producer.history());
     }
 }
