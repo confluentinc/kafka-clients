@@ -2104,8 +2104,31 @@ with real output pasted (three instances this milestone of a check that did not 
 what its prose claimed).
 
 Handed forward: 47 `TransactionManagerTest` methods to Phase 8 (join-proven to need
-accumulator/Sender surface), 18 transactional `SenderTest` rows to Phase 6
+accumulator/Sender surface), the transactional `SenderTest` group to Phase 6
 (rationale-expired evidence), `prepare_transaction`'s public surface to Phase 6.
+
+**Two of those three clauses were amended after Phase 6 (Critic 46 issues 2 and 5);
+recorded here because §9.21 is the natural entry point for "what did Phase 5 owe Phase
+6?" and a refused hand-forward needs its record at *every* site, not just at §Phase-6:**
+
+  - The `SenderTest` group is **15**, not 18. The sentence originally said 18, which was
+    the pre-Phase-5a count: `18 = 3 + 15`, and the block's own pasted derivation at
+    `c59c09d:7547-7549` says so — it covers "the eighteen entries **this group and the 5a
+    group above** cover", with the three 5a ones printing `-`. The header already read
+    `TRANSACTIONAL (15)` at `c59c09d`, i.e. before Phase 6 touched it, so the 15 was
+    Phase 5b's own reclassification and Phase 6 changed disposition only (4 translated,
+    11 to Phase 8) with an empty membership diff.
+  - **`prepare_transaction` was refused, with reason, and the refusal stands.**
+    `KafkaProducer.java` in 4.2 has no such method — only `TransactionManager` does — so
+    there was no public surface to hand forward. See §10.9 deviation 2 for the evidence,
+    and §Phase-6's struck-through spec line for the correction at the point of
+    specification. Critic 46 confirmed it independently and added a stronger argument
+    than Phase 6's own: `KafkaProducerMetrics.java:80` creates a `prepareTxnSensor` but
+    the class has **no `recordPrepareTxn` method**, so the sensor is dead
+    forward-looking KIP-939 scaffolding and implies no 4.2 producer method. The 4.2
+    producer-side 2PC surface is `throwIfInPreparedState` (`:968-976`), which Phase 6
+    translated at all of its Java call sites plus the zero-copy FFI `send` that
+    duplicates `doSend`'s guards.
 
 ---
 
@@ -2762,20 +2785,57 @@ Each is documented at its call site as well.
    `pendingRequests` with the state "touched exclusively by the Sender thread". That
    was true of every caller through Phase 5b and is **false of the class**: Java
    enqueues into it from the application thread through all four blocking public
-   methods — `initTransactions` (`KafkaProducer.java:653`) →
-   `initializeTransactions` (`TransactionManager.java:299`), `commitTransaction`
-   (`:741`) → `beginCommit` (`:353`), `abortTransaction` (`:784`) → `beginAbort`
-   (`:361`), and `sendOffsetsToTransaction` (`:818`) → `sendOffsetsToTransaction`
-   (`:404`), every one of them `synchronized`.
+   methods, every one of them reaching a `synchronized` manager method. Cited at the
+   `transactionManager.<m>(..)` call statement rather than at the enclosing method's
+   declaration, so the line and the method cannot drift apart:
+
+   | `KafkaProducer` method | call statement | line | manager method |
+   |---|---|---|---|
+   | `initTransactions` | `initializeTransactions(false)` | 652 | `:299` |
+   | `sendOffsetsToTransaction` | `sendOffsetsToTransaction(..)` | 740 | `:404` |
+   | `commitTransaction` | `beginCommit()` | 783 | `:353` |
+   | `abortTransaction` | `beginAbort()` | 818 | `:361` |
+
+   Derived, not transcribed:
+
+   ```
+   $ grep -n "transactionManager\.\(initializeTransactions\|sendOffsetsToTransaction\|beginCommit\|beginAbort\)" \
+       kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+   652:        TransactionalRequestResult result = transactionManager.initializeTransactions(false);
+   740:            TransactionalRequestResult result = transactionManager.sendOffsetsToTransaction(offsets, groupMetadata);
+   783:        TransactionalRequestResult result = transactionManager.beginCommit();
+   818:        TransactionalRequestResult result = transactionManager.beginAbort();
+   ```
+
+   An earlier revision of this entry, and of both field docs, paired those four numbers
+   with the method names **rotated one position** (Critic 46 issue 6). Each wrong arrow
+   landed inside a *different* method, and since this entry is the stated evidence for
+   the rules §2 amendment below, the rotation would have been copied into the rules
+   file. Hence the shipped grep.
 
    So it became `Arc<Mutex<PendingRequests>>` shared between `Sender` and
    `KafkaProducer`, kept **outside** the manager exactly as rules §2 requires. Lock
    order is fixed at `pending_requests` → `TransactionManager`, giving the producer a
    full order of deque → `pending_requests` → manager. Rust evaluates a method
    receiver before its arguments, so every site binds the guard to a local first;
-   locking inline would invert it. Java's own unsynchronized writer
-   (`lookupCoordinator`, `:969`) is safe for a different reason — only the Sender
-   calls it — and taking this lock there costs nothing.
+   locking inline would invert it.
+
+   **Java's unsynchronized writer races; the Rust lock closes the race.**
+   `lookupCoordinator(TxnRequestHandler)` (`:969`) is package-private and not
+   `synchronized`, and both its callers are Sender-side (`Sender.java:522`,
+   `TransactionManager.java:1414`) — which is why rules §2 grouped the queue with the
+   Sender-confined state. But single-caller confinement is not safety, and an earlier
+   revision of this entry called that access "safe for a different reason", which proves
+   a weaker claim than it states (Critic 46 issue 7). The site reaches
+   `pendingRequests.add` (`:969` → `:1191` → `enqueueRequest` `:1207` → `:1188`)
+   **without holding the monitor**, while the four public methods above add to the same
+   `PriorityQueue` *under* it. No other lock, nothing `volatile`, `PriorityQueue` not
+   thread-safe: there is **no happens-before edge** between the two writers, so Java has
+   a real race whose narrowness — the app-side calls are rare — is all that keeps it from
+   biting. Confinement was plainly the intent; the public entry points void it. Taking
+   the lock at that site makes the Rust translation **strictly safer than Java**, at no
+   cost (once per transactional request, never per record or batch) — a better argument
+   for the design than declaring the Java race safe.
 
    **Suggested rule amendment:** rules §2's bullet list should move `pendingRequests`
    from the Sender-owned group to a third category, "outside the manager but shared",
@@ -2800,7 +2860,29 @@ Each is documented at its call site as well.
 
    `completeTransaction` likewise appears only inside `throwIfInPreparedState`'s
    message text. Adding either to `KafkaProducer` would violate DoD §7 — a public
-   method with no Java counterpart. What **is** the 4.2 producer-side 2PC surface, and
+   method with no Java counterpart.
+
+   **The metrics hit is dead scaffolding, which independently confirms the refusal —
+   but not for the reason first offered.** Critic 46 argued the sensor implies nothing
+   because "there is no `recordPrepareTxn` method anywhere in the class". That is false:
+   it exists, at `KafkaProducerMetrics.java:124`. The true and stronger fact is that the
+   *recorder has no callers at all*:
+
+   ```
+   $ grep -rn "recordPrepareTxn" kafka/
+   kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/KafkaProducerMetrics.java:124:    public void recordPrepareTxn(long duration) {
+   $ grep -rn "recordInit\b" kafka/clients/src/
+   .../internals/KafkaProducerMetricsTest.java:52:        producerMetrics.recordInit(METRIC_VALUE);
+   .../internals/KafkaProducerMetrics.java:104:    public void recordInit(long duration) {
+   .../producer/KafkaProducer.java:655:        producerMetrics.recordInit(time.nanoseconds() - now);
+   ```
+
+   One occurrence in the whole tree — its own declaration — against `recordInit`'s three
+   (declaration, the `initTransactions` call site, a unit test). A sensor plus a recorder
+   that nothing invokes, not even a test, is exactly what a forward-looking KIP-939
+   artifact looks like, so it implies no 4.2 producer method. Recorded in this corrected
+   form rather than as relayed, because propagating a false supporting fact for a correct
+   conclusion is the failure mode deviation 1's citation grep exists to prevent. What **is** the 4.2 producer-side 2PC surface, and
    what Phase 6 therefore translated, is `throwIfInPreparedState`
    (`KafkaProducer.java:968-976`), wired into both `beginTransaction` (`:677`) and
    `doSend` (`:989`).
@@ -2815,9 +2897,34 @@ Each is documented at its call site as well.
    join: `close(Duration)` returned while the Sender task was still running. Java joins
    unconditionally after force-closing (`KafkaProducer.java:1414-1418`) and CLAUDE.md
    §9.4 requires the translation to actually await the handle. Now awaits
-   `&mut join_handle` (`JoinHandle` is `Unpin`) and restores it. Found by the three
-   `testCloseIsForcedOn*` tests, the only tests that reach the
-   force-close-after-timeout path.
+   `&mut join_handle` (`JoinHandle` is `Unpin`) and restores it.
+
+   **How it was found is not what prevents its return, and an earlier revision of this
+   entry conflated the two** (Critic 46 issue 6). The bug surfaced while reading the
+   force-close path for the three `testCloseIsForcedOn*` translations, which are the only
+   tests that *reach* it — but reaching a path is not pinning it. The Critic traced every
+   assertion in those three and they **pass with the bug reintroduced**: without the
+   restore, `await_sender_handle_indefinitely` finds `None` and returns immediately, so
+   `close` returns *sooner*, `elapsed < 5s` still holds, and the conditional
+   `initTransactions` arm is skipped in both variants because that call is parked on its
+   own `max.block.ms`. Claiming the three as the regression cover was therefore false.
+
+   Two Rust-side tests now pin it, both with no Java counterpart — `ioThread.join()`
+   cannot lose its thread, so the failure mode is specific to `tokio::time::timeout`
+   consuming its future:
+
+     - `test_await_sender_handle_keeps_the_handle_when_it_expires` — the mechanism. An
+       expired wait must leave `sender_handle` `Some`, and the retained handle must still
+       be awaitable rather than a husk.
+     - `test_close_joins_the_sender_after_forcing` — the contract. `close_timeout` must
+       not return before the Sender task has finished, made observable by an exit hook the
+       harness runs on the Sender's own thread after `Sender::run` returns, following a
+       deliberate 300 ms of shutdown cost (instrumentation for the assertion's margin, a
+       `MockClient` shutdown otherwise being instant).
+
+   Mutation-checked by restoring the exact pre-fix line: both new tests fail, and all
+   three `testCloseIsForcedOn*` still pass — which is the Critic's finding reproduced
+   rather than taken on trust.
 
 4. **No metrics.** `producerMetrics.recordInit` / `recordBeginTxn` /
    `recordSendOffsets` / `recordCommitTxn` / `recordAbortTxn`, and the

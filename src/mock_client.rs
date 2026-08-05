@@ -185,6 +185,17 @@ pub struct MockClient {
     /// mirroring the real client's selector. `wakeup()` signals this same
     /// handle so a producer that cached it is actually woken.
     wakeup: Arc<Notify>,
+    /// When set, [`KafkaClient::poll`] advances the caller's clock by its
+    /// `timeout_ms` before returning, mirroring Java's
+    /// `MockClient.advanceTimeDuringPoll` flag (`MockClient.java:74`, `:145-147`,
+    /// applied at `:346-348`).
+    ///
+    /// Java's `MockClient` holds a whole `Time`, so its flag is a plain `boolean` and
+    /// the sleep goes to `time.sleep(timeoutMs)`. This port holds only `Time`'s read
+    /// half ([`Self::time_provider`]), so the write half is injected here instead.
+    /// Threading Java's full `Time` interface through the producer is the larger change
+    /// PLAN §9.19 tracks on its own account; this keeps the addition inside the mock.
+    advance_time_during_poll: Option<Arc<dyn Fn(i64) + Send + Sync>>,
 }
 
 impl MockClient {
@@ -203,7 +214,19 @@ impl MockClient {
             poll_timeouts: Vec::new(),
             active: AtomicBool::new(true),
             wakeup: Arc::new(Notify::new()),
+            advance_time_during_poll: None,
         }
+    }
+
+    /// Makes [`KafkaClient::poll`] advance the caller's clock by its `timeout_ms`
+    /// before returning, so a backoff or throttle a test installs actually expires.
+    ///
+    /// Translated from `MockClient.advanceTimeDuringPoll(boolean)`
+    /// (`MockClient.java:145-147`). `Some(sleep)` is Java's `true` and `None` is its
+    /// `false`; the closure supplies what Java reads off its `Time` field — see the
+    /// [`Self::advance_time_during_poll`] field docs.
+    pub fn advance_time_during_poll(&mut self, sleep: Option<Arc<dyn Fn(i64) + Send + Sync>>) {
+        self.advance_time_during_poll = sleep;
     }
 
     /// Makes [`KafkaClient::least_loaded_node`] report no node while a request is in
@@ -587,6 +610,15 @@ impl KafkaClient for MockClient {
             response.on_complete();
             result.push(response);
         }
+
+        // Java 344-348: "In real life, if poll() is called and we get to the end with no
+        // responses, time equal to timeoutMs would have passed." Applied
+        // unconditionally at the end of the poll, as Java does — not only when `result`
+        // is empty.
+        if let Some(sleep) = &self.advance_time_during_poll {
+            sleep(_timeout);
+        }
+
         result
     }
 

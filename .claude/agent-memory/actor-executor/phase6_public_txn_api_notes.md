@@ -62,8 +62,17 @@ implies before asserting more than Java does.
 **Bug the port had and Java did not:** `await_sender_handle` passed the `JoinHandle` by
 value to `tokio::time::timeout`, so an expiry dropped it and the follow-up
 "indefinite join" had nothing to join — `close(Duration)` returned with the Sender still
-running. Await `&mut handle` (`JoinHandle` is `Unpin`) and put it back. Only the
-force-close-after-timeout tests reach it.
+running. Await `&mut handle` (`JoinHandle` is `Unpin`) and put it back.
+
+**And the sharper lesson, from Critic 46: "the tests that reach the path" is not "the
+tests that pin it".** The three `testCloseIsForcedOn*` translations reach the
+force-close-after-timeout path and were claimed as the bug's cover — but they *pass with
+the bug reintroduced*, because losing the handle makes `close` return **sooner**, and
+every assertion there is an upper bound on elapsed time. When claiming a test covers a
+fix, reintroduce the fix's inverse and watch it fail; a test that merely executes the
+line proves nothing. The pins now are a mechanism test (an expired wait leaves the handle
+`Some`) and a contract test (`close` cannot return before the Sender's exit hook has
+run), both mutation-checked.
 
 **Error assertions:** `KafkaError::error()` returns `UnknownServerError` for the
 non-`Generic` variants (`Timeout(String)`, `RecordTooLarge(String)`, `InvalidTopic(..)`).

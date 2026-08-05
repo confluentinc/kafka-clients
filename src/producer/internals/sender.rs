@@ -40,8 +40,10 @@
 //! `handleCoordinatorReady` (`:568`). The coordinator nodes themselves are
 //! [`Sender`] fields (rules §2); see [`CoordinatorNodes`].
 //!
-//! Still deferred: `sendProduceRequest` does not yet set `transactional_id` /
-//! `use_transaction_v1_version` (`Sender.java:922-936`, Phase 6).
+//! Phase 6 closed the last deferral: `sendProduceRequest` now sets
+//! `transactional_id` (`Sender.java:922-928`) and builds the request through
+//! `ProduceRequest.builder(data, useTransactionV1Version)` (`:930-936`). See
+//! [`Sender::send_produce_request`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -273,17 +275,41 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// Rules §2 additionally calls it "the Sender task's own unshared state". That
     /// held while the only callers were Sender-side, but it is **not** true of the
-    /// class as Java writes it: `KafkaProducer.initTransactions` (`:653`),
-    /// `commitTransaction` (`:741`), `abortTransaction` (`:784`) and
-    /// `sendOffsetsToTransaction` (`:818`) all run on the *application* thread and
-    /// all reach `enqueueRequest` — through `initializeTransactions`
-    /// (`TransactionManager.java:299`), `beginCommit` (`:353`), `beginAbort`
-    /// (`:361`) and `sendOffsetsToTransaction` (`:404`), every one of them
-    /// `synchronized`. So the queue is written from both threads in Java, and an
-    /// `Arc<Mutex<..>>` shared with [`KafkaProducer`] is what makes those four
-    /// public methods expressible. Java's own unsynchronized writer is safe for a
-    /// different reason (only the Sender calls `lookupCoordinator`), and taking
-    /// this lock there costs nothing.
+    /// class as Java writes it. All four of `KafkaProducer`'s blocking transactional
+    /// methods run on the *application* thread and reach `enqueueRequest` through a
+    /// `synchronized` manager method. Cited at the `transactionManager.<m>(..)` call
+    /// statement rather than at the enclosing method's declaration, so the line and
+    /// the method cannot drift apart:
+    ///
+    /// | `KafkaProducer` method | call statement | line | manager method |
+    /// |---|---|---|---|
+    /// | `initTransactions` | `initializeTransactions(false)` | 652 | `:299` |
+    /// | `sendOffsetsToTransaction` | `sendOffsetsToTransaction(..)` | 740 | `:404` |
+    /// | `commitTransaction` | `beginCommit()` | 783 | `:353` |
+    /// | `abortTransaction` | `beginAbort()` | 818 | `:361` |
+    ///
+    /// So the queue is written from both threads in Java, and an `Arc<Mutex<..>>`
+    /// shared with [`KafkaProducer`] is what makes those four public methods
+    /// expressible.
+    ///
+    /// # Java's unsynchronized writer races; this lock closes the race
+    ///
+    /// `lookupCoordinator(TxnRequestHandler)` (`TransactionManager.java:969`) is
+    /// package-private and **not** `synchronized`, and both its callers are
+    /// Sender-side (`Sender.java:522`, `TransactionManager.java:1414`) — which is why
+    /// rules §2 grouped the queue with the Sender-confined state. But being called
+    /// from one thread is not the same as being safe: that site reaches
+    /// `pendingRequests.add` (`:969` → `:1191` → `enqueueRequest` `:1207` → `:1188`)
+    /// **without holding the monitor**, while the four public methods above add to the
+    /// same `PriorityQueue` *under* it. There is no other lock, nothing `volatile`,
+    /// and `PriorityQueue` is not thread-safe, so there is no happens-before edge
+    /// between the two writers: Java has a genuine race whose narrowness — the app-side
+    /// calls are rare — is what keeps it from biting. Confinement was clearly the
+    /// intent; the public entry points void it.
+    ///
+    /// Taking this lock at that site therefore makes the Rust translation **strictly
+    /// safer than Java**, at no cost: it runs once per transactional request, never per
+    /// record or per batch.
     ///
     /// # Lock order: **`pending_requests` → `transaction_manager`**
     ///
@@ -7460,34 +7486,58 @@ mod tests {
     // `SenderTest.java` accounting (`definition-of-done.md` §3)
     //
     // Scope: every `SenderTest` method whose body references a `TransactionManager`.
-    // 51 construct one and `testSenderShouldCloseWhenTransactionManagerInErrorState`
-    // mocks one, for **52**. None could have been translated before Phase 3, which is
-    // when `TransactionManager` first existed, so all 52 are Phase 4's to place.
+    // 52 construct one and `testSenderShouldCloseWhenTransactionManagerInErrorState`
+    // mocks one, for **53**. None could have been translated before Phase 3, which is
+    // when `TransactionManager` first existed, so all 53 are Phase 4's to place.
     //
     // The scope set and the completeness claim are both reproducible, because Critic 44
     // issues 6 and 7 were the two failure modes of asserting them in prose: the
     // hand-assembled list silently lost an entry while claiming to be complete, and the
     // counts written beside the lists drifted from them.
     //
-    //   # the 52 in-scope Java methods
-    //   awk '/^    (public|private) void test/{n=$3; sub(/\(.*/,"",n); next}
-    //        /^    }$/{n=""} /ransactionManager/{if(n!="")print n}' \
-    //     kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals/\
-    //     SenderTest.java | sort -u > /tmp/java.txt        # 52 lines
+    //   # the 53 in-scope Java methods. Blocks are keyed on the **annotation**, not on a
+    //   # `test` name prefix — see "why this program changed" below.
+    //   S=kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals/SenderTest.java
+    //   awk '/^    @(Test|ParameterizedTest|RepeatedTest)/ { ann=1; next }
+    //        ann && /^    (public|private) [A-Za-z<>,\[\]. ]*[a-zA-Z0-9_]+\(/ {
+    //          match($0, /[a-zA-Z0-9_]+\(/); n = substr($0, RSTART, RLENGTH-1); ann=0; next }
+    //        /^    }$/ { n="" }
+    //        /ransactionManager/ { if (n != "") print n }' "$S" \
+    //     | sort -u > /tmp/java.txt        # 53 lines
     //
-    //   # the 54 entries enumerated below (the `name` (line) shape is unique to them)
-    //   grep -oE '`test[A-Za-z]+` \([0-9]+' src/producer/internals/sender.rs \
-    //     | grep -oE 'test[A-Za-z]+' | sort -u > /tmp/rust.txt   # 54 lines
+    //   # the 55 entries enumerated below (the `name` (line) shape is unique to them).
+    //   # `[a-zA-Z][A-Za-z]+` rather than `test[A-Za-z]+`, for the same reason.
+    //   grep -oE '`[a-zA-Z][A-Za-z]+` \([0-9]+' src/producer/internals/sender.rs \
+    //     | grep -oE '`[a-zA-Z][A-Za-z]+`' | tr -d '`' | sort -u > /tmp/rust.txt   # 55 lines
     //
     //   comm -23 /tmp/java.txt /tmp/rust.txt   # empty: nothing in scope is unplaced
     //   comm -13 /tmp/java.txt /tmp/rust.txt   # the 2 out-of-scope entries carried below
     //
+    // WHY THIS PROGRAM CHANGED (Critic 46 issue 3). Both sides used to key on the `test`
+    // name prefix: the Java splitter matched `/^    (public|private) void test/` and the
+    // Rust grep matched `` `test[A-Za-z]+` ``. `SenderTest.java` has exactly one
+    // annotated test whose name does not start with `test` —
+    // `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (507) — and
+    // it was therefore missing from the Java list, from every group below, and from the
+    // count.
+    //
+    // The lesson is not the missing entry, it is that **the `comm -23` check could not
+    // report it**: both sides shared the filter's assumption, so a method the Java
+    // program never emits cannot surface as unplaced. A completeness diff is only as
+    // strong as the *weaker* of its two classifiers, and identical classifiers on both
+    // sides make it vacuous for anything they agree to ignore. The keys now come from
+    // the annotation, which is what actually defines "is a test", and re-running the old
+    // and new programs against each other prints exactly that one name:
+    //
+    //   $ comm -23 /tmp/java.txt /tmp/java_old_prefix_keyed.txt
+    //   senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
+    //
     // Arithmetic, read off the lists rather than maintained beside them:
-    // 33 translated in Phase 4 + 3 translated in Phase 5a + 15 transactional + 3 blocked
-    // = 54 entries, of which 2 are outside the 52 and carried anyway (each says so where
-    // it appears). 54 − 2 = 52, so every in-scope method is placed exactly once and
-    // nothing else is owed. Phase 5a moved three entries between groups and added none,
-    // so the 54 and the 52 are unchanged.
+    // 33 translated in Phase 4 + 3 translated in Phase 5a + 16 transactional + 3 blocked
+    // = 55 entries, of which 2 are outside the 53 and carried anyway (each says so where
+    // it appears). 55 − 2 = 53, so every in-scope method is placed exactly once and
+    // nothing else is owed. Phase 5a moved three entries between groups and added none;
+    // Phase 6 added the one the old program could not see.
     //
     // Line numbers are the `public void` declaration line throughout, here and in the
     // `Translated from` header of every test above. Checking those headers requires
@@ -7562,7 +7612,7 @@ mod tests {
     //     surface — `MockClient::poll_timeouts`, standing in for Java's
     //     `verify(client, times(2)).poll(eq(RETRY_BACKOFF_MS), anyLong())` spy.
     //
-    // TRANSACTIONAL (15) — **4 translated in Phase 6, 11 still owed.** Every marker the
+    // TRANSACTIONAL (16) — **5 translated in Phase 6, 11 still owed.** Every marker the
     // derivation below finds for this group is `beginTransaction`, `beginCommit`,
     // `beginAbort`, `maybeAddPartition`, `AddPartitionsToTxn`, `EndTxn` or
     // `mock(TransactionManager`, and Phase 5b translated all of that surface: not one
@@ -7573,8 +7623,16 @@ mod tests {
     // Phase 6 built the harness they need (`begin_transaction_with_partition`,
     // `add_partitions_to_txn_response`, `end_txn_response`, `assert_pending_end_txn`)
     // and used it for the four whose subject is the shutdown path, i.e. the ones that
-    // could not have been written before `Sender::run`'s transactional tail was live:
+    // could not have been written before `Sender::run`'s transactional tail was live,
+    // plus the one the old scope program could not see:
     //
+    //   507  senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
+    //          -> test_sender_thread_should_not_get_stuck_when_throttled_and_adding_partitions_to_txn
+    //          Needed `MockClient::advance_time_during_poll`, Java's
+    //          `client.advanceTimeDuringPoll(true)` (`SenderTest.java:511`) — a
+    //          `MockClient` method this port had not translated, added here rather than
+    //          deferred, since without something moving the clock the throttle the test
+    //          installs can never expire.
     //   2737 testTransactionalRequestsSentOnShutdown
     //          -> test_transactional_requests_sent_on_shutdown
     //   2898 testIncompleteTransactionAbortOnShutdown
@@ -7704,8 +7762,13 @@ mod tests {
     //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
     //          beginAbort+mock(TransactionManager
     //
-    // The 15, restated in prose so a reader need not run anything. Four of them are
+    // The 16, restated in prose so a reader need not run anything. Five of them are
     // translated (marked); the rest are the owed/blocked list above:
+    //
+    //   `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (507)
+    //     [TRANSLATED] — beginTransaction, maybeAddPartition; the manager is built at
+    //     `SenderTest.java:515`. Absent from every earlier revision of this block; see
+    //     "why this program changed" above.
     //
     //   `testUnresolvedSequencesAreNotFatal` (1534) — beginTransaction + maybeAddPartition
     //     + AddPartitionsToTxn; the manager is built at `SenderTest.java:1537`.
@@ -7867,6 +7930,85 @@ mod tests {
             "the AddPartitionsToTxn response must have landed"
         );
         assert!(!ctx.sender.has_in_flight_request());
+    }
+
+    /// Translated from
+    /// `SenderTest.senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn`
+    /// (Java 507-544).
+    ///
+    /// With the coordinator throttled, `awaitNodeReady` must ride out the throttle and
+    /// no longer: `NetworkClientUtils.awaitReady` clamps its poll timeout to
+    /// `pollDelayMs` (`network_client_utils.rs:92-96`), so the `AddPartitionsToTxn`
+    /// goes out after roughly the throttle and well inside `request.timeout.ms`. The
+    /// bug it guards against is the Sender blocking for the full request timeout
+    /// instead.
+    ///
+    /// Needs `MockClient::advance_time_during_poll` — Java's
+    /// `client.advanceTimeDuringPoll(true)` (`SenderTest.java:511`) — because the
+    /// throttle can only expire if something moves the clock, and the test drives the
+    /// Sender itself so nothing else does.
+    ///
+    /// # Why this method was missing until Critic 46 issue 3
+    ///
+    /// It is the **only** annotated test in `SenderTest.java` whose name does not begin
+    /// with `test`, and the accounting block's splitter keyed on that prefix, so the
+    /// derivation never emitted it and the `comm -23` "nothing in scope is unplaced"
+    /// check could not report it either — both sides of that diff were filtered by the
+    /// same assumption. The splitter now keys on the `@Test` / `@ParameterizedTest`
+    /// annotation instead; see the accounting block.
+    #[tokio::test]
+    async fn test_sender_thread_should_not_get_stuck_when_throttled_and_adding_partitions_to_txn() {
+        let mut ctx = SenderTestContext::transactional();
+        // Java's `client.advanceTimeDuringPoll(true)`, undone by its `finally` block —
+        // which has no analogue here, the context being dropped with the test.
+        let time = Arc::clone(&ctx.time);
+        ctx.sender
+            .client_mut()
+            .advance_time_during_poll(Some(Arc::new(move |ms| time.sleep(ms))));
+
+        run_init_transactions(&mut ctx).await;
+
+        const THROTTLE_TIME_MS: i64 = 1000;
+        let start_time = ctx.time.milliseconds();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.sender.client_mut().throttle(&node, THROTTLE_TIME_MS);
+
+        // Verify the node is throttled a little bit. In real-life Apache Kafka this can
+        // happen as done here by throttling, or with a disconnect / backoff.
+        assert_eq!(
+            ctx.sender.client().poll_delay_ms(&node, start_time),
+            THROTTLE_TIME_MS,
+            "the throttle must be visible as a poll delay"
+        );
+
+        let tp = ctx.tp0.clone();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_transaction()
+            .expect("beginTransaction");
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .maybe_add_partition(&tp)
+            .expect("maybeAddPartition");
+
+        assert!(!ctx.sender.has_in_flight_request());
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(
+            ctx.sender.has_in_flight_request(),
+            "the AddPartitionsToTxn must have been sent despite the throttle"
+        );
+
+        // It should have blocked roughly only the throttle and some change.
+        let total_time_to_run_once = ctx.time.milliseconds() - start_time;
+        assert!(
+            total_time_to_run_once < REQUEST_TIMEOUT as i64,
+            "runOnce blocked for {} ms, which is not less than request.timeout.ms ({} ms) \
+             — the Sender waited out the whole request timeout instead of the throttle",
+            total_time_to_run_once,
+            REQUEST_TIMEOUT
+        );
     }
 
     /// Translated from `SenderTest.testTransactionalRequestsSentOnShutdown`

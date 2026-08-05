@@ -137,11 +137,17 @@ pub struct KafkaProducer<K, V> {
     /// and for the lock order (`pending_requests` → `transaction_manager`) every
     /// site below observes.
     ///
-    /// Java's four transactional entry points on this class
-    /// (`initTransactions` `:653`, `sendOffsetsToTransaction` `:818`,
-    /// `commitTransaction` `:741`, `abortTransaction` `:784`) all enqueue into it
-    /// from the application thread, which is why the producer needs a handle at
-    /// all.
+    /// Java's four transactional entry points on this class all enqueue into it from
+    /// the application thread, which is why the producer needs a handle at all. Cited
+    /// at the `transactionManager.<m>(..)` call statement in each, so the line and the
+    /// method cannot drift apart:
+    ///
+    /// | method | call statement | line |
+    /// |---|---|---|
+    /// | `initTransactions` | `initializeTransactions(false)` | 652 |
+    /// | `sendOffsetsToTransaction` | `sendOffsetsToTransaction(..)` | 740 |
+    /// | `commitTransaction` | `beginCommit()` | 783 |
+    /// | `abortTransaction` | `beginAbort()` | 818 |
     ///
     /// [`Sender::pending_requests`]: crate::producer::internals::Sender
     pending_requests: Arc<Mutex<PendingRequests>>,
@@ -3179,6 +3185,69 @@ mod tests {
             .expect("close is the one allowed operation");
     }
 
+    /// Translated from `KafkaProducerTest.testPartitionAddedToTransaction`
+    /// (Java 2423-2443).
+    ///
+    /// Pins the producer-level transactional wiring: `doSend` must call
+    /// `transactionManager.maybeAddPartition(tp)` after the append succeeds, with the
+    /// partition the accumulator actually chose (`KafkaProducer.java:1040-1046`). The
+    /// send's future must also still be pending — the record is buffered, not sent.
+    ///
+    /// # Deviation: a real manager instead of Mockito's `verify`
+    ///
+    /// Java builds the producer through `KafkaProducerTestContext`, which injects
+    /// `mock(TransactionManager.class)` (`:2601`, passed at `:2672`), and asserts with
+    /// `verify(ctx.transactionManager).maybeAddPartition(topicPartition)`.
+    /// `TransactionManager` is a concrete struct here, so there is nothing to stub; the
+    /// substitute is a **real** transactional manager driven into `IN_TRANSACTION`, and
+    /// the assertion is `is_partition_pending_add` (`TransactionManager.java:571`) — the
+    /// state `maybeAddPartition` exists to produce.
+    ///
+    /// That is strictly stronger than `verify`: Mockito confirms the call was made,
+    /// while this confirms it was made *and* had its effect *and* carried the right
+    /// partition. It is also why this test could be written at all rather than deferred
+    /// like `SenderTest`'s one mock-injected entry, whose stub makes a real method
+    /// *throw* and so has no real-state equivalent.
+    ///
+    /// # Why this method was missing until Critic 46 issue 4
+    ///
+    /// It reaches the transactional path only through the injected mock, so its body
+    /// names no public transactional method and no transactional config key — and the
+    /// accounting block's marker set contained neither `TransactionManager` nor
+    /// `maybeAddPartition`. Both are markers now; see the accounting block.
+    #[tokio::test]
+    async fn test_partition_added_to_transaction() {
+        let mut ctx = TxnProducerContext::transactional();
+        init_transactions(&mut ctx).await;
+        ctx.producer.begin_transaction().expect("beginTransaction");
+
+        let partition = TopicPartition::new(TOPIC.to_string(), 0);
+        assert!(
+            !ctx.transaction_manager.lock().unwrap().is_partition_pending_add(&partition),
+            "nothing may be pending before the send"
+        );
+
+        let record = ProducerRecord::new(
+            TOPIC.to_string(),
+            None,
+            Some(ctx.time.milliseconds()),
+            Some("key".to_string()),
+            Some("value".to_string()),
+            None,
+        )
+        .expect("a valid record");
+        let future = ctx.producer.send(record).await.expect("send");
+
+        assert!(
+            !future.is_done(),
+            "the record is buffered in the accumulator, not sent — nothing has driven the Sender"
+        );
+        assert!(
+            ctx.transaction_manager.lock().unwrap().is_partition_pending_add(&partition),
+            "doSend must call maybeAddPartition with the partition the accumulator chose"
+        );
+    }
+
     /// Translated from
     /// `KafkaProducerTest.testCommitTransactionWithRecordTooLargeException`
     /// (Java 1532-1560).
@@ -3782,6 +3851,19 @@ mod tests {
         extra: &[(&str, &str)],
         prepare: impl FnOnce(&mut MockClient),
     ) -> KafkaProducer<String, String> {
+        spawned_transactional_producer_with_exit_hook(extra, prepare, None)
+    }
+
+    /// As [`spawned_transactional_producer`], but runs `on_exit` on the Sender's own
+    /// thread once `Sender::run` has returned.
+    ///
+    /// This is what makes "did `close` actually join the Sender?" observable — see
+    /// [`test_close_joins_the_sender_after_forcing`].
+    fn spawned_transactional_producer_with_exit_hook(
+        extra: &[(&str, &str)],
+        prepare: impl FnOnce(&mut MockClient),
+        on_exit: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> KafkaProducer<String, String> {
         let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9000".to_string())]);
         for (key, value) in extra {
             props.insert((*key).to_string(), (*value).to_string());
@@ -3874,6 +3956,9 @@ mod tests {
                 .build()
                 .expect("a current-thread runtime for the Sender")
                 .block_on(sender.run());
+            if let Some(on_exit) = on_exit {
+                on_exit();
+            }
         });
 
         KafkaProducer::new(
@@ -3949,6 +4034,96 @@ mod tests {
         }
     }
 
+    // -- Rust-side regression tests, no Java counterpart --------------------
+    //
+    // `close`'s join is a Rust-only failure mode: Java's `ioThread.join()` cannot "lose"
+    // its thread, whereas `tokio::time::timeout(t, handle)` consumes the `JoinHandle` and
+    // drops it on expiry. Both tests below exist to make reverting
+    // `await_sender_handle`'s `&mut` fail — which Critic 46 issue 6 showed the three
+    // translated `testCloseIsForcedOn*` tests do **not**: with the bug restored,
+    // `await_sender_handle_indefinitely` finds `None` and returns *sooner*, so every
+    // assertion in those tests still passes.
+
+    /// The mechanism: an expired [`KafkaProducer::await_sender_handle`] must leave the
+    /// handle in place for [`KafkaProducer::await_sender_handle_indefinitely`] to join.
+    ///
+    /// Java's `close` force-closes and *then* joins unconditionally
+    /// (`KafkaProducer.java:1414-1418`), and CLAUDE.md §9.4 requires the Rust
+    /// translation to await the handle rather than merely signal it. Passing the handle
+    /// by value into `tokio::time::timeout` breaks that silently: `timeout` takes
+    /// ownership and drops it on `Elapsed`.
+    #[tokio::test]
+    async fn test_await_sender_handle_keeps_the_handle_when_it_expires() {
+        let ctx = TxnProducerContext::transactional();
+
+        // A task that outlives the wait below, so the wait is guaranteed to expire.
+        let handle = tokio::task::spawn(async { tokio::time::sleep(Duration::from_secs(30)).await });
+        *ctx.producer.sender_handle.lock().unwrap() = Some(handle);
+
+        let completed = ctx.producer.await_sender_handle(Duration::from_millis(50)).await;
+        assert!(!completed, "the task outlives the wait, so it cannot have completed");
+        assert!(
+            ctx.producer.sender_handle.lock().unwrap().is_some(),
+            "an expired wait must put the handle back — otherwise close's later \
+             unconditional join has nothing to join and returns while the Sender runs"
+        );
+
+        // And the retained handle is still the live one: aborting the task and waiting
+        // again resolves against it, rather than short-circuiting on `None`.
+        ctx.producer.sender_handle.lock().unwrap().as_ref().expect("retained").abort();
+        assert!(
+            ctx.producer.await_sender_handle(Duration::from_secs(5)).await,
+            "the retained handle must be awaitable, not a husk"
+        );
+    }
+
+    /// The contract: `close_timeout` must not return before the Sender has finished.
+    ///
+    /// Same setup as the three `testCloseIsForcedOn*` translations — a transactional
+    /// request left in flight so the graceful wait expires and `close` force-closes —
+    /// but with the Sender's exit made *observable*: the harness runs an exit hook on
+    /// the Sender's own thread once `Sender::run` returns, after a deliberate 300 ms of
+    /// shutdown cost.
+    ///
+    /// The sleep is instrumentation, not padding. Real shutdown work takes time (the
+    /// force-close path fails pending requests, aborts batches, closes the client), but
+    /// with a `MockClient` it is instant, which would leave the assertion racing the task
+    /// instead of observing the join. 300 ms against a 1000 ms graceful timeout is a
+    /// wide, one-sided margin: with the join the flag is necessarily set; without it
+    /// `close` returns ~300 ms early.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_joins_the_sender_after_forcing() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let exited = Arc::clone(&exited);
+            spawned_transactional_producer_with_exit_hook(
+                &[("transactional.id", "this-is-a-transactional-id")],
+                |_client| {},
+                Some(Arc::new(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    exited.store(true, Ordering::SeqCst);
+                })),
+            )
+        };
+
+        let producer = Arc::new(producer);
+        let init = {
+            let producer = Arc::clone(&producer);
+            tokio::task::spawn(async move { producer.init_transactions().await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        producer.close_timeout(Duration::from_millis(1000)).await.expect("close");
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "close returned before the Sender task finished: the graceful wait expired, \
+             so close force-closed and must then have joined the handle \
+             (KafkaProducer.java:1414-1418, CLAUDE.md §9.4)"
+        );
+
+        init.abort();
+    }
+
     /// Translated from `KafkaProducerTest.testTransactionalMethodThrowsWhenSenderClosed`
     /// (Java 2162-2179).
     #[tokio::test]
@@ -4014,10 +4189,36 @@ mod tests {
     // =====================================================================
     // PHASE-6 TEST ACCOUNTING — the transactional `KafkaProducerTest` methods
     //
-    // SCOPE CRITERION. A `KafkaProducerTest.java` method is in scope for Phase 6 iff
-    // its body (or a helper it calls) mentions one of the five public transactional
-    // methods, one of the three transactional config keys, or the
-    // `verifyInvalidGroupMetadata` helper. That is the marker set below.
+    // SCOPE CRITERION. A `KafkaProducerTest.java` method is in scope for Phase 6 iff its
+    // body (or a helper it calls) mentions one of the five public transactional methods,
+    // `TRANSACTIONAL_ID_CONFIG`, `TransactionManager`, `maybeAddPartition`, or the
+    // `verifyInvalidGroupMetadata` helper. That is the marker set below, exactly.
+    //
+    // Two corrections to the criterion as first written (Critic 46 issue 4):
+    //
+    //   - It said "one of the **three** transactional config keys" while the marker set
+    //     held one. The narrow *program* was right and the prose wrong: adding
+    //     `ENABLE_IDEMPOTENCE_CONFIG` yields 36 rows and drags in 8 plainly
+    //     non-transactional tests that merely set `enable.idempotence=false`
+    //     (`testMetadataFetch`, `testMetadataExpiry`, `testMetadataTimeoutWith*`,
+    //     `testMetadataWithPartitionOutOfRange`, `testTopicRefreshInMetadata`,
+    //     `testFlushCompleteSendOfInflightBatches`, `shouldNotInvokeFlushInCallback`).
+    //     "Three" described no realizable marker set, so the prose now matches the
+    //     program.
+    //   - `TransactionManager` / `maybeAddPartition` were **missing**, which made every
+    //     mock-injected transactional test invisible. `testPartitionAddedToTransaction`
+    //     (2423) reaches the transactional path only through
+    //     `KafkaProducerTestContext`'s `mock(TransactionManager.class)` (`:2601`, passed
+    //     `:2672`), so it named no marker at all and was absent from the denominator.
+    //     It was also a real coverage gap, not only bookkeeping: `maybe_add_partition`'s
+    //     production call site in this file had no test.
+    //
+    // The classifier lesson generalises, and is the same one the sibling `sender.rs`
+    // block now records: a completeness check is only as strong as the assumption its
+    // classifier makes, and when the Java side and the Rust side share that assumption
+    // the resulting diff is **vacuous** for whatever they agree to ignore. Here the
+    // shared assumption was "a transactional test names a transactional symbol", which a
+    // Mockito-injected test does not.
     //
     // DERIVATION. The splitter counts braces rather than matching a declaration
     // regexp, because several of these bodies contain anonymous classes and lambdas
@@ -4026,7 +4227,8 @@ mod tests {
     //
     //   T=kafka/clients/src/test/java/org/apache/kafka/clients/producer/KafkaProducerTest.java
     //   M='initTransactions,beginTransaction,commitTransaction,abortTransaction,'
-    //   M="$M"'sendOffsetsToTransaction,verifyInvalidGroupMetadata,TRANSACTIONAL_ID_CONFIG'
+    //   M="$M"'sendOffsetsToTransaction,verifyInvalidGroupMetadata,TRANSACTIONAL_ID_CONFIG,'
+    //   M="$M"'TransactionManager,maybeAddPartition'
     //   awk -v MARKERS="$M" '
     //     BEGIN { n = split(MARKERS, m, ","); depth = 0; inm = 0 }
     //     {
@@ -4046,23 +4248,27 @@ mod tests {
     //       }
     //     }' "$T"
     //
-    // It prints **28** rows. `emit` walks `MARKERS` in declaration order, not
-    // `for (k in hard)`, so the output is reproducible on any awk (the sibling blocks
-    // in `sender.rs` / `transaction_manager.rs` record why that matters).
+    // It prints **29** rows. The inline `for (i = 1; i <= n; i++)` walks `MARKERS` in
+    // declaration order rather than `for (k in hard)`, so the output is reproducible on
+    // any awk (the sibling blocks in `sender.rs` / `transaction_manager.rs` record why
+    // that matters). An earlier revision credited an `emit` function for that property;
+    // there is none in *this* program — the logic is inline, and `emit` belongs to the
+    // sibling blocks (Critic 46 issue 4).
     //
-    // ARITHMETIC. 28 printed rows = 1 helper (`verifyInvalidGroupMetadata`, 2000 — not
-    // a test method) + 27 test methods, which is the count §Phase-6 states. Those 27
-    // partition with no overlap into
+    // ARITHMETIC. 29 printed rows = 1 helper (`verifyInvalidGroupMetadata`, 2000 — not a
+    // test method) + **28** test methods. §Phase-6 says 27; 28 is the corrected
+    // denominator, the extra being `testPartitionAddedToTransaction` (2423; Critic 46 issue 4).
+    // Those 28 partition with no overlap into
     //
-    //   22 translated here
+    //   23 translated here
     // +  1 not translated, justified (`testNullGroupMetadataInSendOffsets`)
     // +  4 translated in Phase 1, in `producer_config.rs`
-    // = 27.
+    // = 28.
     //
     // Each of the three groups is listed in full below, so the sum can be checked
     // against the lists rather than taken on trust.
     //
-    // TRANSLATED HERE (22 Rust tests):
+    // TRANSLATED HERE (23 Rust tests):
     //   1290 testInitTransactionsResponseAfterTimeout
     //          -> test_init_transactions_response_after_timeout
     //   1329 testInitTransactionTimeout               -> test_init_transaction_timeout
@@ -4098,6 +4304,10 @@ mod tests {
     //          -> test_close_is_forced_on_pending_init_producer_id
     //   2239 testCloseIsForcedOnPendingAddOffsetRequest
     //          -> test_close_is_forced_on_pending_add_offset_request
+    //   2423 testPartitionAddedToTransaction         -> test_partition_added_to_transaction
+    //          The mock-injected one. Translated with a real manager and
+    //          `is_partition_pending_add` in place of Mockito's `verify`; the test's own
+    //          rustdoc argues why that is stronger rather than weaker.
     //
     // NOT TRANSLATED, JUSTIFIED (1):
     //   1944 testNullGroupMetadataInSendOffsets — passes `null` for the
