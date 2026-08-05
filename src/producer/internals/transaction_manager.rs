@@ -760,36 +760,58 @@ impl PendingStateTransition {
 // =========================================================================
 // PHASE-5A METHOD ACCOUNTING (`definition-of-done.md` §2)
 //
-// `TransactionManager.java` declares 91 distinct method names at class level
-// (inner-class methods are indented eight spaces and are excluded; the
-// `TransactionManager` constructor has no return type and so is not counted).
-// After Phase 5a, 83 of the 91 have a Rust `fn`, here or on `Sender` — the four
-// that moved there are named in the "Lock topology" section below. Derivation:
+// `TransactionManager.java` declares **90** distinct method names at class level.
+// After Phase 5a, 82 of the 90 have a Rust `fn`, here or on `Sender` — the four
+// that moved there are named in the "Lock topology" section below.
+//
+// Two exclusions are enforced by the derivation rather than asserted beside it,
+// because Critic 45 issue 4 was exactly the failure of asserting them: an earlier
+// revision claimed the constructor "has no return type and so is not counted" while
+// its regex counted it anyway (the modifier group is `*`, so the engine backtracks
+// to zero repetitions and reads `public` as the return type), and then scored that
+// phantom entry *present* against `fn transaction_manager` — a `#[cfg(test)]`
+// `SenderTestContext` accessor, not a translation.
+//
+//   1. The negative lookahead after the modifier run forces it to consume every
+//      modifier, so a return type **and** a name are both required. A constructor
+//      has only a name and cannot match.
+//   2. Each Rust file is cut at its `#[cfg(test)]` module before the `fn` scan, so
+//      no test-only item can satisfy a production-method claim.
+//
+// Derivation (real output below it):
 //
 //   python3 - <<'PY'
 //   import re
 //   J = ("kafka/clients/src/main/java/org/apache/kafka/clients/producer/"
 //        "internals/TransactionManager.java")
-//   decl = re.compile(r'^    (?:(?:public|private|protected|synchronized|static|'
-//                     r'final)\s+)*[A-Za-z_][A-Za-z0-9_<>,\.\[\]\s]*?\s+'
-//                     r'([a-zA-Z_][A-Za-z0-9_]*)\s*\(')
+//   MODS = r'(?:public|private|protected|synchronized|static|final|abstract)'
+//   decl = re.compile(rf'^    (?:{MODS}\s+)*(?!{MODS}\s)'
+//                     rf'[A-Za-z_][A-Za-z0-9_<>,\.\[\]]*(?:<[^>]*>)?\s+'
+//                     rf'([a-zA-Z_][A-Za-z0-9_]*)\s*\(')
 //   names = set()
 //   for line in open(J):
 //       if any(k in line for k in ('class ', 'enum ', 'interface ')): continue
 //       m = decl.match(line)
 //       if m: names.add(m.group(1))
 //   snake = lambda n: re.sub(r'(?<!^)(?=[A-Z])', '_', n).lower().replace('2_p_c', '2pc')
-//   rust = "".join(open(f).read() for f in
+//   production = lambda f: open(f).read().split("\n#[cfg(test)]\n")[0]
+//   rust = "".join(production(f) for f in
 //                  ("src/producer/internals/transaction_manager.rs",
 //                   "src/producer/internals/sender.rs"))
 //   defs = set(re.findall(r'\bfn ([a-z_0-9]+)\s*[(<]', rust))
-//   print(len(names), sorted(n for n in names if snake(n) not in defs))
+//   missing = sorted(n for n in names if snake(n) not in defs)
+//   print(len(names), len(missing), len(names) - len(missing))
+//   print(missing)
 //   PY
 //
-// It prints `91` and nine names. One of the nine, `is2PCEnabled`, is a
-// snake-conversion artefact: the crate spells it `is_2pc_enabled`, which the naive
-// conversion renders as `is2pc_enabled`. So 91 − 9 + 1 = **83** are present and
-// **8** have no `fn` at all.
+//   90 9 81
+//   ['addPartitionsToTransactionHandler', 'beginCommit', 'beginCompletingTransaction',
+//    'hasPendingOffsetCommits', 'is2PCEnabled', 'maybeUpdateTransactionV2Enabled',
+//    'prepareTransaction', 'sendOffsetsToTransaction', 'txnOffsetCommitHandler']
+//
+// One of the nine, `is2PCEnabled`, is a snake-conversion artefact: the crate spells
+// it `is_2pc_enabled`, which the naive conversion renders as `is2pc_enabled`. So
+// 81 + 1 = **82** are present and **8** have no `fn` at all.
 //
 // Phase 5b owes **nine**: those eight, plus `beginAbort`, which the derivation
 // cannot report because a partial translation still defines the `fn`. Each is owed
@@ -813,8 +835,8 @@ impl PendingStateTransition {
 //   `prepareTransaction` (342) — KIP-939 two-phase commit.
 //
 // Arithmetic, read off the derivation rather than maintained beside it: 9 reported
-// − 1 artefact + 1 unreported (`beginAbort`) = 9 owed; 91 − 9 = 82 fully
-// translated, and `beginAbort`'s guard makes 83 that have a `fn`.
+// − 1 artefact + 1 unreported (`beginAbort`) = 9 owed; 90 − 9 = 81 fully
+// translated, and `beginAbort`'s guard makes 82 that have a `fn`.
 // =========================================================================
 
 /// A class which maintains state for transactions. Also keeps the state necessary to ensure idempotent production.
@@ -6116,7 +6138,7 @@ mod tests {
     //     if (name != "") emit()
     //     match($0, /void [a-zA-Z0-9_]+\(/)
     //     name = substr($0, RSTART+5, RLENGTH-6); line = NR
-    //     delete hard; delete soft; idem = 0; on = 1; next }
+    //     delete hard; soft = 0; idem = 0; on = 1; next }
     //   /^    private / { if (name != "") on = 0 }
     //   on {
     //     if (index($0, "initializeTransactionManager(Optional.empty()") > 0) idem = 1
@@ -6125,9 +6147,34 @@ mod tests {
     //     if (index($0, "maybeAddPartition") > 0 && index($0, "assertThrows") == 0) soft = 1 }
     //   END { if (name != "") emit() }
     //   function emit() { hits = ""
-    //     for (k in hard) hits = hits (hits == "" ? "" : "+") k
-    //     if (!idem && soft) hits = hits (hits == "" ? "" : "+") "maybeAddPartition"
+    //     n = split(MARKERS, m, ",")
+    //     for (i = 1; i <= n; i++) if (m[i] in hard) hits = hits (hits == "" ? "" : "+") ABBREV[m[i]]
+    //     if (!idem && soft) hits = hits (hits == "" ? "" : "+") "mAP"
     //     printf "%s\t%s\t%s\n", line, name, (hits == "" ? "-" : hits) }
+    //   BEGIN {
+    //     ABBREV["beginCommit"]="bC"; ABBREV["beginAbort"]="bA"
+    //     ABBREV["sendOffsetsToTransaction"]="sOT"; ABBREV["transactionContainsPartition"]="tCP"
+    //     ABBREV["isTransactionV2Enabled"]="TV2"; ABBREV["AddPartitionsToTxn"]="AP"
+    //     ABBREV["AddOffsetsToTxn"]="AO"; ABBREV["TxnOffsetCommit"]="TOC"; ABBREV["EndTxn"]="ET"
+    //     ABBREV["assertAbortableError"]="aAE"; ABBREV["assertFatalError"]="aFE"
+    //     ABBREV["verifyProducerFenced"]="vPF"
+    //     ABBREV["verifyProducerFencedForInitProducerId"]="vPFI"
+    //     ABBREV["verifyCommitOrAbortTransactionRetriable"]="vCAR"
+    //     ABBREV["writeTransactionalBatchWithValue"]="wTB"
+    //     ABBREV["prepareGroupMetadataCommit"]="pGM" }
+    //
+    // Two properties of that program are load-bearing and were both wrong in the
+    // revision Critic 45 issue 5 reviewed:
+    //
+    //   - `soft = 0` at the top, **not** `delete soft`. `delete` types the name as an
+    //     array, and the later scalar assignment then aborts with "can't read value of
+    //     soft; it's an array name" on this environment's `awk version 20200816` (BWK
+    //     awk; neither `gawk` nor `mawk` is installed). Three of the five checks below
+    //     printed `0` as a result — the headline 140 / 33 / 107 among them.
+    //   - `emit` walks `MARKERS` in declaration order rather than `for (k in hard)`,
+    //     whose order awk leaves unspecified. Without that, the GROUP B listing below
+    //     is not reproducible across implementations, which matters precisely because
+    //     it is pasted output.
     //
     //   J=kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals/TransactionManagerTest.java
     //   M='beginCommit,beginAbort,sendOffsetsToTransaction,transactionContainsPartition,'
@@ -6135,7 +6182,7 @@ mod tests {
     //   M="$M"'assertAbortableError,assertFatalError,verifyProducerFenced,'
     //   M="$M"'verifyProducerFencedForInitProducerId,verifyCommitOrAbortTransactionRetriable,'
     //   M="$M"'writeTransactionalBatchWithValue,prepareGroupMetadataCommit'
-    //   awk -v MARKERS="$M" -f /tmp/scope.awk "$J" > /tmp/scope.tsv
+    //   awk -v MARKERS="$M" -f /tmp/scope.awk "$J" > /tmp/scope.tsv     # exit 0
     //
     //   # the block splitter must break at `private` members too, or the helpers
     //   # sitting between two tests are absorbed into the earlier one — which
@@ -6145,6 +6192,9 @@ mod tests {
     //   grep -c '^    @ParameterizedTest' "$J"                   # 18   (122+18=140)
     //   awk -F'\t' '$3=="-" && $2!="setup"' /tmp/scope.tsv | wc -l   # 33  = group A
     //   awk -F'\t' '$3!="-"' /tmp/scope.tsv | wc -l                  # 107 = group B
+    //
+    // Real output of all five, run from the repo root on the awk named above:
+    // `awk exit=0`, then `140`, `122`, `18`, `33`, `107`.
     //
     // 33 + 107 = 140, so every method is placed exactly once.
     //
@@ -6229,25 +6279,145 @@ mod tests {
     //   `testFailedInflightBatchAfterEpochBump` (3726) [4]
     //     → sender.rs test_failed_inflight_batch_after_epoch_bump.
     //
-    // GROUP B — owed to Phase 5b (107). Not skipped: each needs a request handler,
-    // an entry point or a Transaction V2 read that Phase 5b adds, and the blocking
-    // identifier is printed per method by the derivation above:
+    // GROUP B — owed to Phase 5b (107). Not skipped: each needs a request handler, an
+    // entry point or a Transaction V2 read that Phase 5b adds. Enumerated inline, as
+    // the Phase-4 accounting does, so every one of the 140 methods has a visible
+    // record rather than only a command that reproduces it — Critic 45 issue 5. This
+    // *is* the derivation's output, reproducible with:
     //
-    //   awk -F'\t' '$3!="-" {print $1, $2, $3}' /tmp/scope.tsv
+    //   awk -F'\t' '$3!="-" {printf "    //   %-4s %-60s %s\n", $1, $2, $3}' /tmp/scope.tsv
     //
-    // The shape of that set, as a histogram over the blocking identifiers (a
-    // method may be blocked by several):
+    // Blocking identifiers, abbreviated as the `ABBREV` table above spells them:
+    // bC beginCommit · bA beginAbort · sOT sendOffsetsToTransaction ·
+    // tCP transactionContainsPartition · TV2 isTransactionV2Enabled ·
+    // AP AddPartitionsToTxn · AO AddOffsetsToTxn · TOC TxnOffsetCommit · ET EndTxn ·
+    // aAE assertAbortableError · aFE assertFatalError · vPF verifyProducerFenced ·
+    // vPFI verifyProducerFencedForInitProducerId ·
+    // vCAR verifyCommitOrAbortTransactionRetriable ·
+    // wTB writeTransactionalBatchWithValue · pGM prepareGroupMetadataCommit ·
+    // mAP maybeAddPartition (the conditional marker).
+    //
+    //   228  testSenderShutdownWithPendingTransactions                    bC+AP+ET+mAP
+    //   249  testEndTxnNotSentIfIncompleteBatches                         bC+tCP+AP+ET+mAP
+    //   304  testHasOngoingTransactionSuccessfulAbort                     bA+tCP+AP+ET+mAP
+    //   328  testHasOngoingTransactionSuccessfulCommit                    bC+tCP+AP+ET+mAP
+    //   352  testHasOngoingTransactionAbortableError                      bA+tCP+AP+ET+mAP
+    //   379  testHasOngoingTransactionFatalError                          tCP+AP+mAP
+    //   400  testMaybeAddPartitionToTransaction                           tCP+AP+mAP
+    //   425  testMaybeAddPartitionToTransactionInTransactionV2            tCP+mAP
+    //   445  testAddPartitionToTransactionOverridesRetryBackoffForConcurrentTransactions tCP+AP+mAP
+    //   464  testAddPartitionToTransactionRetainsRetryBackoffForRegularRetriableError tCP+AP+mAP
+    //   483  testAddPartitionToTransactionRetainsRetryBackoffWhenPartitionsAlreadyAdded tCP+AP+mAP
+    //   532  testIsSendToPartitionAllowedWithPendingPartitionAfterAbortableError mAP
+    //   544  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterAbortableError AP+mAP
+    //   559  testIsSendToPartitionAllowedWithPendingPartitionAfterFatalError mAP
+    //   571  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterFatalError AP+mAP
+    //   586  testIsSendToPartitionAllowedWithAddedPartitionAfterAbortableError AP+mAP
+    //   602  testIsSendToPartitionAllowedWithAddedPartitionAfterFatalError AP+mAP
+    //   881  testBasicTransaction                                         bC+sOT+tCP+AP+AO+TOC+ET+mAP
+    //   934  testTransactionManagerEnablesV2                              bC+tCP+TV2+AP+ET+mAP
+    //   984  testTransactionV2AddPartitionAndOffsets                      bC+sOT+tCP+TOC+ET+mAP
+    //   1034 testTransactionManagerDisablesV2                             TV2+TOC
+    //   1137 testUnsupportedForMessageFormatInTxnOffsetCommit             sOT+AO+TOC+aFE
+    //   1159 testFencedInstanceIdInTxnOffsetCommitByGroupMetadata         sOT+AO+TOC+aAE
+    //   1193 testUnknownMemberIdInTxnOffsetCommitByGroupMetadata          sOT+AO+TOC+aAE
+    //   1226 testIllegalGenerationInTxnOffsetCommitByGroupMetadata        sOT+AO+TOC+aAE
+    //   1351 testTransactionalIdAuthorizationFailureInFindCoordinator     aFE
+    //   1366 testTransactionalIdAuthorizationFailureInInitProducerId      aAE
+    //   1381 testGroupAuthorizationFailureInFindCoordinator               sOT+AO+aAE
+    //   1406 testGroupAuthorizationFailureInTxnOffsetCommit               sOT+AO+TOC+aAE
+    //   1435 testFatalErrorWhenProduceResponseWithInvalidPidMapping       mAP
+    //   1451 testTransactionalIdAuthorizationFailureInAddOffsetsToTxn     sOT+AO+aFE
+    //   1471 testInvalidTxnStateFailureInAddOffsetsToTxn                  sOT+AO+aFE
+    //   1491 testTransactionalIdAuthorizationFailureInTxnOffsetCommit     sOT+AO+TOC+aFE
+    //   1516 testTopicAuthorizationFailureInAddPartitions                 tCP+AP+aAE+mAP
+    //   1553 testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight bC+AP+mAP
+    //   1602 testRecoveryFromAbortableErrorTransactionNotStarted          bC+bA+tCP+AP+ET+mAP
+    //   1648 testRetryAbortTransactionAfterTimeout                        bC+bA+tCP+AP+ET+mAP
+    //   1680 testRetryCommitTransactionAfterTimeout                       bC+bA+tCP+AP+ET+mAP
+    //   1714 testRetryInitTransactionsAfterTimeout                        bC+bA
+    //   1746 testRecoveryFromAbortableErrorTransactionStarted             bC+bA+tCP+AP+ET+mAP
+    //   1799 testRecoveryFromAbortableErrorProduceRequestInRetry          bC+bA+tCP+AP+ET+mAP
+    //   1863 testTransactionalIdAuthorizationFailureInAddPartitions       AP+aFE+mAP
+    //   1879 testInvalidTxnStateInAddPartitions                           AP+aFE+mAP
+    //   1895 testFlushPendingPartitionsOnCommit                           bC+tCP+AP+ET+mAP
+    //   1932 testMultipleAddPartitionsPerForOneProduce                    tCP+AP+mAP
+    //   1979 testRetriableErrors                                          bC+tCP+AP+TOC+ET+mAP
+    //   2028 testProducerFencedExceptionInInitProducerId                  vPF+vPFI
+    //   2033 testInvalidProducerEpochConvertToProducerFencedInInitProducerId vPF+vPFI
+    //   2057 testProducerFencedInAddPartitionToTxn                        AP+vPF
+    //   2062 testInvalidProducerEpochConvertToProducerFencedInAddPartitionToTxn AP+vPF
+    //   2081 testProducerFencedInAddOffSetsToTxn                          AO+vPF
+    //   2086 testInvalidProducerEpochConvertToProducerFencedInAddOffSetsToTxn AO+vPF
+    //   2125 testInvalidProducerEpochConvertToProducerFencedInEndTxn      bC+bA+sOT+AP+ET+mAP
+    //   2155 testInvalidProducerEpochFromProduce                          bA+AP+ET+mAP
+    //   2189 testDisallowCommitOnProduceFailure                           bC+bA+AP+ET+mAP
+    //   2217 testAllowAbortOnProduceFailure                               bA+AP+ET+mAP
+    //   2240 testAbortableErrorWhileAbortInProgress                       bA+AP+ET+mAP
+    //   2270 testCommitTransactionWithUnsentProduceRequest                bC+AP+ET+mAP
+    //   2313 testCommitTransactionWithInFlightProduceRequest              bC+AP+ET+mAP
+    //   2355 testFindCoordinatorAllowedInAbortableErrorState              AP+mAP
+    //   2377 testCancelUnsentAddPartitionsAndProduceOnAbort               bA+ET+mAP
+    //   2398 testAbortResendsAddPartitionErrorIfRetried                   bA+AP+ET+mAP
+    //   2424 testAbortResendsProduceRequestIfRetried                      bA+AP+ET+mAP
+    //   2452 testHandlingOfUnknownTopicPartitionErrorOnAddPartitions      tCP+AP+mAP
+    //   2473 testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit    TOC
+    //   2478 testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit       TOC
+    //   2483 testHandlingOfNetworkExceptionOnTxnOffsetCommit              TOC
+    //   2523 testHandlingOfProducerFencedErrorOnTxnOffsetCommit           TOC
+    //   2528 testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit TOC
+    //   2533 testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit     TOC
+    //   2538 testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit TOC
+    //   2574 shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed tCP+AP+mAP
+    //   2588 shouldNotSendAbortTxnRequestWhenOnlyAddPartitionsRequestFailed bA+AP+mAP
+    //   2605 shouldNotSendAbortTxnRequestWhenOnlyAddOffsetsRequestFailed  bA+sOT+AO
+    //   2624 shouldFailAbortIfAddOffsetsFailsWithFatalError               bA+sOT+AO
+    //   2643 testSendOffsetsWithGroupMetadata                             TOC+pGM
+    //   2666 testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled TOC+aFE+pGM
+    //   2712 testNoDrainWhenPartitionsPending                             mAP
+    //   2746 testAllowDrainInAbortableErrorState                          tCP+AP+mAP
+    //   2775 testRaiseErrorWhenNoPartitionsPendingOnDrain                 AP+mAP
+    //   2811 resendFailedProduceRequestAfterAbortableError                AP+mAP
+    //   2832 testTransitionToAbortableErrorOnBatchExpiry                  tCP+AP+mAP
+    //   2870 testTransitionToAbortableErrorOnMultipleBatchExpiry          tCP+AP+mAP
+    //   2924 testDropCommitOnBatchExpiry                                  bC+bA+tCP+AP+ET+mAP
+    //   2979 testTransitionToFatalErrorWhenRetriedBatchIsExpired          bC+tCP+AP+mAP
+    //   3159 testMaybeResolveSequencesTransactionalProducer               tCP+TV2+AP+wTB+mAP
+    //   3191 testEpochUpdateAfterBumpFromEndTxnResponseInV2               bA+ET+mAP
+    //   3218 testProducerIdAndEpochUpdateAfterOverflowFromEndTxnResponseInV2 bC+ET+mAP
+    //   3269 testAbortTransactionAndReuseSequenceNumberOnError            bA+tCP+AP+ET+mAP
+    //   3325 testAbortTransactionAndResetSequenceNumberOnUnknownProducerId bA+tCP+AP+ET+mAP
+    //   3395 testBumpTransactionalEpochOnAbortableError                   bA+tCP+AP+ET+mAP
+    //   3441 testBumpTransactionalEpochOnUnknownProducerIdError           bA+tCP+AP+ET+mAP
+    //   3488 testBumpTransactionalEpochOnTimeout                          bA+tCP+AP+ET+mAP
+    //   3547 testBumpTransactionalEpochOnRecoverableAddPartitionRequestError bA+AP+mAP
+    //   3567 testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError bA+sOT+AP+AO+ET+mAP
+    //   3695 testRetryAbortTransaction                                    vCAR
+    //   3700 testRetryCommitTransaction                                   vCAR
+    //   3705 testRetryAbortTransactionAfterCommitTimeout                  vCAR
+    //   3710 testRetryCommitTransactionAfterAbortTimeout                  vCAR
+    //   3819 testBackgroundInvalidStateTransitionIsFatal                  bC+bA+sOT
+    //   3841 testForegroundInvalidStateTransitionIsRecoverable            bC+bA+tCP+AP+ET+mAP
+    //   3872 testTransactionAbortableExceptionInInitProducerId            aAE
+    //   3887 testTransactionAbortableExceptionInAddPartitions             AP+aAE+mAP
+    //   3903 testTransactionAbortableExceptionInFindCoordinator           sOT+AO+aAE
+    //   3925 testTransactionAbortableExceptionInEndTxn                    bC+AP+ET+aAE+mAP
+    //   3950 testTransactionAbortableExceptionInAddOffsetsToTxn           sOT+AO+aAE
+    //   3970 testTransactionAbortableExceptionInTxnOffsetCommit           sOT+AO+TOC+aAE
+    //
+    // The same set as a histogram over the blocking identifiers (a method may be
+    // blocked by several):
     //
     //   awk -F'\t' '$3!="-" {n=split($3,m,"+"); for(i=1;i<=n;i++) c[m[i]]++} \
-    //       END {for (k in c) printf "%4d  %s\n", c[k], k}' /tmp/scope.tsv | sort -rn
+    //       END {for (k in c) printf "%4d  %s\n", c[k], k}' /tmp/scope.tsv \
+    //     | sort -k1,1rn -k2,2
     //
-    //     68 maybeAddPartition        61 AddPartitionsToTxn   36 transactionContainsPartition
-    //     36 EndTxn                   30 beginAbort           25 beginCommit
-    //     20 TxnOffsetCommit          19 sendOffsetsToTransaction   18 AddOffsetsToTxn
-    //     13 assertAbortableError      8 assertFatalError      6 verifyProducerFenced
-    //      4 verifyCommitOrAbortTransactionRetriable           3 isTransactionV2Enabled
-    //      2 verifyProducerFencedForInitProducerId             2 prepareGroupMetadataCommit
-    //      1 writeTransactionalBatchWithValue
+    // (`sort -k1,1rn -k2,2` rather than a bare `sort -rn`, so equal counts do not come
+    // back in awk's unspecified hash order.) Real output:
+    //
+    //     68 mAP    61 AP     36 ET     36 tCP    30 bA     25 bC
+    //     20 TOC    19 sOT    18 AO     13 aAE     8 aFE     6 vPF
+    //      4 vCAR    3 TV2     2 pGM     2 vPFI    1 wTB
     //
     // Note `TransactionManagerTest` contains **no** KIP-939 two-phase-commit test
     // in Apache Kafka 4.2: `prepareTransaction`, `preparedTransactionState` and
