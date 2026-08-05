@@ -224,11 +224,21 @@ impl PartialEq for QueuedRequest {
 /// `.claude/rules/producer-transactions.md` §2 and PLAN §6.5 require Java's
 /// `transactionCoordinator` (`TransactionManager.java:137`) and
 /// `consumerGroupCoordinator` (`:138`) to live on the Sender task's own unshared
-/// state: they are non-volatile, and Java's only reader is
-/// `Sender.java:481` while its only writers are `lookupCoordinator` (`:1191`,
-/// itself unsynchronized) and `FindCoordinatorHandler.handleResponse` (`:1693`).
+/// state: they are non-volatile, and every touch is on the Sender thread. In full —
+///
+///   - **Writers**: `lookupCoordinator` (`:1194`, `:1197`, itself unsynchronized)
+///     and `FindCoordinatorHandler.handleResponse` (`:1696`, `:1699`).
+///   - **Readers**: `coordinator(CoordinatorType)` (`:961`, `:963`), whose only
+///     production caller is `Sender.java:481`; **and** `handleCoordinatorReady`
+///     (`:1104-1105`), which reads `transactionCoordinator` as a field rather than
+///     through the accessor.
+///
 /// Single-thread confinement is what makes that safe there, and a plain field on
 /// `Sender` is what makes it safe here.
+///
+/// That second reader is why [`TransactionManager::handle_coordinator_ready`] takes
+/// `&CoordinatorNodes` — it needs the node, and the node is not here. Do not
+/// "simplify" that parameter away.
 ///
 /// So, as with [`PendingRequests`] and [`InFlightBatchPool`], the manager methods
 /// Java implements by touching this state take it as a parameter:
@@ -989,7 +999,11 @@ pub(crate) struct TransactionManager {
     ///     manager field. It runs once per coordinator connection.
     ///
     /// Recorded as a deviation in PLAN §10.7. The coordinator *nodes* do live on
-    /// the `Sender` as §2 requires — `Sender.java:481` is their only reader.
+    /// the `Sender` as §2 requires: both of their readers are Sender-side —
+    /// `coordinator(CoordinatorType)` (Java 961/963), reached from
+    /// `Sender.java:481`, and `handleCoordinatorReady` (Java 1104-1105), which is
+    /// why [`Self::handle_coordinator_ready`] receives them. See
+    /// [`CoordinatorNodes`].
     coordinator_supports_bumping_epoch: bool,
     /// The producer id and epoch of the transaction prepared for a two-phase
     /// commit (Java 148).
@@ -1344,21 +1358,26 @@ impl TransactionManager {
     ///
     /// Phase 4 needs it because `Sender.run`'s shutdown loop calls it at
     /// `Sender.java:273`, inside a `try`/`catch` that force-closes the producer if
-    /// it throws (`:274-278`). For every producer this client can build today the
+    /// it throws (`:274-278`). For a *non*-transactional producer the
     /// `ensureTransactional()` guard is what throws, so translating that guard is
-    /// what makes the shutdown path behave as Java's does; the rest of the body
-    /// (`transitionTo(ABORTING_TRANSACTION)`, `beginCompletingTransaction`, the
-    /// `EndTxn` handler) is Phase 6 and is unreachable while [`Self::new`] refuses
-    /// a transactional id.
+    /// what makes the shutdown path behave as Java's does.
+    ///
+    /// The rest of the body — `transitionTo(ABORTING_TRANSACTION)`,
+    /// `beginCompletingTransaction`, the `EndTxn` handler — is **Phase 5b**, which
+    /// the `9faf0a0` amendment to PLAN §Phase-5 assigns it verbatim among "the entry
+    /// points that construct them". It is now *reachable*, because Phase 5a removed
+    /// Phase 3's guard on constructing the manager with a transactional id, which is
+    /// exactly why the tail returns [`Errors::UnsupportedVersion`] rather than being
+    /// dead code (CLAUDE.md §5).
     ///
     /// # Errors
     ///
     /// [`KafkaError::IllegalState`] on a non-transactional producer, with Java's
-    /// message.
+    /// message; [`Errors::UnsupportedVersion`] on a transactional one, until 5b.
     pub(crate) fn begin_abort(&mut self) -> Result<(), KafkaError> {
         self.ensure_transactional()?;
         Err(KafkaError::unsupported_version(
-            "Aborting a transaction is not yet implemented in this client (Milestone 11, Phase 6).",
+            "Aborting a transaction is not yet implemented in this client (Milestone 11, Phase 5b).",
         ))
     }
 
@@ -5181,6 +5200,20 @@ mod tests {
             &broker_node(),
         )
         .expect("a successful FindCoordinator response is handled");
+        // Java 2019. Asserting on the node is the point of the test — that the
+        // *retry* installs it, and in the TRANSACTION slot. Without this, a retry
+        // that wrote `consumer_group` instead would leave the test green, because
+        // the `InitProducerId` below is resolved through `next_request` directly
+        // rather than through the `Sender` routing that reads `coordinators`.
+        assert_eq!(
+            coordinators.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&broker_node())
+        );
+        assert!(
+            coordinators.coordinator(CoordinatorType::Group).expect("valid type").is_none(),
+            "a TRANSACTION lookup must not populate the GROUP slot"
+        );
+
         let handler = manager.next_request(&mut pending, false).expect("the InitProducerId is queued");
         complete_init_producer_id_with_coordinators(
             &mut manager,
@@ -5229,6 +5262,38 @@ mod tests {
             manager.last_error().expect("recorded").error(),
             Errors::TransactionalIdAuthorizationFailed
         );
+        // Java 1360-1361 asserts on the **`InitProducerId`** result, which is the
+        // object `handleCachedTransactionRequestResult` installed in
+        // `pending_transition` and which only `transitionToFatalError`'s
+        // `pendingTransition.result.fail(exception)` (Java 545-547) can fail. A bare
+        // `is_completed()` would pass whether that slot was failed with the right
+        // error, the wrong error, or merely `done()`.
+        //
+        // The `is_completed()` assertion stays, ahead of the await, so a regression
+        // that stops failing the slot *fails* here instead of parking forever on a
+        // result nothing will ever complete. Java's `assertThrows(.., ::await)` would
+        // hang in the same situation; a fail-fast probe is strictly better and costs
+        // no fidelity, since the await below still pins the error.
+        assert!(
+            init_pid_result.is_completed(),
+            "the fatal transition must fail the pending slot"
+        );
+        assert!(!init_pid_result.is_successful());
+        assert_eq!(
+            init_pid_result
+                .await_result()
+                .await
+                .expect_err("the pending initTransactions failed")
+                .error(),
+            Errors::TransactionalIdAuthorizationFailed
+        );
+
+        // The `FindCoordinator` result is a *different* object — `lookupCoordinator`
+        // builds `FindCoordinatorHandler` with its own `TransactionalRequestResult`
+        // (Java 1655 → `super("FindCoordinator")`) — so these assertions are in
+        // addition to Java's, not a substitute for them. Java holds no reference to
+        // it and so cannot assert on it.
+        assert!(find_coordinator_result.is_completed());
         assert!(!find_coordinator_result.is_successful());
         assert_eq!(
             find_coordinator_result
@@ -5238,9 +5303,6 @@ mod tests {
                 .error(),
             Errors::TransactionalIdAuthorizationFailed
         );
-        // Java asserts on `initPidResult` in the sibling test; the fatal transition
-        // also fails the pending slot, which is the same result object.
-        assert!(init_pid_result.is_completed());
     }
 
     /// The remaining three error arms of

@@ -2352,8 +2352,13 @@ Each is documented at its call site as well.
 10. **`begin_abort` translates only `ensureTransactional()`.** Java's shutdown loop
     (`Sender.java:273`) depends on `beginAbort` *throwing* for a non-transactional
     producer, and force-closes when it does. Translating the guard is what makes the
-    shutdown path behave as Java's; the transactional body is Phase 6 and is
-    unreachable while `TransactionManager::new` refuses a transactional id.
+    shutdown path behave as Java's; ~~the transactional body is Phase 6 and is
+    unreachable while `TransactionManager::new` refuses a transactional id.~~
+    **Corrected in Phase 5a** (Critic 45 issue 2): the body is **Phase 5b**, which the
+    `9faf0a0` amendment to §Phase-5 assigns it verbatim, and it is *reachable*, because
+    Phase 5a removed that guard — which is why its `unsupported_version` is live code
+    rather than dead. The doc comment and the error message both said "Phase 6" until
+    the fixup; the Phase-5a sweep of the deleted guard's comments missed this one.
 
 11. **`network_client_utils::await_ready` takes `&(dyn Fn() -> i64 + Send + Sync)`.**
     `&dyn Fn()` is only `Send` when the trait object is `Sync`, and without the bound
@@ -2389,9 +2394,16 @@ Each is documented at its call site as well.
    must hold the guard regardless because Java's version reads `apiVersions`
    (`:1104`), a manager field. It runs once per coordinator connection.
 
-   The coordinator **nodes** do go to the Sender as §2 requires — `Sender.java:481`
-   is their only reader, and both writers (`lookupCoordinator` `:1191` and
-   `FindCoordinatorHandler.handleResponse` `:1693`) are unsynchronized.
+   The coordinator **nodes** do go to the Sender as §2 requires: both writers
+   (`lookupCoordinator` `:1194`/`:1197` and
+   `FindCoordinatorHandler.handleResponse` `:1696`/`:1699`) are unsynchronized, and
+   both readers are Sender-side — `coordinator(CoordinatorType)` (`:961`, `:963`),
+   whose only production caller is `Sender.java:481`, **and**
+   `handleCoordinatorReady` (`:1104-1105`), which reads `transactionCoordinator` as a
+   field rather than through the accessor. That second reader is why
+   `handle_coordinator_ready` takes `&CoordinatorNodes` (Critic 45 issue 1 — an
+   earlier revision of this entry and of the two doc sites claimed a single reader,
+   which the parameter it justifies already contradicted).
 
 2. **`CoordinatorNodes`**, a `pub(crate)` struct on `Sender` holding the two
    `Option<Node>` slots, with Java's `coordinator(CoordinatorType)` (`:958`)
