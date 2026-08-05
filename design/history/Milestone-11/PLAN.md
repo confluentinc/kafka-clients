@@ -534,6 +534,37 @@ One test stays skipped with justification already written and still valid:
 `shouldThrowClassCastException` (`mock_producer.rs:579–588`) — tests Java type
 erasure, which has no Rust analogue.
 
+**Outcome.** The prediction held: all 40 class-level `MockProducer.java` methods in
+scope landed, and **43 of the 44** named tests with them. `MockProducerTest.java`'s
+55 `@Test` methods now split **53 translated / 2 not applicable**, derived rather
+than asserted in the test accounting block at the end of `mock_producer.rs`.
+
+The 44th, `shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction`
+(`MockProducerTest.java:430`), joins `shouldThrowClassCastException` as the second
+NOT APPLICABLE entry — and **not** for missing surface. Its
+`NullPointerException` is not thrown by the mock at all: it comes from evaluating
+`new ConsumerGroupMetadata(null)` inside the lambda, i.e.
+`ConsumerGroupMetadata.java:41`'s `Objects.requireNonNull(groupId, ..)`, before
+`sendOffsetsToTransaction` is entered — and with `Collections.emptyMap()` for the
+offsets there is no other reachable throw. Rust's
+`ConsumerGroupMetadata::new(impl Into<String>)` cannot receive null, so there is
+nothing to implement (§10.10 deviation 4). The empty-offsets path it incidentally
+exercises is covered by `shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
+(438).
+
+`shouldThrowClassCastException`'s justification was re-checked and stands, with one
+addition: beyond type erasure, the Rust mock holds no serializers to mis-apply.
+
+Two pre-existing defects in `Completion::complete` were fixed here (the error-path
+callback got no metadata where Java passes a −1-filled `RecordMetadata`, and
+`result.done()` preceded the callback instead of following it), and three landed
+translations that were weaker than their Java originals were brought up to them
+(`testMetadataOnException`, and the two closed-producer message assertions). Ten
+`MockProducer.java` methods remain absent — the telemetry / metrics pair, tracked
+as §9.23, blocking **zero** of the 55 tests — plus `partition`, whose absence is
+the standing pre-serialized-bytes design decision. Deviations are recorded in
+§10.10.
+
 ---
 
 ### Phase 8 (N=48) — `TransactionManagerTest` parity sweep + broker integration
@@ -2196,6 +2227,39 @@ Standing rule-update suggestions accumulated for the process: rules §2 on
 
 ---
 
+### 9.23 `MockProducer`'s telemetry and metrics surface is untranslated, because the trait is
+
+**Status:** open. Found in Phase 7 by its method accounting, which is in
+`src/producer/mock_producer.rs` above the struct. **Not a Phase 7 defect** — PLAN
+§Phase-7's scope is the transactional surface, and none of this is transactional.
+
+`MockProducer.java` declares 40 class-level methods; 30 have a Rust `fn` and 10 do
+not. Nine of the ten are one feature pair:
+
+  - `clientInstanceId` (382), `metrics` (400), `registerMetricForSubscription`
+    (589), `unregisterMetricFromSubscription` (594) — these are `Producer`
+    *interface* methods, and the Rust `Producer` trait in `producer_trait.rs` does
+    not declare them. So the gap is in the trait, not in the mock: an impl would
+    have nothing to override. `KafkaProducer` has the same hole.
+  - `disableTelemetry` (366), `injectTimeoutException` (373), `setClientInstanceId`
+    (377), `setMockMetrics` (407), `addedMetrics` (584) — mock-only knobs that exist
+    to drive those four. They only make sense once the four land.
+
+The tenth, `partition` (526), is different and is **not** tracked here: it needs
+`Partitioner` plus the two `Serializer`s, and the Rust producer taking
+pre-serialized bytes is a deliberate crate-wide design decision, stated at
+`MockProducer::new`. Its only cost to test parity is that `testPartitioner`
+(`MockProducerTest.java:86`) is translated in adapted form, which its rustdoc says.
+
+**Cost today: none to Phase 7's test parity.** Each of the nine appears **zero**
+times in `MockProducerTest.java` — the check is in the method accounting block — so
+no Java test is blocked. `KafkaProducerTest`'s telemetry methods are the ones that
+would need them, and they are not in Phases 1-8.
+
+**Fix:** add the four `Producer`-trait methods (`KafkaProducer` first, since it owns
+the real `ClientTelemetryReporter`), then the five mock knobs, then translate the
+`KafkaProducerTest` telemetry group. Sizeable, and orthogonal to transactions.
+
 ## 10. Recorded translation deviations
 
 `definition-of-done.md` §7 requires every deviation from the Java source to be
@@ -3061,3 +3125,64 @@ Not deviations, recorded because a reviewer may read them as such:
     per-method reasons and Phase 8 named as owner, in the accounting block at the end of
     `src/producer/internals/sender.rs`. Two of the eleven are blocked on named missing
     surface (§9.18's split panic, and the one method given `mock(TransactionManager)`).
+
+---
+
+### 10.10 Phase 7 deviations (`MockProducer` transactional surface)
+
+Each is documented at its call site as well.
+
+1. **`ProducerFencedException` loses its wrapper on the `send` path.** Java's fenced
+   `send` throws `KafkaException("MockProducer is fenced.", new
+   ProducerFencedException("Fenced"))` (`MockProducer.java:293-295`) while
+   `verifyNotFenced` throws the bare `ProducerFencedException("MockProducer is
+   fenced.")` (`:256`). `KafkaError` has no cause chain (§10.5 deviation 5), so both
+   collapse to one value: `Errors::ProducerFenced` carrying Java's message. That
+   keeps both halves `shouldThrowOnSendIfProducerGotFenced` asserts —
+   `assertThrows(KafkaException.class, ..)` and `assertInstanceOf(
+   ProducerFencedException.class, e.getCause())`. What is lost is the distinction
+   between the two Java shapes, and `is_api_exception()`, which reports `true` for
+   the flattened value where Java's outer bare `KafkaException` is not an
+   `ApiException`. Preserving the wrapper would need a cause chain on `KafkaError`,
+   crate-wide and out of scope; preserving the code was the more valuable half,
+   since it is what the test checks.
+
+2. **`flush()` moved to the inner type.** Java's `flush()` is `synchronized` and is
+   called from the equally `synchronized` `commitTransaction` (`:214`) and
+   `abortTransaction` (`:240`). A Java monitor is reentrant; `std::sync::Mutex` is
+   not, so the body lives on `MockProducerInner` and runs with the caller's guard
+   already held, with `Producer::flush` as the acquiring entry point. Same for
+   `completeNext` / `errorNext`. No behavioural change: the mock's critical sections
+   contain no `.await`, so nothing is held across a suspend point (CLAUDE.md §9.6.2).
+
+3. **`uncommittedOffsets()` returns a snapshot, not the live map.** Java hands back
+   the field itself (`:484`) — asymmetric with `history()` and
+   `uncommittedRecords()`, which copy. Behind the mutex a reference is not
+   expressible, so the Rust accessor clones. No Java caller mutates the returned
+   map.
+
+4. **`Objects.requireNonNull` guards have no counterpart.** Java's
+   `sendOffsetsToTransaction` opens with `Objects.requireNonNull(groupMetadata)`
+   (`:184`); the parameter is taken by value and is not an `Option`, so a missing
+   metadata is unrepresentable. This is why
+   `shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction`
+   (`MockProducerTest.java:430`) is one of the two NOT APPLICABLE entries in the
+   test accounting block — and note the `NullPointerException` it asserts is not
+   even raised by the mock: it comes from `new ConsumerGroupMetadata(null)` in the
+   lambda, i.e. `ConsumerGroupMetadata.java:41`.
+
+5. **`ConsumerGroupOffsets` type alias.** Spells Java's `Map<String,
+   Map<TopicPartition, OffsetAndMetadata>>` (`:63`, `:68`) once instead of four
+   times. An alias, not a new type, so it adds no struct absent from Java
+   (`definition-of-done.md` §7). Rules §10's sort-for-determinism does not apply:
+   these maps are never serialised, and §10 says explicitly not to order collections
+   that never reach a `write()`.
+
+6. **Three Rust-only tests.** `test_uncommitted_accessors`,
+   `test_clear_resets_staging_but_not_transaction_flags` and
+   `test_set_transactional_errors` cover `uncommittedRecords` (`:471`),
+   `uncommittedOffsets` (`:483`) and the five transactional `*Exception` fields
+   (`:79-83`) — each of which appears **zero** times in `MockProducerTest.java`, its
+   Java callers being Kafka Streams tests (out of scope per §1.1). Added rather than
+   left untested, following the convention the file already had for the four
+   non-transactional `*Exception` knobs.
