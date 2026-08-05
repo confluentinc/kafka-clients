@@ -4387,6 +4387,36 @@ impl TransactionManager {
     /// registered straight into `partitionsInTransaction` — and re-registering one
     /// already there is idempotent, which is why that arm can sit ahead of the
     /// short-circuit.
+    ///
+    /// # Hot-path allocation audit (`definition-of-done.md` §10)
+    ///
+    /// This method is on the send path: `KafkaProducer.doSend` calls it once per
+    /// record. Every branch added by the transactional arm is behind
+    /// `is_transactional()`, so the idempotent path is byte-for-byte what Phase 4
+    /// audited.
+    ///
+    /// For a transactional producer, per record in the steady state:
+    ///
+    ///   - **V1** — the `transaction_contains_partition || is_partition_pending_add`
+    ///     short-circuit returns before touching anything, so two hash lookups and no
+    ///     allocation. The registration arm below it runs once per *partition*, not
+    ///     per record.
+    ///   - **V2** — the arm runs every time, as Java's does: `get_or_create` and the
+    ///     `partitions_in_transaction` insert each hash once and each clone the
+    ///     `TopicPartition`. That clone is an `Arc<str>` refcount bump plus an `i32`,
+    ///     which is the representation CLAUDE.md §11 prescribes precisely so it is
+    ///     not a heap allocation — the set already holds the key, so no bucket is
+    ///     allocated and both clones are dropped again. Java pays the two lookups too
+    ///     (`computeIfAbsent` + `HashSet.add`) and, having references, no refcount
+    ///     traffic.
+    ///
+    /// Guarding the V2 arm on `partitions_in_transaction.contains(..)` would remove
+    /// that traffic, and is deliberately **not** done: `txn_partition_map` has other
+    /// writers (`reset` from the producer-id lifecycle) that
+    /// `partitions_in_transaction` does not, so the two sets can legitimately
+    /// disagree, and a `contains`-guard would then skip a `get_or_create` Java
+    /// performs. Trading a correctness edge for two atomic increments is the wrong
+    /// way round.
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), KafkaError> {
         self.maybe_fail_with_error()?;
         self.throw_if_pending_state("send")?;
