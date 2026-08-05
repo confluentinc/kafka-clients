@@ -15,6 +15,28 @@
 //! Control-record key parsing.
 //!
 //! Translated from `org.apache.kafka.common.record.ControlRecordType`.
+//!
+//! # Method accounting (`definition-of-done.md` §2)
+//!
+//! Java declares five members. Four are translated: `type()`
+//! ([`ControlRecordType::type_id`]), `parseTypeId`, `fromTypeId` and `parse`.
+//!
+//! The fifth, `recordKey()` (Java 78-87), is **not** translated, and it is a write-path
+//! method with no reachable client caller. It builds the `Struct` that *serialises* a
+//! control-record key, and its only call site in the whole Java tree is
+//! `MemoryRecordsBuilder.appendControlRecord` (`MemoryRecordsBuilder.java:614`):
+//!
+//! ```text
+//! $ grep -rn 'recordKey()' kafka/clients/src/main/java/
+//! .../record/MemoryRecordsBuilder.java:614:        Struct keyStruct = type.recordKey();
+//! .../record/ControlRecordType.java:78:    public Struct recordKey() {
+//! ```
+//!
+//! `appendControlRecord` is itself only reached from `appendEndTxnMarker` and the KRaft
+//! leader-change / snapshot writers — broker and controller paths. None is translated,
+//! `appendControlRecord` included, and `EndTransactionMarker` is explicitly out of scope
+//! (`design/history/Milestone-11/PLAN.md` §1.1). A Kafka *client* only ever reads control
+//! records, which is why the parsing half is what this port needs.
 
 use crate::common::record::InvalidRecordError;
 
