@@ -917,24 +917,73 @@ fn next_offset(offsets: &mut HashMap<TopicPartition, i64>, tp: &TopicPartition) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::Errors;
 
     // -----------------------------------------------------------------------
-    // Helper
+    // Fixtures, mirroring `MockProducerTest.java`'s fields (56-64)
     // -----------------------------------------------------------------------
+
+    /// Java's `MockProducerTest.topic` (`MockProducerTest.java:56`).
+    const TOPIC: &str = "topic";
+
+    /// The four `RecordMetadata` fields `testMetadataOnException` inspects
+    /// (`MockProducerTest.java:728-731`): offset, timestamp, serialized key size,
+    /// serialized value size.
+    type ObservedMetadata = (i64, i64, i32, i32);
+
+    /// Java's `MockProducerTest.groupId` (`MockProducerTest.java:60`).
+    const GROUP_ID: &str = "group";
 
     fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, String> {
         ProducerRecord::with_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
+    }
+
+    /// Java's `MockProducerTest.record1` (`MockProducerTest.java:58`). A function
+    /// rather than a field because the tests hand records to `send` by value.
+    fn record1() -> ProducerRecord<String, String> {
+        make_record(TOPIC, "key1", "value1")
+    }
+
+    /// Java's `MockProducerTest.record2` (`MockProducerTest.java:59`).
+    fn record2() -> ProducerRecord<String, String> {
+        make_record(TOPIC, "key2", "value2")
+    }
+
+    /// Java's `MockProducerTest.buildMockProducer(boolean)`
+    /// (`MockProducerTest.java:62`), which passes `Cluster.empty()` and the two
+    /// `MockSerializer`s the Rust mock has no counterpart for (it takes
+    /// pre-serialized bytes — see [`MockProducer::new`]).
+    fn build_mock_producer(auto_complete: bool) -> MockProducer<String, String> {
+        MockProducer::with_auto_complete(auto_complete)
+    }
+
+    /// Java's `new ConsumerGroupMetadata(groupId)`. The Rust constructor carries
+    /// `#[deprecated]`, mirroring Java's `@Deprecated(since = "4.2")`; the tests
+    /// must still exercise it, so the allowance sits at this one call site.
+    #[allow(deprecated)]
+    fn group_metadata(group_id: &str) -> ConsumerGroupMetadata {
+        ConsumerGroupMetadata::new(group_id)
+    }
+
+    /// Assert `result` failed the way Java's `IllegalStateException` does, with
+    /// Java's message text (`definition-of-done.md` §3 — the message is part of
+    /// the contract, so `is_err()` alone is not enough).
+    fn assert_illegal_state<T>(result: Result<T, KafkaError>, message: &str) {
+        let error = result.err().expect("expected an IllegalState error, got Ok");
+        assert!(
+            matches!(error, KafkaError::IllegalState(_)),
+            "expected IllegalState, got {error}"
+        );
+        assert_eq!(message, error.message());
     }
 
     // -----------------------------------------------------------------------
     // Tests translated from MockProducerTest.java
     // -----------------------------------------------------------------------
 
-    /// Translated from `MockProducerTest.testAutoCompleteMock`.
+    /// Translated from `MockProducerTest.testAutoCompleteMock` (Java 73).
     #[tokio::test]
     async fn test_auto_complete_mock() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         let record1 = make_record("topic", "key1", "value1");
 
         let future = producer.send(record1.clone()).await.unwrap();
@@ -952,7 +1001,7 @@ mod tests {
         assert_eq!(0, producer.history().len(), "Clear should erase our history");
     }
 
-    /// Translated from `MockProducerTest.testPartitioner`.
+    /// Translated from `MockProducerTest.testPartitioner` (Java 86).
     ///
     /// Java's test uses a `RoundRobinPartitioner` with cluster metadata.
     /// Since our Rust `MockProducer` doesn't use a partitioner (it uses
@@ -993,10 +1042,10 @@ mod tests {
         producer.close().await.unwrap();
     }
 
-    /// Translated from `MockProducerTest.testManualCompletion`.
+    /// Translated from `MockProducerTest.testManualCompletion` (Java 107).
     #[tokio::test]
     async fn test_manual_completion() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
+        let producer = build_mock_producer(false);
         let record1 = make_record("topic", "key1", "value1");
         let record2 = make_record("topic", "key2", "value2");
 
@@ -1036,21 +1085,6 @@ mod tests {
     // list as it does. The list is replaced by the standard test-accounting block
     // once it is empty.
     //
-    //   - shouldInitTransactions
-    //   - shouldThrowOnInitTransactionIfProducerAlreadyInitializedForTransactions
-    //   - shouldThrowOnBeginTransactionIfTransactionsNotInitialized
-    //   - shouldBeginTransactions
-    //   - shouldThrowOnBeginTransactionsIfTransactionInflight
-    //   - shouldThrowOnSendOffsetsToTransactionIfTransactionsNotInitialized
-    //   - shouldThrowOnSendOffsetsToTransactionTransactionIfNoTransactionGotStarted
-    //   - shouldThrowOnCommitIfTransactionsNotInitialized
-    //   - shouldThrowOnCommitTransactionIfNoTransactionGotStarted
-    //   - shouldCommitEmptyTransaction
-    //   - shouldCountCommittedTransaction
-    //   - shouldNotCountAbortedTransaction
-    //   - shouldThrowOnAbortIfTransactionsNotInitialized
-    //   - shouldThrowOnAbortTransactionIfNoTransactionGotStarted
-    //   - shouldAbortEmptyTransaction
     //   - shouldThrowFenceProducerIfTransactionsNotInitialized
     //   - shouldThrowOnBeginTransactionsIfProducerGotFenced
     //   - shouldThrowOnSendIfProducerGotFenced
@@ -1094,10 +1128,10 @@ mod tests {
     //
     // -----------------------------------------------------------------------
 
-    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerIsClosed`.
+    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerIsClosed` (Java 624).
     #[tokio::test]
     async fn should_throw_on_send_if_producer_is_closed() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.close().await.unwrap();
         let result = producer.send(make_record("topic", "key1", "value1")).await;
         assert!(result.is_err());
@@ -1105,68 +1139,276 @@ mod tests {
         assert!(err.message().contains("MockProducer is already closed"));
     }
 
-    /// Translated from `MockProducerTest.shouldThrowOnFlushProducerIfProducerIsClosed`.
+    /// Translated from `MockProducerTest.shouldThrowOnFlushProducerIfProducerIsClosed` (Java 673).
     #[tokio::test]
     async fn should_throw_on_flush_if_producer_is_closed() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.close().await.unwrap();
         let result = producer.flush().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message().contains("MockProducer is already closed"));
     }
 
-    /// Translated from `MockProducerTest.shouldBeFlushedIfNoBufferedRecords`.
+    /// Translated from `MockProducerTest.shouldBeFlushedIfNoBufferedRecords` (Java 696).
     #[test]
     fn should_be_flushed_if_no_buffered_records() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         assert!(producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords`.
+    /// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords` (Java 702).
     #[tokio::test]
     async fn should_be_flushed_with_auto_complete_if_buffered_records() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.send(make_record("topic", "key1", "value1")).await.unwrap();
         assert!(producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords`.
+    /// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords` (Java 709).
     #[tokio::test]
     async fn should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
+        let producer = build_mock_producer(false);
         producer.send(make_record("topic", "key1", "value1")).await.unwrap();
         assert!(!producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.shouldNotBeFlushedAfterFlush`.
+    /// Translated from `MockProducerTest.shouldNotBeFlushedAfterFlush` (Java 716).
     ///
-    /// Note: The Java test name is misleading — it tests that after flush,
-    /// `flushed()` returns `true` (not `false`). The Rust version matches the
-    /// actual Java assertion: `assertTrue(producer.flushed())`.
+    /// Note: the Java name is misleading — the body asserts that after flush
+    /// `flushed()` returns `true`, not `false`. The name is kept as Java spells it
+    /// (the same call this phase makes for
+    /// `shouldThrowOnAbortForNonAutoCompleteIfTransactionsAreEnabled`, whose name
+    /// is misleading in the same way) and the assertion follows the body.
     #[tokio::test]
-    async fn should_be_flushed_after_flush() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-        producer.send(make_record("topic", "key1", "value1")).await.unwrap();
+    async fn should_not_be_flushed_after_flush() {
+        let producer = build_mock_producer(false);
+        producer.send(record1()).await.unwrap();
         producer.flush().await.unwrap();
         assert!(producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.testMetadataOnException`.
+    /// Translated from `MockProducerTest.testMetadataOnException` (Java 724).
     ///
-    /// Java's version uses a callback to inspect metadata on error. Since our
-    /// Producer trait does not have callbacks, we test that `error_next()`
-    /// causes the future to resolve with the injected error.
+    /// Java asserts on the metadata handed to the send callback. A panic inside
+    /// the callback would be swallowed by the mock, so the four values are
+    /// captured and asserted afterwards rather than in the closure — otherwise a
+    /// callback that never fires, or fires with no metadata, would pass silently.
     #[tokio::test]
     async fn test_metadata_on_exception() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-        let record2 = make_record("topic", "key2", "value2");
+        let producer = build_mock_producer(false);
 
-        let future = producer.send(record2).await.unwrap();
+        let observed: Arc<Mutex<Option<ObservedMetadata>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&observed);
+        let callback: Callback = Box::new(move |metadata, _error| {
+            let metadata = metadata.expect("the callback must receive metadata on the error path");
+            *sink.lock().unwrap() = Some((
+                metadata.offset(),
+                metadata.timestamp(),
+                metadata.serialized_key_size(),
+                metadata.serialized_value_size(),
+            ));
+        });
+
+        let future = producer.send_with_callback(record2(), Some(callback)).await.unwrap();
         let e = KafkaError::illegal_argument("dummy exception");
-        assert!(producer.error_next(e), "Complete the request with an error");
+        assert!(producer.error_next(e), "Complete the second request with an error");
 
+        let (offset, timestamp, key_size, value_size) = observed.lock().unwrap().expect("the callback did not fire");
+        assert_eq!(-1, offset, "Invalid offset");
+        assert_eq!(RecordBatch::NO_TIMESTAMP, timestamp, "Invalid timestamp");
+        assert_eq!(-1, key_size, "Invalid Serialized Key size");
+        assert_eq!(-1, value_size, "Invalid Serialized value size");
+
+        // Java asserts the injected exception is the future's cause; `KafkaError`
+        // has no cause chain, so the message identifies it.
         let result = future.get().await;
-        assert!(result.is_err(), "Expected error");
+        let error = result.expect_err("Something went wrong, expected an error");
+        assert_eq!("dummy exception", error.message());
+    }
+
+    // -----------------------------------------------------------------------
+    // Transaction lifecycle: init / begin / commit / abort state and counts
+    // -----------------------------------------------------------------------
+
+    /// Translated from `MockProducerTest.shouldInitTransactions` (Java 134).
+    #[tokio::test]
+    async fn should_init_transactions() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        assert!(producer.transaction_initialized());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnInitTransactionIfProducerAlreadyInitializedForTransactions`
+    /// (Java 141).
+    #[tokio::test]
+    async fn should_throw_on_init_transaction_if_producer_already_initialized_for_transactions() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        assert_illegal_state(
+            producer.init_transactions().await,
+            "MockProducer has already been initialized for transactions.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnBeginTransactionIfTransactionsNotInitialized`
+    /// (Java 148).
+    #[test]
+    fn should_throw_on_begin_transaction_if_transactions_not_initialized() {
+        let producer = build_mock_producer(true);
+        assert_illegal_state(
+            producer.begin_transaction(),
+            "MockProducer hasn't been initialized for transactions.",
+        );
+    }
+
+    /// Translated from `MockProducerTest.shouldBeginTransactions` (Java 154).
+    #[tokio::test]
+    async fn should_begin_transactions() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+        assert!(producer.transaction_in_flight());
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnBeginTransactionsIfTransactionInflight`
+    /// (Java 162).
+    #[tokio::test]
+    async fn should_throw_on_begin_transactions_if_transaction_inflight() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+        assert_illegal_state(producer.begin_transaction(), "Transaction already started");
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionIfTransactionsNotInitialized`
+    /// (Java 170).
+    ///
+    /// Java passes `null` for the offsets map, relying on the guard firing before
+    /// `offsets.isEmpty()` is reached (`MockProducer.java:194`). A `HashMap`
+    /// parameter is not nullable, so the empty map stands in — and it tests the
+    /// same ordering: were the guard to move below the emptiness check, Java would
+    /// throw `NullPointerException` and this assertion would see `Ok`.
+    #[tokio::test]
+    async fn should_throw_on_send_offsets_to_transaction_if_transactions_not_initialized() {
+        let producer = build_mock_producer(true);
+        assert_illegal_state(
+            producer
+                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .await,
+            "MockProducer hasn't been initialized for transactions.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionTransactionIfNoTransactionGotStarted`
+    /// (Java 176). Java's `null` offsets map becomes the empty map, as in
+    /// `should_throw_on_send_offsets_to_transaction_if_transactions_not_initialized`.
+    #[tokio::test]
+    async fn should_throw_on_send_offsets_to_transaction_transaction_if_no_transaction_got_started() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        assert_illegal_state(
+            producer
+                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .await,
+            "There is no open transaction.",
+        );
+    }
+
+    /// Translated from `MockProducerTest.shouldThrowOnCommitIfTransactionsNotInitialized`
+    /// (Java 183).
+    #[tokio::test]
+    async fn should_throw_on_commit_if_transactions_not_initialized() {
+        let producer = build_mock_producer(true);
+        assert_illegal_state(
+            producer.commit_transaction().await,
+            "MockProducer hasn't been initialized for transactions.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnCommitTransactionIfNoTransactionGotStarted`
+    /// (Java 189).
+    #[tokio::test]
+    async fn should_throw_on_commit_transaction_if_no_transaction_got_started() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        assert_illegal_state(producer.commit_transaction().await, "There is no open transaction.");
+    }
+
+    /// Translated from `MockProducerTest.shouldCommitEmptyTransaction` (Java 196).
+    #[tokio::test]
+    async fn should_commit_empty_transaction() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+        producer.commit_transaction().await.unwrap();
+        assert!(!producer.transaction_in_flight());
+        assert!(producer.transaction_committed());
+        assert!(!producer.transaction_aborted());
+    }
+
+    /// Translated from `MockProducerTest.shouldCountCommittedTransaction` (Java 207).
+    #[tokio::test]
+    async fn should_count_committed_transaction() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+
+        assert_eq!(0, producer.commit_count());
+        producer.commit_transaction().await.unwrap();
+        assert_eq!(1, producer.commit_count());
+    }
+
+    /// Translated from `MockProducerTest.shouldNotCountAbortedTransaction` (Java 218).
+    #[tokio::test]
+    async fn should_not_count_aborted_transaction() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.abort_transaction().await.unwrap();
+
+        producer.begin_transaction().unwrap();
+        producer.commit_transaction().await.unwrap();
+        assert_eq!(1, producer.commit_count());
+    }
+
+    /// Translated from `MockProducerTest.shouldThrowOnAbortIfTransactionsNotInitialized`
+    /// (Java 231).
+    #[tokio::test]
+    async fn should_throw_on_abort_if_transactions_not_initialized() {
+        let producer = build_mock_producer(true);
+        assert_illegal_state(
+            producer.abort_transaction().await,
+            "MockProducer hasn't been initialized for transactions.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnAbortTransactionIfNoTransactionGotStarted`
+    /// (Java 237).
+    #[tokio::test]
+    async fn should_throw_on_abort_transaction_if_no_transaction_got_started() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        assert_illegal_state(producer.abort_transaction().await, "There is no open transaction.");
+    }
+
+    /// Translated from `MockProducerTest.shouldAbortEmptyTransaction` (Java 244).
+    #[tokio::test]
+    async fn should_abort_empty_transaction() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.begin_transaction().unwrap();
+        producer.abort_transaction().await.unwrap();
+        assert!(!producer.transaction_in_flight());
+        assert!(producer.transaction_aborted());
+        assert!(!producer.transaction_committed());
     }
 
     // -----------------------------------------------------------------------
@@ -1189,7 +1431,7 @@ mod tests {
     /// offsets.
     #[tokio::test]
     async fn test_incrementing_offsets() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         let f0 = producer.send(make_record("t", "k", "v0")).await.unwrap();
         let f1 = producer.send(make_record("t", "k", "v1")).await.unwrap();
         let f2 = producer.send(make_record("t", "k", "v2")).await.unwrap();
@@ -1202,7 +1444,7 @@ mod tests {
     /// Tests that sends to different topic-partitions have independent offsets.
     #[tokio::test]
     async fn test_independent_topic_partition_offsets() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         let r1 = ProducerRecord::with_value("t1".to_string(), Some("k".to_string()));
         let r2 = ProducerRecord::with_value("t2".to_string(), Some("k".to_string()));
 
@@ -1221,7 +1463,7 @@ mod tests {
     /// manually set to `null`.
     #[tokio::test]
     async fn test_set_send_error() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.set_send_error(Some(KafkaError::new(Errors::CorruptMessage)));
 
         let result = producer.send(make_record("t", "k", "v")).await;
@@ -1243,7 +1485,7 @@ mod tests {
     /// manually set to `null`.
     #[tokio::test]
     async fn test_set_flush_error() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.set_flush_error(Some(KafkaError::new(Errors::CorruptMessage)));
 
         let result = producer.flush().await;
@@ -1265,7 +1507,7 @@ mod tests {
     /// until manually set to `null`.
     #[tokio::test]
     async fn test_set_partitions_for_error() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.set_partitions_for_error(Some(KafkaError::new(Errors::UnknownTopicOrPartition)));
 
         let result = producer.partitions_for("t").await;
@@ -1287,7 +1529,7 @@ mod tests {
     /// manually set to `null`.
     #[tokio::test]
     async fn test_set_close_error() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.set_close_error(Some(KafkaError::new(Errors::UnknownServerError)));
 
         let result = producer.close().await;
@@ -1337,7 +1579,7 @@ mod tests {
     /// Tests `close_timeout` behaves like `close`.
     #[tokio::test]
     async fn test_close_timeout() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         assert!(!producer.closed());
         producer.close_timeout(Duration::from_secs(5)).await.unwrap();
         assert!(producer.closed());
@@ -1349,7 +1591,7 @@ mod tests {
     /// offset numbering continues after `clear()`.
     #[tokio::test]
     async fn test_clear_preserves_offsets() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         producer.send(make_record("t", "k", "v")).await.unwrap();
         producer.send(make_record("t", "k", "v")).await.unwrap();
 
@@ -1380,7 +1622,7 @@ mod tests {
     /// Tests that `history` returns a clone (modifications don't affect internal state).
     #[tokio::test]
     async fn test_history_returns_clone() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+        let producer = build_mock_producer(true);
         let record = make_record("t", "k", "v");
         producer.send(record).await.unwrap();
 
@@ -1395,7 +1637,7 @@ mod tests {
     /// Tests that `error_next` returns false when no completions are pending.
     #[test]
     fn test_error_next_no_pending() {
-        let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
+        let producer = build_mock_producer(false);
         assert!(!producer.error_next(KafkaError::new(Errors::UnknownServerError)));
     }
 }
