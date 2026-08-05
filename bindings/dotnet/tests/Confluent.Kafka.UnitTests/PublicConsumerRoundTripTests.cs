@@ -23,7 +23,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The public consumer round-trip (PLAN §5.1) exercised end to end through the
-/// <b>public</b> <see cref="MockConsumer"/> / <see cref="IConsumer"/> surface: assign →
+/// <b>public</b> <see cref="AsyncMockConsumer"/> / <see cref="IAsyncConsumer"/> surface: assign →
 /// add records → poll → assert every public field (<see cref="ConsumerRecord.Topic"/> /
 /// <c>Partition</c> / <c>Offset</c> / <c>Timestamp</c> / <see cref="TimestampType"/> /
 /// <c>Key</c> / <c>Value</c> / <c>Headers</c>), incl. the non-ASCII length-delimited
@@ -43,20 +43,20 @@ public sealed class PublicConsumerRoundTripTests
     private const int Partition = 0;
 
     // Assign + seek to offset 0 so the mock poll has a valid position — the canonical
-    // broker-free poll setup, now through the public MockConsumer surface.
-    private static async Task<MockConsumer> ReadyToPoll(string topic = Topic, int partition = Partition)
+    // broker-free poll setup, now through the public AsyncMockConsumer surface.
+    private static async Task<AsyncMockConsumer> ReadyToPoll(string topic = Topic, int partition = Partition)
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         consumer.Assign(new[] { new TopicPartition(topic, partition) });
         await TestTimeout.Run(
-            () => consumer.SeekAsync(new TopicPartition(topic, partition), offset: 0), s_deadline);
+            () => consumer.Seek(new TopicPartition(topic, partition), offset: 0), s_deadline);
         return consumer;
     }
 
     [Fact]
-    public async Task PollAsync_RoundTripsAllPublicFields()
+    public async Task Poll_RoundTripsAllPublicFields()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         byte[] key = Encoding.UTF8.GetBytes("key-1");
         byte[] value = Encoding.UTF8.GetBytes("value-1");
         consumer.AddRecord(Topic, Partition, offset: 42, key, value);
@@ -79,24 +79,24 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_ViaIConsumerInterface_RoundTrips()
+    public async Task Poll_ViaIAsyncConsumerInterface_RoundTrips()
     {
-        // Hold a MockConsumer, pass it as IConsumer (the additive-growth interface).
-        using MockConsumer mock = await ReadyToPoll();
+        // Hold an AsyncMockConsumer, pass it as IAsyncConsumer (the additive-growth interface).
+        using AsyncMockConsumer mock = await ReadyToPoll();
         mock.AddRecord(Topic, Partition, offset: 3, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
-        IConsumer consumer = mock;
-        ConsumerRecords records = await TestTimeoutResult(consumer.PollAsync(s_pollTimeout));
+        IAsyncConsumer consumer = mock;
+        ConsumerRecords records = await TestTimeoutResult(consumer.Poll(s_pollTimeout));
 
         ConsumerRecord record = Assert.Single(records);
         Assert.Equal(3, record.Offset);
     }
 
     [Fact]
-    public async Task PollAsync_NonAsciiTopicAndBytes_RoundTripViaOutLen()
+    public async Task Poll_NonAsciiTopicAndBytes_RoundTripViaOutLen()
     {
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";
-        using MockConsumer consumer = await ReadyToPoll(nonAsciiTopic);
+        using AsyncMockConsumer consumer = await ReadyToPoll(nonAsciiTopic);
         byte[] key = Encoding.UTF8.GetBytes("café-key-Ω");
         byte[] value = Encoding.UTF8.GetBytes("naïve-value-🎉");
         consumer.AddRecord(nonAsciiTopic, Partition, offset: 7, key, value);
@@ -110,9 +110,9 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_TombstoneAndAbsentKey_MapToNull()
+    public async Task Poll_TombstoneAndAbsentKey_MapToNull()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 1, key: null, value: null);
 
         ConsumerRecords records = await Poll(consumer);
@@ -123,9 +123,9 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_EmptyKeyAndValue_MapToEmptyNonNull()
+    public async Task Poll_EmptyKeyAndValue_MapToEmptyNonNull()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 2, key: Array.Empty<byte>(), value: Array.Empty<byte>());
 
         ConsumerRecords records = await Poll(consumer);
@@ -138,9 +138,9 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_MultipleRecords_RoundTripInOrder()
+    public async Task Poll_MultipleRecords_RoundTripInOrder()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         for (int i = 0; i < 5; i++)
         {
             consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes($"k{i}"), Encoding.UTF8.GetBytes($"v{i}"));
@@ -153,9 +153,9 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_Empty_ReturnsNonNullZeroCount()
+    public async Task Poll_Empty_ReturnsNonNullZeroCount()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
 
         ConsumerRecords records = await Poll(consumer);
 
@@ -164,12 +164,12 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_HeaderValueIsByteArray()
+    public async Task Poll_HeaderValueIsByteArray()
     {
-        // Header.Value is byte[]? (PLAN micro-decision A). The MockConsumer's add_record
+        // Header.Value is byte[]? (PLAN micro-decision A). The AsyncMockConsumer's add_record
         // carries no headers (M3/P3 finding), so the reachable broker-free case is the
         // empty Headers collection — assert its byte[]-typed, read-only shape.
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
         ConsumerRecords records = await Poll(consumer);
@@ -187,9 +187,9 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_SetPollError_FaultsWithKafkaException()
+    public async Task Poll_SetPollError_FaultsWithKafkaException()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         consumer.SetPollError("boom");
 
         // Poll already carries the TestTimeout hang guard, so a stall on the FAILURE
@@ -205,9 +205,9 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_SetPollError_IsOneShot_ThenReusable()
+    public async Task Poll_SetPollError_IsOneShot_ThenReusable()
     {
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         consumer.SetPollError("transient");
 
         await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
@@ -217,12 +217,12 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task PollAsync_RecordsErrorsEmpties_Churned_NoCorruption()
+    public async Task Poll_RecordsErrorsEmpties_Churned_NoCorruption()
     {
         // The double-free / leak detector for the owned-result path through the PUBLIC
         // surface: batch _destroy, error handle, and per-op GCHandle each freed exactly
         // once per poll over many iterations.
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
 
         for (int i = 0; i < 100; i++)
         {
@@ -255,7 +255,7 @@ public sealed class PublicConsumerRoundTripTests
         Assert.Equal(0, (int)TimestampType.CreateTime);
         Assert.Equal(1, (int)TimestampType.LogAppendTime);
 
-        using MockConsumer consumer = await ReadyToPoll();
+        using AsyncMockConsumer consumer = await ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 0, null, Encoding.UTF8.GetBytes("v"));
         ConsumerRecord record = Assert.Single(await Poll(consumer));
         Assert.True(Enum.IsDefined(typeof(TimestampType), record.TimestampType));
@@ -264,10 +264,10 @@ public sealed class PublicConsumerRoundTripTests
     // Every awaited poll routes through the TestTimeout hang guard (PLAN §5) so a
     // future stall in the owned-handle bridge or the mock fails the run fast instead
     // of hanging it — mirroring PublicConsumerTfmSmokeTests.Poll.
-    private static async Task<ConsumerRecords> Poll(IConsumer consumer)
+    private static async Task<ConsumerRecords> Poll(IAsyncConsumer consumer)
     {
         ConsumerRecords result = default!;
-        await TestTimeout.Run(async () => result = await consumer.PollAsync(s_pollTimeout), s_deadline);
+        await TestTimeout.Run(async () => result = await consumer.Poll(s_pollTimeout), s_deadline);
         return result;
     }
 

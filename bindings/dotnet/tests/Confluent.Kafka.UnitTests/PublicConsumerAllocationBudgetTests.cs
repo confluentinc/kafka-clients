@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Per-record receive-path allocation budget through the <b>public</b>
-/// <see cref="MockConsumer"/> surface (PLAN §5.6; ffi-marshalling.md §B4,
+/// <see cref="AsyncMockConsumer"/> surface (PLAN §5.6; ffi-marshalling.md §B4,
 /// consumer-threading §27, DoD §10). The <c>byte[]</c> key/value (PLAN micro-decision A)
 /// is the same single copy the copy-out already made — dropping the
 /// <see cref="System.ReadOnlyMemory{T}"/> wrap does NOT increase the budget. Asserts the
@@ -57,7 +57,7 @@ public sealed class PublicConsumerAllocationBudgetTests
     private const long PerRecordBudgetBytes = 1024;
 
     [Fact]
-    public async Task PollAsync_PerRecordAllocation_WithinCopyOutBudget()
+    public async Task Poll_PerRecordAllocation_WithinCopyOutBudget()
     {
         byte[] key = MakeBytes(KeySize, 0xAB);
         byte[] value = MakeBytes(ValueSize, 0xCD);
@@ -84,11 +84,11 @@ public sealed class PublicConsumerAllocationBudgetTests
 
     private static async Task<long> MeasurePoll(int recordCount, byte[] key, byte[] value)
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         try
         {
             consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
-            await consumer.SeekAsync(new TopicPartition(Topic, Partition), offset: 0);
+            await consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
             for (int i = 0; i < recordCount; i++)
             {
                 consumer.AddRecord(Topic, Partition, offset: i, key, value);
@@ -99,7 +99,7 @@ public sealed class PublicConsumerAllocationBudgetTests
             GC.Collect();
 
             long before = GC.GetTotalAllocatedBytes(precise: true);
-            ConsumerRecords records = await consumer.PollAsync(s_pollTimeout);
+            ConsumerRecords records = await consumer.Poll(s_pollTimeout);
             long after = GC.GetTotalAllocatedBytes(precise: true);
 
             Assert.Equal(recordCount, records.Count);

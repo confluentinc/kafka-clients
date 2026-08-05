@@ -24,8 +24,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// The M4/P4a <c>NativeConsumer</c> edits driven through the internal surface: the new
-/// <c>UnsubscribeAsync</c> void wire (<c>Consumer_unsubscribe_async</c>), the
-/// <c>SeekAsync</c> negative-<b>offset</b> precondition (Java-fidelity, PLAN dec. 11),
+/// <c>UnsubscribeWithCallback</c> void wire (<c>Consumer_unsubscribe_async</c>), the
+/// <c>SeekWithCallback</c> negative-<b>offset</b> precondition (Java-fidelity, PLAN dec. 11),
 /// and <c>GroupMetadata()</c> (the full four-field owned-handle read). Every awaited op
 /// runs under a <see cref="TestTimeout"/> hang guard.
 /// </summary>
@@ -52,28 +52,28 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         return config;
     }
 
-    // ---- UnsubscribeAsync (the one new void wire) ----
+    // ---- UnsubscribeWithCallback (the one new void wire) ----
 
     [Fact]
-    public async Task UnsubscribeAsync_OnMock_Completes()
+    public async Task UnsubscribeWithCallback_OnMock_Completes()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        await consumer.SubscribeAsync(ProofTopic());
-        await TestTimeout.Run(() => consumer.UnsubscribeAsync(), s_deadline);
+        await consumer.SubscribeWithCallback(ProofTopic());
+        await TestTimeout.Run(() => consumer.UnsubscribeWithCallback(), s_deadline);
     }
 
     [Fact]
-    public async Task UnsubscribeAsync_WithoutSubscribe_Completes()
+    public async Task UnsubscribeWithCallback_WithoutSubscribe_Completes()
     {
         // Unsubscribing when not subscribed is a no-op that still resolves the Task.
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        await TestTimeout.Run(() => consumer.UnsubscribeAsync(), s_deadline);
+        await TestTimeout.Run(() => consumer.UnsubscribeWithCallback(), s_deadline);
     }
 
     [Fact]
-    public async Task UnsubscribeAsync_Churned_NoLeakOrHang()
+    public async Task UnsubscribeWithCallback_Churned_NoLeakOrHang()
     {
         // Churn subscribe → unsubscribe: the void bridge (batch _destroy is N/A here,
         // but the per-op GCHandle) must be freed exactly once per op. A leak / double
@@ -82,29 +82,29 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         for (int i = 0; i < 100; i++)
         {
-            await consumer.SubscribeAsync(ProofTopic());
-            await TestTimeout.Run(() => consumer.UnsubscribeAsync(), s_deadline);
+            await consumer.SubscribeWithCallback(ProofTopic());
+            await TestTimeout.Run(() => consumer.UnsubscribeWithCallback(), s_deadline);
         }
     }
 
     [Fact]
-    public async Task UnsubscribeAsync_AfterDispose_ThrowsObjectDisposed()
+    public async Task UnsubscribeWithCallback_AfterDispose_ThrowsObjectDisposed()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await consumer.DisposeAsync();
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.UnsubscribeAsync());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.UnsubscribeWithCallback());
     }
 
-    // ---- SeekAsync negative-offset precondition (Java-fidelity, DoD §3 message) ----
+    // ---- SeekWithCallback negative-offset precondition (Java-fidelity, DoD §3 message) ----
 
     [Fact]
-    public async Task SeekAsync_NegativeOffset_ThrowsWithExactJavaMessage()
+    public async Task SeekWithCallback_NegativeOffset_ThrowsWithExactJavaMessage()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
         ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => consumer.SeekAsync("proof-topic", 0, offset: -1));
+            () => consumer.SeekWithCallback("proof-topic", 0, offset: -1));
 
         // The exact Java message is part of the behavioral contract (DoD §3).
         Assert.Equal("offset", ex.ParamName);
@@ -112,7 +112,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public async Task SeekAsync_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
+    public async Task SeekWithCallback_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
     {
         // Preconditions are validated BEFORE the FFI call (ffi §B5). Even a closed
         // consumer throws the offset precondition (ArgumentOutOfRangeException), not
@@ -122,18 +122,18 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         await consumer.DisposeAsync();
 
         ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => consumer.SeekAsync("proof-topic", 0, offset: -5));
+            () => consumer.SeekWithCallback("proof-topic", 0, offset: -5));
         Assert.Equal("offset", ex.ParamName);
     }
 
     [Fact]
-    public async Task SeekAsync_NegativePartition_ThrowsArgumentOutOfRange()
+    public async Task SeekWithCallback_NegativePartition_ThrowsArgumentOutOfRange()
     {
         // The partition precondition is carried unchanged from M3/P1.
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
         ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => consumer.SeekAsync("proof-topic", partition: -1, offset: 0));
+            () => consumer.SeekWithCallback("proof-topic", partition: -1, offset: 0));
         Assert.Equal("partition", ex.ParamName);
     }
 
@@ -213,34 +213,34 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
     }
 
-    // ---- CloseAsync() wiring (PLAN decision 6: latch → close → destroy, surface error) ----
+    // ---- CloseWithCallback() wiring (PLAN decision 6: latch → close → destroy, surface error) ----
 
     [Fact]
-    public async Task CloseAsync_OnMock_ReturnsWithoutHang()
+    public async Task CloseWithCallback_OnMock_ReturnsWithoutHang()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        await TestTimeout.Run(async () => await consumer.CloseAsync(), s_deadline);
+        await TestTimeout.Run(async () => await consumer.CloseWithCallback(), s_deadline);
     }
 
     [Fact]
-    public async Task CloseAsync_ThenDisposeAsync_IsIdempotent()
+    public async Task CloseWithCallback_ThenDisposeAsync_IsIdempotent()
     {
-        // CloseAsync takes the one-shot latch and destroys; a subsequent DisposeAsync
+        // CloseWithCallback takes the one-shot latch and destroys; a subsequent DisposeAsync
         // loses the latch and no-ops (no double-destroy).
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        await consumer.CloseAsync();
+        await consumer.CloseWithCallback();
         await consumer.DisposeAsync();
         consumer.Dispose();
     }
 
     [Fact]
-    public async Task CloseAsync_UseAfterClose_ThrowsObjectDisposed()
+    public async Task CloseWithCallback_UseAfterClose_ThrowsObjectDisposed()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
-        await consumer.CloseAsync();
+        await consumer.CloseWithCallback();
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SubscribeAsync(ProofTopic()));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SubscribeWithCallback(ProofTopic()));
     }
 }

@@ -55,7 +55,7 @@ public sealed class ConsumerPollWakeupCancelTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (Topic, Partition) });
-        await consumer.SeekAsync(Topic, Partition, offset: 0);
+        await consumer.SeekWithCallback(Topic, Partition, offset: 0);
         return consumer;
     }
 
@@ -71,17 +71,17 @@ public sealed class ConsumerPollWakeupCancelTests
         // draining records) and faults with a Wakeup KafkaException.
         consumer.Wakeup();
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => consumer.PollAsync(s_pollTimeout), s_deadline));
+            () => TestTimeout.Run(() => consumer.PollWithCallback(s_pollTimeout), s_deadline));
         Assert.False(string.IsNullOrEmpty(ex.Message));
 
         // One-shot: the flag was cleared by the faulted poll, so the next poll succeeds
         // and returns the queued record — the "then the op works again" half.
-        ConsumerRecords records = await TestTimeoutResult(consumer.PollAsync(s_pollTimeout));
+        ConsumerRecords records = await TestTimeoutResult(consumer.PollWithCallback(s_pollTimeout));
         Assert.Single(records);
     }
 
     [Fact]
-    public async Task PollAsync_PreCanceledToken_ThrowsOperationCanceled()
+    public async Task PollWithCallback_PreCanceledToken_ThrowsOperationCanceled()
     {
         // Deterministic: an already-canceled token is honored before the native call
         // (OperationCanceledException, distinct from a wakeup KafkaException), via the
@@ -91,14 +91,14 @@ public sealed class ConsumerPollWakeupCancelTests
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => consumer.PollAsync(s_pollTimeout, cts.Token));
+            () => consumer.PollWithCallback(s_pollTimeout, cts.Token));
     }
 
     // NOTE (Critic N=7, Finding 1): a "wakeup fired during an in-flight poll" test was
     // removed here. The mock poll checks-and-clears the wakeup flag in Step 4 and returns
     // to completion synchronously (source-verified: src/consumer/mock_consumer.rs poll),
     // and no block hook is exposed at the C ABI — so a Wakeup() call issued *after* the
-    // PollAsync() submit races the instant poll non-deterministically: when the poll wins,
+    // PollWithCallback() submit races the instant poll non-deterministically: when the poll wins,
     // the one-shot flag is left set and leaks into the *next* poll, faulting it. There is
     // no deterministic "in-flight" outcome to assert broker-free. The reachable, Java-
     // faithful behavior — Wakeup() sets the one-shot flag, the NEXT poll faults once with

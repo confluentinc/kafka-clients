@@ -21,7 +21,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Public-surface teardown (PLAN §5.5): <see cref="IDisposable.Dispose"/> /
-/// <see cref="IAsyncDisposable.DisposeAsync"/> / <see cref="IConsumer.CloseAsync"/>
+/// <see cref="IAsyncDisposable.DisposeAsync"/> / <see cref="IAsyncConsumer.Close"/>
 /// return without hanging, are idempotent under double / mixed calls, and every public
 /// op throws <see cref="ObjectDisposedException"/> after teardown. Every teardown runs
 /// under a <see cref="TestTimeout"/> hang guard (the teardown-returns regression).
@@ -36,14 +36,14 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DisposeAsync_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
     }
 
     [Fact]
     public void Dispose_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
 
@@ -52,8 +52,8 @@ public sealed class PublicConsumerTeardownTests
     {
         // The accepted single-owner residual (strand + one-time leak) — the teardown
         // must still RETURN without hanging even with an unawaited op in flight.
-        MockConsumer consumer = new MockConsumer();
-        _ = consumer.SubscribeAsync(ProofTopic()); // unawaited, deliberately
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        _ = consumer.Subscribe(ProofTopic()); // unawaited, deliberately
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
     }
@@ -61,8 +61,8 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Dispose_WithUnawaitedOpInFlight_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
-        _ = consumer.SubscribeAsync(ProofTopic()); // unawaited, deliberately
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        _ = consumer.Subscribe(ProofTopic()); // unawaited, deliberately
 
         await TestTimeout.Run(() => Task.Run(consumer.Dispose), s_deadline);
     }
@@ -70,7 +70,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DoubleDisposeAsync_IsSafe()
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         await consumer.DisposeAsync();
         await consumer.DisposeAsync();
     }
@@ -78,7 +78,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public void DoubleDispose_IsSafe()
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         consumer.Dispose();
         consumer.Dispose();
     }
@@ -86,7 +86,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task MixedDisposeAndDisposeAsync_IsSafe()
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         consumer.Dispose();
         await consumer.DisposeAsync();
     }
@@ -94,55 +94,55 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task UseAfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
         await consumer.DisposeAsync();
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.PollAsync(s_pollTimeout));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SubscribeAsync(ProofTopic()));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.UnsubscribeAsync());
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SeekAsync(new TopicPartition("t", 0), 0L));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Unsubscribe());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
     }
 
     [Fact]
-    public async Task CloseAsync_ReturnsWithoutHang()
+    public async Task Close_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
-        await TestTimeout.Run(() => consumer.CloseAsync(), s_deadline);
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        await TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
-    public async Task CloseAsync_ThenDisposeAndDisposeAsync_IsIdempotent()
+    public async Task Close_ThenDisposeAndDisposeAsync_IsIdempotent()
     {
-        // CloseAsync takes the one-shot latch and destroys; a subsequent
+        // Close takes the one-shot latch and destroys; a subsequent
         // Dispose/DisposeAsync loses the latch and no-ops (closed-flag idempotence).
-        MockConsumer consumer = new MockConsumer();
-        await consumer.CloseAsync();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        await consumer.Close();
         await consumer.DisposeAsync();
         consumer.Dispose();
     }
 
     [Fact]
-    public async Task CloseAsync_UseAfterClose_ThrowsObjectDisposed()
+    public async Task Close_UseAfterClose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
-        await consumer.CloseAsync();
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        await consumer.Close();
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SubscribeAsync(ProofTopic()));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
     }
 
     [Fact]
-    public async Task CloseAsync_OnMock_DoesNotSurfaceError_ButPathReturns()
+    public async Task Close_OnMock_DoesNotSurfaceError_ButPathReturns()
     {
-        // CloseAsync surfaces a close KafkaException (unlike DisposeAsync, which swallows
-        // it). Broker-free, a MockConsumer close succeeds — the error-surfacing path
-        // (throw) is verified by inspection (CloseAsyncInternal awaits close_async and
-        // rethrows its KafkaException; only DisposeAsync's catch swallows it). Here the
-        // reachable assertion is that a broker-free CloseAsync completes without faulting.
-        MockConsumer consumer = new MockConsumer();
-        await consumer.SubscribeAsync(ProofTopic());
+        // Close surfaces a close KafkaException (unlike DisposeAsync, which swallows
+        // it). Broker-free, an AsyncMockConsumer close succeeds — the error-surfacing path
+        // (throw) is verified by inspection (CloseWithCallbackInternal awaits close_async
+        // and rethrows its KafkaException; only DisposeAsync's catch swallows it). Here
+        // the reachable assertion is that a broker-free Close completes without faulting.
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        await consumer.Subscribe(ProofTopic());
 
-        await TestTimeout.Run(() => consumer.CloseAsync(), s_deadline);
+        await TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
@@ -152,8 +152,8 @@ public sealed class PublicConsumerTeardownTests
         // public surface (the SafeHandle ReleaseHandle → Consumer_destroy path).
         for (int i = 0; i < 100; i++)
         {
-            MockConsumer consumer = new MockConsumer();
-            await consumer.SubscribeAsync(ProofTopic());
+            AsyncMockConsumer consumer = new AsyncMockConsumer();
+            await consumer.Subscribe(ProofTopic());
             await consumer.DisposeAsync();
         }
     }

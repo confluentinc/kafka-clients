@@ -64,7 +64,7 @@ public sealed class ConsumerAsyncOperationTests
         // Reusable: subscribe still succeeds after a wakeup (the "then the op works
         // again" half of the one-shot contract — the Mock observes wakeup only in
         // poll(), which is out of scope, so subscribe does not fault).
-        await TestTimeout.Run(() => consumer.SubscribeAsync(ProofTopic()), s_deadline);
+        await TestTimeout.Run(() => consumer.SubscribeWithCallback(ProofTopic()), s_deadline);
     }
 
     [Fact]
@@ -75,14 +75,14 @@ public sealed class ConsumerAsyncOperationTests
         // the wakeup, so it completes normally — best-effort, Java-faithful.)
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        Task op = consumer.SubscribeAsync(ProofTopic());
+        Task op = consumer.SubscribeWithCallback(ProofTopic());
         consumer.Wakeup();
 
         await TestTimeout.Run(() => op, s_deadline);
     }
 
     [Fact]
-    public async Task SubscribeAsync_PreCanceledToken_ThrowsOperationCanceled()
+    public async Task SubscribeWithCallback_PreCanceledToken_ThrowsOperationCanceled()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -94,18 +94,18 @@ public sealed class ConsumerAsyncOperationTests
         // (RegisterCancellation) but only deterministically reachable once a
         // wakeup-observing op (poll) lands.
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => consumer.SubscribeAsync(ProofTopic(), cts.Token));
+            () => consumer.SubscribeWithCallback(ProofTopic(), cts.Token));
     }
 
     [Fact]
-    public async Task SeekAsync_PreCanceledToken_ThrowsOperationCanceled()
+    public async Task SeekWithCallback_PreCanceledToken_ThrowsOperationCanceled()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => consumer.SeekAsync("proof-topic", 0, 0L, cts.Token));
+            () => consumer.SeekWithCallback("proof-topic", 0, 0L, cts.Token));
     }
 
     [Fact]

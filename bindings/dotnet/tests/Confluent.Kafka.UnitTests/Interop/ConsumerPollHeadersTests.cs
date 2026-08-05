@@ -35,7 +35,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// therefore has no headers, so a header <em>round-trip</em> through the mock is not
 /// reachable this phase; only the <b>empty-headers</b> case
 /// (<c>header_count == 0</c>) is exercisable end to end (see
-/// <c>ConsumerPollReceivePathTests.PollAsync_RoundTripsAllFields</c>, which asserts
+/// <c>ConsumerPollReceivePathTests.PollWithCallback_RoundTripsAllFields</c>, which asserts
 /// <c>Headers</c> is empty). The header copy-out marshaller
 /// (<c>ConsumerRecordsMarshal.CopyHeaders</c>) — count → per-index length-delimited
 /// key (§B3) + copy-out value — is verified by inspection against the header
@@ -55,16 +55,16 @@ public sealed class ConsumerPollHeadersTests
     private const int Partition = 0;
 
     [Fact]
-    public async Task PollAsync_RecordWithoutHeaders_HasEmptyHeaders()
+    public async Task PollWithCallback_RecordWithoutHeaders_HasEmptyHeaders()
     {
         // The end-to-end reachable header case on the mock: header_count == 0 →
         // an empty (shared, non-null) header list. (add_record carries no headers.)
         using NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (Topic, Partition) });
-        await consumer.SeekAsync(Topic, Partition, offset: 0);
+        await consumer.SeekWithCallback(Topic, Partition, offset: 0);
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
-        ConsumerRecords records = await consumer.PollAsync(s_pollTimeout);
+        ConsumerRecords records = await consumer.PollWithCallback(s_pollTimeout);
 
         ConsumerRecord record = Assert.Single(records);
         Assert.NotNull(record.Headers);
