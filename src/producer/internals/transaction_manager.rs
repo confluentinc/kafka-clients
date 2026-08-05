@@ -50,6 +50,22 @@ use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 /// [`Sender`]: crate::producer::internals::Sender
 pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
 
+/// The KIP-890 feature flag whose finalized level decides whether Transaction V2
+/// is in force.
+///
+/// Java writes the string literal inline at `TransactionManager.java:499`; named
+/// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and
+/// its tests both need it, and CLAUDE.md §2 keeps a constant private to the file
+/// that defines it.
+const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
+
+/// The `retryBackoffMs` an `AddPartitionsToTxn` retry uses after the first
+/// `CONCURRENT_TRANSACTIONS` error of a transaction.
+///
+/// Translated from `TransactionManager.ADD_PARTITIONS_RETRY_BACKOFF_MS`
+/// (Java 133).
+const ADD_PARTITIONS_RETRY_BACKOFF_MS: i64 = 20;
+
 /// The Sender task's queue of transactional requests waiting to be sent.
 ///
 /// # Why this is not a field on [`TransactionManager`]
@@ -984,13 +1000,16 @@ pub(crate) struct TransactionManager {
     last_error: Option<KafkaError>,
     producer_id_and_epoch: ProducerIdAndEpoch,
     client_side_epoch_bump_required: bool,
-    /// Always `false` in Phase 5a: only `maybeUpdateTransactionV2Enabled`
-    /// (Java 492, Phase 5b) sets it, and that method needs KIP-890 feature
-    /// discovery. Kept as a field so [`Self::set_producer_id_and_epoch`]'s
-    /// log-level fork (Java 605) and the three predicates that read it
-    /// ([`Self::need_to_trigger_epoch_bump_from_client`],
-    /// [`Self::can_handle_abortable_error`], [`Self::maybe_add_partition`]) can be
-    /// translated verbatim rather than approximated.
+    /// The finalized-features epoch the KIP-890 feature read last observed
+    /// (Java 145).
+    ///
+    /// Written only by [`Self::maybe_update_transaction_v2_enabled`], which uses it
+    /// to skip the read when `ApiVersions` has learned nothing new.
+    latest_finalized_features_epoch: i64,
+    /// Whether the cluster has finalized `transaction.version` at level 2 or
+    /// above, i.e. whether KIP-890 Transaction V2 is in force (Java 146).
+    ///
+    /// Written only by [`Self::maybe_update_transaction_v2_enabled`] (Java 492).
     is_transaction_v2_enabled: bool,
     enable_2pc: bool,
     /// Whether the transaction coordinator's `InitProducerId` version supports a
@@ -1078,6 +1097,7 @@ impl TransactionManager {
             last_error: None,
             producer_id_and_epoch: ProducerIdAndEpoch::NONE,
             client_side_epoch_bump_required: false,
+            latest_finalized_features_epoch: -1,
             is_transaction_v2_enabled: false,
             enable_2pc,
             coordinator_supports_bumping_epoch: false,
@@ -1259,12 +1279,57 @@ impl TransactionManager {
         self.transactional_id.is_some()
     }
 
+    /// Checks all the finalized features from `api_versions` to verify whether
+    /// Transaction V2 is enabled.
+    ///
+    /// Translated from `maybeUpdateTransactionV2Enabled(boolean)` (Java 492).
+    ///
+    /// Sets `client_side_epoch_bump_required` if upgrading to V2 since we need to
+    /// bump the epoch. This is because V2 no longer adds partitions explicitly and
+    /// there are some edge cases on upgrade that can be avoided by fencing the old
+    /// V1 transaction epoch. For example, we won't consider partitions from the
+    /// previous transaction as already added to the new V2 transaction if the epoch
+    /// is fenced.
+    ///
+    /// # A missing feature map is Java's unreachable NPE
+    ///
+    /// Java dereferences `info.finalizedFeatures` (Java 499) without a null check,
+    /// and the field starts out `null` (`ApiVersions.java:34`). The guard above it
+    /// is what makes that safe: `latestFinalizedFeaturesEpoch` and
+    /// `maxFinalizedFeaturesEpoch` both start at `-1`, so the method returns early
+    /// until some node reports a features epoch — and `ApiVersions.update` writes
+    /// the map and the epoch together (`ApiVersions.java:47-50`). This crate models
+    /// the field as an `Option`, and treats `None` as an empty map: the same answer
+    /// (`transaction.version` absent ⇒ V2 off) without a panic (CLAUDE.md §10.1).
+    pub(crate) fn maybe_update_transaction_v2_enabled(&mut self, on_initialization: bool) {
+        if self.latest_finalized_features_epoch >= self.api_versions.max_finalized_features_epoch() {
+            return;
+        }
+        let info = self.api_versions.finalized_features_info();
+        self.latest_finalized_features_epoch = info.finalized_features_epoch;
+        let transaction_version = info
+            .finalized_features
+            .as_ref()
+            .and_then(|features| features.get(TRANSACTION_VERSION_FEATURE).copied());
+        let was_transaction_v2_enabled = self.is_transaction_v2_enabled;
+        self.is_transaction_v2_enabled = transaction_version.is_some_and(|version| version >= 2);
+        kafka_debug!(
+            self.log_context,
+            "Updating isTV2 enabled to {} with FinalizedFeaturesEpoch {}",
+            self.is_transaction_v2_enabled,
+            self.latest_finalized_features_epoch
+        );
+        if !on_initialization && !was_transaction_v2_enabled && self.is_transaction_v2_enabled {
+            self.client_side_epoch_bump_required = true;
+        }
+    }
+
     /// Whether KIP-890 Transaction V2 is in use.
     ///
-    /// Corresponds to `isTransactionV2Enabled()` (Java 506). Always `false` until
-    /// Phase 5b adds `maybeUpdateTransactionV2Enabled` (Java 492), the only writer
-    /// of the field; the accessor exists because `Sender.sendProduceRequest`
-    /// (`Sender.java:924-926`) reads it from outside this module in Phase 6.
+    /// Corresponds to `isTransactionV2Enabled()` (Java 506).
+    /// [`Self::maybe_update_transaction_v2_enabled`] is the only writer, and
+    /// `Sender.sendProduceRequest` (`Sender.java:924-926`) reads it from outside
+    /// this module in Phase 6.
     pub(crate) fn is_transaction_v2_enabled(&self) -> bool {
         self.is_transaction_v2_enabled
     }
@@ -3474,19 +3539,30 @@ mod tests {
     /// `ApiVersions` contents, so the `transactionV2Enabled` parameterisation is
     /// reproduced faithfully.
     ///
-    /// # `transaction_v2_enabled` is still not observable in Phase 5a
+    /// # How `transaction_v2_enabled` reaches the manager
     ///
-    /// Java threads the flag only into `apiVersions`, and the manager reads
-    /// `apiVersions` from exactly two methods:
+    /// Java threads the flag only into `apiVersions`, as a finalized
+    /// `transaction.version` level of 2 (enabled) or 1 (disabled) at features epoch
+    /// 0. The manager reads `apiVersions` from exactly two methods:
     /// [`TransactionManager::handle_coordinator_ready`] (Java 1104), which looks at
     /// the `INIT_PRODUCER_ID` version and not at features, and
-    /// `maybeUpdateTransactionV2Enabled` (Java 493), which is Phase 5b and is the
-    /// only writer of `is_transaction_v2_enabled`. So the flag stays `false` in
-    /// both iterations and both parameterisations execute identical code. The
-    /// loops are kept: they cost nothing and start discriminating in Phase 5b.
+    /// [`TransactionManager::maybe_update_transaction_v2_enabled`] (Java 493), the
+    /// only writer of `is_transaction_v2_enabled`. So a manager built here is
+    /// Transaction V2 *capable* but not yet V2 *enabled*: [`do_init_transactions`]
+    /// makes the feature read, mirroring Java 4359.
     fn manager_with_transactional_id(
         transactional_id: Option<String>,
         transaction_v2_enabled: bool,
+    ) -> TransactionManager {
+        manager_with_transactional_id_and_2pc(transactional_id, transaction_v2_enabled, false)
+    }
+
+    /// Mirrors the three-argument
+    /// `initializeTransactionManager(Optional, boolean, boolean)` (Java 177).
+    fn manager_with_transactional_id_and_2pc(
+        transactional_id: Option<String>,
+        transaction_v2_enabled: bool,
+        enable_2pc: bool,
     ) -> TransactionManager {
         fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
             let mut version = ApiVersion::new();
@@ -3495,16 +3571,6 @@ mod tests {
             version.set_max_version(max_version);
             version
         }
-
-        let transaction_version = if transaction_v2_enabled { 2 } else { 1 };
-        let mut supported_feature = SupportedFeatureKey::new();
-        supported_feature.set_name("transaction.version".to_string());
-        supported_feature.set_max_version(transaction_version);
-        supported_feature.set_min_version(0);
-        let mut finalized_feature = FinalizedFeatureKey::new();
-        finalized_feature.set_name("transaction.version".to_string());
-        finalized_feature.set_max_version_level(transaction_version);
-        finalized_feature.set_min_version_level(transaction_version);
 
         let api_versions = Arc::new(ApiVersions::new());
         api_versions.update(
@@ -3529,8 +3595,8 @@ mod tests {
                         },
                     ),
                 ],
-                &[supported_feature],
-                &[finalized_feature],
+                &transaction_version_supported_features(if transaction_v2_enabled { 2 } else { 1 }),
+                &transaction_version_finalized_features(if transaction_v2_enabled { 2 } else { 1 }),
                 0,
             ),
         );
@@ -3541,8 +3607,48 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             DEFAULT_RETRY_BACKOFF_MS,
             api_versions,
-            false,
+            enable_2pc,
         )
+    }
+
+    /// The `supportedFeatures` list Java's fixture builds (Java 198-201).
+    fn transaction_version_supported_features(level: i16) -> Vec<SupportedFeatureKey> {
+        let mut supported_feature = SupportedFeatureKey::new();
+        supported_feature.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        supported_feature.set_max_version(level);
+        supported_feature.set_min_version(0);
+        vec![supported_feature]
+    }
+
+    /// The `finalizedFeatures` list Java's fixture builds (Java 202-205).
+    fn transaction_version_finalized_features(level: i16) -> Vec<FinalizedFeatureKey> {
+        let mut finalized_feature = FinalizedFeatureKey::new();
+        finalized_feature.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        finalized_feature.set_max_version_level(level);
+        finalized_feature.set_min_version_level(level);
+        vec![finalized_feature]
+    }
+
+    /// Republishes node `"0"`'s API versions with `transaction.version` finalized at
+    /// `level` and features epoch `epoch`.
+    ///
+    /// Mirrors the mid-test `apiVersions.update("0", .., 2)` that
+    /// `testTransactionManagerEnablesV2` (Java 941-954) performs to move the cluster
+    /// onto Transaction V2 while the manager is running.
+    fn finalize_transaction_version(api_versions: &ApiVersions, level: i16, epoch: i64) {
+        let mut init_producer_id = ApiVersion::new();
+        init_producer_id.set_api_key(ApiKeys::INIT_PRODUCER_ID.id());
+        init_producer_id.set_min_version(0);
+        init_producer_id.set_max_version(3);
+        api_versions.update(
+            "0",
+            NodeApiVersions::new(
+                &[init_producer_id],
+                &transaction_version_supported_features(level),
+                &transaction_version_finalized_features(level),
+                epoch,
+            ),
+        );
     }
 
     /// A single-record batch, mirroring `batchWithValue` (Java 840).
@@ -3716,6 +3822,10 @@ mod tests {
         complete_init_producer_id(manager, pending_requests, handler, Errors::None, producer_id, epoch)
             .expect("a successful InitProducerId response is handled");
         assert!(manager.has_producer_id());
+        // Java 4359. `on_initialization = true` suppresses the
+        // `client_side_epoch_bump_required` side effect (Java 500-501), so this only
+        // latches the fixture's finalized `transaction.version` level.
+        manager.maybe_update_transaction_v2_enabled(true);
 
         // Java: `result.await(); assertTrue(result.isSuccessful()); assertTrue(result.isAcked());`
         assert!(result.is_successful());
@@ -3870,6 +3980,102 @@ mod tests {
     // ---------------------------------------------------------------------
     // Rust-side unit tests for the pieces Java covers only indirectly.
     // ---------------------------------------------------------------------
+
+    /// `maybeUpdateTransactionV2Enabled` (Java 492) latches the finalized
+    /// `transaction.version` level and, on an *upgrade* after initialization, sets
+    /// `clientSideEpochBumpRequired`.
+    ///
+    /// Java covers the method only end to end, through
+    /// `testTransactionManagerEnablesV2` / `testTransactionManagerDisablesV2` /
+    /// `testTransactionV2AddPartitionAndOffsets`; each of those pins one path
+    /// through it. This pins all four branches directly, which is the only way to
+    /// separate the epoch guard from the `onInitialization` suppression — the two
+    /// reasons the flag can fail to move.
+    #[test]
+    fn test_maybe_update_transaction_v2_enabled_reads_the_finalized_feature_level() {
+        // Level 1 finalized at epoch 0: the read happens (epoch -1 < 0) and leaves
+        // Transaction V2 off.
+        let mut manager = transactional_manager(false);
+        manager.maybe_update_transaction_v2_enabled(true);
+        assert!(!manager.is_transaction_v2_enabled());
+        assert!(!manager.client_side_epoch_bump_required());
+
+        // Level 2 finalized at epoch 0: the read turns Transaction V2 on. With
+        // `on_initialization = true` no epoch bump is required (Java 500-501).
+        let mut manager = transactional_manager(true);
+        manager.maybe_update_transaction_v2_enabled(true);
+        assert!(manager.is_transaction_v2_enabled());
+        assert!(!manager.client_side_epoch_bump_required());
+    }
+
+    /// The guard at Java 493-495: once a features epoch has been observed, a later
+    /// call with no *newer* epoch does not re-read.
+    ///
+    /// This is also what makes Java's unchecked `info.finalizedFeatures.get(..)`
+    /// (Java 499) safe on a fresh `ApiVersions`, whose map is `null` and whose epoch
+    /// is `-1` — hence the second half.
+    #[test]
+    fn test_maybe_update_transaction_v2_enabled_skips_an_epoch_it_has_already_seen() {
+        let mut manager = transactional_manager(false);
+        manager.maybe_update_transaction_v2_enabled(false);
+        assert!(!manager.is_transaction_v2_enabled());
+
+        // Re-finalize at level 2 but at the *same* epoch the manager already read.
+        // `ApiVersions::update` fences the stale epoch, so nothing changes.
+        finalize_transaction_version(manager.api_versions(), 2, 0);
+        manager.maybe_update_transaction_v2_enabled(false);
+        assert!(!manager.is_transaction_v2_enabled());
+        assert!(!manager.client_side_epoch_bump_required());
+
+        // A manager whose `ApiVersions` has learned nothing at all: epoch -1 on both
+        // sides, so the read is skipped and the absent feature map is never touched.
+        let mut manager = TransactionManager::new(
+            LogContext::empty(),
+            Some(TRANSACTIONAL_ID.to_string()),
+            TRANSACTION_TIMEOUT_MS,
+            DEFAULT_RETRY_BACKOFF_MS,
+            Arc::new(ApiVersions::new()),
+            false,
+        );
+        manager.maybe_update_transaction_v2_enabled(false);
+        assert!(!manager.is_transaction_v2_enabled());
+    }
+
+    /// Java 500-501: an upgrade observed *after* initialization requires a
+    /// client-side epoch bump, so the old V1 epoch is fenced before the first V2
+    /// transaction.
+    ///
+    /// The three suppressing conditions are pinned alongside it: an upgrade seen at
+    /// initialization time, a level that does not change, and a *downgrade*.
+    #[test]
+    fn test_maybe_update_transaction_v2_enabled_requires_an_epoch_bump_only_on_a_late_upgrade() {
+        let mut manager = transactional_manager(false);
+        manager.maybe_update_transaction_v2_enabled(true);
+        assert!(!manager.is_transaction_v2_enabled());
+
+        finalize_transaction_version(manager.api_versions(), 2, 2);
+        manager.maybe_update_transaction_v2_enabled(false);
+        assert!(manager.is_transaction_v2_enabled());
+        assert!(manager.client_side_epoch_bump_required());
+
+        // Already enabled: a further read at a newer epoch does not re-arm the bump.
+        let mut manager = transactional_manager(true);
+        manager.maybe_update_transaction_v2_enabled(true);
+        assert!(manager.is_transaction_v2_enabled());
+        finalize_transaction_version(manager.api_versions(), 2, 3);
+        manager.maybe_update_transaction_v2_enabled(false);
+        assert!(manager.is_transaction_v2_enabled());
+        assert!(!manager.client_side_epoch_bump_required());
+
+        // A downgrade turns the flag off and requires no bump.
+        let mut manager = transactional_manager(true);
+        manager.maybe_update_transaction_v2_enabled(true);
+        assert!(manager.is_transaction_v2_enabled());
+        finalize_transaction_version(manager.api_versions(), 1, 4);
+        manager.maybe_update_transaction_v2_enabled(false);
+        assert!(!manager.is_transaction_v2_enabled());
+        assert!(!manager.client_side_epoch_bump_required());
+    }
 
     /// Phase 3's MILESTONE-11 GUARD is gone: a transactional manager is
     /// constructible, and the arms Phase 5b still owes fail loudly with
