@@ -2581,8 +2581,29 @@ Each is documented at its call site as well.
    `TransactionPhaseError::Other` — which is where Java's `runOnce` catch-and-log
    receives it. The throw is unreachable on that path (the only states holding a
    pending `EndTxn` are `COMMITTING_TRANSACTION` and `ABORTING_TRANSACTION`, and both
-   `→ READY` and `→ INITIALIZING` are valid from either), and the 35 test call sites
-   assert as much with `.expect("next_request does not fail on this path")`.
+   `→ READY` and `→ INITIALIZING` are valid from either), and every test call site
+   asserts as much with `.expect("next_request does not fail on this path")`.
+
+   Their count and placement, derived rather than written down (the first revision of
+   this entry said "35 test call sites" across two files, which was neither the count
+   nor the file list — Critic 45 5b issue 3, and the same class as 5a issue 4: a
+   number nobody re-derived after the tree grew):
+
+   ```
+   $ grep -ro '\.expect("next_request does not fail on this path")' src/ | wc -l
+   56
+   $ grep -rc 'next_request does not fail on this path' \
+       src/producer/internals/transaction_manager.rs \
+       src/producer/internals/sender.rs \
+       src/producer/internals/record_accumulator.rs
+   src/producer/internals/transaction_manager.rs:53
+   src/producer/internals/sender.rs:2
+   src/producer/internals/record_accumulator.rs:1
+   ```
+
+   All 56 are inside `#[cfg(test)]` modules — the first match in each file follows its
+   `#[cfg(test)]` line (4993 > 4671, 3875 > 2274, 1918 > 1813) and there are no
+   further module boundaries below — so no `expect` sits on a production path.
 
 4. **`coordinator_key` takes an explicit lifetime.**
    `coordinatorKey()`'s base implementation returns the manager's `transactionalId`

@@ -619,3 +619,596 @@ two *empty* files — the `sed` extraction had silently dropped the program's la
 line. This is the same class as the defect being fixed. The check now asserts the
 extracted program has balanced braces and that both sides are non-empty before
 diffing, and that guard is what made the second attempt trustworthy.
+
+---
+
+# Pass 3 (clean — closes 5a, 2026-08-05)
+
+# Critic 45 — Milestone 11 Phase 5a review (pass 3)
+
+Range: `990bb4e..HEAD` (`a5918b3`, `3c24cc7`).
+
+## No findings.
+
+Both pass-2 findings are fixed. Phase 5a closes from my side. Loop: 7 → 2 → **0**.
+
+Verified green independently: `cargo xtask lint` 0, `cargo xtask format-check` 0,
+`cargo test --lib` 2319 passed / 0 failed / 2 ignored, and `test_node_not_ready` passing on
+its own. Production regions confirmed byte-identical per file, cutting each revision at *its
+own* `^#[cfg(test)]` line: `sender.rs` 2249 → 2249 zero-line diff, `transaction_manager.rs`
+3413 → 3413 zero-line diff, `mock_client.rs` untouched. Only the `sender.rs` test region and
+its accounting block changed.
+
+## Finding 1 — the `SenderTest` derivation
+
+Re-run from the shipped text, with my own extraction guards (see below). The declaration-order
+walk is applied:
+
+```awk
+n = split(MARKERS, m, ",")
+for (i = 1; i <= n; i++) if (m[i] in hard) hits = hits (hits == "" ? "" : "+") m[i]
+```
+
+- **exit 0, 100 rows.**
+- **All 18 accounted rows regenerate byte-identically** to the inline paste (`diff` clean over
+  the extracted `line \t name \t flags` triples).
+- **The rule is actually applied, not just claimed.** I checked every one of the 100 rows, not
+  only the 18: mapping each flag back to its `MARKERS` index, **0 rows are out of declaration
+  order**. The two rows I cited in pass 2 now read `beginTransaction+maybeAddPartition+AddPartitionsToTxn`
+  (1, 7, 8) and `beginAbort+mock(TransactionManager` (3, 14).
+
+**The splitter claim checks out, independently.** Rather than take the Actor's word, I
+implemented the body-recompute myself — for each `^    (public|private) void …(` line, collect
+until the first line that is exactly `    }`, and recompute the marker set from that body.
+Result: 100 blocks on both sides, **0 disagreements** in line, name or flags. The differently
+shaped guard (`private void` helpers must be able to *start* a block, since `SenderTest`
+declares tests both `public` and `private`) is therefore correct as well as documented.
+
+**The no-`ABBREV` decision is sound.** 18 rows carry full marker names inside the column
+limit; the sibling's table exists because 107 rows did not. Stated at the site as a
+difference rather than an oversight, which is what makes it reviewable.
+
+## Finding 2 — Java 708-709 translated rather than deferred
+
+The right call, and for the reason given: `MockClient::throttle` already existed
+(`mock_client.rs:238`) and `poll_delay_ms` / `is_ready` already honour `throttled_until_ms`
+(`:73`, `:100-106`), so a note would have been a deferral with no blocker — the shape of
+pass-1 issue 3. I verified the second half element by element against Java 689-711; all
+eleven statements now have a counterpart, with the two `2 * REQUEST_TIMEOUT` substitutions the
+only departures.
+
+**The `run_once` count is right, and Java is the cross-check.** Java has exactly two `runOnce`
+between `delayReady` and `assertNotNull` (`:704`, `:705`); the Rust has the else-arm one and
+one more. Tracing that second one: it sends the `FindCoordinator`, `poll_and_dispatch` inside
+`maybe_send_and_poll_transactional_request` consumes the prepared response, the coordinator is
+installed, and `run_once` returns at the `Ok(true)` — leaving the `InitProducerId` queued and
+nothing in flight, which the two new assertions pin. The Actor's stated reason for pinning it
+holds: with a request already in flight, `maybe_send_and_poll_transactional_request` returns at
+Java `:460-463` before ever consulting the coordinator, so the throttle would have nothing to
+block and the second half would silently test nothing.
+
+**Both mutation claims verified without mutating any source.**
+
+- *Half one* — `!update_requests_before && ctx.metadata.update_requested()`. `grep` over the
+  pre-test region gives exactly three `request_update` sites: `:1263` (the `else` arm), `:1449`
+  and `:1873`. The latter two sit in `send_producer_data` and the produce-response path, and
+  that iteration returns `Ok(true)` out of `maybe_send_and_poll_transactional_request` →
+  `run_transaction_phase` → early return from `run_once`, so neither is reachable. Deleting
+  `:1263` leaves the flag false and the assertion fails.
+- *Half two* — "an unready coordinator must be forgotten so the lookup can repeat
+  (`TransactionManager.java:1194`)". `self.transaction = None` occurs at exactly one place,
+  `CoordinatorNodes::clear` (`transaction_manager.rs:304`), whose only caller is
+  `lookup_coordinator` (`:2853`). At that point in the test nothing is in flight and the
+  `InitProducerId` was never sent, so the response paths that also call `lookup_coordinator`
+  are unreachable and `maybe_find_coordinator_and_retry`'s `if` arm is the only way in. Making
+  `clear` a no-op therefore leaves the node `Some(..)` and fails that exact assertion. The
+  assertion is a true discriminator for the `if` arm, which is what the half exists to cover.
+
+**`2 * REQUEST_TIMEOUT` for the throttle — adjudicated: accept, same as the delay.** Java's
+`REQUEST_TIMEOUT + 20` under `MockTime(10)` is a two-tick margin, and
+`NetworkClientUtils.awaitReady` closes its window once the clock has advanced
+`REQUEST_TIMEOUT`; two incidental clock reads anywhere in `runOnce` would let the node become
+ready inside the window and silently exercise the opposite branch. A full-window margin plus
+an explicit `sleep` removes the coin flip without changing which branch runs — and here the
+branch is proved by assertion (coordinator forgotten) rather than inferred from timing. The
+rustdoc says the substitution is the same one for the same reason, which is the right way to
+record it.
+
+**Also correct now:** the rustdoc's "Java 689-711" claim is true; both the rustdoc and the
+accounting entry describe two halves and two arms; and the "only exercise of
+`MockClient::throttle` on the transactional path" claim holds — `grep` finds two callers,
+`:3743` (the pre-existing produce-path latency test) and `:4536` (this one).
+
+## The extraction guards
+
+Present in the record (`COMMENTS.DONE.45.md:617-622`) and **real** — I know because my own
+first extraction this pass hit the identical failure. A mis-quoted `grep` for the start line
+produced an empty program, and my guards (non-empty, balanced `{`/`}`, even single-quote
+count) caught it and aborted instead of reporting a vacuous match. I then located the block
+properly (`sender.rs:7414-7431`, 18 lines, `{`=5 `}`=5, 10 quotes) and re-ran.
+
+Two notes for the record, neither a finding:
+
+- The guard is a *reviewer-side* procedure, not a shipped artifact, and it does not need to
+  be one: the blocks say "Save as `/tmp/scope.awk` and run from the repo root", i.e. they
+  prescribe copy-paste. Extraction is my mechanism for checking that the pasted text is the
+  text that ran, so the guard belongs with me as much as with the Actor. Recording it against
+  itself was the right instinct and it is worth keeping in `producer-transactions.md` if the
+  meta-rule from pass 1 is adopted.
+- `cargo doc --no-deps` reports 57 distinct unresolved intra-doc links crate-wide. All are
+  pre-existing and outside this module — the only one whose text resembles this phase's
+  vocabulary is `[`FindCoordinator`]` in
+  `src/consumer/internals/coordinator_request_manager.rs:169,239`, from Milestone 8 (`ba37a51`).
+  `cargo doc` is not in the gate, and rustdoc does not process `#[cfg(test)]` items, so no link
+  in the new test code is checked either way. Mentioned only so the next reviewer does not
+  read it as new.
+
+## Standing items (unchanged, not re-filed)
+
+- The six pass-1 adjudications and the two rule-update suggestions are in
+  `COMMENTS.DONE.45.md`. The suggestions — correcting `producer-transactions.md` §2 /
+  PLAN §6.5 on `coordinatorSupportsBumpingEpoch`, and the `definition-of-done.md` §3 clause on
+  executing shipped verification commands — are for the Manager/Actor process, not for me to
+  apply.
+- PLAN §9.14 stays not-re-filed.
+# Critic 45 — Milestone 11 Phase 5b review (pass 1)
+
+Range: `3c24cc7..b70e353` (`334ccc9`, `5600c65`, `00e6f89`, `71e71f7`, `1ccc9ba`, `887c535`,
+`dc5182a`, `2c5f9a6`, `b70e353`).
+
+Verified green independently: `cargo xtask lint` 0, `cargo xtask format-check` 0,
+`cargo test --lib` 2369 passed / 0 failed / 2 ignored. No stub remains in
+`src/producer/` — no `TODO`, `FIXME`, `unimplemented!`, and the only
+`not yet implemented` in the module is `kafka_producer.rs`'s Phase-6 public-API guard.
+
+**Four findings.** One is a behavioural divergence in the `Caller` mechanism; three are
+records. The four handler orderings, TV2, 2PC and both accounting blocks all check out —
+see "Verified clean" for what I ran.
+
+---
+
+## Issue 1: `begin_abort` hardcodes `Caller::App`, but Java reaches it from the Sender task — so a Sender-side invalid transition does not poison
+
+- **File**: `src/producer/internals/transaction_manager.rs:1504`
+- **Severity**: Behavior Mismatch
+- **Java Reference**: `Sender.java:273`; `TransactionManager.java:361-371`, `:1124-1127`
+- **Rule**: `.claude/rules/producer-transactions.md` §1, whose anti-pattern list names this exactly
+
+**Description.** `begin_abort` takes no `caller` parameter and its transition is hardcoded:
+
+```rust
+// transaction_manager.rs:1504
+manager.transition_to(State::AbortingTransaction, None, Caller::App)?;
+```
+
+`beginAbort()` has **two** production call sites in Java (`grep -rn "beginAbort()" producer/`):
+
+| Java | thread |
+|---|---|
+| `KafkaProducer.java:818` (`abortTransaction`) | application |
+| **`Sender.java:273`** (`run`'s shutdown abort loop) | **Sender** |
+
+The Rust already has both. The Sender-side one is live: `Sender::begin_abort`
+(`sender.rs`) calls `transaction_manager.lock().unwrap().begin_abort(&mut self.pending_requests)`,
+and is invoked from the shutdown loop at `sender.rs:576`. The method's own rustdoc names it —
+*"`Sender.run`'s shutdown loop calls this at `Sender.java:273`"* — so the second caller is
+known; only the `Caller` does not reflect it.
+
+Rules §1 is explicit on both the requirement and the smell:
+
+> Where a method is reachable from both, it takes `caller` as a parameter and forwards it —
+> do NOT default it.
+>
+> **Anti-patterns to flag in review:** … A method reachable from both sides that hardcodes
+> one `Caller`.
+
+**Why it is behavioural, not cosmetic.** `shouldPoisonStateOnInvalidTransition()` is the whole
+point of the enum. On an invalid `→ ABORTING_TRANSACTION`, Java on the Sender thread does
+(`TransactionManager.java:1124-1127`):
+
+```java
+currentState = State.FATAL_ERROR;
+lastError = new IllegalStateException(message);
+throw lastError;
+```
+
+With `Caller::App` the Rust returns the error and leaves `current_state` and `last_error`
+untouched. Java deliberately anticipates the throw on this path — `Sender.java:269-271`:
+*"It is possible for the transaction manager to throw errors when aborting. Catch these so as
+not to interfere with the rest of the shutdown logic"* — and force-closes on it. The states the
+shutdown loop's own guard admits (`hasOngoingTransaction() && !isCompleting()`, i.e.
+`IN_TRANSACTION` or `ABORTABLE_ERROR`) are both valid sources, so reaching the invalid case
+needs the app side to move the state between the guard read and the call. That window exists in
+both languages — the Rust drops the manager guard between `has_ongoing_transaction()` /
+`is_completing()` and `begin_abort()`, exactly as Java's separate `synchronized` calls do — and
+Java's answer inside it is to poison. Latent today only because
+`KafkaProducer::from_config` still rejects `transactional.id` until Phase 6; that guard's removal
+is what makes it reachable, which is why it wants fixing now rather than being discovered then.
+
+I checked the other new entry points against their Java call sites; `begin_abort` is the only
+one affected. `beginCommit` (`KafkaProducer.java:783`), `sendOffsetsToTransaction` (`:740`) and
+`maybeAddPartition` (`:1045`) each have exactly one Java caller, all application-side, so their
+`Caller::App` is right; `prepareTransaction` has no `clients/src` caller at all;
+`reset_transaction_state`, the six `handle_*_response` methods, `fatal_error`,
+`abortable_error` and `abortable_error_if_possible` are all Sender-only and correctly hardcode
+`Caller::Sender`.
+
+- **Expected**: `begin_abort(&mut self, pending_requests, caller: Caller)`, forwarded to
+  `transition_to`; `KafkaProducer` passes `Caller::App`, `Sender::begin_abort` passes
+  `Caller::Sender`. A test that a Sender-side invalid `→ ABORTING_TRANSACTION` leaves
+  `FATAL_ERROR` and a recorded `last_error`, as the 5a
+  `test_invalid_transition_poisons_only_on_the_sender_side` does for its own targets.
+- **Actual**: one hardcoded `Caller::App` serving both callers; no poisoning on the Sender path.
+
+---
+
+## Issue 2: `handle_txn_offset_commit_response`'s rustdoc claims the re-enqueued request carries only the outstanding offsets — it carries the full original set, in both languages
+
+- **File**: `src/producer/internals/transaction_manager.rs:4230-4232`
+- **Severity**: Design Flaw (a stated mechanism neither language implements; invites a "fix" that would diverge)
+- **Java Reference**: `TxnOffsetCommitRequest.java` Builder ctor; `TransactionManager.java:1394`, `:1944-1950`
+
+**Description.** The doc's third structural claim:
+
+```rust
+// transaction_manager.rs:4230-4232
+/// And `Errors.NONE` *removes* the partition from
+/// `pendingTxnOffsetCommits` while the retriable arm leaves it in place, which
+/// is what makes the re-enqueued request carry only the outstanding offsets.
+```
+
+The first half is right and the code implements it (`:4267` removes, `:4276-4279` continues).
+The conclusion does not follow, in either language, because **both builders snapshot the
+topic collection at construction**:
+
+```java
+// TxnOffsetCommitRequest.java, Builder ctor
+this.data = new TxnOffsetCommitRequestData()
+        …
+        .setTopics(getTopics(pendingTxnOffsetCommits))
+```
+```rust
+// txn_offset_commit_request.rs, TxnOffsetCommitRequestBuilder::new
+data.set_transactional_id(..)
+    …
+    .set_topics(TxnOffsetCommitRequest::get_topics(pending_txn_offset_commits))
+```
+
+The Rust builder takes `&HashMap<..>` and copies; it cannot hold a borrow of
+`self.pending_txn_offset_commits`, since the handler it lands in outlives the call. Java's
+`reenqueue()` (`:1394`) re-adds `this` with that same snapshotted `data`, and the Rust
+`self.retry(pending_requests, handler)` (`:4335`) re-enqueues the same handler with the same
+builder — nothing between the two mutates `builder.data`. So a retry re-sends the **full
+original** offset list, including partitions that already returned `NONE`.
+
+What the map actually governs is the tail (`:4329-4336`, Java `:1944-1950`): whether to clear,
+complete, or retry at all — and the contents of any *later*
+`txn_offset_commit_handler` construction, e.g. a subsequent `send_offsets_to_transaction`,
+which is where leftovers do get folded in. That is the real and worth-documenting property.
+
+The risk is concrete: the claim reads as a specification, and the obvious way to make the code
+match it is to rebuild the builder before `retry`. That would send a *reduced* request where
+Java sends the full one — a wire-level divergence introduced by trusting the comment.
+
+- **Expected**: state that the retry re-sends the constructed snapshot (as Java does), and that
+  the map decides retry-vs-complete and seeds the next construction.
+- **Actual**: claims the re-enqueued request is reduced.
+
+---
+
+## Issue 3: PLAN §10.8 deviation 3 counts 35 `expect` call sites; there are 56
+
+- **File**: `design/history/Milestone-11/PLAN.md:2584`
+- **Severity**: Missing Requirement (DoD §7 — a deviation record whose number does not match the tree)
+
+**Description.** Deviation 3 justifies `next_request` returning `Result<Option<..>>` and closes:
+
+> … and the 35 test call sites assert as much with
+> `.expect("next_request does not fail on this path")`.
+
+Real count, `grep -ro` over `src/`: **56** occurrences, one per line, across three files —
+`transaction_manager.rs` 53, `sender.rs` 2, `record_accumulator.rs` 1. The third file is not
+mentioned either.
+
+The substantive part of the deviation is sound and I verified it: all 56 sites are inside
+`#[cfg(test)]` modules (cut points 4604 / 2268 / 1813; **zero** in any production region), so
+there is no panic on a public path; and the unreachability argument holds — the only states
+holding a pending `EndTxn` are `COMMITTING_TRANSACTION` and `ABORTING_TRANSACTION`, and Java's
+table admits both `→ READY` (sources `INITIALIZING`, `COMMITTING`, `ABORTING`) and
+`→ INITIALIZING` (sources `UNINITIALIZED`, `COMMITTING`, `ABORTING`) from either. Only the
+count is wrong. Same class as 5a issue 4: a stated number nobody re-derived after the tree grew.
+
+- **Expected**: 56, and name `record_accumulator.rs` alongside the other two.
+- **Actual**: 35, across two named files.
+
+---
+
+## Issue 4: two over-claims in the accounting prose — an inert marker presented as an active one, and a miscount in the trap notes
+
+- **Files**: `src/producer/internals/transaction_manager.rs:9853-9854`;
+  `.claude/agent-memory/actor-executor/phase5b_txn_requests_notes.md:46`
+- **Severity**: Missing Requirement (records; no count is affected)
+
+**(a) `verifyProducerFenced` is named as a driver but contributes nothing.** The justification
+for the load-bearing "no owed test is manager-only" check reads:
+
+```
+// transaction_manager.rs:9852-9854
+// drive the **accumulator or the `Sender`** — `appendToAccumulator`, a produce response, a
+// drain, `initiateClose`, or one of the two helpers that do
+// (`verifyCommitOrAbortTransactionRetriable`, `verifyProducerFenced`).
+```
+
+`verifyProducerFenced(` matches **0 of the 107**. Its only two call sites,
+`TransactionManagerTest.java:2077` and `:2101`, are inside the *private* helpers
+`verifyProducerFencedForAddPartitionsToTxn` (`:2066`) and
+`verifyProducerFencedForAddOffsetsToTxn` (`:2090`), and the classifier's splitter stops
+collecting at `^    private `, so no test method's marker set can ever contain it. The named
+sibling `verifyCommitOrAbortTransactionRetriable` does hit (4 of the 47). So one of the "two
+helpers" is inert, and the sentence over-states the evidence for the phase's most
+load-bearing check.
+
+The check itself survives intact — all 47 are still classified by other markers and
+`OWED_MGR` is genuinely 0 — so this is the enumeration, not the conclusion. But it is the
+enumeration a reviewer would audit first.
+
+**(b) Trap 2's count.** The note reads *"unanchored `grep -n TITLE` returns three line
+numbers"*. For `PHASE-5B METHOD ACCOUNTING` it returns **four** (911, 1019, 9825, 9856);
+anchored, one. The point — extra hits break the `$(( ))` arithmetic — is right, and anchoring
+is genuinely necessary; only the number is off.
+
+- **Expected**: drop `verifyProducerFenced` from the enumeration (or note that it is inert
+  because its call sites sit in unscanned private helpers, which is itself the more
+  interesting fact); say "three or four" or name the title each count belongs to.
+- **Actual**: an inert marker listed as one of two active ones; "three" where one title gives four.
+
+---
+
+## Verified clean
+
+**The four load-bearing orderings — all correct against Java.**
+
+- *AddPartitions* (`:3899-4020` vs Java `:1559-1631`). Every early `return` precedes the
+  `pending_partitions_in_transaction` clear at `:3987`, so only the fall-through clears it, as
+  Java's `:1620` does. `CONCURRENT_TRANSACTIONS` (`:3941`) precedes the generic
+  `error.is_retriable()` (`:3945`), which matters because `Errors::ConcurrentTransactions` **is**
+  in the Rust retriable set (`errors.rs:420`) — swap them and
+  `maybe_override_retry_backoff_ms` is dead. The override's plumbing is right end to end:
+  per-instance value on `TxnRequestHandlerKind::AddPartitionsToTxn`, reset at the top of each
+  response (`:3922`, Java `:1567`), lowered only while `partitions_in_transaction.is_empty()`
+  (`:4366-4372`, Java `:1641-1646`), and `retry_backoff_ms()` returning
+  `self.retry_backoff_ms.min(*retry_backoff_ms)` (`:827`) = Java's
+  `Math.min(TransactionManager.this.retryBackoffMs, this.retryBackoffMs)`. On the snapshot
+  question you raised: Java's field is `private final long retryBackoffMs` at
+  `TransactionManager.java:130`, so it cannot change after construction and the snapshot is
+  faithful — not merely conservative.
+- *EndTxn* (`:4034-4126` vs Java `:1747-1793`). `is_abort && TransactionAbortable` (`:4104`)
+  precedes the plain arm (`:4117`), matching Java `:1783` before `:1787`; swapped, an abort
+  would take `abortable_error` and retry itself, which is what Java's comment says must not
+  happen. There are no `TransactionAbortableException` subclasses
+  (`grep -rln "extends TransactionAbortableException"` empty), so Java's `instanceof` and the
+  Rust code equality coincide. The KIP-890 absorption guard is
+  `producer_id != RecordBatch::NO_PRODUCER_ID` (`:4068`), the named constant for Java's literal
+  `-1`, and it gates `set_producer_id_and_epoch` + `reset_sequence_numbers` exactly as Java does.
+- *AddOffsets* (`:4138-4216` vs Java `:1820-1852`). The success arm does **not** complete the
+  result: it hands `Arc::clone(&handler.result)` (`:4170`) to `txn_offset_commit_handler`, so the
+  caller's handle resolves only after the second round trip — rules §5's same-object contract,
+  and `with_result` (`:1349`-equivalent) stores the given `Arc` with `is_retry: false`, adding no
+  second slot. `transaction_started = true` is set here, as Java does. Note this handler puts
+  `UNKNOWN_PRODUCER_ID` *before* the fenced arm while `EndTxn` puts it after — each matches its
+  own Java handler's order, which is the easy thing to homogenise by mistake and was not.
+- *TxnOffsetCommit* (`:4233-4337` vs Java `:1904-1951`). All four properties hold: `break` not
+  `return` on every terminal arm so the `:1944` tail always runs; `NONE` removes from the map
+  (`:4267`); the retriable arm `continue`s and leaves it (`:4276`); `coordinator_reloaded`
+  (`:4253`, `:4272`) bounds the group lookup to once per response. See issue 2 for the doc.
+
+**Rules §9.** The only `instanceof` in the four handlers is `RetriableException`, which
+`error.is_retriable()` stands in for at four sites, and at each one the specific codes that are
+*also* retriable precede it — `CONCURRENT_TRANSACTIONS` / `NOT_COORDINATOR` /
+`COORDINATOR_NOT_AVAILABLE` / `REQUEST_TIMED_OUT`, all confirmed present in `errors.rs`'s
+retriable set. Java tests the authorization and fenced codes by exact constant, not by
+supertype, so §9's authorization clause does not bite here.
+`abortable_error_if_possible` (`:3517-3530`) is a faithful translation of Java `:1379-1388`,
+and is **not** a drifting duplicate of `transition_to_abortable_error_or_fatal_error`: Java
+carries both too, with the same three shared lines, and they differ in arity and in whether a
+handler result is failed. The rustdoc says so at the site.
+
+**TV2.** `maybe_update_transaction_v2_enabled` (Java `:492-504`) matches line for line,
+including the early return on the features epoch and the
+`!on_initialization && !was_enabled && is_enabled` arming of `client_side_epoch_bump_required`.
+All three divergence sites are right: `maybe_add_partition`'s TV2 arm registers straight into
+`partitions_in_transaction` **and sets `transaction_started` itself** because no
+`AddPartitionsToTxn` response will (Java `:448-451`), kept ahead of the already-added
+short-circuit as Java has it; `send_offsets_to_transaction` skips `AddOffsetsToTxn` and likewise
+self-sets (Java `:415-418`); `EndTxnHandler` absorbs the server pid/epoch.
+`begin_completing_transaction` preserves all three orderings Java's own comment calls out — the
+builder is constructed *before* `maybe_update_transaction_v2_enabled(false)`, which itself
+precedes the `client_side_epoch_bump_required` check. `test_transaction_manager_enables_v2` pins
+the rules-§5 interaction you flagged, and pins it at the right place: after the EndTxn the state
+is `Initializing` (not `Ready`), the pending request is `Priority::EpochBump`, and the caller's
+handle is still incomplete until `complete_init_producer_id` runs — so the assertions would fail
+if `begin_completing_transaction` returned the EndTxn's result instead of the epoch bump's.
+
+**2PC.** `prepare_transaction` matches Java `:342-351` statement for statement.
+`setKeepPreparedTxn` re-grepped over `clients/src`: **no hits**, so the response arm is
+unreachable for Java's own reason. It is translated in full rather than stubbed, with the
+rationale that it is the second of `PREPARED_TRANSACTION`'s two Java sources — correct, and the
+better call. The two `#[cfg(test)]` doors (`InitProducerIdRequestBuilder::data_mut`,
+`TxnRequestHandler::set_keep_prepared_txn_for_test`) each carry the Java reason at the site and
+follow the Phase-3 precedent (`force_enqueue_init_producer_id_for_test`, `current_state`);
+neither is reachable from production.
+
+**Both accounting blocks — extracted and run, with guards.** Method: `90 1 89` + `['is2PCEnabled']`,
+identical to the paste; both exclusions enforced rather than asserted (the constructor line
+fails `decl.match`, the `#[cfg(test)]` cut removes `transaction_manager` from the `fn` set while
+the full-file set still contains it); the one miss is the snake-case artefact and
+`fn is_2pc_enabled` exists at `:1798` in the production region — so 90/90, zero owed. Test: `awk`
+exit 0 and all five checks reproduce (140 / 122 / 18 / 33 / 107); the claimed split is
+`33 + 60 + 47 = 140` and both pasted tables regenerate byte-identically. The join is real, not
+vacuous: the full cross-tab is 57 `HAVE_MGR`, 3 `HAVE_ACC`, 47 `OWED_ACC`, **0 `OWED_MGR`**, and
+the classifier's only error direction (it does not scan private helper bodies) can produce false
+*MGR* — every one of which is `HAVE` — so it cannot manufacture that zero. Two of the five
+documented traps spot-checked and holding, including trap 3, which is load-bearing: without it
+the split would read 59/48. The pass-2 determinism fix stays fixed — 0 of 100 `sender.rs` rows
+out of `MARKERS` declaration order.
+
+**Both ownership assignments are consistent with the phases' own wording**, so no PLAN
+amendment is needed. §Phase-8 reads *"Close out any `TransactionManagerTest` method not landed
+in Phases 3/5, so the full 140 are accounted for"* — the 47 **are** Phase-5 leftovers, which is
+literally what that clause covers. §Phase-6's Tests line reads *"the 27 transactional tests in
+`KafkaProducerTest.java`, plus the transactional subset of `SenderTest.java`"* — which is the 18.
+The reclassification's evidence checks out: 0 of the 18 `SenderTest` bodies names
+`commitTransaction(` or `abortTransaction(`, so the old "blocked on a Phase-5b/6 entry point"
+rationale did expire, and §9.19's status line was updated rather than left stale.
+
+**Concurrency + `Caller`.** No new locking: every `transaction_manager.lock()` in the production
+region is a statement-scoped temporary or an explicitly braced block, none spans an `.await`,
+and no `select!` goes near the poll. `Sender::begin_abort`'s new `Arc::clone` exists only to
+release the borrow on `self.transaction_manager` before `&mut self.pending_requests` — no lock
+added. Deque → manager order untouched. `Caller` sites: see issue 1 for the one exception; the
+other ~10 new sites are all correct against their Java call chains.
+
+**DoD, all eleven clauses.** §2 closed at 90/90. §3: 60 new translations with the union
+covering all 140 and the 47 owed named-and-justified. §5/§8: no stubs or markers left. §6: no
+duplicated translation — `TransactionResult` and `CommittedOffset` both exist in Java, and the
+only Java-absent additions are two free helper functions (`sorted_partition_errors`,
+`format_partition_errors`), both recorded in §10.8, plus a test-local `enum Stage` inside one
+`#[tokio::test]`. §10: the `maybe_add_partition` hot-path audit is **accurate**, and I checked
+its load-bearing claim rather than taking it — `TopicPartition` is
+`{ partition: i32, topic: Arc<str> }` with derived `Clone` (`topic_partition.rs:21-25`), so the
+per-record V2 clones are refcount bumps, not heap allocations; and the "optimisation deliberately
+not taken" reasoning is sound, since `txn_partition_map` has a `reset` writer that
+`partitions_in_transaction` does not. §11: N/A.
+
+**Checked and deliberately not filed.** The `(Java A-B)` ranges in the "Translated from"
+rustdocs are loosely `@Test`-line-to-closing-brace with ±1–3 lines of slop (e.g.
+`testTransactionManagerDisablesV2` cites `1033-1075` where the brace is at `1078`, stopping just
+short of the two payload lines its own prose calls the payload). No citation points at a
+*different* method, which is what made the Phase-4 pass-3 finding substantive; these are
+locators, and my two scripted attempts to measure them both misfired before I checked by eye. Not
+worth a fix cycle — recorded so the next pass does not re-derive it.
+
+---
+---
+
+# Critic 45 — Phase 5b pass 1: RESOLVED (fixup commits over `b70e353`)
+
+All four findings conceded; none disputed. Independently re-derived before fixing.
+
+## Issue 1 (behavioural) — `begin_abort` hardcoded `Caller::App`. FIXED.
+
+Confirmed and **worse than reported**: `KafkaProducer::from_config` still rejects
+`transactional.id` until Phase 6, so `Sender::begin_abort` is not merely the second
+caller — it is the *only live* one. The hardcoded `Caller::App` was wrong for every
+caller that exists today.
+
+Re-derived the Critic's sweep rather than trusting it
+(`grep -rn '\.<method>(' clients/src/main/java/.../producer/`):
+
+| method | Java callers | verdict |
+|---|---|---|
+| `beginAbort` | `KafkaProducer.java:818` **and** `Sender.java:273` | takes `caller` |
+| `beginCommit` | `KafkaProducer.java:783` | `Caller::App` correct |
+| `sendOffsetsToTransaction` | `KafkaProducer.java:740` | `Caller::App` correct |
+| `maybeAddPartition` | `KafkaProducer.java:1045` | `Caller::App` correct |
+| `initializeTransactions` | `KafkaProducer.java:652` | `Caller::App` correct |
+| `beginTransaction` | `KafkaProducer.java:679` | `Caller::App` correct |
+| `prepareTransaction` | none in `clients/src` | see below |
+
+The sweep claim holds: `beginAbort` is the only two-caller entry point. One addition
+to the Critic's note on `prepareTransaction` — it has no caller, but
+`KafkaProducerMetrics.java:80` carries a *"Total time producer has spent in
+prepareTransaction"* metric, which is positive evidence that it is an
+application-facing operation rather than merely an untaken guess; recorded at the
+method.
+
+`begin_abort` now takes `caller: Caller` and forwards it; `Sender::begin_abort`
+passes `Caller::Sender`, and the eleven test call sites pass `Caller::App` (each
+models the application-side call `assertAbortableError` / `assertFatalError` /
+`KafkaProducer.abortTransaction` makes).
+
+Also verified nothing below the transition needs the caller:
+`begin_completing_transaction` performs no transition, and the one it can reach
+(`initializeTransactions`'s `!isEpochBump` arm) is unreachable from this path because
+an abort requires a live transaction and therefore a valid producer id, so
+`is_epoch_bump` is always true.
+
+**Two tests, because one is not enough here.**
+`test_begin_abort_poisons_only_on_the_sender_side` (`transaction_manager.rs`) pins
+that `begin_abort` *forwards* the caller it is given — App leaves `READY` and
+`last_error` untouched, Sender poisons to `FATAL_ERROR` with the recorded error.
+That test passes whichever caller `sender.rs` chooses, so
+`test_sender_begin_abort_poisons_the_state_machine` (`sender.rs`) pins the *choice*.
+`READY` is the invalid source in both, because it is the state the shutdown window
+actually produces.
+
+Mutation-checked in both directions:
+
+  - `Sender::begin_abort` reverted to `Caller::App` → the `sender.rs` test fails; the
+    forwarding test still passes, which is exactly why both exist.
+  - `begin_abort` re-hardcoding `Caller::App` internally → does not compile
+    (`error: unused variable: caller` under `#![deny(warnings)]`).
+
+## Issue 2 (design flaw / false mechanism) — TxnOffsetCommit retry prose. FIXED.
+
+Conceded in full; re-read both builders to confirm. Java's
+`TxnOffsetCommitRequest.Builder` ctor calls `setTopics(getTopics(pendingTxnOffsetCommits))`
+and the Rust `TxnOffsetCommitRequestBuilder::new` copies the same way, so
+`reenqueue()` / `retry()` re-send the **full original** list.
+
+Two sites carried the false claim, not one — the handler rustdoc *and* the
+`pending_txn_offset_commits` field doc ("so a retry re-sends exactly what is still
+outstanding"). Both now state that the map governs the tail's three-way choice and
+seeds the *next* construction, and the handler doc carries the explicit warning the
+Critic asked for: **do not rebuild the builder before `retry`** — it would send a
+reduced request where Java sends the full one.
+
+## Issue 3 (record) — PLAN §10.8 deviation 3 count. FIXED.
+
+35 → **56**, and `record_accumulator.rs` named alongside the other two. Per the
+meta-rule the entry now ships the derivation with its real output pasted (56 total;
+53 / 2 / 1 per file) plus the `#[cfg(test)]` placement check (first match after the
+cut point in each file: 4993 > 4671, 3875 > 2274, 1918 > 1813). The prose no longer
+states a bare number at all — it says "every test call site" and lets the derivation
+supply the count, which is the shape that cannot drift again.
+
+## Issue 4 (records) — two over-claims. FIXED.
+
+**(a)** Re-derived: `verifyProducerFenced(` matches **0 of the 107**, and dropping it
+from the classifier's alternation `diff`s empty against the original run — so it is
+provably inert. The paragraph now names `verifyCommitOrAbortTransactionRetriable` as
+the one reachable helper (4 of the 47) and keeps `verifyProducerFenced(` in the
+alternation with the no-op check shipped, because the *reason* it is inert is the
+useful part: its call sites sit inside private helpers the splitter never scans.
+
+That is also promoted to the point the Critic implied — it is the classifier's **one
+error direction, and the harmless one**: not following private helpers can only
+under-report ACC, i.e. produce a false *MGR*, never a false ACC, so it cannot
+manufacture `OWED_MGR == 0`. The four methods it mis-labels are the
+`verifyProducerFenced` family (Java 2057, 2062, 2081, 2086) and all four are `HAVE`,
+verified by re-running the status derivation.
+
+**(b)** Confirmed: `PHASE-5B METHOD ACCOUNTING` unanchored gives four (911, 1019,
+9957, 9988), `PHASE-5B TEST ACCOUNTING` three. Rather than pick a number that will
+drift with the next prose edit — it already had, between the Critic's read and mine —
+both the accounting block and the memory note now say "**more than one**", state that
+the count differs per title and moves with edits, and ship the two-line
+anchored-vs-unanchored `grep -c` to re-check. The load-bearing claim (extra hits break
+`$(( ))`) is unchanged and still true.
+
+## Not acted on, as instructed
+
+The recorded-not-filed `(Java A-B)` range slop stays recorded. Spot-checked the one
+example given — `testTransactionManagerDisablesV2` cited as `1033-1075` where the
+brace is at `1078` — and it points at the right method, so no range is *wrong* and no
+normalisation sweep was launched.
+
+## Verification
+
+`cargo build` 0 · `cargo test` 0 (2371 lib) · `cargo xtask format-check` 0 ·
+`cargo xtask lint` 0 · `make verify-sandbox` 0. All accounting derivations re-run
+after the prose edits: `90 1 89` / `['is2PCEnabled']`; guard ok; group A owed 0;
+60 HAVE / 47 OWED; `OWED_MGR` 0; both pasted tables still diff byte-identically; the
+no-stub `awk` still 0. `producer_perf_test` p99 across three serial runs reported in
+the fixup commit, since issue 1 changes `transition_to`'s call shape on the Sender
+path.

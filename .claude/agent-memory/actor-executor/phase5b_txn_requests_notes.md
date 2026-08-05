@@ -43,8 +43,11 @@ coordinator-disconnect path Java's own test exercises. Do not add a setter.
    `awk '!/^ *\/\// && /PATTERN/' FILE | wc -l`.
 2. **Anchor block-title greps at line start.** Every accounting-block title also
    appears inside a doc comment *and* inside the derivation that reads it, so an
-   unanchored `grep -n TITLE` returns three line numbers and the arithmetic that
-   consumes it fails.
+   unanchored `grep -n TITLE` returns **more than one** line number and the
+   `$(( .. - 1 ))` that consumes it fails. Do not write the count down: it differs
+   per title and moves with every prose edit. At the time of writing,
+   `PHASE-5B METHOD ACCOUNTING` gave four and `PHASE-5B TEST ACCOUNTING` three;
+   an earlier revision of this note said "three" flatly, which Critic 45 caught.
 3. **A backtick-quoted-name search must not require the opening backtick.** One
    Rust test writes `` `TransactionManagerTest.testX` ``; matching `` `testX` ``
    reported it as owed. Match `` testX` `` instead.
