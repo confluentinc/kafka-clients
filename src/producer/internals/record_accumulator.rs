@@ -3729,13 +3729,16 @@ mod tests {
     //
     // `RecordAccumulatorTest` has exactly one test that constructs a
     // `TransactionManager` — `testRecordsDrainedWhenTransactionCompleting`
-    // (Java 976-1019) — and it is **not** translatable here: it stubs
-    // `isCompleting()` to `true` with Mockito, and `COMMITTING_TRANSACTION` /
-    // `ABORTING_TRANSACTION` are unreachable without `beginCommit` / `beginAbort`,
-    // which are Phase 5b. The
-    // `transaction_completing` term it exercises *is* translated, in
-    // `RecordAccumulator::ready`. The test belongs to Phase 6, with the public
-    // `commit_transaction` / `abort_transaction` API that can reach the state.
+    // (Java 976-1019) — and it is still not translated here. Phase 4's reason
+    // (`COMMITTING_TRANSACTION` / `ABORTING_TRANSACTION` unreachable without
+    // `beginCommit` / `beginAbort`) expired with Phase 5b, which made both states
+    // enterable; what remains is that it is a `RecordAccumulatorTest` method outside
+    // Phase 5b's test scope, and that its Java form stubs `isCompleting()` with
+    // Mockito rather than driving a real transaction. The `transaction_completing`
+    // term it exercises *is* translated, in `RecordAccumulator::ready`, and is
+    // reachable for the first time as of Phase 5b. The test belongs to Phase 6, with
+    // the public `commit_transaction` / `abort_transaction` API that reaches the state
+    // the way an application would (PLAN §10.8).
     //
     // The tests below cover the accumulator half of the Phase-4 delta directly:
     // `RecordAccumulator.java:900-925` (sequence assignment), `:815-850`

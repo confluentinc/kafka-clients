@@ -1930,8 +1930,14 @@ phase; it also needs its own allocation audit against DoD §10.
 
 ### 9.19 Three `SenderTest` methods blocked on missing surface
 
-**Status:** open, and reduced to three blocked items — nothing is owed on budget any
-more.
+**Status:** open. Three items stay blocked on named missing surface. Separately, as of
+Phase 5b the 15 transactional `SenderTest` methods are **owed rather than blocked** —
+5b translated every entry point they call, so what they need is the end-to-end
+accumulator + `Sender` harness, not production surface. Their owner is Phase 6, whose
+§Phase-6 "Tests" line already names "the transactional subset of `SenderTest.java`".
+The `sender.rs` accounting block carries the derivation showing no entry in that group
+names `commitTransaction` / `abortTransaction`, which is what makes the reclassification
+checkable rather than asserted.
 
 Raised by Critic 44 issue 4, which rejected Phase 4's block deferral of `SenderTest`
 methods — correctly, since it named Phase 8 as the owner while §Phase-8's own scope
@@ -2539,3 +2545,110 @@ Not deviations, recorded because a reviewer may read them as such:
     `isEndTxn()` is false for both 5a handler kinds — so an `UnsupportedVersion`
     return there would be dead code, and `nextRequest` would have to grow a `Result`
     for it.
+
+---
+
+### 10.8 Phase 5b deviations (`TransactionManager`, transactional requests)
+
+Each is documented at its call site as well.
+
+1. **`format_partition_errors` prints each error as its Rust variant identifier, not
+   Java's enum constant.** Java's `Errors` is an enum, so interpolating one into the
+   `KafkaException` message at `TransactionManager.java:1625` yields
+   `Enum.toString()` = `name()`, e.g. `TOPIC_AUTHORIZATION_FAILED`. This crate's
+   `Errors` renders `Display` as the human-readable `message()` and has no `name()`,
+   so `{:?}` is used and the message carries `TopicAuthorizationFailed`. That
+   identifier *is* the translation of Java's constant under CLAUDE.md §2's PascalCase
+   rule; no Java test asserts on the message; and adding a 134-arm `name()` to
+   `src/common/protocol/errors.rs` for one diagnostic string would be out of
+   proportion to a transactions phase. Two `log` statements (`:1610`, and the
+   `TxnOffsetCommit` debug at `:1901`) share the treatment.
+
+2. **A malformed `AddPartitionsToTxn` response is an error, not a panic.** Java reads
+   `errors().get(V3_AND_BELOW_TXN_ID)` (`:1561`) and iterates it unchecked; `errors()`
+   omits that key entirely when the response carries no v3-and-below topic results, so
+   a malformed or v4+-shaped reply makes Java raise a `NullPointerException` inside
+   `NetworkClient.poll`. Rust returns `KafkaError::IllegalState` instead — the same
+   treatment `handle_find_coordinator_response` gives Java's
+   `IndexOutOfBoundsException` (§10.7 deviation 7), and unreachable in practice
+   because the request is only ever built from a non-empty pending set.
+
+3. **`nextRequest` returns `Result<Option<TxnRequestHandler>>`.** Java's method returns
+   the handler and can throw, through `resetTransactionState`'s `transitionTo` on the
+   "EndTxn for a transaction that never started" path (`:923`). Keeping `Option` for
+   "nothing to send" rather than overloading one return value with both meanings costs
+   one `?` at the single production call site, where `Sender` maps it to
+   `TransactionPhaseError::Other` — which is where Java's `runOnce` catch-and-log
+   receives it. The throw is unreachable on that path (the only states holding a
+   pending `EndTxn` are `COMMITTING_TRANSACTION` and `ABORTING_TRANSACTION`, and both
+   `→ READY` and `→ INITIALIZING` are valid from either), and the 35 test call sites
+   assert as much with `.expect("next_request does not fail on this path")`.
+
+4. **`coordinator_key` takes an explicit lifetime.**
+   `coordinatorKey()`'s base implementation returns the manager's `transactionalId`
+   while `TxnOffsetCommitHandler`'s override (`:1899`) returns the group id off the
+   *handler*. Rust's lifetime elision would tie the result to `&self` alone, so the
+   signature is `fn coordinator_key<'a>(&'a self, handler: &'a TxnRequestHandler) ->
+   Option<&'a str>`. No behaviour change; Java gets this for free from GC.
+
+5. **`CommitFailedException` is encoded as a bare `KafkaException`, not as
+   `ConsumerError::CommitFailed`.** Java's `TxnOffsetCommitHandler` raises
+   `new CommitFailedException(..)` at `:1929-1931`, and `CommitFailedException extends
+   KafkaException`. The crate already has `ConsumerError::CommitFailed`, but its
+   `From<ConsumerError> for KafkaError` impl flattens to `KafkaError::IllegalState` —
+   which would send `maybeFailWithError` down Java's `instanceof IllegalStateException`
+   branch (`:1167`) instead of its bare-`KafkaException` one, changing the message the
+   *next* transactional call reports. So the error is
+   `KafkaError::with_message(Errors::UnknownServerError, ..)` carrying Java's exact
+   text, and the tests assert that text (`definition-of-done.md` §3).
+
+6. **Per-partition error maps are iterated in sorted order.** Java walks the
+   `AddPartitionsToTxn` and `TxnOffsetCommit` error maps in `HashMap` order, and both
+   loops contain arms that `return` / `break` mid-walk — so the order decides *which*
+   error is reported when a response carries several. `sorted_partition_errors` fixes
+   it, which is rules §10's reasoning applied to control flow rather than to an
+   encoding. `addPartitionsToTransactionHandler`'s partition list is sorted for the
+   encoding reason proper.
+
+7. **Two `#[cfg(test)]` doors exist for the KIP-939 response arm.**
+   `InitProducerIdRequestBuilder::data_mut` and
+   `TxnRequestHandler::set_keep_prepared_txn_for_test`. Java's
+   `initializeTransactions` never calls `setKeepPreparedTxn` in Apache Kafka 4.2, so
+   the arm at `:1501` cannot be reached without setting the flag on a built request —
+   which is exactly what `TransactionManagerTest.prepareInitPidResponse`'s
+   `keepPreparedTxn = true` overload asserts the broker would see. Shipping the branch
+   untested is the failure mode §9.16 records.
+
+8. **`do_init_transactions` calls `handleCoordinatorReady`.** Java's helper spins
+   `Sender.runOnce`, which connects to the transaction coordinator and so runs
+   `handleCoordinatorReady` (`Sender.java:569`) as a side effect. That method is the
+   only writer of `coordinatorSupportsBumpingEpoch`, which decides whether
+   `abortableErrorIfPossible` recovers or goes fatal (`:1326`) — so a manager-level
+   drive that skips it takes the fatal branch Java does not.
+   `test_bump_transactional_epoch_on_recoverable_add_partition_request_error` is the
+   test that surfaced it. Recorded here because it changes what every test using the
+   fixture observes, not just the one.
+
+Not deviations, recorded because a reviewer may read them as such:
+
+  - **The `keepPreparedTxn` response arm is unreachable, for Java's own reason.**
+    §10.7's note stands: `setKeepPreparedTxn` appears nowhere in `clients/src`, so
+    `builder.data.keepPreparedTxn()` is always false on the `initializeTransactions`
+    path in Java too. The arm is translated in full rather than stubbed, because it is
+    what a broker-driven recovery takes once a caller does set the flag, and because
+    omitting it would leave `PREPARED_TRANSACTION` reachable from only one of its two
+    Java sources.
+  - **All nine `State` variants are now enterable**, closing §10.7's note on
+    `PREPARED_TRANSACTION` / `COMMITTING_TRANSACTION` / `ABORTING_TRANSACTION`.
+  - **`TransactionManagerTest` has no two-phase-commit test in 4.2.**
+    `prepareTransaction`, `preparedTransactionState` and `enable2pc` appear in no
+    method body, and `doInitTransactionsWith2PCEnabled` is declared and never called.
+    Phase 5b's 2PC cover is therefore three Rust-side tests plus the
+    `KafkaProducerTest` cover §Phase-6 owns.
+  - **`RecordAccumulatorTest.testRecordsDrainedWhenTransactionCompleting`
+    (Java 976-1019) becomes translatable but is not translated here.** Phase 4
+    deferred it because `COMMITTING_TRANSACTION` was unreachable; 5b makes it
+    reachable. It is a `RecordAccumulatorTest` method, outside this phase's test
+    scope, and its Java form stubs `isCompleting()` with Mockito — the accumulator
+    comment block at `record_accumulator.rs` keeps naming Phase 6 as the owner, which
+    is still right because that is where the public `commit_transaction` lands.

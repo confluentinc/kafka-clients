@@ -2360,9 +2360,9 @@ mod tests {
     /// `TransactionManagerTest.initializeTransactionManager(Optional.empty(), ..)`.
     ///
     /// Nothing on the idempotent path reads `ApiVersions` — the manager consults it
-    /// only from `handleCoordinatorReady` (Java 1104), which is transactional, and
-    /// `maybeUpdateTransactionV2Enabled` (Java 493), which is Phase 5b — so an
-    /// empty instance is sufficient here.
+    /// only from `handleCoordinatorReady` (Java 1104) and
+    /// `maybeUpdateTransactionV2Enabled` (493), and both are reached only through
+    /// transactional entry points — so an empty instance is sufficient here.
     fn idempotent_transaction_manager() -> Arc<Mutex<TransactionManager>> {
         Arc::new(Mutex::new(TransactionManager::new(
             LogContext::empty(),
@@ -7427,9 +7427,24 @@ mod tests {
     //     surface — `MockClient::poll_timeouts`, standing in for Java's
     //     `verify(client, times(2)).poll(eq(RETRY_BACKOFF_MS), anyLong())` spy.
     //
-    // TRANSACTIONAL (15) — each blocked on a Phase-5b/6 entry point it actually calls.
+    // TRANSACTIONAL (15) — **owed, not blocked, as of Phase 5b.** Every marker the
+    // derivation below finds for this group is `beginTransaction`, `beginCommit`,
+    // `beginAbort`, `maybeAddPartition`, `AddPartitionsToTxn`, `EndTxn` or
+    // `mock(TransactionManager`, and Phase 5b translated all of that surface: not one
+    // entry names `commitTransaction` / `abortTransaction`, the public-`KafkaProducer`
+    // methods Phase 6 owns. So the group's previous blanket rationale — "blocked on a
+    // Phase-5b/6 entry point it actually calls" — is no longer true, and saying
+    // otherwise would be the §9.19 failure mode (a completeness claim whose reason has
+    // gone stale) repeated.
+    //
+    // What they still need is the *harness*, not production surface: each drives the
+    // accumulator and the `Sender` end to end, and 5b's tests are manager-level.
+    // **Owner: Phase 6**, whose §Phase-6 "Tests" line reads "the transactional subset
+    // of `SenderTest.java`" — the same phase that reviews
+    // `maybeSendAndPollTransactionalRequest` and so has to build that harness anyway.
+    //
     // The blocking identifiers are derived, not asserted, by the same technique the
-    // `TransactionManagerTest` accounting uses (see PHASE-5A TEST ACCOUNTING in
+    // `TransactionManagerTest` accounting uses (see PHASE-5B TEST ACCOUNTING in
     // `transaction_manager.rs`); this listing is that derivation's output for the group:
     //
     //   S=kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals/SenderTest.java
@@ -7551,13 +7566,25 @@ mod tests {
     //   `testDoNotPollWhenNoRequestSent` has moved once more, into the 5a group above.
     //
     // Six further tests in this file translate `TransactionManagerTest` methods rather
-    // than `SenderTest` ones, and so are accounted for by the PHASE-5A TEST ACCOUNTING
+    // than `SenderTest` ones, and so are accounted for by the PHASE-5B TEST ACCOUNTING
     // block in `transaction_manager.rs`, not here:
     // test_transactional_init_producer_id_is_routed_to_the_coordinator,
     // test_lookup_coordinator_on_disconnect_after_send, test_disconnect_and_retry,
     // test_lookup_coordinator_on_disconnect_before_send, test_unsupported_init_transactions,
     // test_unsupported_find_coordinator. Counting them here would break the 52-arithmetic
     // below, which is over `SenderTest.java` alone.
+    //
+    // FORTY-SEVEN `TransactionManagerTest` METHODS ARE OWED HERE TOO, for the same
+    // reason the 15 above are: their Java bodies drive the accumulator or the `Sender`.
+    // They are enumerated, with the mechanical check that none of them is
+    // manager-only, in the PHASE-5B TEST ACCOUNTING block in `transaction_manager.rs`
+    // — that block is authoritative for the count and the list; this note exists so a
+    // reader of *this* file knows the harness they need is the one above.
+    // **Owner: Phase 8**, whose §Phase-8 scope reads "Close out any
+    // `TransactionManagerTest` method not landed in Phases 3/5, so the full 140 are
+    // accounted for". Phase 6 has to build the end-to-end transactional harness first
+    // (see the group above), so the two are ordered, not independent. They are **not**
+    // counted in the 52-arithmetic below, which is over `SenderTest.java` alone.
     //
     // BLOCKED ON NAMED MISSING SURFACE (3) — each cites what is absent, per the Phase-3
     // standard:

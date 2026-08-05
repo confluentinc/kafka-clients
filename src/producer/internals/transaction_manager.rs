@@ -550,9 +550,9 @@ pub(crate) enum Priority {
 /// `AbstractResponse` hierarchies — as the `ConcreteRequest` / `ConcreteResponse`
 /// enums — so it introduces no pattern the codebase does not already use.
 ///
-/// Phase 5a added `InitProducerIdHandler` and `FindCoordinatorHandler`; Phase 5b
-/// adds the remaining four (`AddPartitionsToTxn`, `EndTxn`, `AddOffsetsToTxn`,
-/// `TxnOffsetCommit`).
+/// All six Java handlers are translated: `InitProducerIdHandler` and
+/// `FindCoordinatorHandler` in Phase 5a, and `AddPartitionsToTxn`, `EndTxn`,
+/// `AddOffsetsToTxn` and `TxnOffsetCommit` in Phase 5b.
 pub(crate) enum TxnRequestHandlerKind {
     /// `InitProducerIdHandler` (Java 1461-1539).
     InitProducerId {
@@ -620,8 +620,7 @@ pub(crate) struct TxnRequestHandler {
     /// How long to back off before retrying this request.
     ///
     /// A field rather than a read-through to the manager because
-    /// `AddPartitionsToTxnHandler` (Phase 5b) overrides it per instance
-    /// (Java 1543).
+    /// `AddPartitionsToTxnHandler` overrides it per instance (Java 1543).
     retry_backoff_ms: i64,
     /// The request-specific state.
     kind: TxnRequestHandlerKind,
@@ -909,11 +908,11 @@ impl PendingStateTransition {
 }
 
 // =========================================================================
-// PHASE-5A METHOD ACCOUNTING (`definition-of-done.md` §2)
+// PHASE-5B METHOD ACCOUNTING (`definition-of-done.md` §2)
 //
 // `TransactionManager.java` declares **90** distinct method names at class level.
-// After Phase 5a, 82 of the 90 have a Rust `fn`, here or on `Sender` — the four
-// that moved there are named in the "Lock topology" section below.
+// After Phase 5b, **all 90** have a Rust `fn`, here or on `Sender` — the four that
+// moved there are named in the "Lock topology" section below.
 //
 // Two exclusions are enforced by the derivation rather than asserted beside it,
 // because Critic 45 issue 4 was exactly the failure of asserting them: an earlier
@@ -955,39 +954,46 @@ impl PendingStateTransition {
 //   print(missing)
 //   PY
 //
-//   90 9 81
-//   ['addPartitionsToTransactionHandler', 'beginCommit', 'beginCompletingTransaction',
-//    'hasPendingOffsetCommits', 'is2PCEnabled', 'maybeUpdateTransactionV2Enabled',
-//    'prepareTransaction', 'sendOffsetsToTransaction', 'txnOffsetCommitHandler']
+//   90 1 89
+//   ['is2PCEnabled']
 //
-// One of the nine, `is2PCEnabled`, is a snake-conversion artefact: the crate spells
-// it `is_2pc_enabled`, which the naive conversion renders as `is2pc_enabled`. So
-// 81 + 1 = **82** are present and **8** have no `fn` at all.
+// The single reported miss is a snake-conversion artefact, not a gap: the crate
+// spells it `is_2pc_enabled`, which the naive conversion renders as `is2pc_enabled`.
+// So 89 + 1 = **90** are present and **0** have no `fn`.
 //
-// Phase 5b owes **nine**: those eight, plus `beginAbort`, which the derivation
-// cannot report because a partial translation still defines the `fn`. Each is owed
-// because it constructs or consumes one of the four request handlers 5b adds, or
-// needs a feature read 5b introduces:
+// Phase 5b landed the nine Phase 5a owed. Where each went:
 //
-//   `beginCommit` (353) and `beginCompletingTransaction` (373) — build the
-//     `EndTxnHandler`, and `beginCompletingTransaction` also drains
-//     `newPartitionsInTransaction` through `addPartitionsToTransactionHandler`.
-//   `beginAbort` (361) — present, but only as the `ensureTransactional()` guard
-//     `Sender.run`'s shutdown loop depends on (PLAN §10.6 deviation 10); its body
-//     is `beginCompletingTransaction`, so it counts as owed.
-//   `sendOffsetsToTransaction` (404) — builds `AddOffsetsToTxnHandler` or, under
-//     Transaction V2, `txnOffsetCommitHandler`.
-//   `addPartitionsToTransactionHandler` (1210) and `txnOffsetCommitHandler`
-//     (1221) — the two private handler factories.
-//   `hasPendingOffsetCommits` (1001) — reads `pendingTxnOffsetCommits`, whose only
-//     writer is `txnOffsetCommitHandler`. The field is not translated either.
-//   `maybeUpdateTransactionV2Enabled` (492) — KIP-890 feature discovery; needs
-//     `latestFinalizedFeaturesEpoch` and `ApiVersions.getFinalizedFeaturesInfo`.
+//   `beginCommit` (353), `beginAbort` (361) and `beginCompletingTransaction` (373)
+//     — the `EndTxnHandler` and the two entry points that build it. `beginAbort`
+//     was previously present only as the `ensureTransactional()` guard
+//     `Sender.run`'s shutdown loop depends on (PLAN §10.6 deviation 10), which the
+//     derivation could not report as owed because a partial translation still
+//     defines the `fn`; that hole is now closed.
+//   `sendOffsetsToTransaction` (404), `txnOffsetCommitHandler` (1221) and
+//     `hasPendingOffsetCommits` (1001) — the offsets path, with the
+//     `pendingTxnOffsetCommits` field (103) the last of those reads.
+//   `addPartitionsToTransactionHandler` (1210) — the `AddPartitionsToTxn` factory.
+//   `maybeUpdateTransactionV2Enabled` (492) — KIP-890 feature discovery, with the
+//     `latestFinalizedFeaturesEpoch` field (145).
 //   `prepareTransaction` (342) — KIP-939 two-phase commit.
 //
-// Arithmetic, read off the derivation rather than maintained beside it: 9 reported
-// − 1 artefact + 1 unreported (`beginAbort`) = 9 owed; 90 − 9 = 81 fully
-// translated, and `beginAbort`'s guard makes 82 that have a `fn`.
+// Arithmetic, read off the derivation rather than maintained beside it: 1 reported
+// − 1 artefact = 0 owed; 90 − 0 = **90** translated.
+//
+// The derivation covers *names*, not bodies. Two things it cannot see, and where
+// they are pinned instead:
+//
+//   - A method present but partially translated. Phase 5a's `beginAbort` was
+//     exactly that, and it is why this block's prose has to name what changed
+//     rather than lean on the count. Every arm the phase deferred previously
+//     returned `Errors::UnsupportedVersion` naming Phase 5b. The mechanical check
+//     that none survives has to skip comment lines, or it matches its own
+//     documentation and can never reach 0:
+//       awk '!/^ *\/\// && /unsupported_version/' \
+//         src/producer/internals/transaction_manager.rs | wc -l
+//     Real output: `0`.
+//   - A method whose *behaviour* is untested. That is the test accounting block's
+//     job (`definition-of-done.md` §3), at the end of this file.
 // =========================================================================
 
 /// A class which maintains state for transactions. Also keeps the state necessary to ensure idempotent production.
@@ -1004,21 +1010,15 @@ impl PendingStateTransition {
 /// `resetTransactionState`, the abortable-versus-fatal error machine,
 /// `FindCoordinatorHandler` and the coordinator-routed `InitProducerId` path.
 ///
-/// Phase 5b adds the four remaining request handlers
+/// **Phase 5b** completes the class: the four remaining request handlers
 /// (`AddPartitionsToTxn`, `AddOffsetsToTxn`, `TxnOffsetCommit`, `EndTxn`), the
 /// entry points that construct them (`beginCommit`, `beginAbort`,
 /// `beginCompletingTransaction`, `sendOffsetsToTransaction`,
 /// `maybeAddPartition`'s registration branch), KIP-890 Transaction V2 and KIP-939
-/// two-phase commit. Every deferred arm returns
-/// [`Errors::UnsupportedVersion`] naming Phase 5b rather than silently taking
-/// another branch (CLAUDE.md §5).
-///
-/// Three of the nine [`State`] variants are therefore not yet *enterable*:
-/// `PREPARED_TRANSACTION` (needs `prepareTransaction` / the `keepPreparedTxn`
-/// response arm), `COMMITTING_TRANSACTION` (needs `beginCommit`) and
-/// `ABORTING_TRANSACTION` (needs `beginAbort`) — each blocked on a Phase-5b
-/// entry point, not on transition logic. The full 9×9 table has been translated
-/// since Phase 3; see [`State::is_transition_valid`].
+/// two-phase commit. All 90 of Java's methods now have a Rust `fn` — see the
+/// PHASE-5B METHOD ACCOUNTING block above — and all nine [`State`] variants are
+/// enterable; the full 9×9 table has been translated since Phase 3, see
+/// [`State::is_transition_valid`].
 ///
 /// # Lock topology
 ///
@@ -1071,8 +1071,8 @@ pub(crate) struct TransactionManager {
     /// `None` for a purely idempotent producer.
     transactional_id: Option<String>,
     transaction_timeout_ms: i32,
-    /// Read by [`Self::handle_coordinator_ready`] and, from Phase 5b,
-    /// `maybeUpdateTransactionV2Enabled`.
+    /// Read by [`Self::handle_coordinator_ready`] and
+    /// [`Self::maybe_update_transaction_v2_enabled`].
     api_versions: Arc<ApiVersions>,
 
     txn_partition_map: TxnPartitionMap,
@@ -1213,10 +1213,9 @@ impl TransactionManager {
     ///
     /// Phase 3's MILESTONE-11 GUARD, which refused a `transactional_id` so that
     /// the untranslated transactional arms stayed unreachable, is gone: Phase 5a
-    /// implements the transactional state machine, and the arms it still defers
-    /// (Transaction V2, two-phase commit, and the four Phase-5b request handlers)
-    /// each fail loudly with [`Errors::UnsupportedVersion`] naming Phase 5b, per
-    /// CLAUDE.md §5. `KafkaProducer::from_config` keeps its own guard on
+    /// implemented the transactional state machine and Phase 5b the four request
+    /// handlers, Transaction V2 and two-phase commit, so nothing is deferred here
+    /// any more. `KafkaProducer::from_config` keeps its own guard on
     /// `transactional.id` until Phase 6 wires the public API (PLAN §7.1), so the
     /// only way to build a transactional manager today is directly.
     pub(crate) fn new(
@@ -1291,8 +1290,8 @@ impl TransactionManager {
     ///
     /// Translated from the package-private overload
     /// `initializeTransactions(ProducerIdAndEpoch)` (Java 291), whose only Java
-    /// caller is `beginCompletingTransaction` (`:1200`) when
-    /// `clientSideEpochBumpRequired` holds — Phase 5b. Renamed because Rust has no
+    /// caller is [`Self::begin_completing_transaction`] (`:1200`) when
+    /// `clientSideEpochBumpRequired` holds. Renamed because Rust has no
     /// overloading, the same treatment
     /// [`Self::producer_id_and_epoch_for_partition`] gets (PLAN §10.5
     /// deviation 4).
@@ -1812,7 +1811,7 @@ impl TransactionManager {
     /// The API versions this manager was constructed with.
     ///
     /// Java reads the field directly from `handleCoordinatorReady` (Java 1104) and
-    /// `maybeUpdateTransactionV2Enabled` (Java 493, Phase 5b). Exposed because
+    /// `maybeUpdateTransactionV2Enabled` (Java 493). Exposed because
     /// `TransactionManagerTest` reaches `apiVersions` too
     /// (`testNeedToTriggerEpochBumpFromClientDuringCoordinatorDisconnect`,
     /// Java 3719).
@@ -2057,11 +2056,11 @@ impl TransactionManager {
     /// Both Java call sites run on the Sender thread — `nextRequest`'s
     /// "EndTxn for a transaction that never started" branch (Java 923) and
     /// `EndTxnHandler.handleResponse` (Java 1767) — so [`Caller::Sender`] is
-    /// hardcoded per rules §1 rather than taken as a parameter. Both are Phase 5b,
-    /// which is why this method has no caller yet; it is translated now because it
-    /// is the only writer that clears the per-transaction sets and
-    /// `prepared_txn_state`, and splitting it from the state machine would mean
-    /// writing it twice.
+    /// hardcoded per rules §1 rather than taken as a parameter. Both call sites
+    /// arrived with Phase 5b's `EndTxnHandler`; the method itself was translated in
+    /// Phase 5a because it is the only writer that clears the per-transaction sets
+    /// and `prepared_txn_state`, and splitting it from the state machine would have
+    /// meant writing it twice.
     fn reset_transaction_state(&mut self) -> Result<(), KafkaError> {
         if self.client_side_epoch_bump_required {
             self.transition_to(State::Initializing, None, Caller::Sender)?;
@@ -2520,11 +2519,10 @@ impl TransactionManager {
     /// (`RecordAccumulator.java:818`) — which Phase 4 translates, hence this method
     /// arriving before the rest of the transactional entry points.
     ///
-    /// Phase 5a completes the transactional arm. `partitions_in_transaction` is
-    /// necessarily empty until Phase 5b adds `AddPartitionsToTxnHandler`, so a
-    /// transactional producer is refused every partition — which is Java's own
-    /// answer for an empty set, and is consistent, because
-    /// [`Self::maybe_add_partition`] refuses to register one in the first place.
+    /// Phase 5a completed the transactional arm; since Phase 5b filled
+    /// `partitions_in_transaction` — through `AddPartitionsToTxnHandler`, or directly
+    /// under Transaction V2 — the set lookup discriminates rather than always
+    /// refusing.
     pub(crate) fn is_send_to_partition_allowed(&self, topic_partition: &TopicPartition) -> bool {
         if self.has_fatal_error() {
             return false;
@@ -2585,12 +2583,9 @@ impl TransactionManager {
 
     /// Check if the transaction is in the prepared state.
     ///
-    /// Corresponds to `isPrepared()` (Java 1099). Always `false` in Phase 5a:
-    /// [`State::PreparedTransaction`] is not enterable until Phase 5b adds
-    /// `prepareTransaction` (Java 342) and the `keepPreparedTxn` response arm. A
-    /// pure state read, so it is translated with the rest of the predicates rather
-    /// than held back — the same treatment [`Self::is_completing`] and
-    /// [`Self::is_aborting`] got in Phase 3.
+    /// Corresponds to `isPrepared()` (Java 1099). [`State::PreparedTransaction`] is
+    /// entered by [`Self::prepare_transaction`] (Java 342) and by
+    /// `InitProducerIdHandler`'s `keepPreparedTxn` arm (1504), both KIP-939.
     pub(crate) fn is_prepared(&self) -> bool {
         self.current_state == State::PreparedTransaction
     }
@@ -2599,10 +2594,9 @@ impl TransactionManager {
     /// ongoing transaction. This is used when preparing a transaction for a
     /// two-phase commit.
     ///
-    /// Corresponds to `preparedTransactionState()` (Java 1976). Always
-    /// [`ProducerIdAndEpoch::NONE`] in Phase 5a, for the same reason as
-    /// [`Self::is_prepared`]; translated so
-    /// [`Self::reset_transaction_state`]'s write to the field has a reader.
+    /// Corresponds to `preparedTransactionState()` (Java 1976). The value an
+    /// external transaction coordinator uses to commit or abort a prepared
+    /// transaction on the producer's behalf (KIP-939).
     pub(crate) fn prepared_transaction_state(&self) -> ProducerIdAndEpoch {
         self.prepared_txn_state
     }
@@ -7093,8 +7087,13 @@ mod tests {
         assert_eq!(handler.retry_backoff_ms(), DEFAULT_RETRY_BACKOFF_MS);
     }
 
-    /// Translated from the six `testIsSendToPartitionAllowedWith*After*Error`
-    /// methods (Java 531-612), one loop iteration each.
+    /// Translated from `testIsSendToPartitionAllowedWithPendingPartitionAfterAbortableError`
+    /// (Java 531), `testIsSendToPartitionAllowedWithInFlightPartitionAddAfterAbortableError`
+    /// (543), `testIsSendToPartitionAllowedWithPendingPartitionAfterFatalError` (558),
+    /// `testIsSendToPartitionAllowedWithInFlightPartitionAddAfterFatalError` (570),
+    /// `testIsSendToPartitionAllowedWithAddedPartitionAfterAbortableError` (585) and
+    /// `testIsSendToPartitionAllowedWithAddedPartitionAfterFatalError` (601) — one
+    /// loop iteration each.
     ///
     /// The distinction they pin: `isSendToPartitionAllowed` (Java 466) refuses a
     /// partition that is only *pending* — because nothing may be sent for it until
@@ -7560,9 +7559,9 @@ mod tests {
         }
     }
 
-    /// Translated from the parameterized `testRetriableErrors(Errors)`
-    /// (Java 1970-2010), whose `@EnumSource` names four codes — translated as a real
-    /// loop rather than one invocation (`definition-of-done.md` §3).
+    /// Translated from the parameterized `testRetriableErrors` (Java 1970-2010),
+    /// whose `@EnumSource` names four codes — translated as a real loop rather than
+    /// one invocation (`definition-of-done.md` §3).
     ///
     /// Covers a retry of every request family the phase adds except
     /// `TxnOffsetCommit`, which Java's own comment defers to
@@ -8214,7 +8213,7 @@ mod tests {
     /// `nextState != pendingTransition.state` arm of
     /// `handleCachedTransactionRequestResult` itself needs a second
     /// result-returning entry point (`beginCommit` / `beginAbort` /
-    /// `sendOffsetsToTransaction`), all Phase 5b.
+    /// `sendOffsetsToTransaction`), all of which Phase 5b landed.
     #[tokio::test]
     async fn test_pending_transition_blocks_other_operations_and_stays_retryable() {
         let mut manager = transactional_manager(false);
@@ -8453,7 +8452,9 @@ mod tests {
     /// per-transaction state, and picks `INITIALIZING` over `READY` exactly when a
     /// client-side epoch bump is pending.
     ///
-    /// Both Java call sites are Phase 5b, so this drives the method directly.
+    /// Both Java call sites — `nextRequest`'s never-started `EndTxn` branch and
+    /// `EndTxnHandler.handleResponse` — arrive through a full transaction; this drives
+    /// the method directly so the field clears are pinned in isolation.
     #[tokio::test]
     async fn test_reset_transaction_state() {
         for epoch_bump_required in [false, true] {
@@ -8529,7 +8530,9 @@ mod tests {
         // (`throwIfPendingState`, Java 332).
         result.await_result().await.expect("initTransactions succeeded");
         // The predicates remain false through a transaction: PREPARED_TRANSACTION
-        // needs Phase 5b, and nothing in Phase 5a can turn Transaction V2 on.
+        // needs a Transaction V2 manager, which `transactional_manager(true)` plus
+        // `do_init_transactions`'s feature read supplies; covered by
+        // `test_transaction_v2_add_partition_and_offsets`.
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
         assert!(!manager.is_ready());
         assert!(!manager.is_prepared());
@@ -8960,7 +8963,7 @@ mod tests {
     ///
     /// Java's `testFindCoordinatorAllowedInAbortableErrorState` (Java 2354-2375)
     /// reaches the state through `maybeAddPartition` + a `NOT_COORDINATOR`
-    /// `AddPartitionsToTxn` response, both Phase 5b; the escape hatch itself is
+    /// `AddPartitionsToTxn` response; the escape hatch itself is
     /// driven here. Without it the abort could never find its coordinator.
     #[tokio::test]
     async fn test_find_coordinator_allowed_in_abortable_error_state() {
@@ -9082,8 +9085,10 @@ mod tests {
     /// path when it does not, with Java's two messages.
     ///
     /// Java's `testMaybeResolveSequencesTransactionalProducer` (Java 3157-3188)
-    /// drives this through `maybeAddPartition` + `AddPartitionsToTxn` (Phase 5b);
-    /// the branch itself is driven here.
+    /// drives this through `maybeAddPartition` + `AddPartitionsToTxn` and an expired
+    /// batch, which needs the accumulator; the branch itself is driven here, which is
+    /// why the test accounting block lists that method as translated-with-a-named-gap
+    /// rather than fully.
     #[tokio::test]
     async fn test_maybe_resolve_sequences_transactional_producer() {
         const UNACKED: &str = "The client hasn't received acknowledgment for some previously sent messages and can \
@@ -9596,7 +9601,7 @@ mod tests {
     }
 
     // =====================================================================
-    // PHASE-5A TEST ACCOUNTING (`definition-of-done.md` §3)
+    // PHASE-5B TEST ACCOUNTING (`definition-of-done.md` §3)
     //
     // `TransactionManagerTest.java` has 140 test methods. Every one lands in
     // exactly one of two groups, and the split is derived mechanically rather
@@ -9605,8 +9610,8 @@ mod tests {
     // claiming completeness, and the counts written beside the lists drifted from
     // them.
     //
-    // SCOPE CRITERION. A method is in Phase-5a scope iff its body reaches no
-    // Phase-5b surface, i.e. none of `beginCommit`, `beginAbort`,
+    // SCOPE CRITERION (Phase 5a). A method was in Phase-5a scope iff its body
+    // reached no Phase-5b surface, i.e. none of `beginCommit`, `beginAbort`,
     // `sendOffsetsToTransaction`, the four Phase-5b request families
     // (`AddPartitionsToTxn`, `AddOffsetsToTxn`, `TxnOffsetCommit`, `EndTxn`),
     // `transactionContainsPartition` or `isTransactionV2Enabled` — nor any of the
@@ -9770,134 +9775,214 @@ mod tests {
     //   `testFailedInflightBatchAfterEpochBump` (3726) [4]
     //     → sender.rs test_failed_inflight_batch_after_epoch_bump.
     //
-    // GROUP B — owed to Phase 5b (107). Not skipped: each needs a request handler, an
-    // entry point or a Transaction V2 read that Phase 5b adds. Enumerated inline, as
-    // the Phase-4 accounting does, so every one of the 140 methods has a visible
-    // record rather than only a command that reproduces it — Critic 45 issue 5. This
-    // *is* the derivation's output, reproducible with:
+    // GROUP B — the 107 Phase 5b owns. Phase 5b translates **60** and owes **47**,
+    // and that split is derived rather than asserted: a method counts as translated
+    // iff its name appears in the Rust producer sources *outside* the accounting
+    // blocks, which is exactly the property the "Translated from" header of every
+    // test above establishes.
     //
-    //   awk -F'\t' '$3!="-" {printf "    //   %-4s %-60s %s\n", $1, $2, $3}' /tmp/scope.tsv
+    //   # the Rust sources with the three accounting blocks cut out. The line
+    //   # numbers are read from the files rather than written here, so an edit that
+    //   # moves a block cannot silently shrink the corpus. The `test -s` guard is
+    //   # not decoration: an empty corpus would report all 140 as owed, and a
+    //   # vacuous extraction is how both agents have been burned before.
+    //   T=src/producer/internals/transaction_manager.rs
+    //   S=src/producer/internals/sender.rs
+    //   # anchored at the start of the line, because each title also appears inside
+    //   # a doc comment and inside this very derivation — an unanchored grep returns
+    //   # three line numbers and the arithmetic below then fails loudly rather than
+    //   # cutting the wrong range.
+    //   ma=$(( $(grep -n '^// PHASE-5B METHOD ACCOUNTING' $T | cut -d: -f1) - 1 ))
+    //   mb=$(awk -v s=$ma 'NR>s && /^\/\/ ={20,}/{print NR; exit}' $T)
+    //   ta=$(( $(grep -n '^    // PHASE-5B TEST ACCOUNTING' $T | cut -d: -f1) - 1 ))
+    //   tb=$(awk -v s=$ta 'NR>s && /^    \/\/ ={20,}/{print NR; exit}' $T)
+    //   sa=$(( $(grep -n '^    // `SenderTest.java` accounting' $S | cut -d: -f1) - 1 ))
+    //   sb=$(awk -v s=$sa 'NR>s && !/^    \/\//{print NR-1; exit}' $S)
+    //   { sed "${ta},${tb}d;${ma},${mb}d" $T; sed "${sa},${sb}d" $S; \
+    //     cat src/producer/internals/record_accumulator.rs; } > /tmp/rust_nonacct.txt
+    //   test -s /tmp/rust_nonacct.txt && [ $(wc -l < /tmp/rust_nonacct.txt) -gt 15000 ]
     //
-    // Blocking identifiers, abbreviated as the `ABBREV` table above spells them:
-    // bC beginCommit · bA beginAbort · sOT sendOffsetsToTransaction ·
-    // tCP transactionContainsPartition · TV2 isTransactionV2Enabled ·
-    // AP AddPartitionsToTxn · AO AddOffsetsToTxn · TOC TxnOffsetCommit · ET EndTxn ·
-    // aAE assertAbortableError · aFE assertFatalError · vPF verifyProducerFenced ·
-    // vPFI verifyProducerFencedForInitProducerId ·
-    // vCAR verifyCommitOrAbortTransactionRetriable ·
-    // wTB writeTransactionalBatchWithValue · pGM prepareGroupMetadataCommit ·
-    // mAP maybeAddPartition (the conditional marker).
+    //   # status of every one of the 140
+    //   awk -F'\t' '$2!="setup"{print $1"\t"$2"\t"$3}' /tmp/scope.tsv \
+    //   | while IFS=$'\t' read -r ln nm grp; do
+    //       grep -q "$nm\`" /tmp/rust_nonacct.txt && st=HAVE || st=OWED
+    //       printf "%s\t%s\t%s\t%s\n" "$ln" "$nm" "$grp" "$st"; done > /tmp/status.tsv
+    //   awk -F'\t' '$3=="-" && $4=="OWED"' /tmp/status.tsv | wc -l    # 0 — group A intact
+    //   awk -F'\t' '$3!="-" && $4=="HAVE"' /tmp/status.tsv | wc -l    # 60
+    //   awk -F'\t' '$3!="-" && $4=="OWED"' /tmp/status.tsv | wc -l    # 47
     //
-    //   228  testSenderShutdownWithPendingTransactions                    bC+AP+ET+mAP
-    //   249  testEndTxnNotSentIfIncompleteBatches                         bC+tCP+AP+ET+mAP
-    //   304  testHasOngoingTransactionSuccessfulAbort                     bA+tCP+AP+ET+mAP
-    //   328  testHasOngoingTransactionSuccessfulCommit                    bC+tCP+AP+ET+mAP
-    //   352  testHasOngoingTransactionAbortableError                      bA+tCP+AP+ET+mAP
-    //   379  testHasOngoingTransactionFatalError                          tCP+AP+mAP
-    //   400  testMaybeAddPartitionToTransaction                           tCP+AP+mAP
-    //   425  testMaybeAddPartitionToTransactionInTransactionV2            tCP+mAP
+    // Real output of the four, run from the repo root: the guard exits 0, then `0`,
+    // `60`, `47`. 33 + 60 + 47 = 140, so every method is still placed exactly once.
+    //
+    // Note the status grep matches `NAME`` rather than ``NAME`` — one Rust test
+    // writes `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`, and
+    // requiring the opening backtick reported it as owed when it is not.
+    //
+    // WHY THE 47 ARE OWED, and the check that says so. Every one of them drives the
+    // **accumulator or the `Sender`** — `appendToAccumulator`, a produce response, a
+    // drain, `initiateClose`, or one of the two helpers that do
+    // (`verifyCommitOrAbortTransactionRetriable`, `verifyProducerFenced`). None is
+    // blocked on manager surface: Phase 5b translates all 90 of
+    // `TransactionManager`'s methods (see the PHASE-5B METHOD ACCOUNTING block).
+    // They belong with the transactional `SenderTest` group, whose harness is
+    // `sender.rs`'s `SenderTestContext`; the `SenderTest.java` accounting block in
+    // that file is where they are owed.
+    //
+    //   # classify each group-B method by whether its body reaches that machinery
+    //   J=kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals/TransactionManagerTest.java
+    //   awk -F'\t' '$3!="-" {print $1"\t"$2}' /tmp/scope.tsv \
+    //   | while IFS=$'\t' read -r ln nm; do
+    //       body=$(awk -v s=$ln 'NR>s{if($0=="    }")exit;print}' "$J")
+    //       needs=MGR
+    //       echo "$body" | grep -q 'appendToAccumulator\|accumulator\.\|sender\.\|ProduceResponse\|drain\|writeTransactionalBatchWithValue\|initiateClose\|verifyCommitOrAbortTransactionRetriable\|verifyProducerFenced(' \
+    //         && needs=ACC
+    //       printf "%s\t%s\t%s\n" "$ln" "$nm" "$needs"; done > /tmp/class.tsv
+    //   awk -F'\t' '$3=="MGR"' /tmp/class.tsv | wc -l                  # 57
+    //   awk -F'\t' '$3=="ACC"' /tmp/class.tsv | wc -l                  # 50
+    //
+    //   # THE LOAD-BEARING ONE: no owed method is manager-only, i.e. nothing is
+    //   # deferred that this phase's own surface could have covered.
+    //   join -t$'\t' -1 2 -2 2 \
+    //     <(awk -F'\t' '$3!="-" && $4=="OWED" {print $1"\t"$2}' /tmp/status.tsv | sort -t$'\t' -k2,2) \
+    //     <(sort -t$'\t' -k2,2 /tmp/class.tsv) | awk -F'\t' '$4=="MGR"' | wc -l   # 0
+    //
+    // Real output of the three: `57`, `50`, `0`.
+    //
+    // 57 MGR + 50 ACC = 107 while 60 HAVE + 47 OWED = 107, and the two splits are
+    // *not* the same partition: three ACC methods are translated anyway, minus a
+    // named accumulator leg — `testTransactionV2AddPartitionAndOffsets` (984, minus
+    // its two `appendToAccumulator` legs),
+    // `testMaybeResolveSequencesTransactionalProducer` (3159, whose branch is driven
+    // directly) and `testFindCoordinatorAllowedInAbortableErrorState` (2355,
+    // likewise). Each says so in its own rustdoc. The empty join above is what
+    // matters: the reverse direction — a manager-only method left untranslated — is
+    // what would be a gap, and there are none.
+    //
+    // GROUP B, TRANSLATED (60). Columns: Java declaration line, Java name, the
+    // blocking identifiers the derivation found (`ABBREV` above spells them). This
+    // *is* pasted derivation output:
+    //
+    //   join -t$'\t' -1 2 -2 2 \
+    //     <(awk -F'\t' '$3!="-" && $4=="HAVE" {print $1"\t"$2"\t"$3}' /tmp/status.tsv | sort -t$'\t' -k2,2) \
+    //     <(sort -t$'\t' -k2,2 /tmp/class.tsv) \
+    //   | awk -F'\t' '{print $2"\t"$1"\t"$3}' | sort -k1,1n \
+    //   | awk -F'\t' '{printf "    //   %-4s %-74s %s\n", $1, $2, $3}'
+    //
+    //   249  testEndTxnNotSentIfIncompleteBatches                                       bC+tCP+AP+ET+mAP
+    //   304  testHasOngoingTransactionSuccessfulAbort                                   bA+tCP+AP+ET+mAP
+    //   328  testHasOngoingTransactionSuccessfulCommit                                  bC+tCP+AP+ET+mAP
+    //   352  testHasOngoingTransactionAbortableError                                    bA+tCP+AP+ET+mAP
+    //   379  testHasOngoingTransactionFatalError                                        tCP+AP+mAP
+    //   400  testMaybeAddPartitionToTransaction                                         tCP+AP+mAP
+    //   425  testMaybeAddPartitionToTransactionInTransactionV2                          tCP+mAP
     //   445  testAddPartitionToTransactionOverridesRetryBackoffForConcurrentTransactions tCP+AP+mAP
-    //   464  testAddPartitionToTransactionRetainsRetryBackoffForRegularRetriableError tCP+AP+mAP
+    //   464  testAddPartitionToTransactionRetainsRetryBackoffForRegularRetriableError   tCP+AP+mAP
     //   483  testAddPartitionToTransactionRetainsRetryBackoffWhenPartitionsAlreadyAdded tCP+AP+mAP
-    //   532  testIsSendToPartitionAllowedWithPendingPartitionAfterAbortableError mAP
-    //   544  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterAbortableError AP+mAP
-    //   559  testIsSendToPartitionAllowedWithPendingPartitionAfterFatalError mAP
-    //   571  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterFatalError AP+mAP
-    //   586  testIsSendToPartitionAllowedWithAddedPartitionAfterAbortableError AP+mAP
-    //   602  testIsSendToPartitionAllowedWithAddedPartitionAfterFatalError AP+mAP
-    //   881  testBasicTransaction                                         bC+sOT+tCP+AP+AO+TOC+ET+mAP
-    //   934  testTransactionManagerEnablesV2                              bC+tCP+TV2+AP+ET+mAP
-    //   984  testTransactionV2AddPartitionAndOffsets                      bC+sOT+tCP+TOC+ET+mAP
-    //   1034 testTransactionManagerDisablesV2                             TV2+TOC
-    //   1137 testUnsupportedForMessageFormatInTxnOffsetCommit             sOT+AO+TOC+aFE
-    //   1159 testFencedInstanceIdInTxnOffsetCommitByGroupMetadata         sOT+AO+TOC+aAE
-    //   1193 testUnknownMemberIdInTxnOffsetCommitByGroupMetadata          sOT+AO+TOC+aAE
-    //   1226 testIllegalGenerationInTxnOffsetCommitByGroupMetadata        sOT+AO+TOC+aAE
-    //   1351 testTransactionalIdAuthorizationFailureInFindCoordinator     aFE
-    //   1366 testTransactionalIdAuthorizationFailureInInitProducerId      aAE
-    //   1381 testGroupAuthorizationFailureInFindCoordinator               sOT+AO+aAE
-    //   1406 testGroupAuthorizationFailureInTxnOffsetCommit               sOT+AO+TOC+aAE
-    //   1435 testFatalErrorWhenProduceResponseWithInvalidPidMapping       mAP
-    //   1451 testTransactionalIdAuthorizationFailureInAddOffsetsToTxn     sOT+AO+aFE
-    //   1471 testInvalidTxnStateFailureInAddOffsetsToTxn                  sOT+AO+aFE
-    //   1491 testTransactionalIdAuthorizationFailureInTxnOffsetCommit     sOT+AO+TOC+aFE
-    //   1516 testTopicAuthorizationFailureInAddPartitions                 tCP+AP+aAE+mAP
-    //   1553 testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight bC+AP+mAP
-    //   1602 testRecoveryFromAbortableErrorTransactionNotStarted          bC+bA+tCP+AP+ET+mAP
-    //   1648 testRetryAbortTransactionAfterTimeout                        bC+bA+tCP+AP+ET+mAP
-    //   1680 testRetryCommitTransactionAfterTimeout                       bC+bA+tCP+AP+ET+mAP
-    //   1714 testRetryInitTransactionsAfterTimeout                        bC+bA
-    //   1746 testRecoveryFromAbortableErrorTransactionStarted             bC+bA+tCP+AP+ET+mAP
-    //   1799 testRecoveryFromAbortableErrorProduceRequestInRetry          bC+bA+tCP+AP+ET+mAP
-    //   1863 testTransactionalIdAuthorizationFailureInAddPartitions       AP+aFE+mAP
-    //   1879 testInvalidTxnStateInAddPartitions                           AP+aFE+mAP
-    //   1895 testFlushPendingPartitionsOnCommit                           bC+tCP+AP+ET+mAP
-    //   1932 testMultipleAddPartitionsPerForOneProduce                    tCP+AP+mAP
-    //   1979 testRetriableErrors                                          bC+tCP+AP+TOC+ET+mAP
-    //   2028 testProducerFencedExceptionInInitProducerId                  vPF+vPFI
-    //   2033 testInvalidProducerEpochConvertToProducerFencedInInitProducerId vPF+vPFI
-    //   2057 testProducerFencedInAddPartitionToTxn                        AP+vPF
-    //   2062 testInvalidProducerEpochConvertToProducerFencedInAddPartitionToTxn AP+vPF
-    //   2081 testProducerFencedInAddOffSetsToTxn                          AO+vPF
-    //   2086 testInvalidProducerEpochConvertToProducerFencedInAddOffSetsToTxn AO+vPF
-    //   2125 testInvalidProducerEpochConvertToProducerFencedInEndTxn      bC+bA+sOT+AP+ET+mAP
-    //   2155 testInvalidProducerEpochFromProduce                          bA+AP+ET+mAP
-    //   2189 testDisallowCommitOnProduceFailure                           bC+bA+AP+ET+mAP
-    //   2217 testAllowAbortOnProduceFailure                               bA+AP+ET+mAP
-    //   2240 testAbortableErrorWhileAbortInProgress                       bA+AP+ET+mAP
-    //   2270 testCommitTransactionWithUnsentProduceRequest                bC+AP+ET+mAP
-    //   2313 testCommitTransactionWithInFlightProduceRequest              bC+AP+ET+mAP
-    //   2355 testFindCoordinatorAllowedInAbortableErrorState              AP+mAP
-    //   2377 testCancelUnsentAddPartitionsAndProduceOnAbort               bA+ET+mAP
-    //   2398 testAbortResendsAddPartitionErrorIfRetried                   bA+AP+ET+mAP
-    //   2424 testAbortResendsProduceRequestIfRetried                      bA+AP+ET+mAP
-    //   2452 testHandlingOfUnknownTopicPartitionErrorOnAddPartitions      tCP+AP+mAP
-    //   2473 testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit    TOC
-    //   2478 testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit       TOC
-    //   2483 testHandlingOfNetworkExceptionOnTxnOffsetCommit              TOC
-    //   2523 testHandlingOfProducerFencedErrorOnTxnOffsetCommit           TOC
-    //   2528 testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit TOC
-    //   2533 testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit     TOC
-    //   2538 testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit TOC
-    //   2574 shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed tCP+AP+mAP
-    //   2588 shouldNotSendAbortTxnRequestWhenOnlyAddPartitionsRequestFailed bA+AP+mAP
-    //   2605 shouldNotSendAbortTxnRequestWhenOnlyAddOffsetsRequestFailed  bA+sOT+AO
-    //   2624 shouldFailAbortIfAddOffsetsFailsWithFatalError               bA+sOT+AO
-    //   2643 testSendOffsetsWithGroupMetadata                             TOC+pGM
-    //   2666 testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled TOC+aFE+pGM
-    //   2712 testNoDrainWhenPartitionsPending                             mAP
-    //   2746 testAllowDrainInAbortableErrorState                          tCP+AP+mAP
-    //   2775 testRaiseErrorWhenNoPartitionsPendingOnDrain                 AP+mAP
-    //   2811 resendFailedProduceRequestAfterAbortableError                AP+mAP
-    //   2832 testTransitionToAbortableErrorOnBatchExpiry                  tCP+AP+mAP
-    //   2870 testTransitionToAbortableErrorOnMultipleBatchExpiry          tCP+AP+mAP
-    //   2924 testDropCommitOnBatchExpiry                                  bC+bA+tCP+AP+ET+mAP
-    //   2979 testTransitionToFatalErrorWhenRetriedBatchIsExpired          bC+tCP+AP+mAP
-    //   3159 testMaybeResolveSequencesTransactionalProducer               tCP+TV2+AP+wTB+mAP
-    //   3191 testEpochUpdateAfterBumpFromEndTxnResponseInV2               bA+ET+mAP
-    //   3218 testProducerIdAndEpochUpdateAfterOverflowFromEndTxnResponseInV2 bC+ET+mAP
-    //   3269 testAbortTransactionAndReuseSequenceNumberOnError            bA+tCP+AP+ET+mAP
-    //   3325 testAbortTransactionAndResetSequenceNumberOnUnknownProducerId bA+tCP+AP+ET+mAP
-    //   3395 testBumpTransactionalEpochOnAbortableError                   bA+tCP+AP+ET+mAP
-    //   3441 testBumpTransactionalEpochOnUnknownProducerIdError           bA+tCP+AP+ET+mAP
-    //   3488 testBumpTransactionalEpochOnTimeout                          bA+tCP+AP+ET+mAP
-    //   3547 testBumpTransactionalEpochOnRecoverableAddPartitionRequestError bA+AP+mAP
-    //   3567 testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError bA+sOT+AP+AO+ET+mAP
-    //   3695 testRetryAbortTransaction                                    vCAR
-    //   3700 testRetryCommitTransaction                                   vCAR
-    //   3705 testRetryAbortTransactionAfterCommitTimeout                  vCAR
-    //   3710 testRetryCommitTransactionAfterAbortTimeout                  vCAR
-    //   3819 testBackgroundInvalidStateTransitionIsFatal                  bC+bA+sOT
-    //   3841 testForegroundInvalidStateTransitionIsRecoverable            bC+bA+tCP+AP+ET+mAP
-    //   3872 testTransactionAbortableExceptionInInitProducerId            aAE
-    //   3887 testTransactionAbortableExceptionInAddPartitions             AP+aAE+mAP
-    //   3903 testTransactionAbortableExceptionInFindCoordinator           sOT+AO+aAE
-    //   3925 testTransactionAbortableExceptionInEndTxn                    bC+AP+ET+aAE+mAP
-    //   3950 testTransactionAbortableExceptionInAddOffsetsToTxn           sOT+AO+aAE
-    //   3970 testTransactionAbortableExceptionInTxnOffsetCommit           sOT+AO+TOC+aAE
+    //   532  testIsSendToPartitionAllowedWithPendingPartitionAfterAbortableError        mAP
+    //   544  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterAbortableError    AP+mAP
+    //   559  testIsSendToPartitionAllowedWithPendingPartitionAfterFatalError            mAP
+    //   571  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterFatalError        AP+mAP
+    //   586  testIsSendToPartitionAllowedWithAddedPartitionAfterAbortableError          AP+mAP
+    //   602  testIsSendToPartitionAllowedWithAddedPartitionAfterFatalError              AP+mAP
+    //   934  testTransactionManagerEnablesV2                                            bC+tCP+TV2+AP+ET+mAP
+    //   984  testTransactionV2AddPartitionAndOffsets                                    bC+sOT+tCP+TOC+ET+mAP
+    //   1034 testTransactionManagerDisablesV2                                           TV2+TOC
+    //   1137 testUnsupportedForMessageFormatInTxnOffsetCommit                           sOT+AO+TOC+aFE
+    //   1159 testFencedInstanceIdInTxnOffsetCommitByGroupMetadata                       sOT+AO+TOC+aAE
+    //   1193 testUnknownMemberIdInTxnOffsetCommitByGroupMetadata                        sOT+AO+TOC+aAE
+    //   1226 testIllegalGenerationInTxnOffsetCommitByGroupMetadata                      sOT+AO+TOC+aAE
+    //   1351 testTransactionalIdAuthorizationFailureInFindCoordinator                   aFE
+    //   1366 testTransactionalIdAuthorizationFailureInInitProducerId                    aAE
+    //   1381 testGroupAuthorizationFailureInFindCoordinator                             sOT+AO+aAE
+    //   1406 testGroupAuthorizationFailureInTxnOffsetCommit                             sOT+AO+TOC+aAE
+    //   1451 testTransactionalIdAuthorizationFailureInAddOffsetsToTxn                   sOT+AO+aFE
+    //   1471 testInvalidTxnStateFailureInAddOffsetsToTxn                                sOT+AO+aFE
+    //   1491 testTransactionalIdAuthorizationFailureInTxnOffsetCommit                   sOT+AO+TOC+aFE
+    //   1714 testRetryInitTransactionsAfterTimeout                                      bC+bA
+    //   1863 testTransactionalIdAuthorizationFailureInAddPartitions                     AP+aFE+mAP
+    //   1879 testInvalidTxnStateInAddPartitions                                         AP+aFE+mAP
+    //   1979 testRetriableErrors                                                        bC+tCP+AP+TOC+ET+mAP
+    //   2028 testProducerFencedExceptionInInitProducerId                                vPF+vPFI
+    //   2033 testInvalidProducerEpochConvertToProducerFencedInInitProducerId            vPF+vPFI
+    //   2057 testProducerFencedInAddPartitionToTxn                                      AP+vPF
+    //   2062 testInvalidProducerEpochConvertToProducerFencedInAddPartitionToTxn         AP+vPF
+    //   2081 testProducerFencedInAddOffSetsToTxn                                        AO+vPF
+    //   2086 testInvalidProducerEpochConvertToProducerFencedInAddOffSetsToTxn           AO+vPF
+    //   2355 testFindCoordinatorAllowedInAbortableErrorState                            AP+mAP
+    //   2473 testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit                  TOC
+    //   2478 testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit                     TOC
+    //   2483 testHandlingOfNetworkExceptionOnTxnOffsetCommit                            TOC
+    //   2523 testHandlingOfProducerFencedErrorOnTxnOffsetCommit                         TOC
+    //   2528 testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit     TOC
+    //   2533 testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit                   TOC
+    //   2538 testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit            TOC
+    //   2588 shouldNotSendAbortTxnRequestWhenOnlyAddPartitionsRequestFailed             bA+AP+mAP
+    //   2605 shouldNotSendAbortTxnRequestWhenOnlyAddOffsetsRequestFailed                bA+sOT+AO
+    //   2624 shouldFailAbortIfAddOffsetsFailsWithFatalError                             bA+sOT+AO
+    //   3159 testMaybeResolveSequencesTransactionalProducer                             tCP+TV2+AP+wTB+mAP
+    //   3547 testBumpTransactionalEpochOnRecoverableAddPartitionRequestError            bA+AP+mAP
+    //   3819 testBackgroundInvalidStateTransitionIsFatal                                bC+bA+sOT
+    //   3841 testForegroundInvalidStateTransitionIsRecoverable                          bC+bA+tCP+AP+ET+mAP
+    //   3872 testTransactionAbortableExceptionInInitProducerId                          aAE
+    //   3887 testTransactionAbortableExceptionInAddPartitions                           AP+aAE+mAP
+    //   3903 testTransactionAbortableExceptionInFindCoordinator                         sOT+AO+aAE
+    //   3950 testTransactionAbortableExceptionInAddOffsetsToTxn                         sOT+AO+aAE
+    //   3970 testTransactionAbortableExceptionInTxnOffsetCommit                         sOT+AO+TOC+aAE
     //
-    // The same set as a histogram over the blocking identifiers (a method may be
-    // blocked by several):
+    // GROUP B, OWED (47) — the same listing with `$4=="OWED"`. Every row is `ACC`,
+    // which is the empty join above restated as data:
+    //
+    //   228  testSenderShutdownWithPendingTransactions                                  bC+AP+ET+mAP
+    //   881  testBasicTransaction                                                       bC+sOT+tCP+AP+AO+TOC+ET+mAP
+    //   1435 testFatalErrorWhenProduceResponseWithInvalidPidMapping                     mAP
+    //   1516 testTopicAuthorizationFailureInAddPartitions                               tCP+AP+aAE+mAP
+    //   1553 testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight             bC+AP+mAP
+    //   1602 testRecoveryFromAbortableErrorTransactionNotStarted                        bC+bA+tCP+AP+ET+mAP
+    //   1648 testRetryAbortTransactionAfterTimeout                                      bC+bA+tCP+AP+ET+mAP
+    //   1680 testRetryCommitTransactionAfterTimeout                                     bC+bA+tCP+AP+ET+mAP
+    //   1746 testRecoveryFromAbortableErrorTransactionStarted                           bC+bA+tCP+AP+ET+mAP
+    //   1799 testRecoveryFromAbortableErrorProduceRequestInRetry                        bC+bA+tCP+AP+ET+mAP
+    //   1895 testFlushPendingPartitionsOnCommit                                         bC+tCP+AP+ET+mAP
+    //   1932 testMultipleAddPartitionsPerForOneProduce                                  tCP+AP+mAP
+    //   2125 testInvalidProducerEpochConvertToProducerFencedInEndTxn                    bC+bA+sOT+AP+ET+mAP
+    //   2155 testInvalidProducerEpochFromProduce                                        bA+AP+ET+mAP
+    //   2189 testDisallowCommitOnProduceFailure                                         bC+bA+AP+ET+mAP
+    //   2217 testAllowAbortOnProduceFailure                                             bA+AP+ET+mAP
+    //   2240 testAbortableErrorWhileAbortInProgress                                     bA+AP+ET+mAP
+    //   2270 testCommitTransactionWithUnsentProduceRequest                              bC+AP+ET+mAP
+    //   2313 testCommitTransactionWithInFlightProduceRequest                            bC+AP+ET+mAP
+    //   2377 testCancelUnsentAddPartitionsAndProduceOnAbort                             bA+ET+mAP
+    //   2398 testAbortResendsAddPartitionErrorIfRetried                                 bA+AP+ET+mAP
+    //   2424 testAbortResendsProduceRequestIfRetried                                    bA+AP+ET+mAP
+    //   2452 testHandlingOfUnknownTopicPartitionErrorOnAddPartitions                    tCP+AP+mAP
+    //   2574 shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed            tCP+AP+mAP
+    //   2643 testSendOffsetsWithGroupMetadata                                           TOC+pGM
+    //   2666 testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled      TOC+aFE+pGM
+    //   2712 testNoDrainWhenPartitionsPending                                           mAP
+    //   2746 testAllowDrainInAbortableErrorState                                        tCP+AP+mAP
+    //   2775 testRaiseErrorWhenNoPartitionsPendingOnDrain                               AP+mAP
+    //   2811 resendFailedProduceRequestAfterAbortableError                              AP+mAP
+    //   2832 testTransitionToAbortableErrorOnBatchExpiry                                tCP+AP+mAP
+    //   2870 testTransitionToAbortableErrorOnMultipleBatchExpiry                        tCP+AP+mAP
+    //   2924 testDropCommitOnBatchExpiry                                                bC+bA+tCP+AP+ET+mAP
+    //   2979 testTransitionToFatalErrorWhenRetriedBatchIsExpired                        bC+tCP+AP+mAP
+    //   3191 testEpochUpdateAfterBumpFromEndTxnResponseInV2                             bA+ET+mAP
+    //   3218 testProducerIdAndEpochUpdateAfterOverflowFromEndTxnResponseInV2            bC+ET+mAP
+    //   3269 testAbortTransactionAndReuseSequenceNumberOnError                          bA+tCP+AP+ET+mAP
+    //   3325 testAbortTransactionAndResetSequenceNumberOnUnknownProducerId              bA+tCP+AP+ET+mAP
+    //   3395 testBumpTransactionalEpochOnAbortableError                                 bA+tCP+AP+ET+mAP
+    //   3441 testBumpTransactionalEpochOnUnknownProducerIdError                         bA+tCP+AP+ET+mAP
+    //   3488 testBumpTransactionalEpochOnTimeout                                        bA+tCP+AP+ET+mAP
+    //   3567 testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError              bA+sOT+AP+AO+ET+mAP
+    //   3695 testRetryAbortTransaction                                                  vCAR
+    //   3700 testRetryCommitTransaction                                                 vCAR
+    //   3705 testRetryAbortTransactionAfterCommitTimeout                                vCAR
+    //   3710 testRetryCommitTransactionAfterAbortTimeout                                vCAR
+    //   3925 testTransactionAbortableExceptionInEndTxn                                  bC+AP+ET+aAE+mAP
+    //
+    // The whole of group B as a histogram over the blocking identifiers (a method
+    // may be blocked by several) — kept from the Phase-5a block because it is the
+    // cheapest cross-check that the marker set itself has not drifted:
     //
     //   awk -F'\t' '$3!="-" {n=split($3,m,"+"); for(i=1;i<=n;i++) c[m[i]]++} \
     //       END {for (k in c) printf "%4d  %s\n", c[k], k}' /tmp/scope.tsv \
@@ -9914,33 +9999,12 @@ mod tests {
     // in Apache Kafka 4.2: `prepareTransaction`, `preparedTransactionState` and
     // `enable2pc` appear in no method body, and the `doInitTransactionsWith2PCEnabled`
     // helper (Java 4367) is declared and never called. So no group-B entry is
-    // blocked on 2PC, and Phase 5b's 2PC cover has to come from `KafkaProducerTest`
-    // (PLAN §Phase-6) rather than from here. Check:
+    // blocked on 2PC, and Phase 5b's 2PC cover is three Rust-side tests
+    // (`test_prepare_transaction_records_the_prepared_state`,
+    // `test_prepare_transaction_is_refused_outside_a_transaction`,
+    // `test_init_producer_id_resumes_a_prepared_transaction`) plus the
+    // `KafkaProducerTest` cover PLAN §Phase-6 owns. Check:
     //   grep -c 'doInitTransactionsWith2PCEnabled' "$J"   # 1 — the declaration only
-    //
-    // GROUP B ENTRIES PHASE 5A NEVERTHELESS COVERS (7). These stay owed to 5b —
-    // they are listed so a reviewer is not surprised to find a Rust test named
-    // after a group-B method. Two kinds:
-    //
-    //   Body translated minus a named 5b tail (3):
-    //     `testRetryInitTransactionsAfterTimeout` (1714) → test_retry_init_transactions_after_timeout,
-    //       minus its three `beginAbort` / `beginCommit` assertions (Java 1732-1734).
-    //     `testBackgroundInvalidStateTransitionIsFatal` (3819)
-    //       → test_background_invalid_state_transition_is_fatal, minus its `beginAbort`,
-    //       `beginCommit` and `sendOffsetsToTransaction` assertions (Java 3833, 3834, 3837).
-    //     `testTransactionalIdAuthorizationFailureInFindCoordinator` (1351)
-    //       → test_transactional_id_authorization_failure_in_find_coordinator, minus
-    //       `assertFatalError(..)` (Java 1362).
-    //
-    //   Only the production branch is covered, by a Rust-side test named after the
-    //   Java method, because Java reaches the branch through a 5b handler (4):
-    //     `testMaybeResolveSequencesTransactionalProducer` (3159)
-    //       → test_maybe_resolve_sequences_transactional_producer.
-    //     `testFindCoordinatorAllowedInAbortableErrorState` (2355)
-    //       → test_find_coordinator_allowed_in_abortable_error_state.
-    //     `testGroupAuthorizationFailureInFindCoordinator` (1381) and
-    //     `testTransactionAbortableExceptionInFindCoordinator` (3903)
-    //       → test_find_coordinator_remaining_error_arms.
     //
     // Line numbers are the `void` declaration line throughout, here and in the
     // `Translated from` header of every test above.
