@@ -20,7 +20,8 @@
 
 //! State for transactions, and the state needed to ensure idempotent production.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -70,16 +71,148 @@ pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
 /// name appears as a **field** in this file — only as a parameter — so nothing
 /// else holding the shared mutex can reach either one.
 ///
-/// # Why a type alias, and why a `VecDeque`
+/// # Why a struct, and how the ordering is expressed
 ///
-/// Java's collection is a `PriorityQueue<TxnRequestHandler>` ordered by
-/// [`Priority`] (`:224`). The only handler the idempotence slice can enqueue is
-/// `InitProducerId`, and [`TransactionManager::bump_idempotent_epoch_and_reset_id_if_needed`]
-/// is guarded on `!has_producer_id()`, so at most one is ever pending and FIFO
-/// coincides with priority order. Phase 5 introduces the ordered queue together
-/// with the five handlers that make ordering observable; the alias is what makes
-/// that a one-line change.
-pub(crate) type PendingRequests = VecDeque<TxnRequestHandler>;
+/// Java's collection is
+/// `new PriorityQueue<>(10, Comparator.comparingInt(o -> o.priority().priority))`
+/// (`:224`) — a **min-heap** keyed on [`Priority`]. Phase 3/4 got away with a
+/// `VecDeque` because the only handler the idempotence slice could enqueue was
+/// `InitProducerId` and at most one was ever pending, so FIFO coincided with
+/// priority order; Phase 5a adds `FindCoordinator`, which must overtake a queued
+/// `InitProducerId`, so the real ordering is now observable.
+///
+/// Two Rust-specific concerns are folded into [`QueuedRequest`]'s [`Ord`] rather
+/// than open-coded at the call sites:
+///
+///   - [`BinaryHeap`] is a **max**-heap, so the comparison is inverted to
+///     reproduce Java's min-heap.
+///   - Java's `PriorityQueue` is **unstable** for equal priorities, so the order
+///     in which two `AddPartitionsOrOffsets` requests come back out is
+///     unspecified there. An insertion-sequence tiebreaker makes it FIFO here, so
+///     tests can assert on it (PLAN §Phase-5 recommends exactly this). That is a
+///     strict refinement of Java's contract: any order Java may produce for equal
+///     keys is admissible, and the one chosen is the order the requests were
+///     enqueued in.
+///
+/// The priority is **snapshotted at insertion** into `QueuedRequest`, never read
+/// back off the handler while it sits in the heap. `InitProducerIdHandler.priority()`
+/// (Java 1477) is dynamic — `EPOCH_BUMP` when bumping, `INIT_PRODUCER_ID`
+/// otherwise — and although `is_epoch_bump` happens to be immutable after
+/// construction, rules §6 forbids keying an ordered collection on a field read
+/// through the element: the snapshot makes that structurally impossible.
+///
+/// A struct rather than a bare `BinaryHeap<QueuedRequest>` alias, so no call site
+/// can build an element with a hand-made key. It stands in for Java's
+/// `pendingRequests` field itself and adds no concept Java lacks
+/// (`definition-of-done.md` §7).
+pub(crate) struct PendingRequests {
+    queue: BinaryHeap<QueuedRequest>,
+    /// Supplies [`QueuedRequest::sequence`]. Monotonic for the life of the
+    /// `Sender`; at one transactional request per round trip, `u64` cannot wrap.
+    next_sequence: u64,
+}
+
+impl PendingRequests {
+    /// Creates an empty queue.
+    ///
+    /// Java sizes its `PriorityQueue` at 10 (`:224`); a `BinaryHeap` grows on
+    /// demand and the initial capacity is not observable.
+    pub(crate) fn new() -> Self {
+        Self { queue: BinaryHeap::new(), next_sequence: 0 }
+    }
+
+    /// Enqueues `handler` at its current priority.
+    ///
+    /// Corresponds to `pendingRequests.add(requestHandler)` (Java 1188).
+    pub(crate) fn add(&mut self, handler: TxnRequestHandler) {
+        let priority = handler.priority();
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        self.queue.push(QueuedRequest { priority, sequence, handler });
+    }
+
+    /// The highest-priority queued request, without removing it.
+    ///
+    /// Corresponds to `pendingRequests.peek()` (Java 897).
+    pub(crate) fn peek(&self) -> Option<&TxnRequestHandler> {
+        self.queue.peek().map(|queued| &queued.handler)
+    }
+
+    /// Removes and returns the highest-priority queued request.
+    ///
+    /// Corresponds to `pendingRequests.poll()` (Java 905, 920).
+    pub(crate) fn poll(&mut self) -> Option<TxnRequestHandler> {
+        self.queue.pop().map(|queued| queued.handler)
+    }
+
+    /// Whether the queue is empty.
+    ///
+    /// Corresponds to `pendingRequests.isEmpty()` (Java 1006).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// The number of queued requests.
+    pub(crate) fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Iterates the queued requests in **unspecified** order.
+    ///
+    /// Corresponds to `pendingRequests.forEach(..)` (Java 940, 945, 951) and to
+    /// the `for (TxnRequestHandler request : pendingRequests)` loop at Java 939.
+    /// `PriorityQueue.iterator()` is documented as *not* traversing in any
+    /// particular order, and `BinaryHeap::iter` matches: it walks the backing
+    /// vector in heap order. All three Java callers fail every handler with the
+    /// same exception, so no caller can observe the difference.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &TxnRequestHandler> {
+        self.queue.iter().map(|queued| &queued.handler)
+    }
+}
+
+impl Default for PendingRequests {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A [`TxnRequestHandler`] together with the sort key it was enqueued under.
+///
+/// This is Java's `Comparator.comparingInt(o -> o.priority().priority)`
+/// (`TransactionManager.java:224`) reified, plus the insertion tiebreaker — see
+/// [`PendingRequests`] for both. Private to this module so the key can only ever
+/// be produced by [`PendingRequests::add`].
+struct QueuedRequest {
+    priority: Priority,
+    sequence: u64,
+    handler: TxnRequestHandler,
+}
+
+impl Ord for QueuedRequest {
+    /// Orders so that [`BinaryHeap`]'s max-heap yields Java's min-heap: the
+    /// *lowest* [`Priority`] first, and among equal priorities the *earliest*
+    /// insertion first.
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .priority
+            .cmp(&self.priority)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for QueuedRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for QueuedRequest {}
+
+impl PartialEq for QueuedRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
 
 /// The per-partition in-flight batch pool supplied by the batches' owners.
 ///
@@ -1774,7 +1907,7 @@ impl TransactionManager {
     /// needed for the log prefix.
     fn enqueue_request(&self, pending_requests: &mut PendingRequests, handler: TxnRequestHandler) {
         kafka_debug!(self.log_context, "Enqueuing transactional request {:?}", handler);
-        pending_requests.push_back(handler);
+        pending_requests.add(handler);
     }
 
     /// The next transactional request to send, if any.
@@ -1792,14 +1925,14 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
         has_incomplete_batches: bool,
     ) -> Option<TxnRequestHandler> {
-        let next_request_handler = pending_requests.front()?;
+        let next_request_handler = pending_requests.peek()?;
 
         // Do not send the EndTxn until all batches have been flushed
         if next_request_handler.is_end_txn() && has_incomplete_batches {
             return None;
         }
 
-        let next_request_handler = pending_requests.pop_front()?;
+        let next_request_handler = pending_requests.poll()?;
         if self.maybe_terminate_request_with_error(&next_request_handler) {
             kafka_trace!(
                 self.log_context,
@@ -2870,6 +3003,91 @@ mod tests {
             manager.last_error().expect("recorded").message(),
             "The producer closed forcefully"
         );
+    }
+
+    /// Builds an `InitProducerId` handler directly, bypassing the state guards on
+    /// [`TransactionManager::bump_idempotent_epoch_and_reset_id_if_needed`], so the
+    /// queue's ordering can be exercised with more than one pending request.
+    ///
+    /// `is_epoch_bump` is what makes `InitProducerIdHandler.priority()` (Java 1477)
+    /// dynamic, and therefore the only priority difference the 5a handler set can
+    /// express without a `FindCoordinator`.
+    fn init_producer_id_handler(operation: &str, is_epoch_bump: bool) -> TxnRequestHandler {
+        let mut request_data = InitProducerIdRequestData::new();
+        request_data.set_transactional_id(None).set_transaction_timeout_ms(i32::MAX);
+        TxnRequestHandler::new(
+            operation,
+            DEFAULT_RETRY_BACKOFF_MS,
+            TxnRequestHandlerKind::InitProducerId {
+                builder: InitProducerIdRequestBuilder::new(request_data),
+                is_epoch_bump,
+            },
+        )
+    }
+
+    /// The queue is Java's min-heap on [`Priority`] (Java 224): a lower priority
+    /// value is dequeued first, regardless of insertion order.
+    ///
+    /// An epoch bump sorts *after* everything else ([`Priority::EpochBump`] = 4),
+    /// so enqueueing it first must not make it come out first.
+    #[test]
+    fn test_pending_requests_are_ordered_by_priority() {
+        let mut pending = PendingRequests::new();
+        pending.add(init_producer_id_handler("EpochBump", true));
+        pending.add(init_producer_id_handler("InitProducerId", false));
+        assert_eq!(pending.len(), 2);
+
+        assert_eq!(
+            pending.peek().expect("two are queued").priority(),
+            Priority::InitProducerId,
+            "peek must report the lowest priority, not the head of insertion order"
+        );
+        assert_eq!(pending.poll().expect("two are queued").operation(), "InitProducerId");
+        assert_eq!(pending.poll().expect("one is queued").operation(), "EpochBump");
+        assert!(pending.poll().is_none());
+        assert!(pending.is_empty());
+    }
+
+    /// Equal priorities come out in insertion order.
+    ///
+    /// Java's `PriorityQueue` leaves this unspecified; the insertion-sequence
+    /// tiebreaker makes it deterministic so tests can assert on it (PLAN
+    /// §Phase-5). Three elements, because a two-element `BinaryHeap` would agree
+    /// with FIFO by accident.
+    #[test]
+    fn test_pending_requests_break_priority_ties_by_insertion_order() {
+        let mut pending = PendingRequests::new();
+        for operation in ["first", "second", "third"] {
+            pending.add(init_producer_id_handler(operation, false));
+        }
+        let dequeued: Vec<String> = std::iter::from_fn(|| pending.poll())
+            .map(|handler| handler.operation().to_string())
+            .collect();
+        assert_eq!(dequeued, vec!["first", "second", "third"]);
+    }
+
+    /// The sort key is snapshotted at insertion, so a handler re-enqueued by
+    /// [`TransactionManager::retry`] is re-keyed rather than keeping a stale slot.
+    #[test]
+    fn test_reenqueued_request_is_rekeyed_at_its_current_priority() {
+        let manager = idempotent_manager(false);
+        let mut pending = PendingRequests::new();
+        pending.add(init_producer_id_handler("InitProducerId", false));
+        pending.add(init_producer_id_handler("EpochBump", true));
+
+        // Dequeue the InitProducerId and put it back: it must still overtake the
+        // epoch bump, i.e. the sequence tiebreaker must not have promoted the bump.
+        let handler = pending.poll().expect("two are queued");
+        assert_eq!(handler.operation(), "InitProducerId");
+        manager.retry(&mut pending, handler);
+
+        let handler = pending.poll().expect("two are queued");
+        assert_eq!(handler.operation(), "InitProducerId");
+        assert!(
+            handler.is_retry(),
+            "retry() marks the handler before re-enqueueing (Java 934-937)"
+        );
+        assert_eq!(pending.poll().expect("one is queued").operation(), "EpochBump");
     }
 
     /// A `PRODUCER_FENCED` / `INVALID_PRODUCER_EPOCH` `InitProducerId` response
