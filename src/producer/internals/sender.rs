@@ -10526,6 +10526,333 @@ mod tests {
         assert!(!manager.lock().unwrap().transaction_contains_partition(&tp0));
     }
 
+    /// `prepareGroupMetadataCommit(Runnable)` (Java 2684-2710).
+    ///
+    /// `prepare_txn_commit_response` stands in for Java's `Runnable`: it is invoked at
+    /// the same point, between the `FindCoordinator` response being prepared and the two
+    /// `runOnce` calls that discover the group coordinator.
+    async fn prepare_group_metadata_commit<F>(
+        ctx: &mut SenderTestContext,
+        prepare_txn_commit_response: F,
+    ) -> Arc<TransactionalRequestResult>
+    where
+        F: FnOnce(&mut SenderTestContext),
+    {
+        do_init_transactions(ctx).await;
+
+        begin_transaction(ctx);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        let mut offsets = HashMap::new();
+        offsets.insert(tp0, offset(1));
+        offsets.insert(tp1, offset(1));
+
+        let add_offsets_result = send_offsets_to_transaction(ctx, offsets, full_consumer_group_metadata());
+        prepare_add_offsets_to_txn_response(ctx, Errors::None, CONSUMER_GROUP_ID, TXN_PRODUCER_ID, TXN_EPOCH);
+
+        ctx.sender.run_once().await.expect("run_once"); // send AddOffsetsToTxnResult
+
+        // The request should complete only after the TxnOffsetCommit completes.
+        assert!(!add_offsets_result.is_completed());
+
+        prepare_find_coordinator_response(ctx, Errors::None, false, CoordinatorType::Group, CONSUMER_GROUP_ID);
+        prepare_txn_commit_response(ctx);
+
+        assert!(ctx.sender.coordinator(CoordinatorType::Group).expect("valid type").is_none());
+        // Try to send TxnOffsetCommitRequest, but find we don't have a group coordinator.
+        ctx.sender.run_once().await.expect("run_once");
+        // Send find-coordinator for the group request.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.sender.coordinator(CoordinatorType::Group).expect("valid type").is_some());
+        assert!(ctx.transaction_manager().lock().unwrap().has_pending_offset_commits());
+        add_offsets_result
+    }
+
+    /// Translated from `TransactionManagerTest.testSendOffsetsWithGroupMetadata`
+    /// (Java 2643-2663).
+    #[tokio::test]
+    async fn test_send_offsets_with_group_metadata() {
+        let mut ctx = txn_mgr_test_context(false);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+
+        let group_metadata = full_consumer_group_metadata();
+        let add_offsets_result = {
+            let tp0 = tp0.clone();
+            let tp1 = tp1.clone();
+            let group_metadata = group_metadata.clone();
+            prepare_group_metadata_commit(&mut ctx, move |ctx| {
+                prepare_txn_offset_commit_response_with_group_metadata(
+                    ctx,
+                    TXN_PRODUCER_ID,
+                    TXN_EPOCH,
+                    &group_metadata,
+                    &[(tp0, Errors::None), (tp1, Errors::CoordinatorLoadInProgress)],
+                );
+            })
+            .await
+        };
+
+        ctx.sender.run_once().await.expect("run_once"); // Send TxnOffsetCommitRequest.
+
+        let manager = ctx.transaction_manager();
+        // The TxnOffsetCommit failed.
+        assert!(manager.lock().unwrap().has_pending_offset_commits());
+        // We should only be done after both RPCs complete successfully.
+        assert!(!add_offsets_result.is_completed());
+
+        prepare_txn_offset_commit_response_with_group_metadata(
+            &mut ctx,
+            TXN_PRODUCER_ID,
+            TXN_EPOCH,
+            &group_metadata,
+            &[(tp0, Errors::None), (tp1, Errors::None)],
+        );
+        ctx.sender.run_once().await.expect("run_once"); // Send TxnOffsetCommitRequest again.
+
+        assert!(add_offsets_result.is_completed());
+        assert!(add_offsets_result.is_successful());
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled`
+    /// (Java 2666-2681).
+    ///
+    /// Java caps the *client's* `TXN_OFFSET_COMMIT` at v2 with
+    /// `client.setNodeApiVersions(..)`, so `NetworkClient` refuses to send the v3+
+    /// request the group metadata requires and completes it with
+    /// `UnsupportedVersionException`. This port expresses that same client-side rejection
+    /// with `MockClient::prepare_unsupported_version_response`, which is how every other
+    /// translated test in this file reaches an `UnsupportedVersionException` from the
+    /// client (see `test_unsupported_init_transactions`). The queue order matters and is
+    /// the same as Java's: the `FindCoordinator` response is prepared first, so the
+    /// unsupported-version rejection is matched by the following `TxnOffsetCommit`.
+    #[tokio::test]
+    async fn test_send_offset_with_group_metadata_fail_as_auto_downgrade_txn_commit_not_enabled() {
+        let mut ctx = txn_mgr_test_context(false);
+
+        let add_offsets_result = prepare_group_metadata_commit(&mut ctx, |ctx| {
+            ctx.sender.client_mut().prepare_unsupported_version_response();
+        })
+        .await;
+
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert!(add_offsets_result.is_completed());
+        assert!(!add_offsets_result.is_successful());
+        assert_eq!(
+            add_offsets_result.error().expect("the commit failed").error(),
+            Errors::UnsupportedVersion
+        );
+        assert_fatal_error(&ctx, Errors::UnsupportedVersion);
+    }
+
+    /// A `MetadataSnapshot` carrying exactly the given partition leaders, mirroring the
+    /// `new MetadataSnapshot(null, nodesById, partitionMetadata, emptySet(), emptySet(),
+    /// emptySet(), null, emptyMap())` the three drain tests build by hand.
+    fn drain_metadata_snapshot(leaders: &[(&TopicPartition, &Node)]) -> crate::metadata_snapshot::MetadataSnapshot {
+        use crate::common::requests::PartitionMetadata;
+        use crate::metadata_snapshot::MetadataSnapshot;
+
+        let nodes_by_id: HashMap<i32, Node> = leaders.iter().map(|(_, node)| ((*node).id(), (*node).clone())).collect();
+        let partitions: Vec<PartitionMetadata> = leaders
+            .iter()
+            .map(|(tp, node)| PartitionMetadata {
+                error: Errors::None,
+                topic_partition: (*tp).clone(),
+                leader_id: Some((*node).id()),
+                leader_epoch: None,
+                replica_ids: vec![],
+                in_sync_replica_ids: vec![],
+                offline_replica_ids: vec![],
+            })
+            .collect();
+        MetadataSnapshot::new(
+            None,
+            nodes_by_id,
+            partitions,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            None,
+            HashMap::new(),
+        )
+    }
+
+    /// Translated from `TransactionManagerTest.testNoDrainWhenPartitionsPending`
+    /// (Java 2712-2743).
+    #[tokio::test]
+    async fn test_no_drain_when_partitions_pending() {
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        maybe_add_partition(&ctx, &tp0);
+        ctx.append_to_accumulator(&tp0).await;
+        maybe_add_partition(&ctx, &tp1);
+        ctx.append_to_accumulator(&tp1).await;
+
+        let manager = ctx.transaction_manager();
+        assert!(!manager.lock().unwrap().is_send_to_partition_allowed(&tp0));
+        assert!(!manager.lock().unwrap().is_send_to_partition_allowed(&tp1));
+
+        let node1 = Node::new(0, "localhost".to_string(), 1111);
+        let node2 = Node::new(1, "localhost".to_string(), 1112);
+        let metadata_cache = drain_metadata_snapshot(&[(&tp0, &node1), (&tp1, &node2)]);
+        let nodes: HashSet<Node> = HashSet::from([node1.clone(), node2.clone()]);
+        let drained_batches = ctx
+            .accumulator
+            .drain(&metadata_cache, &nodes, i32::MAX, ctx.time.milliseconds())
+            .expect("drain succeeds");
+
+        // We shouldn't drain batches which haven't been added to the transaction yet.
+        assert!(drained_batches.contains_key(&node1.id()));
+        assert!(drained_batches[&node1.id()].is_empty());
+        assert!(drained_batches.contains_key(&node2.id()));
+        assert!(drained_batches[&node2.id()].is_empty());
+        assert!(!manager.lock().unwrap().has_error());
+    }
+
+    /// Translated from `TransactionManagerTest.testAllowDrainInAbortableErrorState`
+    /// (Java 2746-2772).
+    #[tokio::test]
+    async fn test_allow_drain_in_abortable_error_state() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        maybe_add_partition(&ctx, &tp1);
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp1.clone(), Errors::None)]);
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            let tp1 = tp1.clone();
+            run_until(&mut ctx.sender, move |_| {
+                manager.lock().unwrap().transaction_contains_partition(&tp1)
+            })
+            .await;
+        }
+
+        maybe_add_partition(&ctx, &tp0);
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::TopicAuthorizationFailed)]);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().has_abortable_error()).await;
+        }
+        assert!(manager.lock().unwrap().is_send_to_partition_allowed(&tp1));
+
+        // Try to drain a message destined for tp1; it should get drained.
+        let node1 = Node::new(1, "localhost".to_string(), 1112);
+        let metadata_cache = drain_metadata_snapshot(&[(&tp1, &node1)]);
+        ctx.append_to_accumulator(&tp1).await;
+        let nodes: HashSet<Node> = HashSet::from([node1.clone()]);
+        let drained_batches = ctx
+            .accumulator
+            .drain(&metadata_cache, &nodes, i32::MAX, ctx.time.milliseconds())
+            .expect("drain succeeds");
+
+        // We should drain the appended record since we are in abortable state and the
+        // partition has already been added to the transaction.
+        assert!(drained_batches.contains_key(&node1.id()));
+        assert_eq!(drained_batches[&node1.id()].len(), 1);
+        assert!(manager.lock().unwrap().has_abortable_error());
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testRaiseErrorWhenNoPartitionsPendingOnDrain`
+    /// (Java 2775-2808).
+    #[tokio::test]
+    async fn test_raise_error_when_no_partitions_pending_on_drain() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+        begin_transaction(&ctx);
+        // Don't call maybeAddPartition(tp0). This should result in an error on drain.
+        let tp0 = ctx.tp0.clone();
+        ctx.append_to_accumulator(&tp0).await;
+        let node1 = Node::new(0, "localhost".to_string(), 1111);
+        let metadata_cache = drain_metadata_snapshot(&[(&tp0, &node1)]);
+
+        let nodes: HashSet<Node> = HashSet::from([node1.clone()]);
+        let drained_batches = ctx
+            .accumulator
+            .drain(&metadata_cache, &nodes, i32::MAX, ctx.time.milliseconds())
+            .expect("drain succeeds");
+
+        // We shouldn't drain batches which haven't been added to the transaction yet.
+        assert!(drained_batches.contains_key(&node1.id()));
+        assert!(drained_batches[&node1.id()].is_empty());
+
+        // Let's now add the partition, flush and try to drain again.
+        maybe_add_partition(&ctx, &tp0);
+        ctx.accumulator.begin_flush();
+
+        let drained_batches = ctx
+            .accumulator
+            .drain(&metadata_cache, &nodes, i32::MAX, ctx.time.milliseconds())
+            .expect("drain succeeds");
+
+        // We still shouldn't drain batches because the partition call didn't complete yet.
+        assert!(drained_batches.contains_key(&node1.id()));
+        assert!(drained_batches[&node1.id()].is_empty());
+        assert!(ctx.accumulator.has_undrained());
+
+        // Now prepare a response to complete the partition addition. We should now be
+        // able to drain the request.
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::None)]);
+        {
+            let accumulator = Arc::clone(&ctx.accumulator);
+            run_until(&mut ctx.sender, move |_| !accumulator.has_undrained()).await;
+        }
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.resendFailedProduceRequestAfterAbortableError`
+    /// (Java 2811-2829).
+    #[tokio::test]
+    async fn resend_failed_produce_request_after_abortable_error() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+        begin_transaction(&ctx);
+
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::NotLeaderOrFollower, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+
+        assert!(!response_future.is_done());
+
+        {
+            // Java's `new KafkaException()` carries no wire code; `UnknownServerError` is
+            // this crate's spelling for that, the convention `transaction_manager.rs`'s
+            // `kafka_exception()` helper already uses.
+            let manager = ctx.transaction_manager();
+            manager
+                .lock()
+                .unwrap()
+                .transition_to_abortable_error(KafkaError::with_message(Errors::UnknownServerError, ""), Caller::App)
+                .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        }
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+        // The retried batch for an already-added partition still succeeds.
+        response_future.get().await.expect("the retried send succeeded");
+    }
+
     #[test]
     fn test_transactional_response_without_a_body_is_fatal() {
         let mut ctx = SenderTestContext::idempotent();
