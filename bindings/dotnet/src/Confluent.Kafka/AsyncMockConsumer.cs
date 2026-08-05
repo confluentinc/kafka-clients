@@ -24,18 +24,18 @@ namespace Confluent.Kafka;
 /// <summary>
 /// A broker-free Kafka consumer for tests — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.consumer.MockConsumer</c>. A thin, Java-shaped forwarder
-/// over the internal <see cref="NativeConsumer"/> (like <see cref="KafkaConsumer"/>),
+/// over the internal <see cref="NativeConsumer"/> (like <see cref="AsyncKafkaConsumer"/>),
 /// plus mock-only helpers to drive records and errors without a broker.
 /// </summary>
 /// <remarks>
 /// The mock-only helpers (<see cref="Assign"/>, <see cref="AddRecord"/>,
 /// <see cref="SetPollError"/>) are <b>inherent methods on this concrete type, not on
-/// <see cref="IConsumer"/></b> (consumer-threading §2; Python's <c>_MockConsumerMixin</c>
-/// parity) — tests hold a <see cref="MockConsumer"/> directly and pass it as an
-/// <see cref="IConsumer"/> where the interface is expected. Single-owner / not
-/// thread-safe, same as <see cref="KafkaConsumer"/>.
+/// <see cref="IAsyncConsumer"/></b> (consumer-threading §2; Python's
+/// <c>_MockConsumerMixin</c> parity) — tests hold an <see cref="AsyncMockConsumer"/>
+/// directly and pass it as an <see cref="IAsyncConsumer"/> where the interface is
+/// expected. Single-owner / not thread-safe, same as <see cref="AsyncKafkaConsumer"/>.
 /// </remarks>
-public sealed class MockConsumer : IConsumer
+public sealed class AsyncMockConsumer : IAsyncConsumer
 {
     private readonly NativeConsumer _native;
 
@@ -47,29 +47,29 @@ public sealed class MockConsumer : IConsumer
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
     /// (<c>"latest"</c>).
     /// </param>
-    public MockConsumer(string? autoOffsetReset = null)
+    public AsyncMockConsumer(string? autoOffsetReset = null)
     {
         _native = NativeConsumer.CreateMock(autoOffsetReset);
     }
 
     /// <inheritdoc/>
-    public Task<ConsumerRecords> PollAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+    public Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _native.PollAsync(timeout, cancellationToken);
 
     /// <inheritdoc/>
-    public Task SubscribeAsync(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
+    public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
         _native.SubscribeAsync(topics, cancellationToken);
 
     /// <inheritdoc/>
-    public Task UnsubscribeAsync(CancellationToken cancellationToken = default) =>
+    public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeAsync(cancellationToken);
 
     /// <inheritdoc/>
-    public Task SeekAsync(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
+    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
         _native.SeekAsync(partition.Topic, partition.Partition, offset, cancellationToken);
 
     /// <inheritdoc/>
-    public Task CloseAsync(CancellationToken cancellationToken = default) =>
+    public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseAsync(cancellationToken).AsTask();
 
     /// <inheritdoc/>
@@ -104,7 +104,7 @@ public sealed class MockConsumer : IConsumer
     }
 
     /// <summary>
-    /// Queues a record to be returned by the next <see cref="PollAsync"/> (mock-only
+    /// Queues a record to be returned by the next <see cref="Poll"/> (mock-only
     /// helper). The partition must already be assigned (via <see cref="Assign"/>). The
     /// component-tuple form (topic / partition / offset / key / value) needs no public
     /// <see cref="ConsumerRecord"/> constructor this phase (PLAN decision 4); a
@@ -123,8 +123,8 @@ public sealed class MockConsumer : IConsumer
         _native.AddRecord(topic, partition, offset, key, value);
 
     /// <summary>
-    /// Injects an error to be returned by the next <see cref="PollAsync"/> (mock-only
-    /// helper; mirrors Java <c>setPollException</c>). The awaiting <see cref="PollAsync"/>
+    /// Injects an error to be returned by the next <see cref="Poll"/> (mock-only
+    /// helper; mirrors Java <c>setPollException</c>). The awaiting <see cref="Poll"/>
     /// faults with a <see cref="KafkaException"/> carrying <paramref name="message"/>.
     /// </summary>
     /// <param name="message">The error message.</param>

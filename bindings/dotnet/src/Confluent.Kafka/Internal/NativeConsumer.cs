@@ -33,9 +33,9 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This is <b>not</b> the public client. The public <c>IConsumer</c> /
-/// <c>KafkaConsumer</c> / <c>MockConsumer</c> types land later; this wrapper is the
-/// internal proving ground for the create → async op → close → destroy lifecycle,
+/// This is <b>not</b> the public client. The public <c>IAsyncConsumer</c> /
+/// <c>AsyncKafkaConsumer</c> / <c>AsyncMockConsumer</c> types compose this wrapper; it
+/// is the internal proving ground for the create → async op → close → destroy lifecycle,
 /// the completion bridge (<see cref="OperationCompletionSource"/>), and the
 /// operational / precondition / wakeup / concurrent error surfaces.
 /// </para>

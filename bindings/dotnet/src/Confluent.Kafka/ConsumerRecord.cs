@@ -25,7 +25,7 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <b>Poll-output-only this phase (PLAN decision 4).</b> There is no public constructor:
-/// a <see cref="ConsumerRecord"/> is produced only by <c>IConsumer.PollAsync(...)</c>.
+/// a <see cref="ConsumerRecord"/> is produced only by <c>IAsyncConsumer.Poll(...)</c>.
 /// A public constructor (and the fuller Java field set — leader epoch, serialized
 /// sizes, and Java's <c>addRecord(ConsumerRecord)</c> mock helper) are deferred to a
 /// later additive phase.

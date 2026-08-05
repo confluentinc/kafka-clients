@@ -20,7 +20,7 @@ namespace Confluent.Kafka;
 /// A <c>(topic, partition)</c> pair — the .NET realization of Java's
 /// <c>org.apache.kafka.common.TopicPartition</c>. A <c>readonly struct</c> with value
 /// equality (so it is usable as a dictionary / set key), mirroring the Java type's
-/// immutable, equatable shape. The input type for <c>IConsumer.SeekAsync(...)</c>.
+/// immutable, equatable shape. The input type for <c>IAsyncConsumer.Seek(...)</c>.
 /// </summary>
 /// <remarks>
 /// Because this is a <c>readonly struct</c>, a <c>default(TopicPartition)</c> is always

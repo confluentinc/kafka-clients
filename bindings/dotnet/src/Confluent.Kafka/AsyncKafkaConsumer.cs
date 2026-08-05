@@ -36,7 +36,7 @@ namespace Confluent.Kafka;
 /// <see cref="GroupMetadata"/> throws <see cref="InvalidOperationException"/>). Do not
 /// share one instance across threads without external synchronization.
 /// <see cref="Wakeup"/> is the one deliberately cross-thread member; the canonical
-/// pattern (thread A blocked in <see cref="PollAsync"/>, thread B wakes it, thread A
+/// pattern (thread A blocked in <see cref="Poll"/>, thread B wakes it, thread A
 /// then disposes) is safe. Racing <see cref="Wakeup"/> against disposal from a second
 /// thread is a misuse that the not-thread-safe contract does not defend against (an
 /// accepted single-owner residual; a candidate future hardening).
@@ -44,11 +44,11 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Disposal.</b> <see cref="DisposeAsync"/> is the primary path (graceful async close
 /// then destroy; swallows any close error); <see cref="Dispose"/> is the blocking
-/// fallback. <see cref="CloseAsync"/> is the explicit graceful close that <em>surfaces</em>
+/// fallback. <see cref="Close"/> is the explicit graceful close that <em>surfaces</em>
 /// a close failure. All are idempotent and gated by a single atomic closed flag.
 /// </para>
 /// </remarks>
-public sealed class KafkaConsumer : IConsumer
+public sealed class AsyncKafkaConsumer : IAsyncConsumer
 {
     private readonly NativeConsumer _native;
 
@@ -61,29 +61,29 @@ public sealed class KafkaConsumer : IConsumer
     /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public KafkaConsumer(IReadOnlyDictionary<string, string> config)
+    public AsyncKafkaConsumer(IReadOnlyDictionary<string, string> config)
     {
         _native = NativeConsumer.Create(config);
     }
 
     /// <inheritdoc/>
-    public Task<ConsumerRecords> PollAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+    public Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _native.PollAsync(timeout, cancellationToken);
 
     /// <inheritdoc/>
-    public Task SubscribeAsync(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
+    public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
         _native.SubscribeAsync(topics, cancellationToken);
 
     /// <inheritdoc/>
-    public Task UnsubscribeAsync(CancellationToken cancellationToken = default) =>
+    public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeAsync(cancellationToken);
 
     /// <inheritdoc/>
-    public Task SeekAsync(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
+    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
         _native.SeekAsync(partition.Topic, partition.Partition, offset, cancellationToken);
 
     /// <inheritdoc/>
-    public Task CloseAsync(CancellationToken cancellationToken = default) =>
+    public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseAsync(cancellationToken).AsTask();
 
     /// <inheritdoc/>
