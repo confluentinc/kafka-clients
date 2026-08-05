@@ -68,23 +68,23 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
 
     /// <inheritdoc/>
     public Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
-        _native.PollAsync(timeout, cancellationToken);
+        _native.PollWithCallback(timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
-        _native.SubscribeAsync(topics, cancellationToken);
+        _native.SubscribeWithCallback(topics, cancellationToken);
 
     /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
-        _native.UnsubscribeAsync(cancellationToken);
+        _native.UnsubscribeWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
-        _native.SeekAsync(partition.Topic, partition.Partition, offset, cancellationToken);
+        _native.SeekWithCallback(partition.Topic, partition.Partition, offset, cancellationToken);
 
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
-        _native.CloseAsync(cancellationToken).AsTask();
+        _native.CloseWithCallback(cancellationToken).AsTask();
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();

@@ -49,8 +49,8 @@ namespace Confluent.Kafka.Internal;
 /// there is <b>no managed mirror</b> (M3/P1's <c>ConsumerAccessGuard</c> +
 /// in-flight tracking were removed here as .NET-only additions on top of that
 /// model — a localized, reversible simplification). Concurrency therefore surfaces
-/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeAsync"/> /
-/// <see cref="SeekAsync"/>) is rejected by the core inline and surfaces as a
+/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeWithCallback"/> /
+/// <see cref="SeekWithCallback"/>) is rejected by the core inline and surfaces as a
 /// <b>faulted <see cref="Task"/></b> carrying a <see cref="KafkaException"/>
 /// (ConcurrentModification); a concurrent <b>sync state read</b>
 /// (<see cref="GroupId"/>) surfaces as <see cref="InvalidOperationException"/> from
@@ -116,7 +116,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 {
     // Fixed graceful-close budget for the synchronous Dispose. A never-joined
     // consumer closes near-instantly; a user-supplied timeout arrives with the
-    // public CloseAsync(TimeSpan) once the public client lands.
+    // future public Close(TimeSpan) overload.
     private const long DefaultCloseTimeoutMilliseconds = 5_000;
 
     private readonly SafeConsumerHandle _handle;
@@ -281,7 +281,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentException">A topic name is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task SubscribeAsync(
+    internal Task SubscribeWithCallback(
         IReadOnlyCollection<string> topics,
         CancellationToken cancellationToken = default)
     {
@@ -340,7 +340,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task UnsubscribeAsync(CancellationToken cancellationToken = default)
+    internal Task UnsubscribeWithCallback(CancellationToken cancellationToken = default)
     {
         return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
             NativeMethods.ConsumerUnsubscribeAsync(consumer, callback, userData));
@@ -368,7 +368,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task SeekAsync(
+    internal Task SeekWithCallback(
         string topic,
         int partition,
         long offset,
@@ -421,7 +421,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task<ConsumerRecords> PollAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
+    internal Task<ConsumerRecords> PollWithCallback(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         // Precondition BEFORE any P/Invoke (ffi §B5): a negative timeout is a
         // programmer error, not a Kafka outcome.
@@ -774,7 +774,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// (joins the background task via the completion bridge), then release the handle
     /// (→ <c>Consumer_destroy</c>). Idempotent and safe under concurrent / double
     /// calls (the atomic closed flag). Best-effort: it swallows the close error
-    /// (surfacing it is the future <c>CloseAsync(TimeSpan)</c>'s job).
+    /// (surfacing it is <see cref="CloseWithCallback"/> / the public <c>Close()</c>'s job).
     /// </summary>
     /// <remarks>
     /// <b>Single-owner: no separate-op drain.</b> Under the not-thread-safe contract
@@ -797,12 +797,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // Graceful async close (joins the bg task) via the void bridge. Under
             // single-owner there is nothing to drain first: the awaiter of any op is
             // this disposer, so the core guard is free for the close op.
-            await CloseAsyncInternal().ConfigureAwait(false);
+            await CloseWithCallbackInternal().ConfigureAwait(false);
         }
         catch (KafkaException)
         {
             // Best-effort teardown — Dispose/DisposeAsync must not surface a close
-            // error; that is CloseAsync(TimeSpan)'s job.
+            // error; that is the public Close()'s job.
         }
         finally
         {
@@ -813,8 +813,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Graceful <b>async</b> close (Java <c>close()</c>) that <b>surfaces</b> the close
-    /// error — the public <c>CloseAsync()</c>'s worker. Takes the one-shot
-    /// <see cref="TryBeginClose"/> latch, closes via <see cref="CloseAsyncInternal"/>
+    /// error — the public <c>Close()</c>'s worker. Takes the one-shot
+    /// <see cref="TryBeginClose"/> latch, closes via <see cref="CloseWithCallbackInternal"/>
     /// (<c>close_async</c>, joining the background task), then releases the handle
     /// (→ <c>Consumer_destroy</c>) in a <c>finally</c> — destroy runs exactly once even
     /// on a close error. A subsequent <see cref="Dispose"/> / <see cref="DisposeAsync"/>
@@ -825,7 +825,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <b>No timeout (ABI-verified, PLAN decision 6).</b> The ABI has no async close
     /// with a timeout — <c>Consumer_close_async</c> takes only a callback; the only
     /// timeout-accepting close is the sync <c>Consumer_close_with_timeout</c>. So this
-    /// takes only a <see cref="CancellationToken"/>; a faithful <c>CloseAsync(TimeSpan)</c>
+    /// takes only a <see cref="CancellationToken"/>; a faithful <c>Close(TimeSpan)</c>
     /// is deferred to an additive overload once a Rust-core <c>close_async_with_timeout</c>
     /// exists (Mode-B, out of scope). Unlike <see cref="DisposeAsync"/> (which swallows
     /// the close error), this <b>throws</b> it — <c>close()</c> reports failures.
@@ -837,7 +837,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </param>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal async ValueTask CloseAsync(CancellationToken cancellationToken = default)
+    internal async ValueTask CloseWithCallback(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -852,7 +852,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         {
             // Graceful async close (joins the bg task); surface any close error (unlike
             // DisposeAsync). Under single-owner there is nothing to drain first.
-            await CloseAsyncInternal().ConfigureAwait(false);
+            await CloseWithCallbackInternal().ConfigureAwait(false);
         }
         finally
         {
@@ -866,7 +866,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// completion callback. If the submitting P/Invoke throws before native could
     /// fire the callback, the context is abandoned (its <c>GCHandle</c> freed) here.
     /// </summary>
-    private Task CloseAsyncInternal()
+    private Task CloseWithCallbackInternal()
     {
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
