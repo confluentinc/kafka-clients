@@ -26,12 +26,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::ApiVersions;
+use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::record::RecordBatch;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::requests::{
-    ConcreteResponse, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder, PartitionResponse, RequestBuilder,
+    AddPartitionsToTxnRequestBuilder, ConcreteResponse, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder,
+    PartitionResponse, RequestBuilder, V3_AND_BELOW_TXN_ID,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{KafkaError, Node, TopicPartition};
@@ -543,9 +545,9 @@ pub(crate) enum Priority {
 /// `AbstractResponse` hierarchies — as the `ConcreteRequest` / `ConcreteResponse`
 /// enums — so it introduces no pattern the codebase does not already use.
 ///
-/// Phase 5a adds `FindCoordinatorHandler`; the remaining four
-/// (`AddPartitionsToTxn`, `EndTxn`, `AddOffsetsToTxn`, `TxnOffsetCommit`) arrive
-/// in Phase 5b.
+/// Phase 5a added `InitProducerIdHandler` and `FindCoordinatorHandler`; Phase 5b
+/// adds the remaining four (`AddPartitionsToTxn`, `EndTxn`, `AddOffsetsToTxn`,
+/// `TxnOffsetCommit`).
 pub(crate) enum TxnRequestHandlerKind {
     /// `InitProducerIdHandler` (Java 1461-1539).
     InitProducerId {
@@ -559,6 +561,20 @@ pub(crate) enum TxnRequestHandlerKind {
     FindCoordinator {
         /// The request being sent.
         builder: FindCoordinatorRequestBuilder,
+    },
+    /// `AddPartitionsToTxnHandler` (Java 1541-1649).
+    AddPartitionsToTxn {
+        /// The request being sent.
+        builder: AddPartitionsToTxnRequestBuilder,
+        /// This handler's own backoff, lowered to
+        /// [`ADD_PARTITIONS_RETRY_BACKOFF_MS`] by
+        /// [`TransactionManager::maybe_override_retry_backoff_ms`] on the first
+        /// `CONCURRENT_TRANSACTIONS` of a transaction (Java 1543, 1645).
+        ///
+        /// The only handler kind Java gives a per-instance backoff to, which is
+        /// why [`TxnRequestHandler::retry_backoff_ms`] is the manager's value for
+        /// every other kind.
+        retry_backoff_ms: i64,
     },
 }
 
@@ -621,6 +637,7 @@ impl TxnRequestHandler {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => Box::new(builder.clone()),
             TxnRequestHandlerKind::FindCoordinator { builder } => Box::new(builder.clone()),
+            TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => Box::new(builder.clone()),
         }
     }
 
@@ -633,6 +650,7 @@ impl TxnRequestHandler {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { .. } => &ApiKeys::INIT_PRODUCER_ID,
             TxnRequestHandlerKind::FindCoordinator { .. } => &ApiKeys::FIND_COORDINATOR,
+            TxnRequestHandlerKind::AddPartitionsToTxn { .. } => &ApiKeys::ADD_PARTITIONS_TO_TXN,
         }
     }
 
@@ -644,7 +662,7 @@ impl TxnRequestHandler {
     pub(crate) fn init_producer_id_request_data(&self) -> Option<&InitProducerIdRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => Some(builder.data()),
-            TxnRequestHandlerKind::FindCoordinator { .. } => None,
+            _ => None,
         }
     }
 
@@ -652,7 +670,15 @@ impl TxnRequestHandler {
     pub(crate) fn find_coordinator_request_data(&self) -> Option<&FindCoordinatorRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::FindCoordinator { builder } => Some(builder.data()),
-            TxnRequestHandlerKind::InitProducerId { .. } => None,
+            _ => None,
+        }
+    }
+
+    /// The `AddPartitionsToTxn` request data, or `None` for another request kind.
+    pub(crate) fn add_partitions_to_txn_request_data(&self) -> Option<&AddPartitionsToTxnRequestData> {
+        match &self.kind {
+            TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => Some(builder.data()),
+            _ => None,
         }
     }
 
@@ -672,16 +698,20 @@ impl TxnRequestHandler {
             },
             // Java 1665: a pending FindCoordinator must always go first.
             TxnRequestHandlerKind::FindCoordinator { .. } => Priority::FindCoordinator,
+            // Java 1556.
+            TxnRequestHandlerKind::AddPartitionsToTxn { .. } => Priority::AddPartitionsOrOffsets,
         }
     }
 
     /// Whether this is an `EndTxn` request.
     ///
     /// Corresponds to `isEndTxn()` (Java 1450), whose base implementation
-    /// returns `false`; only `EndTxnHandler` (Phase 5b) overrides it.
+    /// returns `false`; only `EndTxnHandler` overrides it (Java 1744).
     pub(crate) fn is_end_txn(&self) -> bool {
         match &self.kind {
-            TxnRequestHandlerKind::InitProducerId { .. } | TxnRequestHandlerKind::FindCoordinator { .. } => false,
+            TxnRequestHandlerKind::InitProducerId { .. }
+            | TxnRequestHandlerKind::FindCoordinator { .. }
+            | TxnRequestHandlerKind::AddPartitionsToTxn { .. } => false,
         }
     }
 
@@ -709,9 +739,18 @@ impl TxnRequestHandler {
 
     /// How long to back off before retrying this request.
     ///
-    /// Corresponds to `retryBackoffMs()` (Java 1401).
+    /// Corresponds to `retryBackoffMs()` (Java 1401), plus
+    /// `AddPartitionsToTxnHandler`'s override (Java 1636-1638), which is the only
+    /// one: `Math.min(TransactionManager.this.retryBackoffMs, this.retryBackoffMs)`.
+    /// `self.retry_backoff_ms` is the manager's value, snapshotted at construction
+    /// because Java's field is `final`.
     pub(crate) fn retry_backoff_ms(&self) -> i64 {
-        self.retry_backoff_ms
+        match &self.kind {
+            TxnRequestHandlerKind::AddPartitionsToTxn { retry_backoff_ms, .. } => {
+                self.retry_backoff_ms.min(*retry_backoff_ms)
+            },
+            _ => self.retry_backoff_ms,
+        }
     }
 
     /// The operation name this handler's result was created for.
@@ -746,6 +785,7 @@ impl fmt::Debug for TxnRequestHandler {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => write!(f, "{builder:?}"),
             TxnRequestHandlerKind::FindCoordinator { builder } => write!(f, "{builder:?}"),
+            TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => write!(f, "{builder:?}"),
         }
     }
 }
@@ -960,16 +1000,19 @@ pub(crate) struct TransactionManager {
     /// Partitions added to the transaction locally but not yet sent in an
     /// `AddPartitionsToTxn` request (Java 122).
     ///
-    /// Always empty in Phase 5a: the only writer is `maybeAddPartition`'s
-    /// registration branch (Java 458), which lands with
-    /// `AddPartitionsToTxnHandler` in Phase 5b — see [`Self::maybe_add_partition`].
+    /// Written by [`Self::maybe_add_partition`]'s registration branch (Java 458)
+    /// and drained by [`Self::add_partitions_to_transaction_handler`] (Java 1211).
     new_partitions_in_transaction: HashSet<TopicPartition>,
     /// Partitions whose `AddPartitionsToTxn` request is in flight (Java 123).
-    /// Written only by `addPartitionsToTransactionHandler` (Java 1315), Phase 5b.
+    ///
+    /// Filled by [`Self::add_partitions_to_transaction_handler`] (Java 1211) and
+    /// cleared per-partition by
+    /// [`Self::handle_add_partitions_to_txn_response`] (Java 1620).
     pending_partitions_in_transaction: HashSet<TopicPartition>,
     /// Partitions the broker has confirmed as part of the transaction (Java 124).
-    /// Written only by `AddPartitionsToTxnHandler.handleResponse` and
-    /// `maybeAddPartition`'s Transaction V2 arm, both Phase 5b.
+    ///
+    /// Written by [`Self::handle_add_partitions_to_txn_response`] (Java 1627) and,
+    /// under Transaction V2, directly by [`Self::maybe_add_partition`] (Java 450).
     partitions_in_transaction: HashSet<TopicPartition>,
     /// The operation whose [`TransactionalRequestResult`] the caller has not yet
     /// acknowledged (Java 125).
@@ -991,9 +1034,11 @@ pub(crate) struct TransactionManager {
     /// Whether anything has been added to the current transaction, so an `EndTxn`
     /// would have work to do (Java 143).
     ///
-    /// Always `false` in Phase 5a: every writer (Java 420, 451, 1629, 1831) is a
-    /// Transaction V2 arm or a Phase-5b handler. [`Self::reset_transaction_state`]
-    /// clears it, which is why the field is here rather than in 5b.
+    /// Set by `maybeAddPartition`'s Transaction V2 arm (Java 451),
+    /// `sendOffsetsToTransaction`'s Transaction V2 arm (420),
+    /// `AddPartitionsToTxnHandler.handleResponse` (1629) and
+    /// `AddOffsetsToTxnHandler.handleResponse` (1831); cleared by
+    /// [`Self::reset_transaction_state`].
     transaction_started: bool,
 
     current_state: State,
@@ -2813,20 +2858,18 @@ impl TransactionManager {
     ///
     /// Translated from `nextRequest(boolean)` (Java 894).
     ///
-    /// Java's first statement enqueues an `AddPartitionsToTxn` when
-    /// `newPartitionsInTransaction` is non-empty, and its `isEndTxn` branch
-    /// short-circuits an `EndTxn` for a transaction that never started. Both are
-    /// transaction-only, and [`TxnRequestHandler::is_end_txn`] is `false` for
-    /// every handler Phase 5a can build, so neither is reachable; Phase 5b adds
-    /// them with the handlers they need — `addPartitionsToTransactionHandler`
-    /// (Java 1313) for the first and `EndTxnHandler` for the second. What keeps
-    /// `new_partitions_in_transaction` empty is
-    /// [`Self::maybe_add_partition`]'s deferred registration arm.
+    /// Java's `isEndTxn && !transactionStarted` branch (Java 913-925) is Phase 5b's,
+    /// and lands with [`TxnRequestHandler::is_end_txn`]'s only `true` case.
     pub(crate) fn next_request(
         &mut self,
         pending_requests: &mut PendingRequests,
         has_incomplete_batches: bool,
     ) -> Option<TxnRequestHandler> {
+        if !self.new_partitions_in_transaction.is_empty() {
+            let handler = self.add_partitions_to_transaction_handler();
+            self.enqueue_request(pending_requests, handler);
+        }
+
         let next_request_handler = pending_requests.peek()?;
 
         // Do not send the EndTxn until all batches have been flushed
@@ -2928,6 +2971,41 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Moves every locally-registered partition into the pending set and builds the
+    /// `AddPartitionsToTxn` that announces them to the coordinator.
+    ///
+    /// Translated from `addPartitionsToTransactionHandler()` (Java 1210).
+    ///
+    /// Java takes `new ArrayList<>(pendingPartitionsInTransaction)`, whose order a
+    /// `HashSet` leaves unspecified. This sorts, so the encoding is deterministic
+    /// (rules §10) — the wire builder's own `build_txn_topic_collection` already
+    /// sorts by topic name, and this settles the partition order within a topic,
+    /// which that grouping preserves.
+    fn add_partitions_to_transaction_handler(&mut self) -> TxnRequestHandler {
+        self.pending_partitions_in_transaction
+            .extend(self.new_partitions_in_transaction.iter().cloned());
+        self.new_partitions_in_transaction.clear();
+
+        let mut partitions: Vec<TopicPartition> = self.pending_partitions_in_transaction.iter().cloned().collect();
+        // `TopicPartition` is deliberately not `Ord` — Java's is not `Comparable`
+        // either — so the key is spelled out, as `cluster.rs:349` does.
+        partitions.sort_by_key(|partition| (partition.topic_arc().clone(), partition.partition()));
+
+        let builder = AddPartitionsToTxnRequestBuilder::for_client(
+            // `ensureTransactional()` has already run at every call site, so the id
+            // is present; Java would interpolate a null as the text "null".
+            self.transactional_id.as_deref().unwrap_or_default(),
+            self.producer_id_and_epoch.producer_id,
+            self.producer_id_and_epoch.epoch,
+            &partitions,
+        );
+        TxnRequestHandler::new(
+            "AddPartitionsToTxn",
+            self.retry_backoff_ms,
+            TxnRequestHandlerKind::AddPartitionsToTxn { builder, retry_backoff_ms: self.retry_backoff_ms },
+        )
+    }
+
     /// Records whether the transaction coordinator's `InitProducerId` version
     /// supports a client-triggered epoch bump.
     ///
@@ -2995,6 +3073,36 @@ impl TransactionManager {
         self.transition_to_abortable_error(error, Caller::Sender)
     }
 
+    /// Fails `handler` and moves the manager to [`State::AbortableError`] when the
+    /// coordinator can recover from one, or to [`State::FatalError`] when it cannot.
+    ///
+    /// Corresponds to `TxnRequestHandler.abortableErrorIfPossible(RuntimeException)`
+    /// (Java 1379).
+    ///
+    /// Java's javadoc there: an abortable error can be handled effectively if epoch
+    /// bumping is supported — either because Transaction V2 bumps automatically at
+    /// the end of every transaction, or because the client can trigger a bump. If
+    /// epoch bumping is not supported the system cannot recover and the error must
+    /// be treated as fatal.
+    ///
+    /// Distinct from [`Self::transition_to_abortable_error_or_fatal_error`]
+    /// (Java 557), which takes *two* exceptions and does not touch a handler
+    /// result: that one serves `maybeResolveSequences`, this one the response path.
+    fn abortable_error_if_possible(
+        &mut self,
+        handler: &TxnRequestHandler,
+        error: KafkaError,
+    ) -> Result<(), KafkaError> {
+        if self.can_handle_abortable_error() {
+            if self.need_to_trigger_epoch_bump_from_client() {
+                self.client_side_epoch_bump_required = true;
+            }
+            self.abortable_error(handler, error)
+        } else {
+            self.fatal_error(handler, error)
+        }
+    }
+
     /// The coordinator `handler` must be routed to, or `None` when it can go to
     /// any broker.
     ///
@@ -3017,6 +3125,8 @@ impl TransactionManager {
                 }
             },
             TxnRequestHandlerKind::FindCoordinator { .. } => None,
+            // The base implementation (Java 1434).
+            TxnRequestHandlerKind::AddPartitionsToTxn { .. } => Some(CoordinatorType::Transaction),
         }
     }
 
@@ -3028,7 +3138,10 @@ impl TransactionManager {
     /// else.
     pub(crate) fn coordinator_key(&self, handler: &TxnRequestHandler) -> Option<&str> {
         match handler.kind {
-            TxnRequestHandlerKind::InitProducerId { .. } => self.transactional_id(),
+            // The base implementation (Java 1438).
+            TxnRequestHandlerKind::InitProducerId { .. } | TxnRequestHandlerKind::AddPartitionsToTxn { .. } => {
+                self.transactional_id()
+            },
             TxnRequestHandlerKind::FindCoordinator { .. } => None,
         }
     }
@@ -3080,6 +3193,9 @@ impl TransactionManager {
             },
             TxnRequestHandlerKind::FindCoordinator { .. } => {
                 self.handle_find_coordinator_response(handler, response, coordinators, pending_requests)
+            },
+            TxnRequestHandlerKind::AddPartitionsToTxn { .. } => {
+                self.handle_add_partitions_to_txn_response(handler, response, coordinators, pending_requests)
             },
         }
     }
@@ -3301,6 +3417,189 @@ impl TransactionManager {
         )
     }
 
+    /// Handles an `AddPartitionsToTxn` response.
+    ///
+    /// Translated from
+    /// `AddPartitionsToTxnHandler.handleResponse(AbstractResponse)` (Java 1559).
+    ///
+    /// # Two orderings a reviewer should check against the Java
+    ///
+    /// The per-partition loop's early `return`s (Java 1580, 1584, 1588, 1593, 1598,
+    /// 1605, 1608) abandon the whole response, leaving
+    /// `pendingPartitionsInTransaction` **untouched** — only the fall-through path
+    /// at Java 1620 clears it. And the `if / else if` chain's order is load-bearing:
+    /// `CONCURRENT_TRANSACTIONS` is itself a retriable code, so its backoff
+    /// override (Java 1585) only happens because that arm precedes the generic
+    /// retriable arm.
+    ///
+    /// # A response with no v3-and-below results
+    ///
+    /// Java reads `errors().get(V3_AND_BELOW_TXN_ID)` (Java 1561) and then iterates
+    /// it unchecked. `errors()` omits that key entirely when the response carries no
+    /// v3-and-below topic results, so a malformed or v4+-shaped response makes Java
+    /// raise a `NullPointerException` inside `NetworkClient.poll`. Rust must not
+    /// panic (CLAUDE.md §10.1), so the absent key becomes an error — the same
+    /// treatment `handle_find_coordinator_response` gives Java's
+    /// `IndexOutOfBoundsException` (PLAN §10.7 deviation 7). Unreachable in
+    /// practice: the request is only built from a non-empty pending set.
+    fn handle_add_partitions_to_txn_response(
+        &mut self,
+        mut handler: TxnRequestHandler,
+        response: &ConcreteResponse,
+        coordinators: &mut CoordinatorNodes,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<(), KafkaError> {
+        let ConcreteResponse::AddPartitionsToTxn(add_partitions_to_txn_response) = response else {
+            // Java casts unconditionally; a mismatch would be a
+            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            return Err(KafkaError::illegal_state(format!(
+                "Expected an AddPartitionsToTxn response for an AddPartitionsToTxn request, got {response}"
+            )));
+        };
+        let Some(errors) = add_partitions_to_txn_response.errors().remove(V3_AND_BELOW_TXN_ID) else {
+            // See the method docs: Java raises NullPointerException here.
+            return Err(KafkaError::illegal_state(
+                "AddPartitionsToTxn response carries no results for this client's transaction",
+            ));
+        };
+
+        let mut has_partition_errors = false;
+        let mut unauthorized_topics = HashSet::new();
+        self.reset_add_partitions_retry_backoff_ms(&mut handler);
+
+        // Java iterates a `HashMap`, so its order is unspecified. Sorted here for a
+        // reproducible outcome: the arms that `return` make the loop
+        // order-sensitive, and Java's own `KafkaException` message below
+        // interpolates the map (rules §10's reasoning applied to a log message).
+        for (topic_partition, error) in sorted_partition_errors(&errors) {
+            if error == Errors::None {
+                continue;
+            } else if error == Errors::CoordinatorNotAvailable || error == Errors::NotCoordinator {
+                let transactional_id = self.transactional_id().unwrap_or_default().to_string();
+                self.lookup_coordinator(
+                    coordinators,
+                    pending_requests,
+                    CoordinatorType::Transaction,
+                    &transactional_id,
+                )?;
+                self.retry(pending_requests, handler);
+                return Ok(());
+            } else if error == Errors::ConcurrentTransactions {
+                self.maybe_override_retry_backoff_ms(&mut handler);
+                self.retry(pending_requests, handler);
+                return Ok(());
+            } else if error.is_retriable() {
+                self.retry(pending_requests, handler);
+                return Ok(());
+            } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
+                // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
+                // just treat it the same as PRODUCE_FENCED.
+                return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+            } else if error == Errors::TransactionalIdAuthorizationFailed
+                || error == Errors::InvalidTxnState
+                || error == Errors::InvalidProducerIdMapping
+            {
+                return self.fatal_error(&handler, KafkaError::new(error));
+            } else if error == Errors::TopicAuthorizationFailed {
+                unauthorized_topics.insert(topic_partition.topic().to_string());
+            } else if error == Errors::OperationNotAttempted {
+                kafka_debug!(
+                    self.log_context,
+                    "Did not attempt to add partition {} to transaction because other partitions in the batch had \
+                     errors.",
+                    topic_partition
+                );
+                has_partition_errors = true;
+            } else if error == Errors::UnknownProducerId {
+                return self.abortable_error_if_possible(&handler, KafkaError::new(error));
+            } else if error == Errors::TransactionAbortable {
+                return self.abortable_error(&handler, KafkaError::new(error));
+            } else {
+                kafka_error!(
+                    self.log_context,
+                    "Could not add partition {} due to unexpected error {:?}",
+                    topic_partition,
+                    error
+                );
+                has_partition_errors = true;
+            }
+        }
+
+        // Remove the partitions from the pending set regardless of the result. We use the presence
+        // of partitions in the pending set to know when it is not safe to send batches. However, if
+        // the partitions failed to be added and we enter an error state, we expect the batches to be
+        // aborted anyway. In this case, we must be able to continue sending the batches which are in
+        // retry for partitions that were successfully added.
+        self.pending_partitions_in_transaction
+            .retain(|partition| !errors.contains_key(partition));
+
+        if !unauthorized_topics.is_empty() {
+            return self.abortable_error(&handler, KafkaError::topic_authorization(unauthorized_topics));
+        }
+        if has_partition_errors {
+            // Java: new KafkaException("Could not add partitions to transaction due
+            // to errors: " + errors), which interpolates a `HashMap`. A bare
+            // KafkaException carries no wire code — `Errors::UnknownServerError` is
+            // this crate's spelling for that — and the map is rendered in sorted
+            // order so the message is reproducible.
+            return self.abortable_error(
+                &handler,
+                KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!(
+                        "Could not add partitions to transaction due to errors: {}",
+                        format_partition_errors(&errors)
+                    ),
+                ),
+            );
+        }
+
+        kafka_debug!(
+            self.log_context,
+            "Successfully added partitions {:?} to transaction",
+            errors.keys().map(ToString::to_string).collect::<Vec<_>>()
+        );
+        self.partitions_in_transaction.extend(errors.into_keys());
+        self.transaction_started = true;
+        handler.result.done();
+        Ok(())
+    }
+
+    /// Restores `handler`'s backoff to the manager's configured value.
+    ///
+    /// Java's `AddPartitionsToTxnHandler.handleResponse` opens with
+    /// `retryBackoffMs = TransactionManager.this.retryBackoffMs` (Java 1565), which
+    /// undoes a previous [`Self::maybe_override_retry_backoff_ms`] before the new
+    /// response's errors are examined.
+    fn reset_add_partitions_retry_backoff_ms(&self, handler: &mut TxnRequestHandler) {
+        if let TxnRequestHandlerKind::AddPartitionsToTxn { retry_backoff_ms, .. } = &mut handler.kind {
+            *retry_backoff_ms = self.retry_backoff_ms;
+        }
+    }
+
+    /// Lowers `handler`'s backoff to [`ADD_PARTITIONS_RETRY_BACKOFF_MS`] when this
+    /// is the transaction's *first* `AddPartitionsToTxn`.
+    ///
+    /// Translated from `AddPartitionsToTxnHandler.maybeOverrideRetryBackoffMs()`
+    /// (Java 1641).
+    ///
+    /// Java's comment: we only want to reduce the backoff when retrying the first
+    /// AddPartition which errored out due to a `CONCURRENT_TRANSACTIONS` error,
+    /// since this means that the previous transaction is still completing and we
+    /// don't want to wait too long before trying to start the new one. This is only
+    /// a temporary fix; the long-term solution is tracked in KAFKA-5482.
+    ///
+    /// A manager method rather than a handler one because Java's version reads the
+    /// enclosing instance's `partitionsInTransaction`.
+    fn maybe_override_retry_backoff_ms(&self, handler: &mut TxnRequestHandler) {
+        if !self.partitions_in_transaction.is_empty() {
+            return;
+        }
+        if let TxnRequestHandlerKind::AddPartitionsToTxn { retry_backoff_ms, .. } = &mut handler.kind {
+            *retry_backoff_ms = ADD_PARTITIONS_RETRY_BACKOFF_MS;
+        }
+    }
+
     // -- Send path ----------------------------------------------------------
 
     /// Validates that a record may be appended for `topic_partition`, adding it
@@ -3308,29 +3607,14 @@ impl TransactionManager {
     ///
     /// Translated from `maybeAddPartition(TopicPartition)` (Java 437).
     ///
-    /// # Where Phase 5a stops
+    /// # The transactional arm's chain order is load-bearing
     ///
-    /// The transactional arm is an ordered `if / else if` chain (Java 441-459).
-    /// Phase 5a translates the three branches that need no request handler — the
-    /// two state guards and the already-added short-circuit — because they are
-    /// pure state validation and are what the `testFailIfNotReadyForSend*` /
-    /// `testNotReadyForSend*` family asserts on. The last two branches belong with
-    /// `AddPartitionsToTxnHandler` in Phase 5b and fail loudly (CLAUDE.md §5):
-    ///
-    ///   - the Transaction V2 arm (Java 448-451), which registers the partition
-    ///     directly because TV2 sends no `AddPartitionsToTxn`. Unreachable until
-    ///     Phase 5b adds `maybeUpdateTransactionV2Enabled`, the only writer of
-    ///     `is_transaction_v2_enabled`; kept in position so the chain's order is
-    ///     the Java one.
-    ///   - the registration arm (Java 456-458), which populates
-    ///     `new_partitions_in_transaction` for `addPartitionsToTransactionHandler`
-    ///     (Java 1313) to drain. Deferring it is what keeps that set empty, and so
-    ///     keeps `nextRequest`'s first statement and
-    ///     [`Self::is_send_to_partition_allowed`]'s set lookup consistent in 5a.
-    ///
-    /// The split is recorded in PLAN §10.7: the task's boundary places
-    /// `maybe_add_partition`'s transactional arm in 5b, but the tests that pin its
-    /// state guards are named as 5a's, and those guards depend on nothing 5b owns.
+    /// Java writes an ordered `if / else if` chain (Java 441-459) whose Transaction
+    /// V2 arm (`:448`) precedes the already-added short-circuit (`:452`). Under TV2
+    /// the client sends no `AddPartitionsToTxn` at all, so the partition is
+    /// registered straight into `partitionsInTransaction` — and re-registering one
+    /// already there is idempotent, which is why that arm can sit ahead of the
+    /// short-circuit.
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), KafkaError> {
         self.maybe_fail_with_error()?;
         self.throw_if_pending_state("send")?;
@@ -3349,19 +3633,21 @@ impl TransactionManager {
                     self.current_state
                 )));
             } else if self.is_transaction_v2_enabled {
-                return Err(KafkaError::unsupported_version(format!(
-                    "Adding partition {topic_partition} to a Transaction V2 transaction is not yet implemented in \
-                     this client (Milestone 11, Phase 5b)."
-                )));
+                self.txn_partition_map.get_or_create(topic_partition);
+                self.partitions_in_transaction.insert(topic_partition.clone());
+                self.transaction_started = true;
             } else if self.transaction_contains_partition(topic_partition)
                 || self.is_partition_pending_add(topic_partition)
             {
                 return Ok(());
             } else {
-                return Err(KafkaError::unsupported_version(format!(
-                    "Adding partition {topic_partition} to a transaction is not yet implemented in this client \
-                     (Milestone 11, Phase 5b)."
-                )));
+                kafka_debug!(
+                    self.log_context,
+                    "Begin adding new partition {} to transaction",
+                    topic_partition
+                );
+                self.txn_partition_map.get_or_create(topic_partition);
+                self.new_partitions_in_transaction.insert(topic_partition.clone());
             }
         }
         Ok(())
@@ -3475,18 +3761,59 @@ pub(crate) fn is_out_of_order_sequence(code: Errors) -> bool {
     matches!(code, Errors::OutOfOrderSequenceNumber | Errors::UnknownProducerId)
 }
 
+/// A per-partition error map in topic-then-partition order.
+///
+/// Java iterates these maps in `HashMap` order, which is unspecified. The response
+/// handlers that walk one contain arms that `return` mid-loop, so the order decides
+/// *which* error is reported when a response carries several — sorting makes that
+/// choice reproducible, the same reasoning
+/// `.claude/rules/producer-transactions.md` §10 applies to encodings.
+fn sorted_partition_errors(errors: &HashMap<TopicPartition, Errors>) -> Vec<(&TopicPartition, Errors)> {
+    let mut entries: Vec<(&TopicPartition, Errors)> = errors.iter().map(|(tp, error)| (tp, *error)).collect();
+    entries.sort_by_key(|(partition, _)| (partition.topic_arc().clone(), partition.partition()));
+    entries
+}
+
+/// A per-partition error map rendered as Java's `AbstractMap.toString()` would
+/// render it, in topic-then-partition order.
+///
+/// Java interpolates the map straight into a `KafkaException` message
+/// (`TransactionManager.java:1625`); `HashMap` order would make that text
+/// unreproducible, so it is sorted here.
+///
+/// # Each error prints as its Rust variant name, not Java's constant name
+///
+/// Java's `Errors` is an enum, so interpolating one yields
+/// `Enum.toString()` = `name()`, e.g. `TOPIC_AUTHORIZATION_FAILED`. This crate's
+/// [`Errors`] renders `Display` as the human-readable `message()` and has no
+/// `name()`, so the variant identifier is printed instead:
+/// `TopicAuthorizationFailed`. That identifier *is* the translation of Java's
+/// constant under CLAUDE.md §2's PascalCase rule, and no Java test asserts on this
+/// message — adding a 134-arm `name()` to a shared file for one diagnostic string
+/// would be out of proportion. Recorded as a deviation in PLAN §10.8.
+fn format_partition_errors(errors: &HashMap<TopicPartition, Errors>) -> String {
+    let entries: Vec<String> = sorted_partition_errors(errors)
+        .into_iter()
+        .map(|(partition, error)| format!("{partition}={error:?}"))
+        .collect();
+    format!("{{{}}}", entries.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
     use crate::NodeApiVersions;
+    use crate::add_partitions_to_txn_response_data::AddPartitionsToTxnResponseData;
     use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
     use crate::common::compress::Compression;
     use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
     use crate::common::record::memory_records::MemoryRecords;
-    use crate::common::requests::{FindCoordinatorResponse, InitProducerIdResponse};
+    use crate::common::requests::{
+        AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, FindCoordinatorResponse, InitProducerIdResponse,
+    };
     use crate::init_producer_id_response_data::InitProducerIdResponseData;
     use crate::producer::internals::sender::is_authorization_error_handled_by_sender;
 
@@ -3744,6 +4071,62 @@ mod tests {
             .set_producer_epoch(epoch)
             .set_throttle_time_ms(0);
         let response = ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data));
+        manager.handle_response(handler, &response, coordinators, pending_requests)
+    }
+
+    /// The `AddPartitionsToTxnResponse` Java's `prepareAddPartitionsToTxn`
+    /// (Java 4027) builds: the per-partition errors filed under
+    /// [`V3_AND_BELOW_TXN_ID`], which is the only shape a client request produces.
+    fn add_partitions_to_txn_response(errors: &HashMap<TopicPartition, Errors>) -> ConcreteResponse {
+        let result = AddPartitionsToTxnResponse::result_for_transaction(V3_AND_BELOW_TXN_ID, errors);
+        let mut data = AddPartitionsToTxnResponseData::new();
+        data.set_results_by_topic_v3_and_below(result.topic_results)
+            .set_throttle_time_ms(0);
+        ConcreteResponse::AddPartitionsToTxn(AddPartitionsToTxnResponse::new(data))
+    }
+
+    /// Dequeues the pending `AddPartitionsToTxn`, checks the outgoing request the
+    /// way Java's request matcher does, and feeds back a response carrying `errors`.
+    ///
+    /// Combines `prepareAddPartitionsToTxn` (Java 4027) — including its assertion
+    /// that the request's partition set equals the errors' key set — with the
+    /// `runUntil` that lets `Sender` send it and dispatch the reply.
+    /// `addPartitionsRequestMatcher` (Java 4165) checks the producer id, epoch and
+    /// transactional id too, so those are checked here.
+    fn run_add_partitions_to_txn(
+        manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
+        errors: &[(TopicPartition, Errors)],
+    ) -> Result<(), KafkaError> {
+        let mut coordinators = CoordinatorNodes::new();
+        run_add_partitions_to_txn_with_coordinators(manager, &mut coordinators, pending_requests, errors)
+    }
+
+    /// As [`run_add_partitions_to_txn`], but with a caller-supplied coordinator
+    /// record, for the arms that rediscover the coordinator (Java 1578).
+    fn run_add_partitions_to_txn_with_coordinators(
+        manager: &mut TransactionManager,
+        coordinators: &mut CoordinatorNodes,
+        pending_requests: &mut PendingRequests,
+        errors: &[(TopicPartition, Errors)],
+    ) -> Result<(), KafkaError> {
+        let handler = manager
+            .next_request(pending_requests, false)
+            .expect("an AddPartitionsToTxn request must be pending");
+        let data = handler
+            .add_partitions_to_txn_request_data()
+            .expect("an AddPartitionsToTxn handler");
+        assert_eq!(data.v3_and_below_transactional_id, TRANSACTIONAL_ID);
+        assert_eq!(data.v3_and_below_producer_id, manager.producer_id_and_epoch().producer_id);
+        assert_eq!(data.v3_and_below_producer_epoch, manager.producer_id_and_epoch().epoch);
+        let requested: HashSet<TopicPartition> = AddPartitionsToTxnRequest::get_partitions(&data.v3_and_below_topics)
+            .into_iter()
+            .collect();
+        let expected: HashSet<TopicPartition> = errors.iter().map(|(partition, _)| partition.clone()).collect();
+        assert_eq!(requested, expected, "the request must carry exactly the pending partitions");
+
+        let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
+        let response = add_partitions_to_txn_response(&error_map);
         manager.handle_response(handler, &response, coordinators, pending_requests)
     }
 
@@ -4078,16 +4461,14 @@ mod tests {
     }
 
     /// Phase 3's MILESTONE-11 GUARD is gone: a transactional manager is
-    /// constructible, and the arms Phase 5b still owes fail loudly with
-    /// [`Errors::UnsupportedVersion`] instead (CLAUDE.md §5).
+    /// constructible and drives a full transaction.
     ///
-    /// Pins the guard's *replacement*, so removing it cannot silently turn a
-    /// deferred transactional path into a wrong-branch success. The two arms
-    /// asserted here are the ones an application can reach first: registering a
-    /// partition in a live transaction, and the `AddPartitionsToTxn` that would
-    /// carry it.
+    /// Pins the guard's *replacement* end to end — `initTransactions`,
+    /// `beginTransaction`, a partition registration and the `AddPartitionsToTxn`
+    /// round trip that confirms it — so nothing can silently regress the manager to
+    /// refusing a transactional producer.
     #[tokio::test]
-    async fn test_transactional_manager_is_constructible_and_defers_phase_5b_arms() {
+    async fn test_transactional_manager_is_constructible_and_drives_a_transaction() {
         let mut manager = transactional_manager(false);
         assert!(manager.is_transactional());
         assert_eq!(manager.transactional_id(), Some(TRANSACTIONAL_ID));
@@ -4097,15 +4478,14 @@ mod tests {
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
 
-        let error = manager
+        manager
             .maybe_add_partition(&tp0())
-            .expect_err("registering a new partition needs AddPartitionsToTxn (Phase 5b)");
-        assert_eq!(error.error(), Errors::UnsupportedVersion);
-        assert!(
-            error.message().contains("Milestone 11, Phase 5b"),
-            "unexpected message: {}",
-            error.message()
-        );
+            .expect("registering a new partition succeeds");
+        assert!(manager.has_partitions_to_add());
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&tp0()));
+        assert!(manager.is_send_to_partition_allowed(&tp0()));
     }
 
     /// The full nine-by-nine transition table, checked against Java 162-188.
@@ -4842,6 +5222,163 @@ mod tests {
             error.message(),
             "Cannot execute transactional method because we are in an error state"
         );
+    }
+
+    /// Translated from `testMaybeAddPartitionToTransaction` (Java 399-422).
+    #[tokio::test]
+    async fn test_maybe_add_partition_to_transaction() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_partitions_to_add());
+        assert!(!manager.transaction_contains_partition(&partition));
+        assert!(manager.is_partition_pending_add(&partition));
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&partition));
+        assert!(!manager.has_partitions_to_add());
+        assert!(!manager.is_partition_pending_add(&partition));
+
+        // adding the partition again should not have any effect
+        manager.maybe_add_partition(&partition).expect("re-registering is a no-op");
+        assert!(!manager.has_partitions_to_add());
+        assert!(manager.transaction_contains_partition(&partition));
+        assert!(!manager.is_partition_pending_add(&partition));
+    }
+
+    /// Translated from `testMaybeAddPartitionToTransactionInTransactionV2`
+    /// (Java 424-442).
+    ///
+    /// The Transaction V2 arm (Java 448-451) registers the partition directly,
+    /// because the client sends no `AddPartitionsToTxn` under TV2 — so nothing is
+    /// ever pending and the queue stays empty.
+    #[tokio::test]
+    async fn test_maybe_add_partition_to_transaction_in_transaction_v2() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(true);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_transaction_v2_enabled());
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        // In V2, the maybeAddPartition should not add the partition to the pending list.
+        assert!(!manager.has_partitions_to_add());
+        assert!(manager.transaction_contains_partition(&partition));
+        assert!(!manager.is_partition_pending_add(&partition));
+        assert!(pending.is_empty(), "Transaction V2 sends no AddPartitionsToTxn");
+
+        // Adding the partition again should not have any effect
+        manager.maybe_add_partition(&partition).expect("re-registering is a no-op");
+        assert!(!manager.has_partitions_to_add());
+        assert!(manager.transaction_contains_partition(&partition));
+        assert!(!manager.is_partition_pending_add(&partition));
+    }
+
+    /// Translated from
+    /// `testAddPartitionToTransactionOverridesRetryBackoffForConcurrentTransactions`
+    /// (Java 444-461).
+    #[tokio::test]
+    async fn test_add_partition_to_transaction_overrides_retry_backoff_for_concurrent_transactions() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_partitions_to_add());
+        assert!(!manager.transaction_contains_partition(&partition));
+        assert!(manager.is_partition_pending_add(&partition));
+
+        run_add_partitions_to_txn(
+            &mut manager,
+            &mut pending,
+            &[(partition.clone(), Errors::ConcurrentTransactions)],
+        )
+        .expect("a CONCURRENT_TRANSACTIONS response re-enqueues the request");
+
+        let handler = manager.next_request(&mut pending, false).expect("the retry must be pending");
+        assert_eq!(handler.retry_backoff_ms(), ADD_PARTITIONS_RETRY_BACKOFF_MS);
+    }
+
+    /// Translated from
+    /// `testAddPartitionToTransactionRetainsRetryBackoffForRegularRetriableError`
+    /// (Java 463-479).
+    ///
+    /// `COORDINATOR_NOT_AVAILABLE` takes the coordinator-rediscovery arm
+    /// (Java 1577), which re-enqueues without touching the backoff — so the queue
+    /// holds a `FindCoordinator` at [`Priority::FindCoordinator`] ahead of the
+    /// retry, and Java's `nextRequest(false)` yields *that* one. Java asserts
+    /// `DEFAULT_RETRY_BACKOFF_MS`, which is the value both handlers carry.
+    #[tokio::test]
+    async fn test_add_partition_to_transaction_retains_retry_backoff_for_regular_retriable_error() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_partitions_to_add());
+        assert!(!manager.transaction_contains_partition(&partition));
+        assert!(manager.is_partition_pending_add(&partition));
+
+        run_add_partitions_to_txn(
+            &mut manager,
+            &mut pending,
+            &[(partition.clone(), Errors::CoordinatorNotAvailable)],
+        )
+        .expect("a COORDINATOR_NOT_AVAILABLE response looks the coordinator up again");
+
+        let handler = manager.next_request(&mut pending, false).expect("the retry must be pending");
+        assert_eq!(handler.retry_backoff_ms(), DEFAULT_RETRY_BACKOFF_MS);
+    }
+
+    /// Translated from
+    /// `testAddPartitionToTransactionRetainsRetryBackoffWhenPartitionsAlreadyAdded`
+    /// (Java 481-501).
+    ///
+    /// `maybeOverrideRetryBackoffMs` only lowers the backoff while
+    /// `partitionsInTransaction` is empty (Java 1646), so the second partition's
+    /// `CONCURRENT_TRANSACTIONS` keeps the configured value.
+    ///
+    /// Java asserts on `nextRequest(false)` *before* driving the second response,
+    /// so the handler it inspects is the freshly-enqueued `AddPartitionsToTxn` —
+    /// which already carries `DEFAULT_RETRY_BACKOFF_MS`. This drives the response
+    /// first, so the assertion covers the post-override value as well, which is the
+    /// point the test name makes.
+    #[tokio::test]
+    async fn test_add_partition_to_transaction_retains_retry_backoff_when_partitions_already_added() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_partitions_to_add());
+        assert!(!manager.transaction_contains_partition(&partition));
+        assert!(manager.is_partition_pending_add(&partition));
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&partition));
+
+        let other_partition = TopicPartition::new("foo".to_string(), 1);
+        manager
+            .maybe_add_partition(&other_partition)
+            .expect("a second partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(other_partition, Errors::ConcurrentTransactions)])
+            .expect("a CONCURRENT_TRANSACTIONS response re-enqueues the request");
+
+        let handler = manager.next_request(&mut pending, false).expect("the retry must be pending");
+        assert_eq!(handler.retry_backoff_ms(), DEFAULT_RETRY_BACKOFF_MS);
     }
 
     /// Translated from `testIsSendToPartitionAllowedWithPartitionNotAdded`
