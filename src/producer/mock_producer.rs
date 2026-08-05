@@ -22,13 +22,20 @@
 //!
 //! # Transactional API
 //!
-//! The [`Producer`] trait's transactional methods (`init_transactions`,
-//! `begin_transaction`, `commit_transaction`, `abort_transaction`,
-//! `send_offsets_to_transaction`) are implemented here only as explicit
-//! `UnsupportedVersion` failures (CLAUDE.md §5). The state they need — Java's
-//! `transactionInitialized` (`MockProducer.java:70`), `transactionInFlight`
-//! (`:71`), `sentOffsets` (`:75`) and the uncommitted-record staging — is
-//! Milestone 11 Phase 7 (`design/history/Milestone-11/PLAN.md` §Phase-7).
+//! The [`Producer`] trait's transactional methods are pure in-memory state:
+//! there is no coordinator, no `TransactionManager` and no network, matching
+//! Java's `MockProducer`. While a transaction is in flight, sends are staged in
+//! `uncommitted_sends` (Java `MockProducer.java:60`) and offsets in
+//! `uncommitted_consumer_group_offsets` (`:68`) rather than published;
+//! [`commit_transaction`](Producer::commit_transaction) moves both into the
+//! visible [`history()`](MockProducer::history) and
+//! [`consumer_group_offsets_history()`](MockProducer::consumer_group_offsets_history),
+//! while [`abort_transaction`](Producer::abort_transaction) discards them.
+//!
+//! Misuse returns `Err` where Java throws: `IllegalStateException` becomes
+//! [`KafkaError::illegal_state`] and `ProducerFencedException` becomes a
+//! [`KafkaError`] carrying [`Errors::ProducerFenced`], with Java's message text
+//! preserved verbatim (CLAUDE.md §10.2).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -44,6 +51,7 @@ use crate::common::KafkaError;
 use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
+use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
@@ -56,8 +64,7 @@ use super::Callback;
 /// However it can be configured to allow the user to control the completion of
 /// the call and supply an optional error for the producer to throw.
 ///
-/// Corresponds to Java's `org.apache.kafka.clients.producer.MockProducer`
-/// (non-transactional subset — see the module docs).
+/// Corresponds to Java's `org.apache.kafka.clients.producer.MockProducer`.
 ///
 /// # Thread Safety
 ///
@@ -68,17 +75,137 @@ pub struct MockProducer<K, V> {
     inner: Mutex<MockProducerInner<K, V>>,
 }
 
+/// The offsets one transaction contributed, grouped by consumer group id.
+///
+/// Spells Java's `Map<String, Map<TopicPartition, OffsetAndMetadata>>`
+/// (`MockProducer.java:63`, `:68`); an alias rather than a new type, so it adds
+/// no struct absent from the Java source (`definition-of-done.md` §7).
+type ConsumerGroupOffsets = HashMap<String, HashMap<TopicPartition, OffsetAndMetadata>>;
+
 struct MockProducerInner<K, V> {
     cluster: Cluster,
     auto_complete: bool,
+    /// Java `sent` (`MockProducer.java:59`).
     sent: Vec<ProducerRecord<K, V>>,
+    /// Java `uncommittedSends` (`:60`) — records sent inside the in-flight
+    /// transaction, published to `sent` only on commit.
+    uncommitted_sends: Vec<ProducerRecord<K, V>>,
     completions: VecDeque<Completion>,
     offsets: HashMap<TopicPartition, i64>,
+    /// Java `consumerGroupOffsets` (`:63`) — one entry per committed
+    /// transaction that carried offsets.
+    consumer_group_offsets: Vec<ConsumerGroupOffsets>,
+    /// Java `uncommittedConsumerGroupOffsets` (`:68`).
+    uncommitted_consumer_group_offsets: ConsumerGroupOffsets,
     closed: bool,
+    /// Java `transactionInitialized` (`:70`).
+    transaction_initialized: bool,
+    /// Java `transactionInFlight` (`:71`).
+    transaction_in_flight: bool,
+    /// Java `transactionCommitted` (`:72`).
+    transaction_committed: bool,
+    /// Java `transactionAborted` (`:73`).
+    transaction_aborted: bool,
+    /// Java `producerFenced` (`:74`).
+    producer_fenced: bool,
+    /// Java `sentOffsets` (`:75`).
+    sent_offsets: bool,
+    /// Java `commitCount` (`:76`).
+    commit_count: i64,
+    /// Java `initTransactionException` (`:79`).
+    init_transaction_error: Option<KafkaError>,
+    /// Java `beginTransactionException` (`:80`).
+    begin_transaction_error: Option<KafkaError>,
+    /// Java `sendOffsetsToTransactionException` (`:81`).
+    send_offsets_to_transaction_error: Option<KafkaError>,
+    /// Java `commitTransactionException` (`:82`).
+    commit_transaction_error: Option<KafkaError>,
+    /// Java `abortTransactionException` (`:83`).
+    abort_transaction_error: Option<KafkaError>,
+    /// Java `sendException` (`:84`).
     send_error: Option<KafkaError>,
+    /// Java `flushException` (`:85`).
     flush_error: Option<KafkaError>,
+    /// Java `partitionsForException` (`:86`).
     partitions_for_error: Option<KafkaError>,
+    /// Java `closeException` (`:87`).
     close_error: Option<KafkaError>,
+}
+
+impl<K, V> MockProducerInner<K, V> {
+    /// Corresponds to Java's `verifyNotClosed()` (`MockProducer.java:248`).
+    fn verify_not_closed(&self) -> Result<(), KafkaError> {
+        if self.closed {
+            return Err(KafkaError::illegal_state("MockProducer is already closed."));
+        }
+        Ok(())
+    }
+
+    /// Corresponds to Java's `verifyNotFenced()` (`MockProducer.java:254`),
+    /// which throws `ProducerFencedException`.
+    fn verify_not_fenced(&self) -> Result<(), KafkaError> {
+        if self.producer_fenced {
+            return Err(KafkaError::with_message(Errors::ProducerFenced, "MockProducer is fenced."));
+        }
+        Ok(())
+    }
+
+    /// Corresponds to Java's `verifyTransactionsInitialized()`
+    /// (`MockProducer.java:260`).
+    fn verify_transactions_initialized(&self) -> Result<(), KafkaError> {
+        if !self.transaction_initialized {
+            return Err(KafkaError::illegal_state(
+                "MockProducer hasn't been initialized for transactions.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Corresponds to Java's `verifyTransactionInFlight()`
+    /// (`MockProducer.java:266`).
+    fn verify_transaction_in_flight(&self) -> Result<(), KafkaError> {
+        if !self.transaction_in_flight {
+            return Err(KafkaError::illegal_state("There is no open transaction."));
+        }
+        Ok(())
+    }
+
+    /// Corresponds to Java's `flush()` (`MockProducer.java:347`).
+    ///
+    /// Java's `flush()` is `synchronized` and is called from within the equally
+    /// `synchronized` `commitTransaction` / `abortTransaction`; a Java monitor is
+    /// reentrant, `std::sync::Mutex` is not. So the body lives here, with the lock
+    /// already held by the caller, and [`Producer::flush`] is the entry point that
+    /// acquires it. Note Java's `flush()` deliberately does *not*
+    /// `verifyNotFenced()` — see `shouldNotThrowOnFlushProducerIfProducerIsFenced`.
+    fn flush(&mut self) -> Result<(), KafkaError> {
+        self.verify_not_closed()?;
+
+        if let Some(err) = self.flush_error.as_ref() {
+            return Err(err.clone());
+        }
+
+        while self.complete_next() {}
+
+        Ok(())
+    }
+
+    /// Corresponds to Java's `completeNext()` (`MockProducer.java:504`).
+    fn complete_next(&mut self) -> bool {
+        self.error_next(None)
+    }
+
+    /// Corresponds to Java's `errorNext(RuntimeException)`
+    /// (`MockProducer.java:513`).
+    fn error_next(&mut self, error: Option<KafkaError>) -> bool {
+        match self.completions.pop_front() {
+            Some(completion) => {
+                completion.complete(error);
+                true
+            },
+            None => false,
+        }
+    }
 }
 
 /// Internal completion record that holds the state needed to fulfill a
@@ -96,7 +223,13 @@ struct Completion {
 impl Completion {
     /// Complete this send with either a success or an error.
     ///
-    /// Corresponds to Java's `Completion.complete(RuntimeException)`.
+    /// Corresponds to Java's `Completion.complete(RuntimeException)`
+    /// (`MockProducer.java:567-581`), whose three steps run in this order: set the
+    /// result, fire the callback, then `done()`. The `done()` last is load-bearing
+    /// in Java — it is the latch a `Future.get()` waits on, so a waiter cannot
+    /// observe the send as complete before the callback has returned. It is not
+    /// observable from the single task that calls `complete`, since both happen
+    /// before the call returns, but it is from a concurrent one.
     fn complete(self, error: Option<KafkaError>) {
         let Completion { offset, metadata, result, callback, topic_partition } = self;
         if let Some(e) = error {
@@ -105,20 +238,21 @@ impl Completion {
                 Arc::new(move |_| Some(e.clone()))
             };
             result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
-            result.done();
-            // Mirror Java's `Completion.complete`: fire the callback with the error.
+            // Java 578: the callback still receives metadata on the error path,
+            // carrying -1 for every unknown field, exactly as `KafkaProducer`'s own
+            // error path does (`kafka_producer.rs:1155`).
             if let Some(cb) = callback {
-                cb(None, Some(&e));
+                let null_metadata = RecordMetadata::new(topic_partition, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
+                cb(Some(&null_metadata), Some(&e));
             }
-            let _ = topic_partition;
         } else {
             result.set(offset, RecordBatch::NO_TIMESTAMP, None);
-            result.done();
-            // Mirror Java's `Completion.complete`: fire the callback with the metadata.
+            // Java 576: fire the callback with the record's metadata.
             if let Some(cb) = callback {
                 cb(Some(&metadata), None);
             }
         }
+        result.done();
     }
 }
 
@@ -142,9 +276,24 @@ impl<K, V> MockProducer<K, V> {
                 cluster,
                 auto_complete,
                 sent: Vec::new(),
+                uncommitted_sends: Vec::new(),
                 completions: VecDeque::new(),
                 offsets: HashMap::new(),
+                consumer_group_offsets: Vec::new(),
+                uncommitted_consumer_group_offsets: HashMap::new(),
                 closed: false,
+                transaction_initialized: false,
+                transaction_in_flight: false,
+                transaction_committed: false,
+                transaction_aborted: false,
+                producer_fenced: false,
+                sent_offsets: false,
+                commit_count: 0,
+                init_transaction_error: None,
+                begin_transaction_error: None,
+                send_offsets_to_transaction_error: None,
+                commit_transaction_error: None,
+                abort_transaction_error: None,
                 send_error: None,
                 flush_error: None,
                 partitions_for_error: None,
@@ -178,17 +327,60 @@ impl<K, V> MockProducer<K, V> {
         inner.sent.clone()
     }
 
-    /// Clear the stored history of sent records.
+    /// Get the list of records sent inside the in-flight transaction and not yet
+    /// committed.
+    ///
+    /// Returns a clone of the internal uncommitted-sends list.
+    ///
+    /// Corresponds to Java's `MockProducer.uncommittedRecords()`
+    /// (`MockProducer.java:471`).
+    pub fn uncommitted_records(&self) -> Vec<ProducerRecord<K, V>>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        let inner = self.inner.lock().unwrap();
+        inner.uncommitted_sends.clone()
+    }
+
+    /// Get the list of committed consumer group offsets since the last call to
+    /// [`clear()`](Self::clear) — one entry per committed transaction that
+    /// carried offsets.
+    ///
+    /// Corresponds to Java's `MockProducer.consumerGroupOffsetsHistory()`
+    /// (`MockProducer.java:479`).
+    pub fn consumer_group_offsets_history(&self) -> Vec<ConsumerGroupOffsets> {
+        let inner = self.inner.lock().unwrap();
+        inner.consumer_group_offsets.clone()
+    }
+
+    /// Get the offsets staged by the in-flight transaction and not yet committed.
+    ///
+    /// Corresponds to Java's `MockProducer.uncommittedOffsets()`
+    /// (`MockProducer.java:483`). Java hands back the live map; behind the mutex
+    /// that is not expressible, so this returns a snapshot clone. No Java caller
+    /// mutates the returned map.
+    pub fn uncommitted_offsets(&self) -> ConsumerGroupOffsets {
+        let inner = self.inner.lock().unwrap();
+        inner.uncommitted_consumer_group_offsets.clone()
+    }
+
+    /// Clear the stored history of sent records and consumer group offsets.
     ///
     /// Note: per-topic-partition offset counters are intentionally preserved
     /// across `clear()` calls, matching Java's `MockProducer.clear()` which
-    /// does **not** reset the `offsets` map.
+    /// does **not** reset the `offsets` map. Nor does it reset the transaction
+    /// flags — only `sentOffsets`.
     ///
-    /// Corresponds to Java's `MockProducer.clear()`.
+    /// Corresponds to Java's `MockProducer.clear()` (`MockProducer.java:490`).
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.sent.clear();
+        inner.uncommitted_sends.clear();
+        inner.sent_offsets = false;
         inner.completions.clear();
+        inner.consumer_group_offsets.clear();
+        inner.uncommitted_consumer_group_offsets.clear();
     }
 
     /// Complete the earliest uncompleted call successfully.
@@ -197,7 +389,8 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.completeNext()`.
     pub fn complete_next(&self) -> bool {
-        self.error_next_inner(None)
+        let mut inner = self.inner.lock().unwrap();
+        inner.complete_next()
     }
 
     /// Complete the earliest uncompleted call with the given error.
@@ -206,21 +399,90 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)`.
     pub fn error_next(&self, error: KafkaError) -> bool {
-        self.error_next_inner(Some(error))
+        let mut inner = self.inner.lock().unwrap();
+        inner.error_next(Some(error))
     }
 
-    /// Internal helper shared by `complete_next()` and `error_next()`.
+    /// Mark this producer as fenced by another producer with the same
+    /// `transactional.id`. Every subsequent transactional call and every
+    /// [`send()`](Producer::send) then fails with
+    /// [`Errors::ProducerFenced`].
     ///
-    /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)` which
-    /// is also called by `completeNext()` with a `null` argument.
-    fn error_next_inner(&self, error: Option<KafkaError>) -> bool {
+    /// Corresponds to Java's `MockProducer.fenceProducer()`
+    /// (`MockProducer.java:429`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the producer is closed, is already fenced, or was never
+    /// initialized for transactions ([`KafkaError::illegal_state`] for the first
+    /// and last, [`Errors::ProducerFenced`] for the second).
+    pub fn fence_producer(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(completion) = inner.completions.pop_front() {
-            completion.complete(error);
-            true
-        } else {
-            false
-        }
+        inner.verify_not_closed()?;
+        inner.verify_not_fenced()?;
+        inner.verify_transactions_initialized()?;
+        inner.producer_fenced = true;
+        Ok(())
+    }
+
+    /// Returns `true` if [`init_transactions()`](Producer::init_transactions) has
+    /// completed successfully.
+    ///
+    /// Corresponds to Java's `MockProducer.transactionInitialized()`
+    /// (`MockProducer.java:436`).
+    pub fn transaction_initialized(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.transaction_initialized
+    }
+
+    /// Returns `true` if a transaction has been begun and neither committed nor
+    /// aborted.
+    ///
+    /// Corresponds to Java's `MockProducer.transactionInFlight()`
+    /// (`MockProducer.java:440`).
+    pub fn transaction_in_flight(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.transaction_in_flight
+    }
+
+    /// Returns `true` if the most recent transaction was committed.
+    ///
+    /// Corresponds to Java's `MockProducer.transactionCommitted()`
+    /// (`MockProducer.java:444`).
+    pub fn transaction_committed(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.transaction_committed
+    }
+
+    /// Returns `true` if the most recent transaction was aborted.
+    ///
+    /// Corresponds to Java's `MockProducer.transactionAborted()`
+    /// (`MockProducer.java:448`).
+    pub fn transaction_aborted(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.transaction_aborted
+    }
+
+    /// Returns `true` if offsets were sent to the current or most recent
+    /// transaction. Reset only by
+    /// [`begin_transaction()`](Producer::begin_transaction) and
+    /// [`clear()`](Self::clear) — not by a commit.
+    ///
+    /// Corresponds to Java's `MockProducer.sentOffsets()`
+    /// (`MockProducer.java:456`).
+    pub fn sent_offsets(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.sent_offsets
+    }
+
+    /// The number of transactions committed so far. Aborted transactions are not
+    /// counted.
+    ///
+    /// Corresponds to Java's `MockProducer.commitCount()`
+    /// (`MockProducer.java:460`).
+    pub fn commit_count(&self) -> i64 {
+        let inner = self.inner.lock().unwrap();
+        inner.commit_count
     }
 
     /// Returns `true` if the producer is closed.
@@ -286,17 +548,56 @@ impl<K, V> MockProducer<K, V> {
         let mut inner = self.inner.lock().unwrap();
         inner.close_error = error;
     }
-}
 
-impl<K, V> MockProducer<K, V> {
-    /// The error every `MockProducer` transactional method returns until Phase 7
-    /// translates the surface behind them.
-    fn transactions_not_implemented(operation: &str) -> KafkaError {
-        KafkaError::unsupported_version(format!(
-            "MockProducer.{} is not implemented yet (Milestone 11, Phase 7); \
-             use KafkaProducer for transactional tests.",
-            operation
-        ))
+    /// Set an error to be returned on every
+    /// [`init_transactions()`](Producer::init_transactions) call until cleared.
+    ///
+    /// Matches Java's public `MockProducer.initTransactionException` field
+    /// (`MockProducer.java:79`), which likewise persists until set back to `null`.
+    pub fn set_init_transaction_error(&self, error: Option<KafkaError>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.init_transaction_error = error;
+    }
+
+    /// Set an error to be returned on every
+    /// [`begin_transaction()`](Producer::begin_transaction) call until cleared.
+    ///
+    /// Matches Java's public `MockProducer.beginTransactionException` field
+    /// (`MockProducer.java:80`).
+    pub fn set_begin_transaction_error(&self, error: Option<KafkaError>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.begin_transaction_error = error;
+    }
+
+    /// Set an error to be returned on every
+    /// [`send_offsets_to_transaction()`](Producer::send_offsets_to_transaction)
+    /// call until cleared.
+    ///
+    /// Matches Java's public `MockProducer.sendOffsetsToTransactionException`
+    /// field (`MockProducer.java:81`).
+    pub fn set_send_offsets_to_transaction_error(&self, error: Option<KafkaError>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.send_offsets_to_transaction_error = error;
+    }
+
+    /// Set an error to be returned on every
+    /// [`commit_transaction()`](Producer::commit_transaction) call until cleared.
+    ///
+    /// Matches Java's public `MockProducer.commitTransactionException` field
+    /// (`MockProducer.java:82`).
+    pub fn set_commit_transaction_error(&self, error: Option<KafkaError>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.commit_transaction_error = error;
+    }
+
+    /// Set an error to be returned on every
+    /// [`abort_transaction()`](Producer::abort_transaction) call until cleared.
+    ///
+    /// Matches Java's public `MockProducer.abortTransactionException` field
+    /// (`MockProducer.java:83`).
+    pub fn set_abort_transaction_error(&self, error: Option<KafkaError>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.abort_transaction_error = error;
     }
 }
 
@@ -310,39 +611,190 @@ impl<K, V> Default for MockProducer<K, V> {
 }
 
 impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
-    /// Not yet translated: `MockProducer`'s transactional surface is Phase 7 of
-    /// Milestone 11 (`design/history/Milestone-11/PLAN.md` §Phase-7), which owns
-    /// `transactionInitialized` (Java 70), `transactionInFlight` (71),
-    /// `sentOffsets` (75) and the uncommitted-record staging that gives these
-    /// methods anything to do.
+    /// Initialize this mock for transactions.
     ///
-    /// Returns an explicit error rather than silently succeeding, per CLAUDE.md §5.
+    /// Corresponds to Java's `MockProducer.initTransactions()`
+    /// (`MockProducer.java:145`). Stays `async` because the trait declares it so
+    /// (Java's `KafkaProducer.initTransactions` blocks); the mock never awaits.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the producer is closed, is fenced, has already been
+    /// initialized, or an error was installed with
+    /// [`set_init_transaction_error`](MockProducer::set_init_transaction_error).
     async fn init_transactions(&self) -> Result<(), KafkaError> {
-        Err(Self::transactions_not_implemented("initTransactions"))
+        let mut inner = self.inner.lock().unwrap();
+        inner.verify_not_closed()?;
+        inner.verify_not_fenced()?;
+        if inner.transaction_initialized {
+            return Err(KafkaError::illegal_state(
+                "MockProducer has already been initialized for transactions.",
+            ));
+        }
+        if let Some(err) = inner.init_transaction_error.as_ref() {
+            return Err(err.clone());
+        }
+        inner.transaction_initialized = true;
+        inner.transaction_in_flight = false;
+        inner.transaction_committed = false;
+        inner.transaction_aborted = false;
+        inner.sent_offsets = false;
+        Ok(())
     }
 
-    /// Not yet translated — see [`Self::init_transactions`].
+    /// Begin a transaction.
+    ///
+    /// Corresponds to Java's `MockProducer.beginTransaction()`
+    /// (`MockProducer.java:162`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
+    /// transactions, a transaction is already in flight, or an error was installed
+    /// with [`set_begin_transaction_error`](MockProducer::set_begin_transaction_error).
     fn begin_transaction(&self) -> Result<(), KafkaError> {
-        Err(Self::transactions_not_implemented("beginTransaction"))
+        let mut inner = self.inner.lock().unwrap();
+        inner.verify_not_closed()?;
+        inner.verify_not_fenced()?;
+        inner.verify_transactions_initialized()?;
+
+        if let Some(err) = inner.begin_transaction_error.as_ref() {
+            return Err(err.clone());
+        }
+
+        if inner.transaction_in_flight {
+            return Err(KafkaError::illegal_state("Transaction already started"));
+        }
+
+        inner.transaction_in_flight = true;
+        inner.transaction_committed = false;
+        inner.transaction_aborted = false;
+        inner.sent_offsets = false;
+        Ok(())
     }
 
-    /// Not yet translated — see [`Self::init_transactions`].
+    /// Stage consumer group offsets as part of the in-flight transaction.
+    ///
+    /// Corresponds to Java's `MockProducer.sendOffsetsToTransaction(Map,
+    /// ConsumerGroupMetadata)` (`MockProducer.java:182`). Java's
+    /// `Objects.requireNonNull(groupMetadata)` (`:184`) has no counterpart: the
+    /// parameter is taken by value and is not an `Option`, so a missing metadata is
+    /// not expressible.
+    ///
+    /// An empty `offsets` map is ignored and leaves
+    /// [`sent_offsets()`](MockProducer::sent_offsets) `false` (Java `:194-196`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
+    /// transactions, has no open transaction, or an error was installed with
+    /// [`set_send_offsets_to_transaction_error`](MockProducer::set_send_offsets_to_transaction_error).
     async fn send_offsets_to_transaction(
         &self,
-        _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        _group_metadata: ConsumerGroupMetadata,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
     ) -> Result<(), KafkaError> {
-        Err(Self::transactions_not_implemented("sendOffsetsToTransaction"))
+        let mut inner = self.inner.lock().unwrap();
+        inner.verify_not_closed()?;
+        inner.verify_not_fenced()?;
+        inner.verify_transactions_initialized()?;
+        inner.verify_transaction_in_flight()?;
+
+        if let Some(err) = inner.send_offsets_to_transaction_error.as_ref() {
+            return Err(err.clone());
+        }
+
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        // Java 197-199: `computeIfAbsent` then `putAll`, so a second call for the
+        // same group merges into the first, later offsets winning per partition.
+        let uncommitted_offsets = inner
+            .uncommitted_consumer_group_offsets
+            .entry(group_metadata.group_id().to_string())
+            .or_default();
+        uncommitted_offsets.extend(offsets);
+        inner.sent_offsets = true;
+        Ok(())
     }
 
-    /// Not yet translated — see [`Self::init_transactions`].
+    /// Commit the in-flight transaction, publishing its records and offsets.
+    ///
+    /// Corresponds to Java's `MockProducer.commitTransaction()`
+    /// (`MockProducer.java:204`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
+    /// transactions, has no open transaction, an error was installed with
+    /// [`set_commit_transaction_error`](MockProducer::set_commit_transaction_error),
+    /// or the `flush()` this performs fails.
     async fn commit_transaction(&self) -> Result<(), KafkaError> {
-        Err(Self::transactions_not_implemented("commitTransaction"))
+        let mut inner = self.inner.lock().unwrap();
+        inner.verify_not_closed()?;
+        inner.verify_not_fenced()?;
+        inner.verify_transactions_initialized()?;
+        inner.verify_transaction_in_flight()?;
+
+        if let Some(err) = inner.commit_transaction_error.as_ref() {
+            return Err(err.clone());
+        }
+
+        inner.flush()?;
+
+        // Java 216/220: `sent.addAll(uncommittedSends)` then
+        // `uncommittedSends.clear()`.
+        let uncommitted_sends = std::mem::take(&mut inner.uncommitted_sends);
+        inner.sent.extend(uncommitted_sends);
+
+        // Java 217-218/221: the map *object* is appended to the history and the
+        // field is then reassigned to a fresh map — deliberately not `clear()`,
+        // which would empty the very map just published. `mem::take` is that pair.
+        let uncommitted_offsets = std::mem::take(&mut inner.uncommitted_consumer_group_offsets);
+        if !uncommitted_offsets.is_empty() {
+            inner.consumer_group_offsets.push(uncommitted_offsets);
+        }
+
+        inner.transaction_committed = true;
+        inner.transaction_aborted = false;
+        inner.transaction_in_flight = false;
+
+        inner.commit_count += 1;
+        Ok(())
     }
 
-    /// Not yet translated — see [`Self::init_transactions`].
+    /// Abort the in-flight transaction, discarding its records and offsets.
+    ///
+    /// Corresponds to Java's `MockProducer.abortTransaction()`
+    /// (`MockProducer.java:230`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
+    /// transactions, has no open transaction, an error was installed with
+    /// [`set_abort_transaction_error`](MockProducer::set_abort_transaction_error),
+    /// or the `flush()` this performs fails.
     async fn abort_transaction(&self) -> Result<(), KafkaError> {
-        Err(Self::transactions_not_implemented("abortTransaction"))
+        let mut inner = self.inner.lock().unwrap();
+        inner.verify_not_closed()?;
+        inner.verify_not_fenced()?;
+        inner.verify_transactions_initialized()?;
+        inner.verify_transaction_in_flight()?;
+
+        if let Some(err) = inner.abort_transaction_error.as_ref() {
+            return Err(err.clone());
+        }
+
+        inner.flush()?;
+        // Java 241-242: `clear()` on both — unlike the commit path, neither
+        // collection has been handed to the history, so there is nothing to detach.
+        inner.uncommitted_sends.clear();
+        inner.uncommitted_consumer_group_offsets.clear();
+        inner.transaction_committed = false;
+        inner.transaction_aborted = true;
+        inner.transaction_in_flight = false;
+        Ok(())
     }
 
     async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
@@ -358,6 +810,16 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 
         if inner.closed {
             return Err(KafkaError::illegal_state("MockProducer is already closed."));
+        }
+
+        // Java 293-295 throws `KafkaException("MockProducer is fenced.", new
+        // ProducerFencedException("Fenced"))` — a wrapper whose *cause* is what
+        // `shouldThrowOnSendIfProducerGotFenced` asserts on. `KafkaError` has no
+        // cause chain (PLAN §10.5 deviation 5), so the two collapse into one value
+        // that keeps both observable halves: the fenced error code and Java's
+        // wrapper message. It is the same value `verify_not_fenced` produces.
+        if inner.producer_fenced {
+            return Err(KafkaError::with_message(Errors::ProducerFenced, "MockProducer is fenced."));
         }
 
         if let Some(err) = inner.send_error.as_ref() {
@@ -382,7 +844,13 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 
         let metadata = RecordMetadata::new(tp.clone(), base_offset, batch_index, RecordBatch::NO_TIMESTAMP, 0, 0);
 
-        inner.sent.push(record);
+        // Java 319-322: inside a transaction the record is staged rather than
+        // published, and only `commitTransaction` moves it across.
+        if inner.transaction_in_flight {
+            inner.uncommitted_sends.push(record);
+        } else {
+            inner.sent.push(record);
+        }
 
         let completion = Completion { offset, metadata, result: Arc::clone(&result), callback, topic_partition: tp };
 
@@ -397,20 +865,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 
     async fn flush(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
-
-        if inner.closed {
-            return Err(KafkaError::illegal_state("MockProducer is already closed."));
-        }
-
-        if let Some(err) = inner.flush_error.as_ref() {
-            return Err(err.clone());
-        }
-
-        while let Some(completion) = inner.completions.pop_front() {
-            completion.complete(None);
-        }
-
-        Ok(())
+        inner.flush()
     }
 
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
@@ -574,12 +1029,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Transactional tests (skipped)
+    // Transactional tests (landing)
     //
-    // The following Java tests are excluded because the Producer trait does not
-    // include transactional methods. These tests exercise initTransactions(),
-    // beginTransaction(), commitTransaction(), abortTransaction(),
-    // sendOffsetsToTransaction(), fenceProducer(), and related state:
+    // The transactional surface these exercise now exists (Milestone 11 Phase 7);
+    // the tests land in the commits that follow, and each name is struck from this
+    // list as it does. The list is replaced by the standard test-accounting block
+    // once it is empty.
     //
     //   - shouldInitTransactions
     //   - shouldThrowOnInitTransactionIfProducerAlreadyInitializedForTransactions
