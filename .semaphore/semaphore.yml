@@ -109,8 +109,6 @@ blocks:
               echo "SEMAPHORE_GIT_PR_BRANCH=${SEMAPHORE_GIT_PR_BRANCH}"
               echo "SEMAPHORE_GIT_PR_NUMBER=${SEMAPHORE_GIT_PR_NUMBER}"
               echo "MAIN_BRANCH=${MAIN_BRANCH}"
-              # Ensure all Python dependencies are installed
-              make
               if [ "${SEMAPHORE_GIT_PR_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
               elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
@@ -122,6 +120,8 @@ blocks:
                 # pull raise and abort it. The tree is still validated by the
                 # "Verification" block, which runs regardless.
                 if [ -f translation_agent.db ]; then
+                  # Ensure all Python dependencies are installed
+                  make
                   echo "On main branch (${MAIN_BRANCH}) -- running sweep"
                   translation-agent \
                     --ak-repo-path "${AK_REPO_PATH}" \
@@ -136,6 +136,8 @@ blocks:
                 # let this job pass -- a PR build with no orchestrator state
                 # to act on is still validated by the "Verification" block.
                 if [ -f translation_agent.db ]; then
+                  # Ensure all Python dependencies are installed
+                  make
                   echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
                   translation-agent \
                     --ak-repo-path "${AK_REPO_PATH}" \
