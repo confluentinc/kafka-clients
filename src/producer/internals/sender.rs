@@ -2177,10 +2177,21 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(false);
         }
         match &self.transaction_manager {
-            // `batches` is empty: it supplies the partition's in-flight batches for
-            // the transactional log-truncation rewrite
-            // (`TransactionManager.java:1048`), which the idempotent path never
-            // reaches (rules §7).
+            // `batches` is empty, and that is a **defect** — PLAN §9.25. It supplies the
+            // partition's in-flight batches for the transactional log-truncation rewrite
+            // (`TransactionManager.java:1042-1050`), and a *transactional* producer does
+            // reach that branch: an earlier revision of this comment claimed only the
+            // idempotent path did, which is false — the idempotent path takes the
+            // `requestIdempotentEpochBumpForPartition` arm beside it. With an empty pool
+            // `start_sequences_at_beginning` errors on the tracked in-flight batch it was
+            // not given, so the sequence rewrite silently does not happen.
+            //
+            // Not fixed here: `can_retry` takes the failing batch by `&` *and* the pool by
+            // `&mut`, and the failing batch is still tracked at this point (unlike at
+            // `handle_failed_batch`, which removes it first), so including it in the pool
+            // aliases. That needs a signature change on the produce-response path plus its
+            // own allocation audit — see §9.25. Reproducer:
+            // `test_transactional_unknown_producer_handling_when_retention_limit_reached`.
             Some(transaction_manager) => transaction_manager.lock().unwrap().can_retry(response, batch, &mut []),
             None => Ok(response.error.is_retriable()),
         }
@@ -2530,6 +2541,9 @@ mod tests {
         delivery_timeout_ms: i32,
         accumulator_retry_backoff_ms: i64,
         sender_retry_backoff_ms: i64,
+        /// `lingerMs`, which `SenderTest.setupWithTransactionState(txnManager, lingerMs)`
+        /// (Java 3825-3827) is the only overload to vary; every other one passes 0.
+        linger_ms: i32,
     }
 
     /// Test harness holding all state needed for SenderTest-style tests.
@@ -2595,6 +2609,7 @@ mod tests {
                     delivery_timeout_ms,
                     accumulator_retry_backoff_ms: 0,
                     sender_retry_backoff_ms: 0,
+                    linger_ms: 0,
                 }),
             )
         }
@@ -2612,6 +2627,7 @@ mod tests {
                 delivery_timeout_ms,
                 accumulator_retry_backoff_ms,
                 sender_retry_backoff_ms,
+                linger_ms,
             } = timeouts.unwrap_or(SenderTestTimeouts {
                 request_timeout_ms: REQUEST_TIMEOUT,
                 delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
@@ -2619,6 +2635,7 @@ mod tests {
                 // `setupWithTransactionState` variant.
                 accumulator_retry_backoff_ms: 0,
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+                linger_ms: 0,
             });
             // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
             // which is always > 0. Starting at 0 breaks MockClient because
@@ -2640,7 +2657,7 @@ mod tests {
             let accumulator = Arc::new(RecordAccumulator::new(
                 batch_size,
                 Compression::none(),
-                0, // linger_ms
+                linger_ms,
                 accumulator_retry_backoff_ms,
                 accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
@@ -5057,15 +5074,33 @@ mod tests {
         );
     }
 
-    /// `Sender.java:266-296`: an idempotent producer still in `ABORTABLE_ERROR` when
-    /// the Sender shuts down force-closes instead of spinning.
+    /// Translated from
+    /// `SenderTest.testSenderShouldCloseWhenTransactionManagerInErrorState`
+    /// (Java 3399-3414).
     ///
+    /// Java uses the file's only `mock(TransactionManager.class)` (Java 3403), stubbing
+    /// `hasOngoingTransaction() -> true` and `beginAbort()` to throw, then asserts
+    /// `verify(transactionManager, times(1)).close()`. `TransactionManager` is a concrete
+    /// struct here, so there is nothing to stub — the mock is replaced by the **real
+    /// state that satisfies both stubs**: an idempotent producer left in
+    /// `ABORTABLE_ERROR` by a `ClusterAuthorizationException` on its `InitProducerId`.
     /// `hasOngoingTransaction()` is true for an idempotent producer in that state
-    /// (`TransactionManager.java:1012`), so the second shutdown loop is entered and
-    /// calls `beginAbort()`, whose `ensureTransactional()` guard rejects it; Java's
-    /// `catch` sets `forceClose`, which is the only thing that ends the loop.
+    /// (`TransactionManager.java:1012`), and `beginAbort()`'s `ensureTransactional()`
+    /// guard rejects it, so `Sender.run`'s second shutdown loop (`Sender.java:266-296`)
+    /// takes the `catch` that sets `forceClose` — the only thing that ends the loop.
+    ///
+    /// PLAN §9.19 listed this entry as "blocked on missing surface", offering exactly two
+    /// routes: a `#[cfg(test)]` hook that fails `begin_abort` on demand, or "a state the
+    /// real machine can be forced into where `hasOngoingTransaction()` holds and
+    /// `beginAbort()` is an invalid transition". The second route existed and was already
+    /// exercised by this test under a Rust-only name; naming it after the Java method and
+    /// adding the `close()` assertion is what closes the entry. Re-verified rather than
+    /// assumed: the state is reached in three statements below.
+    ///
+    /// `times(1)` on `close()` needs a call count, not a flag, so
+    /// `TransactionManager::close_call_count` is `#[cfg(test)]`-gated.
     #[tokio::test]
-    async fn test_shutdown_force_closes_when_begin_abort_is_rejected() {
+    async fn test_sender_should_close_when_transaction_manager_in_error_state() {
         let mut ctx = SenderTestContext::idempotent();
         ctx.sender
             .client_mut()
@@ -5089,6 +5124,12 @@ mod tests {
         // The `runOnce` in the loop body still executes, and it is what recovers the
         // state — pinning the body order (abort attempt, then runOnce).
         assert!(!ctx.transaction_manager().lock().unwrap().has_abortable_error());
+        // Java's `verify(transactionManager, times(1)).close()` (Java 3413).
+        assert_eq!(
+            ctx.transaction_manager().lock().unwrap().close_call_count(),
+            1,
+            "the force close must call TransactionManager::close exactly once"
+        );
     }
 
     // =====================================================================
@@ -7402,6 +7443,8 @@ mod tests {
                 delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
                 accumulator_retry_backoff_ms: 10,
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+                // Java 3317: `lingerMs = 0`.
+                linger_ms: 0,
             }),
         );
         let tp0 = ctx.tp0.clone();
@@ -8341,6 +8384,8 @@ mod tests {
                 // accumulator, so a re-enqueued batch is drainable on the next runOnce.
                 accumulator_retry_backoff_ms: 0,
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+                // Java 216: `lingerMs` is 0.
+                linger_ms: 0,
             }),
         )
     }
@@ -11705,6 +11750,642 @@ mod tests {
         assert!(commit_result.is_acked());
 
         assert_abortable_error(&ctx, Errors::TransactionAbortable);
+    }
+
+    // =====================================================================
+    // The `SenderTest` transactional group PLAN §9.19 handed to Phase 8
+    // (the "STILL OWED (11)" list in the accounting block above)
+    // =====================================================================
+
+    /// `SenderTest.doInitTransactions(txnManager, producerIdAndEpoch)` (Java 3923-3933).
+    ///
+    /// Differs from [`run_init_transactions`] only in taking the producer id and epoch;
+    /// that one is the `13131` / `1` specialisation `TransactionManagerTest` uses.
+    async fn run_init_transactions_with(
+        ctx: &mut SenderTestContext,
+        producer_id_and_epoch: ProducerIdAndEpoch,
+    ) -> Arc<TransactionalRequestResult> {
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        let transactional_id = ctx
+            .transaction_manager()
+            .lock()
+            .unwrap()
+            .transactional_id()
+            .expect("a transactional manager")
+            .to_string();
+        let result = ctx
+            .initialize_transactions()
+            .expect("initTransactions is valid from UNINITIALIZED");
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, &transactional_id, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender.run_once().await.expect("run_once");
+
+        ctx.sender.client_mut().prepare_response(init_producer_id_response(
+            Errors::None,
+            producer_id_and_epoch.producer_id,
+            producer_id_and_epoch.epoch,
+        ));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+        result.await_result().await.expect("initTransactions succeeded");
+        result
+    }
+
+    /// `SenderTest.addPartitionToTxn(sender, txnManager, tp)` (Java 2873-2878).
+    ///
+    /// Unlike [`begin_transaction_with_partition`] this does **not** begin the
+    /// transaction — Java's helper only adds the partition to an already-begun one.
+    async fn add_partition_to_txn(ctx: &mut SenderTestContext, tp: &TopicPartition) {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        maybe_add_partition(ctx, tp);
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp.clone(), Errors::None)]));
+        let manager = ctx.transaction_manager();
+        let tp = tp.clone();
+        run_until(&mut ctx.sender, move |_| {
+            manager.lock().unwrap().transaction_contains_partition(&tp)
+        })
+        .await;
+        assert!(!ctx.sender.has_in_flight_request());
+    }
+
+    /// `SenderTest.respondToProduce(tp, error, offset)` (Java 2880-2886).
+    fn respond_to_produce(ctx: &mut SenderTestContext, tp: &TopicPartition, error: Errors, offset: i64) {
+        use crate::common::requests::ConcreteRequest;
+
+        let response = ctx.produce_response(tp, offset, error, 0);
+        let matcher: crate::mock_client::RequestMatcher =
+            Box::new(|request| matches!(request, ConcreteRequest::Produce(_)));
+        ctx.sender.client_mut().respond_with_matcher(matcher, response);
+    }
+
+    /// `SenderTest.respondToEndTxn(error)` (Java 2888-2895).
+    fn respond_to_end_txn(ctx: &mut SenderTestContext, error: Errors) {
+        use crate::common::requests::ConcreteRequest;
+
+        let matcher: crate::mock_client::RequestMatcher =
+            Box::new(|request| matches!(request, ConcreteRequest::EndTxn(_)));
+        ctx.sender.client_mut().respond_with_matcher(matcher, end_txn_response(error));
+    }
+
+    /// `SenderTest.assertFutureFailure(future, Class)` (Java 3944-3954).
+    async fn assert_future_failure(future: &Arc<FutureRecordMetadata>, expected: Errors) {
+        assert!(future.is_done());
+        let error = future.get().await.expect_err("Future should have raised");
+        assert_eq!(error.error(), expected, "Unexpected cause {error}");
+    }
+
+    /// A transactional context whose `TransactionManager` carries `transactional_id` and
+    /// the given `linger.ms` / retry count, mirroring the bespoke `TransactionManager` +
+    /// `setupWithTransactionState(..)` pairs the `SenderTest` transactional group builds.
+    ///
+    /// Java's `setupWithTransactionState` overloads vary exactly these three things
+    /// (Java 3821-3835), and the manager is always built with `transactionTimeoutMs =
+    /// 60000` and `retryBackoffMs = 100` — except `testTransactionShouldTransitionToAbortableForSenderAPI`,
+    /// which passes `RETRY_BACKOFF_MS`.
+    fn sender_test_transactional_context(
+        transactional_id: &str,
+        manager_retry_backoff_ms: i64,
+        linger_ms: i32,
+        retries: i32,
+        init_producer_id_max_version: i16,
+    ) -> SenderTestContext {
+        use crate::api_versions_response_data::ApiVersion;
+        use crate::common::protocol::ApiKeys;
+
+        let mut init_producer_id = ApiVersion::new();
+        init_producer_id
+            .set_api_key(ApiKeys::INIT_PRODUCER_ID.id())
+            .set_min_version(0)
+            .set_max_version(init_producer_id_max_version);
+        let api_versions = Arc::new(crate::ApiVersions::new());
+        api_versions.update("0", crate::NodeApiVersions::new(&[init_producer_id], &[], &[], 0));
+
+        let manager = Arc::new(Mutex::new(TransactionManager::new(
+            LogContext::empty(),
+            Some(transactional_id.to_string()),
+            60000,
+            manager_retry_backoff_ms,
+            api_versions,
+            false,
+        )));
+        SenderTestContext::with_transaction_state(
+            false,
+            retries,
+            Some(manager),
+            Some(SenderTestTimeouts {
+                request_timeout_ms: REQUEST_TIMEOUT,
+                delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
+                accumulator_retry_backoff_ms: 0,
+                sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+                linger_ms,
+            }),
+        )
+    }
+
+    /// Translated from `SenderTest.testUnresolvedSequencesAreNotFatal` (Java 1534-1571).
+    #[tokio::test]
+    async fn test_unresolved_sequences_are_not_fatal() {
+        let mut ctx = sender_test_transactional_context("testUnresolvedSeq", 100, 0, i32::MAX, 3);
+        let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
+        run_init_transactions_with(&mut ctx, producer_id_and_epoch).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp0.clone(), Errors::None)]));
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Send the first ProduceRequest.
+        let request1 = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send request
+
+        ctx.time.sleep(1000);
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send request
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::NotLeaderOrFollower, 0, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive first response
+
+        let node = ctx.metadata.fetch().nodes()[0].clone();
+        ctx.time.sleep(1000);
+        ctx.sender.client_mut().disconnect_by_id(node.id_string());
+        ctx.sender.client_mut().backoff(&node, 10);
+
+        ctx.sender.run_once().await.expect("run_once"); // now expire the first batch
+        assert_future_failure(&request1, Errors::RequestTimedOut).await;
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().has_unresolved_sequence(&tp0));
+
+        // Loop once and confirm that the transaction manager does not enter a fatal error
+        // state.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(manager.lock().unwrap().has_abortable_error());
+    }
+
+    /// Translated from
+    /// `SenderTest.testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`
+    /// (Java 1820-1881).
+    ///
+    /// **`#[ignore]`d on PLAN §9.25.** This is the only test in the tree that drives the
+    /// *transactional* log-truncation branch of `TransactionManager.canRetry`
+    /// (`TransactionManager.java:1042-1050`), and `Sender::can_retry` hands that branch an
+    /// **empty** batch pool. `start_sequences_at_beginning` then fails on the tracked
+    /// in-flight batch it was not given, `last_acked_sequence` is never cleared, and the
+    /// error is swallowed by the per-response error handling — so the assertion that
+    /// fails is `last_acked_sequence(tp0) == None`, four lines after the response.
+    ///
+    /// Left in place as the reproducer, exactly as §9.18's
+    /// `test_too_large_batches_are_safely_removed` is.
+    #[tokio::test]
+    #[ignore = "PLAN §9.25: Sender::can_retry passes an empty batch pool to the transactional log-truncation branch"]
+    async fn test_transactional_unknown_producer_handling_when_retention_limit_reached() {
+        const PRODUCER_ID: i64 = 343434;
+
+        let mut ctx = sender_test_transactional_context("testUnresolvedSeq", 100, 0, i32::MAX, 6);
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(PRODUCER_ID, 0)).await;
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().has_producer_id());
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp0.clone(), Errors::None)]));
+        ctx.sender.run_once().await.expect("run_once"); // Receive AddPartitions response
+
+        assert_eq!(manager.lock().unwrap().sequence_number(&tp0), 0);
+
+        // Send the first ProduceRequest.
+        let request1 = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(manager.lock().unwrap().sequence_number(&tp0), 1);
+        assert_eq!(manager.lock().unwrap().last_acked_sequence(&tp0), None);
+
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::None, 1000, 10);
+
+        ctx.sender.run_once().await.expect("run_once"); // receive the response
+
+        assert!(request1.is_done());
+        assert_eq!(request1.get().await.expect("succeeded").offset(), 1000);
+        assert_eq!(manager.lock().unwrap().last_acked_sequence(&tp0), Some(0));
+        assert_eq!(manager.lock().unwrap().last_acked_offset(&tp0), Some(1000));
+
+        // Send the second ProduceRequest: a single batch with 2 records.
+        ctx.append_to_accumulator(&tp0).await;
+        let request2 = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(manager.lock().unwrap().sequence_number(&tp0), 3);
+        assert_eq!(manager.lock().unwrap().last_acked_sequence(&tp0), Some(0));
+
+        assert!(!request2.is_done());
+
+        send_idempotent_producer_response(&mut ctx, Some(0), 1, &tp0, Errors::UnknownProducerId, -1, 1010);
+        // Receive response 0; should be retried since logStartOffset > lastAckedOffset.
+        ctx.sender.run_once().await.expect("run_once");
+
+        // We should have reset the sequence number state of the partition because the
+        // state was lost on the broker.
+        assert_eq!(manager.lock().unwrap().last_acked_sequence(&tp0), None);
+        assert_eq!(manager.lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!request2.is_done());
+        assert!(!ctx.sender.client().has_in_flight_requests());
+
+        ctx.sender.run_once().await.expect("run_once"); // should retry request 1
+
+        // Resend the request. Note that the expected sequence is 0, since we have lost
+        // producer state on the broker.
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::None, 1011, 1010);
+        ctx.sender.run_once().await.expect("run_once"); // receive response 1
+        assert_eq!(manager.lock().unwrap().last_acked_sequence(&tp0), Some(1));
+        assert_eq!(manager.lock().unwrap().sequence_number(&tp0), 2);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(request2.is_done());
+        assert_eq!(request2.get().await.expect("succeeded").offset(), 1012);
+        assert_eq!(manager.lock().unwrap().last_acked_offset(&tp0), Some(1012));
+    }
+
+    /// Translated from
+    /// `SenderTest.testRecordsFlushedImmediatelyOnTransactionCompletion`
+    /// (Java 2771-2826).
+    #[tokio::test]
+    async fn test_records_flushed_immediately_on_transaction_completion() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        const LINGER_MS: i32 = 50;
+        let mut ctx = sender_test_transactional_context("txnId", 100, LINGER_MS, 1, 6);
+
+        // Begin a transaction and successfully add one partition to it.
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        add_partition_to_txn(&mut ctx, &tp0).await;
+
+        // Send a couple of records and assert that they are not sent immediately (due to
+        // linger).
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!ctx.sender.client().has_in_flight_requests());
+
+        // Now begin the commit and assert that the Produce request is sent immediately
+        // without waiting for the linger.
+        let commit_result = begin_commit(&ctx);
+        run_until(&mut ctx.sender, |sender| sender.client().has_in_flight_requests()).await;
+
+        // Respond to the produce request and wait for the EndTxn request to be sent.
+        respond_to_produce(&mut ctx, &tp0, Errors::None, 1);
+        run_until(&mut ctx.sender, |sender| sender.has_in_flight_request()).await;
+
+        // Respond to the expected EndTxn request.
+        respond_to_end_txn(&mut ctx, Errors::None);
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().is_ready()).await;
+        }
+
+        assert!(commit_result.is_successful());
+        commit_result.await_result().await.expect("the commit succeeded");
+
+        // Finally, assert that the linger time is still effective when the new
+        // transaction begins.
+        begin_transaction(&ctx);
+        add_partition_to_txn(&mut ctx, &tp0).await;
+
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.time.sleep(LINGER_MS as i64 - 1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(ctx.accumulator.has_undrained());
+
+        ctx.time.sleep(1);
+        run_until(&mut ctx.sender, |sender| sender.client().has_in_flight_requests()).await;
+        assert!(!ctx.accumulator.has_undrained());
+    }
+
+    /// Translated from `SenderTest.testAwaitPendingRecordsBeforeCommittingTransaction`
+    /// (Java 2829-2870).
+    #[tokio::test]
+    async fn test_await_pending_records_before_committing_transaction() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = sender_test_transactional_context("txnId", 100, 0, 1, 6);
+
+        // Begin a transaction and successfully add one partition to it.
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        add_partition_to_txn(&mut ctx, &tp0).await;
+
+        // Send one Produce request.
+        ctx.append_to_accumulator(&tp0).await;
+        run_until(&mut ctx.sender, |sender| sender.client().requests().len() == 1).await;
+        assert!(!ctx.accumulator.has_undrained());
+        assert!(ctx.sender.client().has_in_flight_requests());
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().has_inflight_batches(&tp0));
+
+        // Enqueue another record and then commit the transaction. We expect the unsent
+        // record to get sent before the transaction can be completed.
+        ctx.append_to_accumulator(&tp0).await;
+        begin_commit(&ctx);
+        run_until(&mut ctx.sender, |sender| sender.client().requests().len() == 2).await;
+
+        assert!(manager.lock().unwrap().is_completing());
+        assert!(!ctx.sender.has_in_flight_request());
+        assert!(manager.lock().unwrap().has_inflight_batches(&tp0));
+
+        // Now respond to the pending Produce requests.
+        respond_to_produce(&mut ctx, &tp0, Errors::None, 0);
+        respond_to_produce(&mut ctx, &tp0, Errors::None, 1);
+        run_until(&mut ctx.sender, |sender| sender.has_in_flight_request()).await;
+
+        // Finally, respond to the expected EndTxn request.
+        respond_to_end_txn(&mut ctx, Errors::None);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().is_ready()).await;
+        }
+    }
+
+    /// The shared body of `SenderTest.testTransactionShouldTransitionToAbortableForSenderAPI`
+    /// (Java 3051-3101), a `@ParameterizedTest` over
+    /// `@EnumSource(names = {"COORDINATOR_LOAD_IN_PROGRESS", "INVALID_TXN_STATE"})`.
+    async fn run_transaction_should_transition_to_abortable_for_sender_api(error: Errors) {
+        // Java builds the manager with `RETRY_BACKOFF_MS` here rather than the usual 100,
+        // and `setupWithTransactionState(txnManager, false, null, 1)` — a single retry.
+        let mut ctx = sender_test_transactional_context("testRetriableException", RETRY_BACKOFF_MS, 0, 1, 6);
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
+
+        // Begin the transaction and add the partition.
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp0.clone(), Errors::None)]));
+        ctx.sender.run_once().await.expect("run_once");
+
+        // First produce request.
+        ctx.append_to_accumulator(&tp0).await;
+        let response = ctx.produce_response(&tp0, -1, error, 0);
+        ctx.sender.client_mut().prepare_response(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Sleep for the retry backoff.
+        ctx.time.sleep(RETRY_BACKOFF_MS);
+
+        // Second attempt to process the record — prepare the response before sending.
+        let response = ctx.produce_response(&tp0, -1, error, 0);
+        ctx.sender.client_mut().prepare_response(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Now the transaction should be in the abortable state after the retry is
+        // exhausted.
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().has_abortable_error());
+
+        // Second produce request — should fail with TransactionAbortableException.
+        let future2 = ctx.append_to_accumulator(&tp0).await;
+        let response = ctx.produce_response(&tp0, -1, Errors::None, 0);
+        ctx.sender.client_mut().prepare_response(response);
+        // The Sender will try to send and fail with TransactionAbortableException instead
+        // of the triggering error, because we are in the abortable state.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_future_failure(&future2, Errors::TransactionAbortable).await;
+
+        // Transaction API requests must also fail with TransactionAbortableException.
+        //
+        // Java asserts `e.getCause()`'s class, not `e`'s: `maybeFailWithError` throws a
+        // plain `KafkaException("Cannot execute transactional method because we are in an
+        // error state", lastError)`, so the *cause* is the `TransactionAbortableException`.
+        // `KafkaError` has no cause chain (PLAN §10.5 deviation 5), so the wrapper's
+        // message is pinned here and the cause is asserted on `last_error()` — the same
+        // convention `assert_abortable_error` uses.
+        let pending_requests = ctx.pending_requests();
+        let mut pending_requests = pending_requests.lock().unwrap();
+        let commit_error = manager
+            .lock()
+            .unwrap()
+            .begin_commit(&mut pending_requests)
+            .expect_err("beginCommit must fail in the abortable error state");
+        assert_eq!(
+            commit_error.message(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+        assert_eq!(
+            manager.lock().unwrap().last_error().expect("recorded").error(),
+            Errors::TransactionAbortable
+        );
+    }
+
+    /// Translated from
+    /// `SenderTest.testTransactionShouldTransitionToAbortableForSenderAPI`
+    /// (Java 3051-3101), the `COORDINATOR_LOAD_IN_PROGRESS` parameterisation.
+    #[tokio::test]
+    async fn test_transaction_should_transition_to_abortable_for_sender_api_coordinator_load_in_progress() {
+        run_transaction_should_transition_to_abortable_for_sender_api(Errors::CoordinatorLoadInProgress).await;
+    }
+
+    /// Translated from
+    /// `SenderTest.testTransactionShouldTransitionToAbortableForSenderAPI`
+    /// (Java 3051-3101), the `INVALID_TXN_STATE` parameterisation.
+    #[tokio::test]
+    async fn test_transaction_should_transition_to_abortable_for_sender_api_invalid_txn_state() {
+        run_transaction_should_transition_to_abortable_for_sender_api(Errors::InvalidTxnState).await;
+    }
+
+    /// The tail the three `SenderTest` abortable-error entries share (Java 3155-3173,
+    /// 3200-3212, 3239-3251): abort, answer the `EndTxn`, re-acquire a producer id, then
+    /// prove a new transaction can begin.
+    async fn abort_and_reinitialize(
+        ctx: &mut SenderTestContext,
+        result: &Arc<TransactionalRequestResult>,
+        producer_id_and_epoch: ProducerIdAndEpoch,
+    ) {
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Once the transaction is aborted, we should be able to begin a new one.
+        respond_to_end_txn(ctx, Errors::None);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().is_initializing());
+        ctx.sender.client_mut().prepare_response(init_producer_id_response(
+            Errors::None,
+            producer_id_and_epoch.producer_id,
+            producer_id_and_epoch.epoch,
+        ));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().is_ready());
+
+        assert!(result.is_successful());
+        result.await_result().await.expect("the abort succeeded");
+
+        begin_transaction(ctx);
+    }
+
+    /// Translated from `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
+    /// (Java 3126-3173).
+    #[tokio::test]
+    async fn test_receive_failed_batch_twice_with_transactions() {
+        let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
+        let mut ctx = sender_test_transactional_context("testFailTwice", 100, 0, i32::MAX, 3);
+        run_init_transactions_with(&mut ctx, producer_id_and_epoch).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp0.clone(), Errors::None)]));
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Send the first ProduceRequest.
+        let request1 = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send request
+
+        let node = ctx.metadata.fetch().nodes()[0].clone();
+        ctx.time.sleep(2000);
+        // `client.disconnect(node.idString(), true)` — the request stays answerable, which
+        // is what makes the "twice" in the test's name reachable.
+        ctx.sender
+            .client_mut()
+            .disconnect_by_id_with_late_responses(node.id_string(), true);
+        ctx.sender.client_mut().backoff(&node, 10);
+
+        ctx.sender.run_once().await.expect("run_once"); // now expire the batch
+        assert_future_failure(&request1, Errors::RequestTimedOut).await;
+
+        ctx.time.sleep(20);
+
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::InvalidTxnState, 0, -1);
+        ctx.sender.run_once().await.expect("run_once"); // receive late response
+
+        // Loop once and confirm that the transaction manager does not enter a fatal error
+        // state.
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_abortable_error());
+        let result = begin_abort(&ctx);
+        abort_and_reinitialize(&mut ctx, &result, producer_id_and_epoch).await;
+    }
+
+    /// Translated from `SenderTest.testInvalidTxnStateIsAnAbortableError`
+    /// (Java 3176-3212).
+    #[tokio::test]
+    async fn test_invalid_txn_state_is_an_abortable_error() {
+        run_abortable_produce_error(Errors::InvalidTxnState, "testInvalidTxnState").await;
+    }
+
+    /// Translated from `SenderTest.testTransactionAbortableExceptionIsAnAbortableError`
+    /// (Java 3215-3251).
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_is_an_abortable_error() {
+        run_abortable_produce_error(Errors::TransactionAbortable, "textTransactionAbortableException").await;
+    }
+
+    /// The shared body of `testInvalidTxnStateIsAnAbortableError` and
+    /// `testTransactionAbortableExceptionIsAnAbortableError`, which differ only in the
+    /// produce error and the transactional id (Java's second one is spelled
+    /// `"textTransactionAbortableException"`, kept verbatim).
+    async fn run_abortable_produce_error(error: Errors, transactional_id: &str) {
+        let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
+        let mut ctx = sender_test_transactional_context(transactional_id, 100, 0, i32::MAX, 3);
+        run_init_transactions_with(&mut ctx, producer_id_and_epoch).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp0.clone(), Errors::None)]));
+        ctx.sender.run_once().await.expect("run_once");
+
+        let request = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // send request
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, error, 0, -1);
+
+        // The error should be abortable.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_future_failure(&request, error).await;
+        assert!(ctx.transaction_manager().lock().unwrap().has_abortable_error());
+        let result = begin_abort(&ctx);
+        abort_and_reinitialize(&mut ctx, &result, producer_id_and_epoch).await;
+    }
+
+    /// Translated from
+    /// `SenderTest.testAbortableErrorIsConvertedToFatalErrorDuringAbort`
+    /// (Java 3254-3305).
+    #[tokio::test]
+    async fn test_abortable_error_is_converted_to_fatal_error_during_abort() {
+        let mut ctx = sender_test_transactional_context(
+            "testAbortableErrorIsConvertedToFatalErrorDuringAbort",
+            100,
+            0,
+            i32::MAX,
+            6,
+        );
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(1, 0)).await;
+        begin_transaction(&ctx);
+
+        // Add the partition and send a record.
+        let tp = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+        add_partition_to_txn(&mut ctx, &tp).await;
+        ctx.append_to_accumulator(&tp).await;
+
+        // Send the record and take its response.
+        ctx.sender.run_once().await.expect("run_once");
+        send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp, Errors::None, 0, -1);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // A commit answered with TRANSACTION_ABORTABLE must set the manager to the
+        // abortable state.
+        ctx.sender
+            .client_mut()
+            .prepare_response(end_txn_response(Errors::TransactionAbortable));
+
+        let commit_result = begin_commit(&ctx);
+        ctx.sender.run_once().await.expect("run_once");
+        let commit_error = commit_result
+            .await_result_timeout(Duration::from_millis(1000))
+            .await
+            .expect_err("Expected abortable error to be thrown for commit");
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().has_abortable_error());
+        assert_eq!(commit_error.error(), Errors::TransactionAbortable);
+        assert_eq!(commit_result.error().expect("recorded").error(), Errors::TransactionAbortable);
+
+        // An abort answered with TRANSACTION_ABORTABLE must convert it to a fatal error,
+        // i.e. a plain `KafkaException`.
+        ctx.sender
+            .client_mut()
+            .prepare_response(end_txn_response(Errors::TransactionAbortable));
+
+        let abort_result = begin_abort(&ctx);
+        ctx.sender.run_once().await.expect("run_once");
+
+        let abort_error = abort_result
+            .await_result_timeout(Duration::from_millis(1000))
+            .await
+            .expect_err("Expected KafkaException to be thrown");
+        assert!(manager.lock().unwrap().has_fatal_error());
+        // Java: `assertFalse(e instanceof TransactionAbortableException)` and
+        // `assertEquals(KafkaException.class, abortResult.error().getClass())`. A bare
+        // `KafkaException` carries no wire code, which this crate spells
+        // `Errors::UnknownServerError`.
+        assert_ne!(abort_error.error(), Errors::TransactionAbortable);
+        assert_eq!(abort_result.error().expect("recorded").error(), Errors::UnknownServerError);
     }
 
     #[test]

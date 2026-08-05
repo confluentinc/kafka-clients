@@ -290,10 +290,25 @@ impl MockClient {
     ///
     /// Translated from `MockClient.disconnect(String)`.
     pub fn disconnect_by_id(&mut self, node_id: &str) {
-        self.disconnect_node(node_id);
+        self.disconnect_node_with_late_responses(node_id, false);
+    }
+
+    /// Disconnects `node_id`, optionally leaving its in-flight requests answerable.
+    ///
+    /// Translated from `MockClient.disconnect(String, boolean allowLateResponses)`
+    /// (`MockClient.java:200-218`). With `allow_late_responses` the request stays in the
+    /// queue after the disconnect response is emitted, so a subsequent `respond*` still
+    /// matches it — which is what `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
+    /// needs in order to deliver a response for a batch the Sender has already expired.
+    pub fn disconnect_by_id_with_late_responses(&mut self, node_id: &str, allow_late_responses: bool) {
+        self.disconnect_node_with_late_responses(node_id, allow_late_responses);
     }
 
     fn disconnect_node(&mut self, node_id: &str) {
+        self.disconnect_node_with_late_responses(node_id, false);
+    }
+
+    fn disconnect_node_with_late_responses(&mut self, node_id: &str, allow_late_responses: bool) {
         let now = (self.time_provider)();
         // Create disconnect responses for all pending requests to this node
         let mut remaining = VecDeque::new();
@@ -314,6 +329,15 @@ impl MockClient {
                     None,
                 );
                 self.responses.push_back(response);
+                if allow_late_responses {
+                    // Java's `if (!allowLateResponses) iter.remove()` — the request stays
+                    // in the queue so a later `respond*` can still answer it. The callback
+                    // has been moved into the disconnect response above, so the retained
+                    // request carries none; answering it delivers a body with no callback,
+                    // which is exactly what Java's retained `ClientRequest` does after its
+                    // `request.callback()` was handed to the disconnect `ClientResponse`.
+                    remaining.push_back(request);
+                }
             } else {
                 remaining.push_back(request);
             }

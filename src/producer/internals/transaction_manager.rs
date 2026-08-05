@@ -1131,6 +1131,16 @@ pub(crate) struct TransactionManager {
     /// `.claude/rules/producer-transactions.md` §5 is the binding contract.
     pending_transition: Option<PendingStateTransition>,
 
+    /// How many times [`Self::close`] has been called.
+    ///
+    /// Test-only, and the direct analogue of Java's
+    /// `verify(transactionManager, times(1)).close()` in
+    /// `SenderTest.testSenderShouldCloseWhenTransactionManagerInErrorState`
+    /// (`SenderTest.java:3413`). A counter rather than a flag, because the assertion is
+    /// `times(1)` — a boolean could not tell one call from three.
+    #[cfg(test)]
+    close_call_count: u32,
+
     // NOTE (rules §2): Java's `pendingRequests` (Java 121) and
     // `inFlightRequestCorrelationId` (136) are deliberately absent here. They are
     // fields on `Sender`, and the manager methods that touch them take them as
@@ -1256,6 +1266,8 @@ impl TransactionManager {
             enable_2pc,
             coordinator_supports_bumping_epoch: false,
             prepared_txn_state: ProducerIdAndEpoch::NONE,
+            #[cfg(test)]
+            close_call_count: 0,
         }
     }
 
@@ -1948,6 +1960,13 @@ impl TransactionManager {
     /// The current state. Visible for testing, as Java's package-private field
     /// access is.
     #[cfg(test)]
+    /// How many times [`Self::close`] has been called — Java's
+    /// `verify(transactionManager, times(n)).close()`.
+    #[cfg(test)]
+    pub(crate) fn close_call_count(&self) -> u32 {
+        self.close_call_count
+    }
+
     fn current_state(&self) -> State {
         self.current_state
     }
@@ -2284,6 +2303,10 @@ impl TransactionManager {
     /// call site it cited. Recorded because the pull toward inventing a
     /// present-tense payoff is what produced both.
     pub(crate) fn close(&mut self, pending_requests: &mut PendingRequests, caller: Caller) -> Result<(), KafkaError> {
+        #[cfg(test)]
+        {
+            self.close_call_count += 1;
+        }
         let shutdown_error = KafkaError::with_message(Errors::UnknownServerError, "The producer closed forcefully");
         for handler in pending_requests.iter() {
             handler.fail(shutdown_error.clone());
