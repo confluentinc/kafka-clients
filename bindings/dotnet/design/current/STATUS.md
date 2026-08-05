@@ -7,6 +7,65 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 4 / Phase 4b — "Async-surface rename (`IAsyncConsumer`, drop the `Async`
+  suffix, `WithCallback`)": DONE (2026-08-05).** A pure C# rename of M4/P4a's async
+  surface into its final shape — **no ABI change (Mode A), no Rust authored, no new
+  `DllImport`, no behavior change; only identifiers, file names, and one new small
+  interface**. Commits to the two-interface consumer direction: `IAsyncConsumer` is the
+  **async** surface (blocking-in-Java → `Task`), reserving `IConsumer` / `KafkaConsumer`
+  for the future **sync** surface (M5). Method names carry **no `Async` suffix** — the
+  sync-vs-async distinction is carried by the interface/type, matching Java's method
+  names and the Python sibling. Delivered:
+  - **Public rename** (`src/Confluent.Kafka/`): `interface IConsumer` →
+    `interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable`; **new**
+    `interface IConsumerCommon { void Wakeup(); ConsumerGroupMetadata GroupMetadata(); }`
+    (the two non-blocking members move off the async interface onto a shared base);
+    `class KafkaConsumer` → `AsyncKafkaConsumer`, `class MockConsumer` →
+    `AsyncMockConsumer`; drop the `Async` suffix (methods still return `Task`) —
+    `PollAsync`→`Poll`, `SubscribeAsync`→`Subscribe`, `UnsubscribeAsync`→`Unsubscribe`,
+    `SeekAsync`→`Seek`, `CloseAsync`→`Close`. `Dispose`/`DisposeAsync` unchanged
+    (framework contract). File renames: `IConsumer.cs`→`IAsyncConsumer.cs`
+    (+ new `IConsumerCommon.cs`), `KafkaConsumer.cs`→`AsyncKafkaConsumer.cs`,
+    `MockConsumer.cs`→`AsyncMockConsumer.cs`. `AsyncMockConsumer`'s inherent mock helpers
+    (`Assign`/`AddRecord`/`SetPollError`) keep their names. Carried rationale docstrings
+    moved onto the renamed members (`Seek`-is-async blocking-`addAndGet` + Python
+    divergence; `byte[]` key/value/header; single-owner/not-thread-safe caveat; `Close()`
+    surfaces the error unlike `DisposeAsync`; `Wakeup()` cross-thread caveat); CS1591
+    intact.
+  - **Internal rename** (`Internal/NativeConsumer.cs`): the bridge methods `…Async` →
+    `…WithCallback` (their names reflect the callback bridge, not the .NET async
+    convention) — `PollWithCallback`, `SubscribeWithCallback`, `UnsubscribeWithCallback`,
+    `SeekWithCallback`, `CloseWithCallback`, and `CloseAsyncInternal` →
+    `CloseWithCallbackInternal`. `Dispose`/`DisposeAsync`/`SubmitOperation`/
+    `SubmitVoidOperation`/`Wakeup`/`GroupMetadata`/`GroupId` unchanged.
+  - **Two guardrails held:** (1) the `NativeMethods` P/Invoke declarations and their
+    `EntryPoint` strings are untouched — the extern names (`ConsumerPollAsync`, …) mirror
+    the C ABI's own `_async` suffix (`kafka_consumer_Consumer_poll_async`, …), reflecting
+    the C ABI, not our public naming; `ConsumerCallbacks`, the marshallers, value types,
+    `OperationCompletionSource`, the `SafeHandle`s, and `KafkaException` are unchanged.
+    (2) The archived M4/P4a docs (`design/history/M4/P4a-public-consumer/`) are NOT
+    retro-edited — only this current STATUS moves to the new names.
+  - **NOT in scope:** the sync surface (sync `IConsumer`/`KafkaConsumer`/`MockConsumer`,
+    sync `Consumer_*` DllImports, sync `NativeConsumer` methods) — later milestone M5; no
+    behavior change, no new op, no ABI change; `VSTHRD200` confirmed absent (no analyzer
+    enforces the `Async` suffix), so dropping it builds clean under
+    `TreatWarningsAsErrors`.
+  - **Tests:** all consumer test references renamed (public + internal), **every
+    assertion kept** — 122 tests, same count. Parallelism stays disabled (D8.8).
+  - **Deviation (recorded):** PLAN sub-steps 1 (interface) and 2 (impl classes) landed as
+    **one green commit** — the interface doc crefs the impl-class names and the impls
+    implement the renamed interface, so they are the minimal compiling unit for the public
+    rename (the library cannot be green with only one half). Sub-steps 3 (internal), 4
+    (tests), 5 (docs) are separate commits as planned.
+  - **Governance — N=9 is this rename.** Earlier entries (M4/P4a, M3/P3) pre-labeled the
+    `Wakeup()`/`GroupId` handle-TOCTOU `DangerousAddRef` hardening a "candidate N=9
+    follow-up (unscheduled)". That prediction is superseded: N=9 is the P4b rename, and the
+    cross-thread hardening remains **accepted-by-design + unscheduled** (no review number
+    assigned) — it is untouched here (pure rename, no behavior change). The three M3/P2
+    accepted residuals also remain accepted, unchanged.
+  - Approved plan + closed record: `design/history/M4/P4b-async-surface-rename/`. Additive
+    commits on `prashah_dev_public_consumer_scaffolding` (the existing M4/P4a stacked PR;
+    the PR description is updated to the final `IAsyncConsumer` naming before merge). N=9.
 - **Milestone 4 / Phase 4a — "Public Consumer Client (the first usable public cut)":
   DONE (2026-08-04).** The first PUBLIC client surface — promotes the proven internal
   machinery to a Java-shaped, XML-documented public API: subscribe → poll → seek →
@@ -356,6 +415,32 @@ bindings/dotnet/
                                                    return-without-hang only (no separate-op drain; the
                                                    unawaited-op strand+leak is an accepted residual)
 ```
+
+## Verification state (M4/P4b DoD — Actor, all green)
+
+- `cargo build --features ffi` — native cdylib + generated header present (run FIRST,
+  CLAUDE.md §7.1). **No ABI change this phase (Mode A).**
+- `dotnet build` — **0 warnings, 0 errors** across all library TFMs (netstandard2.0,
+  net8.0, net10.0) and all test TFMs (net462, net8.0, net10.0);
+  `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` + `GenerateDocumentationFile`
+  active. **CS1591 satisfied on every renamed public member** (`IAsyncConsumer`, the new
+  `IConsumerCommon`, `AsyncKafkaConsumer`, `AsyncMockConsumer`, and the un-suffixed
+  methods). Apache-2.0 header on the new `IConsumerCommon.cs`; no TODO/FIXME. No analyzer
+  suppressions needed — **VSTHRD200 confirmed absent**
+  (`Microsoft.VisualStudio.Threading.Analyzers` not referenced), so dropping the `Async`
+  suffix builds clean.
+- `dotnet test -f net10.0` — **122 passed, 0 failed** (same count as M4/P4a — a pure
+  rename, no test weakened, no coverage lost); **20/20 full-suite runs green, 0 crashes /
+  0 failures** (the stability gate). Serial execution
+  (`[assembly: CollectionBehavior(DisableTestParallelization = true)]`) stays enabled
+  (D8.8 — not re-enabled).
+- `dotnet format --verify-no-changes` — clean.
+- **CI-only (not blocking):** the local runtime is .NET 10; the net8.0 test *run* and
+  net462 are CI/Windows-only. **All three test *build* legs (net462 / net8.0 / net10.0)
+  pass locally**, and the library's three TFMs build.
+- **Docs match code:** this STATUS is updated to the new names + N=9; the archived M4/P4a
+  docs are left intact as the historical record (guardrail 2). The `NativeMethods` extern
+  names / ABI `EntryPoint` strings are untouched (guardrail 1).
 
 ## Verification state (M4/P4a DoD — Actor, all green)
 
