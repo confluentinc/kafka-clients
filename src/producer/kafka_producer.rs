@@ -463,13 +463,10 @@ impl<K, V> KafkaProducer<K, V> {
     /// `producer::internals`, so an external caller cannot name or construct
     /// them.
     ///
-    /// MILESTONE-11 GUARD: that unreachability is why the idempotence /
-    /// transaction guard in [`Self::from_config`] is not duplicated here. The
-    /// approved plan asked for it in both constructors; it is omitted here
-    /// deliberately, because there is no external path to guard and adding it
-    /// would mean changing this function's return type to `Result` for the
-    /// benefit of in-crate test callers only. Revisit if this ever becomes
-    /// externally constructible.
+    /// (Through Phase 5 that unreachability was also the reason the temporary
+    /// MILESTONE-11 GUARD in [`Self::from_config`] was not duplicated here. Phase 6
+    /// removed the guard, so nothing turns on it any more; the visibility note above
+    /// stands on its own.)
     ///
     /// # Type Parameters
     ///

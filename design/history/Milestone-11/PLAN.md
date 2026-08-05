@@ -464,10 +464,15 @@ Translations of note:
   mapping expiry to `KafkaError::timeout` (CLAUDE.md §9.1).
 - `begin_transaction` does **not** block in Java (line 674–681, pure state
   transition) → stays a **sync** `fn`. Do not make it `async` for symmetry.
-- `prepare_transaction` (2PC) is on `KafkaProducer` only, **not** on the
+- ~~`prepare_transaction` (2PC) is on `KafkaProducer` only, **not** on the
   `Producer` interface — verified: `grep prepareTransaction Producer.java`
   returns nothing. Mirror that: inherent method on `KafkaProducer`, absent from
-  the `Producer` trait.
+  the `Producer` trait.~~ **Wrong, corrected in Phase 6.** The grep is right and
+  the inference is not: in `kafka/` 4.2 `prepareTransaction` exists only on
+  `TransactionManager`, not on `KafkaProducer` either, so there is nothing to
+  mirror. The 4.2 producer-side 2PC surface is `throwIfInPreparedState`
+  (`KafkaProducer.java:968-976`), wired into `beginTransaction` and `doSend`. See
+  §10.9 deviation 2 for the evidence.
 - `maybe_send_and_poll_transactional_request` (`Sender.java:459–518`) is the
   riskiest single method in the milestone — see §6.6.
 - `sendProduceRequest` (924–926) sets `transactional_id` and
@@ -478,6 +483,19 @@ Translations of note:
 
 **Tests:** the 27 transactional tests in `KafkaProducerTest.java`, plus the
 transactional subset of `SenderTest.java`.
+
+**Status: landed.** All 27 `KafkaProducerTest` methods are accounted for — 22
+translated, 1 justified as untranslatable (`testNullGroupMetadataInSendOffsets`
+passes `null`), 4 already in `producer_config.rs` from Phase 1 — with the
+derivation and its real output in the PHASE-6 TEST ACCOUNTING block in
+`src/producer/kafka_producer.rs`. Of the 15 transactional `SenderTest` methods,
+4 are translated (the shutdown group, the ones that needed `Sender::run`'s
+transactional tail) and **11 are handed to Phase 8** with per-method reasons in
+the accounting block at the end of `src/producer/internals/sender.rs`; 2 of the
+11 are blocked on named missing surface. Deviations are recorded in §10.9.
+
+Also in this phase, outside the table: `PendingRequests` became shared state
+(§10.9 deviation 1), and `await_sender_handle` lost-join bug fixed (deviation 3).
 
 ---
 
@@ -790,6 +808,14 @@ in Phase 4, the transactional arm in Phase 6 — so nothing is left behind
 
 **Decision needed:** confirm (C), or pick (A)/(B).
 
+**Status: complete.** (C) was taken. The idempotence arm of the guard was removed in
+Phase 4 and the transactional arm in Phase 6; `from_config` now accepts
+`transactional.id` and builds a transactional manager. `configure_transaction_state`
+dropped the `Result` the guard was its only user of, and
+`test_guard_rejects_transactional_id` was replaced by
+`test_transactional_id_builds_a_transactional_manager` plus two message-pinning tests
+for `throwIfNoTransactionManager` and `ensureTransactional`.
+
 ### 7.2 Bindings deferral — **recommend: defer, as the briefing proposes**
 
 Concur. Rationale to record: it roughly doubles the phase count, and
@@ -1041,8 +1067,11 @@ transactions or the 4.3.1 semantic changes.
 
 ### 9.4 Remove the `MILESTONE-11 GUARD`
 
-**Status:** half done. The idempotence arm was removed in **Phase 4**; the
-transactional arm remains and is scheduled for **Phase 6**.
+**Status:** DONE. The idempotence arm was removed in **Phase 4**, the guard in
+`TransactionManager::new` in **Phase 5a** (§10.7 deviation 10), and the transactional
+arm in `from_config` in **Phase 6**. No `MILESTONE-11 GUARD` remains as a live check:
+`grep -rn 'MILESTONE-11 GUARD' src/` now returns only comments that record its removal
+and the test-block header that explains what those tests cover instead.
 
 `KafkaProducer::from_config` used to reject explicit `enable.idempotence=true` and
 any `transactional.id` (`src/producer/kafka_producer.rs`, marked
@@ -1053,9 +1082,13 @@ is now honoured end to end — and replaced its two rejection tests with
 arms of `configureTransactionState` instead. `TransactionManager::new` keeps its
 own guard on `transactional_id` (PLAN §10.5 deviation 1) until Phase 5.
 
-Phase 6 removes what is left: the `transactional.id` rejection in `from_config`,
-`test_guard_rejects_transactional_id`, and the guard in `TransactionManager::new`
-along with `test_transactional_id_is_refused_until_phase_5`.
+Phase 6 removed what was left: the `transactional.id` rejection in `from_config` and
+`test_guard_rejects_transactional_id`, replaced by
+`test_transactional_id_builds_a_transactional_manager` plus two tests pinning the two
+*real* rejection messages a transactional call can hit — `throwIfNoTransactionManager`
+when there is no manager at all, and `ensureTransactional` when the manager is merely
+idempotent. `configure_transaction_state` also dropped its `Result`, the guard having
+been its only error.
 
 ### 9.5 Critic review of Phase 1
 
@@ -1930,14 +1963,28 @@ phase; it also needs its own allocation audit against DoD §10.
 
 ### 9.19 Three `SenderTest` methods blocked on missing surface
 
-**Status:** open. Three items stay blocked on named missing surface. Separately, as of
-Phase 5b the 15 transactional `SenderTest` methods are **owed rather than blocked** —
-5b translated every entry point they call, so what they need is the end-to-end
-accumulator + `Sender` harness, not production surface. Their owner is Phase 6, whose
-§Phase-6 "Tests" line already names "the transactional subset of `SenderTest.java`".
-The `sender.rs` accounting block carries the derivation showing no entry in that group
-names `commitTransaction` / `abortTransaction`, which is what makes the reclassification
-checkable rather than asserted.
+**Status:** open, and as of Phase 6 there are **five** blocked entries, not three.
+Phase 6 built the end-to-end harness the transactional group needed and translated 4 of
+its 15 (`testTransactionalRequestsSentOnShutdown`,
+`testIncompleteTransactionAbortOnShutdown`,
+`testForceShutdownWithIncompleteTransaction`,
+`testTransactionAbortedExceptionOnAbortWithoutError` — the ones whose subject is
+`Sender::run`'s transactional tail). The other **11 are handed to Phase 8**, with a
+per-method reason each in the `sender.rs` accounting block; two of those eleven are
+blocked on named missing surface rather than merely unwritten:
+
+  - `testTransactionalSplitBatchAndSend` (2385) — blocked on §9.18's split panic, the
+    same gap as `testIdempotentSplitBatchAndSend`.
+  - `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399) — the one entry
+    given `mock(TransactionManager.class)` (Java 3403), stubbing
+    `hasOngoingTransaction()` -> true with `beginAbort()` throwing. `TransactionManager`
+    is a concrete struct here, so it needs either a `#[cfg(test)]` hook that fails
+    `begin_abort` on demand or a forced state where the real machine behaves that way —
+    a `TransactionManager` change, so it belongs with Phase 8's sweep of that class.
+
+The `sender.rs` accounting block carries the derivation showing no entry in the group
+names `commitTransaction` / `abortTransaction`, which is what made the original
+"owed, not blocked" reclassification checkable rather than asserted.
 
 Raised by Critic 44 issue 4, which rejected Phase 4's block deferral of `SenderTest`
 methods — correctly, since it named Phase 8 as the owner while §Phase-8's own scope
@@ -2704,3 +2751,142 @@ Not deviations, recorded because a reviewer may read them as such:
     scope, and its Java form stubs `isCompleting()` with Mockito — the accumulator
     comment block at `record_accumulator.rs` keeps naming Phase 6 as the owner, which
     is still right because that is where the public `commit_transaction` lands.
+
+---
+
+### 10.9 Phase 6 deviations (public producer API + Sender transactional loop)
+
+Each is documented at its call site as well.
+
+1. **`PendingRequests` is shared, not Sender-confined.** Rules §2 lists
+   `pendingRequests` with the state "touched exclusively by the Sender thread". That
+   was true of every caller through Phase 5b and is **false of the class**: Java
+   enqueues into it from the application thread through all four blocking public
+   methods — `initTransactions` (`KafkaProducer.java:653`) →
+   `initializeTransactions` (`TransactionManager.java:299`), `commitTransaction`
+   (`:741`) → `beginCommit` (`:353`), `abortTransaction` (`:784`) → `beginAbort`
+   (`:361`), and `sendOffsetsToTransaction` (`:818`) → `sendOffsetsToTransaction`
+   (`:404`), every one of them `synchronized`.
+
+   So it became `Arc<Mutex<PendingRequests>>` shared between `Sender` and
+   `KafkaProducer`, kept **outside** the manager exactly as rules §2 requires. Lock
+   order is fixed at `pending_requests` → `TransactionManager`, giving the producer a
+   full order of deque → `pending_requests` → manager. Rust evaluates a method
+   receiver before its arguments, so every site binds the guard to a local first;
+   locking inline would invert it. Java's own unsynchronized writer
+   (`lookupCoordinator`, `:969`) is safe for a different reason — only the Sender
+   calls it — and taking this lock there costs nothing.
+
+   **Suggested rule amendment:** rules §2's bullet list should move `pendingRequests`
+   from the Sender-owned group to a third category, "outside the manager but shared",
+   with the four app-side call sites cited. The other three fields it groups with
+   (`inFlightRequestCorrelationId`, the two coordinator nodes) are genuinely
+   Sender-confined and stay where they are.
+
+2. **`KafkaProducer` has no `prepare_transaction`, because Java 4.2 has none.**
+   §Phase-6 above says "`prepare_transaction` (2PC) is on `KafkaProducer` only, **not**
+   on the `Producer` interface — verified: `grep prepareTransaction Producer.java`
+   returns nothing." The grep is right and the inference is wrong. In the `kafka/`
+   submodule this milestone builds against (`a18251bae0 Bump version to 4.2.0`),
+   `prepareTransaction` exists **only** on `TransactionManager` (`:342`, translated in
+   Phase 5a) plus a metric description in `KafkaProducerMetrics` (`:80`):
+
+   ```
+   $ grep -rn "prepareTransaction" kafka/clients/src/
+   kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/KafkaProducerMetrics.java:80: ...
+   kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/TransactionManager.java:342: ...
+   kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/TransactionManager.java:344: ...
+   ```
+
+   `completeTransaction` likewise appears only inside `throwIfInPreparedState`'s
+   message text. Adding either to `KafkaProducer` would violate DoD §7 — a public
+   method with no Java counterpart. What **is** the 4.2 producer-side 2PC surface, and
+   what Phase 6 therefore translated, is `throwIfInPreparedState`
+   (`KafkaProducer.java:968-976`), wired into both `beginTransaction` (`:677`) and
+   `doSend` (`:989`).
+
+   This is the same class of error as §9.19's stale rationales: a claim about the Java
+   source that nobody re-derived against the corpus actually being built. Compare rules
+   §12's "**The corpus matters, so always name it**".
+
+3. **`await_sender_handle` puts the handle back on expiry — a bug fix, not just a
+   translation.** It passed the `JoinHandle` by value to `tokio::time::timeout`, so on
+   expiry the handle was dropped and `await_sender_handle_indefinitely` had nothing to
+   join: `close(Duration)` returned while the Sender task was still running. Java joins
+   unconditionally after force-closing (`KafkaProducer.java:1414-1418`) and CLAUDE.md
+   §9.4 requires the translation to actually await the handle. Now awaits
+   `&mut join_handle` (`JoinHandle` is `Unpin`) and restores it. Found by the three
+   `testCloseIsForcedOn*` tests, the only tests that reach the
+   force-close-after-timeout path.
+
+4. **No metrics.** `producerMetrics.recordInit` / `recordBeginTxn` /
+   `recordSendOffsets` / `recordCommitTxn` / `recordAbortTxn`, and the
+   `time.nanoseconds()` statements that exist only to feed them, are not translated:
+   `KafkaProducerMetrics` and the whole `org.apache.kafka.common.metrics` package are
+   listed in `remaining_classes.txt`. Consequence for tests:
+   `testMeasureAbortTransactionDuration` and `testMeasureTransactionDurations` keep
+   their operation sequences and drop only their `getMetricValue` assertions.
+
+5. **`configure_transaction_state` no longer returns `Result`.** Its only error was
+   `from_config`'s temporary `transactional.id` guard (§7.1), which this phase removed;
+   Java returns a nullable `TransactionManager`, which is now exactly `Option`.
+
+6. **`throwIfInvalidGroupMetadata`'s null arm is not translated.**
+   `ConsumerGroupMetadata` is a value in Rust, so `KafkaProducer.java:1499-1500` is
+   enforced by the type system. This is also why
+   `KafkaProducerTest.testNullGroupMetadataInSendOffsets` (Java 1943) is the one method
+   of the 27 with no Rust counterpart; its sibling
+   `testInvalidGenerationIdAndMemberIdCombinedInSendOffsets`, which exercises the arm
+   that *is* translated, records the reason.
+
+7. **`send_offsets_to_transaction` takes `offsets` and `group_metadata` by value.**
+   CLAUDE.md §12 asks for the most general borrowed form, but the transaction manager
+   *moves* both into the `AddOffsetsToTxn` handler that carries them to the coordinator
+   (`TransactionManager.java:1635-1643`), so borrowing would force a clone Java does
+   not make. `AsyncKafkaConsumer::commit_sync_offsets` already set this convention for
+   an offsets map.
+
+8. **`Sender::run_once` is `pub(crate)`**, matching Java's package-private `runOnce()`
+   that `SenderTest` calls directly. Needed because the `KafkaProducerTest` harness
+   lives in `kafka_producer.rs`.
+
+9. **Two test-harness deviations, both structural rather than stylistic.**
+
+   - `TxnProducerContext` keeps the `Sender` **test-owned** and runs the application
+     call concurrently with a `run_once` loop (`drive`, on `tokio::join!` — never
+     `select!`, which would drop the losing future). Java's helper spawns a real Sender
+     thread and pokes a synchronized `MockClient` beside it; Rust's `Sender` owns its
+     client by value, so a spawned Sender takes the mock with it.
+   - The three `testCloseIsForcedOn*` methods **do** need a spawned Sender, since their
+     subject is `Sender::run`'s force-close tail. `tokio::task::spawn` onto the test's
+     runtime deadlocks: `Sender::run` over a `MockClient` never awaits anything pending
+     (`MockClient::poll` returns immediately), so the task never yields, and because
+     only a worker parks on the time driver, **no timer in the runtime fires** — the
+     test's own `sleep` never returns. Diagnosed from a thread sample (one worker
+     spinning in `run_once`, the other in `park_condvar`). The harness gives the Sender
+     its own OS thread and its own current-thread runtime via `spawn_blocking`, which is
+     also closer to Java, where the Sender genuinely is a separate `ioThread`. A real
+     `NetworkClient` cannot trigger this, because its `poll` awaits the selector.
+
+     This is a Tokio-specific pitfall with no Java analogue and is worth adding to
+     CLAUDE.md §9.6.6: *a task that never awaits anything pending starves every timer in
+     a multi-thread runtime, not just its own worker.*
+
+Not deviations, recorded because a reviewer may read them as such:
+
+  - **`testCloseIsForcedOnPendingAddOffsetRequest`'s Java body is identical to
+    `testCloseIsForcedOnPendingInitProducerId`'s** in 4.2 — one `FindCoordinator`
+    prepared, then `initTransactions` — never reaching an `AddOffsetsToTxn` despite the
+    name. Translated as written.
+  - **`testSendTxnOffsetsWithGroupId` and `testSendTxnOffsetsWithGroupMetadata` pass an
+    empty offsets map**, so `KafkaProducer.java:738` returns before anything is sent and
+    three of the responses each queues are never consumed. Preserved, with the request
+    count asserted unchanged so the no-op is the thing under test.
+  - **A timed-out `TransactionalRequestResult` is not acked.** Java sets `isAcked` only
+    after the latch opens (`TransactionalRequestResult.java:53-62`), which is what makes
+    `initTransactions` retryable after a timeout *and* return the same result object.
+    Rules §5 mandated the shape; two tests now pin the behaviour.
+  - **Eleven of the fifteen transactional `SenderTest` methods are still owed**, with
+    per-method reasons and Phase 8 named as owner, in the accounting block at the end of
+    `src/producer/internals/sender.rs`. Two of the eleven are blocked on named missing
+    surface (§9.18's split panic, and the one method given `mock(TransactionManager)`).

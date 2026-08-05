@@ -7562,21 +7562,61 @@ mod tests {
     //     surface — `MockClient::poll_timeouts`, standing in for Java's
     //     `verify(client, times(2)).poll(eq(RETRY_BACKOFF_MS), anyLong())` spy.
     //
-    // TRANSACTIONAL (15) — **owed, not blocked, as of Phase 5b.** Every marker the
+    // TRANSACTIONAL (15) — **4 translated in Phase 6, 11 still owed.** Every marker the
     // derivation below finds for this group is `beginTransaction`, `beginCommit`,
     // `beginAbort`, `maybeAddPartition`, `AddPartitionsToTxn`, `EndTxn` or
     // `mock(TransactionManager`, and Phase 5b translated all of that surface: not one
     // entry names `commitTransaction` / `abortTransaction`, the public-`KafkaProducer`
-    // methods Phase 6 owns. So the group's previous blanket rationale — "blocked on a
-    // Phase-5b/6 entry point it actually calls" — is no longer true, and saying
-    // otherwise would be the §9.19 failure mode (a completeness claim whose reason has
-    // gone stale) repeated.
+    // methods Phase 6 owns. So the group is *owed*, not blocked — with the two
+    // exceptions named below, which cite missing surface.
     //
-    // What they still need is the *harness*, not production surface: each drives the
-    // accumulator and the `Sender` end to end, and 5b's tests are manager-level.
-    // **Owner: Phase 6**, whose §Phase-6 "Tests" line reads "the transactional subset
-    // of `SenderTest.java`" — the same phase that reviews
-    // `maybeSendAndPollTransactionalRequest` and so has to build that harness anyway.
+    // Phase 6 built the harness they need (`begin_transaction_with_partition`,
+    // `add_partitions_to_txn_response`, `end_txn_response`, `assert_pending_end_txn`)
+    // and used it for the four whose subject is the shutdown path, i.e. the ones that
+    // could not have been written before `Sender::run`'s transactional tail was live:
+    //
+    //   2737 testTransactionalRequestsSentOnShutdown
+    //          -> test_transactional_requests_sent_on_shutdown
+    //   2898 testIncompleteTransactionAbortOnShutdown
+    //          -> test_incomplete_transaction_abort_on_shutdown
+    //   2932 testForceShutdownWithIncompleteTransaction
+    //          -> test_force_shutdown_with_incomplete_transaction
+    //   2966 testTransactionAbortedExceptionOnAbortWithoutError
+    //          -> test_transaction_aborted_exception_on_abort_without_error
+    //
+    // STILL OWED (11), each with what it needs — **owner: Phase 8**, whose §Phase-8
+    // scope is the `TransactionManagerTest` parity sweep and the broker integration
+    // tests, and which therefore already owns the neighbouring 47 (below). Two of the
+    // eleven are blocked on named missing surface rather than merely unwritten:
+    //
+    //   1534 testUnresolvedSequencesAreNotFatal — owed. Drives an unresolved-sequence
+    //     recovery over a transactional manager; needs the produce/response driver, not
+    //     new production surface.
+    //   1820 testTransactionalUnknownProducerHandlingWhenRetentionLimitReached — owed,
+    //     same driver.
+    //   2385 testTransactionalSplitBatchAndSend — **blocked on PLAN §9.18**: it drives a
+    //     `MESSAGE_TOO_LARGE` split, which panics because `ProducerBatch::records()`
+    //     moves the built buffer out. Same blocker as `testIdempotentSplitBatchAndSend`
+    //     below; reproducer `test_too_large_batches_are_safely_removed`.
+    //   2771 testRecordsFlushedImmediatelyOnTransactionCompletion — owed. Needs a
+    //     linger-configured context (`setupWithTransactionState(txnManager, lingerMs)`)
+    //     plus the produce driver.
+    //   2829 testAwaitPendingRecordsBeforeCommittingTransaction — owed, same context.
+    //   3051 testTransactionShouldTransitionToAbortableForSenderAPI — owed.
+    //   3126 testReceiveFailedBatchTwiceWithTransactions — owed.
+    //   3176 testInvalidTxnStateIsAnAbortableError — owed.
+    //   3215 testTransactionAbortableExceptionIsAnAbortableError — owed.
+    //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort — owed.
+    //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState — **blocked on
+    //     missing surface**: it is the one entry given `mock(TransactionManager.class)`
+    //     (Java 3403) and stubs `hasOngoingTransaction()` -> true with `beginAbort()`
+    //     throwing, to drive `Sender::run`'s abort loop into its force-close arm.
+    //     `TransactionManager` is a concrete struct here, so there is nothing to stub;
+    //     it needs either a `#[cfg(test)]` hook that makes `begin_abort` fail on demand
+    //     or a state the real machine can be forced into where `hasOngoingTransaction()`
+    //     holds and `beginAbort()` is an invalid transition. Adding such a hook is a
+    //     `TransactionManager` change and belongs with Phase 8's sweep of that class,
+    //     not with a Sender phase.
     //
     // The blocking identifiers are derived, not asserted, by the same technique the
     // `TransactionManagerTest` accounting uses (see PHASE-5B TEST ACCOUNTING in
@@ -7664,22 +7704,23 @@ mod tests {
     //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
     //          beginAbort+mock(TransactionManager
     //
-    // The 15, restated in prose so a reader need not run anything:
+    // The 15, restated in prose so a reader need not run anything. Four of them are
+    // translated (marked); the rest are the owed/blocked list above:
     //
     //   `testUnresolvedSequencesAreNotFatal` (1534) — beginTransaction + maybeAddPartition
     //     + AddPartitionsToTxn; the manager is built at `SenderTest.java:1537`.
     //   `testTransactionalUnknownProducerHandlingWhenRetentionLimitReached` (1820) — same three.
     //   `testTransactionalSplitBatchAndSend` (2385) — same three.
-    //   `testTransactionalRequestsSentOnShutdown` (2737) — + beginCommit, EndTxn.
+    //   `testTransactionalRequestsSentOnShutdown` (2737) [TRANSLATED] — + beginCommit, EndTxn.
     //   `testRecordsFlushedImmediatelyOnTransactionCompletion` (2771) — beginTransaction,
     //     beginCommit, EndTxn.
     //   `testAwaitPendingRecordsBeforeCommittingTransaction` (2829) — beginTransaction,
     //     beginCommit, EndTxn.
-    //   `testIncompleteTransactionAbortOnShutdown` (2898) — + maybeAddPartition,
+    //   `testIncompleteTransactionAbortOnShutdown` (2898) [TRANSLATED] — + maybeAddPartition,
     //     AddPartitionsToTxn, EndTxn.
-    //   `testForceShutdownWithIncompleteTransaction` (2932) — + beginCommit,
+    //   `testForceShutdownWithIncompleteTransaction` (2932) [TRANSLATED] — + beginCommit,
     //     maybeAddPartition, AddPartitionsToTxn.
-    //   `testTransactionAbortedExceptionOnAbortWithoutError` (2966) — + beginAbort,
+    //   `testTransactionAbortedExceptionOnAbortWithoutError` (2966) [TRANSLATED] — + beginAbort,
     //     maybeAddPartition, AddPartitionsToTxn.
     //   `testTransactionShouldTransitionToAbortableForSenderAPI` (3051) — + beginCommit,
     //     maybeAddPartition, AddPartitionsToTxn.
@@ -7722,7 +7763,10 @@ mod tests {
     // counted in the 52-arithmetic below, which is over `SenderTest.java` alone.
     //
     // BLOCKED ON NAMED MISSING SURFACE (3) — each cites what is absent, per the Phase-3
-    // standard:
+    // standard. These three are the *idempotent / non-transactional* blocked entries;
+    // the transactional group above names two more of its own
+    // (`testTransactionalSplitBatchAndSend`, `testSenderShouldCloseWhenTransactionManagerInErrorState`)
+    // and they are counted there, not here, so the 52-arithmetic below is unaffected:
     //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104) — asserts
     //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between retries.
     //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Fn() -> i64>` with no
@@ -7742,8 +7786,219 @@ mod tests {
     //     point is a `MESSAGE_TOO_LARGE` split. Missing surface: the split panics — PLAN
     //     §9.18, with `test_too_large_batches_are_safely_removed` as the reproducer.
     //
-    // PLAN §9.19 carries the same three blocked entries and nothing more.
+    // PLAN §9.19 carries the same three blocked entries; as of Phase 6 it also carries
+    // the two named in the transactional group, for a total of five blocked across both.
     //
+    // =====================================================================
+    // Transactional `SenderTest` methods (Milestone 11, Phase 6)
+    //
+    // The group PLAN §9.19 reclassified from "blocked" to "owed", on the evidence in
+    // the accounting block above: every entry point they call was translated by Phase
+    // 5b, so what they needed was this end-to-end accumulator + `Sender` harness.
+    // =====================================================================
+
+    /// `SenderTest.buildAddPartitionsToTxnResponseData(0, singletonMap(tp, NONE))`
+    /// (Java 3846-3853): the per-partition errors filed under the v3-and-below
+    /// transactional id, which is the only shape a client request produces.
+    fn add_partitions_to_txn_response(errors: &[(TopicPartition, Errors)]) -> ConcreteResponse {
+        use crate::add_partitions_to_txn_response_data::AddPartitionsToTxnResponseData;
+        use crate::common::requests::AddPartitionsToTxnResponse;
+        use crate::common::requests::add_partitions_to_txn_response::V3_AND_BELOW_TXN_ID;
+
+        let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
+        let result = AddPartitionsToTxnResponse::result_for_transaction(V3_AND_BELOW_TXN_ID, &error_map);
+        let mut data = AddPartitionsToTxnResponseData::new();
+        data.set_results_by_topic_v3_and_below(result.topic_results)
+            .set_throttle_time_ms(0);
+        ConcreteResponse::AddPartitionsToTxn(AddPartitionsToTxnResponse::new(data))
+    }
+
+    /// `new EndTxnResponse(new EndTxnResponseData().setErrorCode(..).setThrottleTimeMs(0))`.
+    fn end_txn_response(error: Errors) -> ConcreteResponse {
+        use crate::common::requests::EndTxnResponse;
+        use crate::end_txn_response_data::EndTxnResponseData;
+
+        let mut data = EndTxnResponseData::new();
+        data.set_error_code(error.code()).set_throttle_time_ms(0);
+        ConcreteResponse::EndTxn(EndTxnResponse::new(data))
+    }
+
+    /// The Rust stand-in for `SenderTest.AssertEndTxnRequestMatcher` (Java 3893-3912):
+    /// asserts the queued request really is an `EndTxn` carrying `committed`, then
+    /// answers it.
+    ///
+    /// Java attaches the matcher to `client.prepareResponse(matcher, response)` and
+    /// checks `matcher.matched` afterwards. `MockClient` here matches responses FIFO
+    /// with no predicate, so the assertion is made directly against the request the
+    /// `Sender` parked — which is strictly more direct: it cannot silently not run.
+    fn assert_pending_end_txn(ctx: &SenderTestContext, committed: bool) {
+        let (_, handler) = ctx
+            .sender
+            .pending_transactional_response
+            .as_ref()
+            .expect("an EndTxn must be in flight");
+        let data = handler.end_txn_request_data().expect("an EndTxn handler");
+        assert_eq!(data.transactional_id, TRANSACTIONAL_ID);
+        // `run_init_transactions` answers the InitProducerId with 13131 / 1.
+        assert_eq!(data.producer_id, 13131);
+        assert_eq!(data.producer_epoch, 1);
+        assert_eq!(data.committed, committed, "EndTxn carried the wrong TransactionResult");
+    }
+
+    /// Begins a transaction and adds `tp` to it, mirroring
+    /// `SenderTest.addPartitionToTxn(sender, txnManager, tp)` (Java 2873-2878).
+    async fn begin_transaction_with_partition(ctx: &mut SenderTestContext, tp: &TopicPartition) {
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_transaction()
+            .expect("beginTransaction");
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .maybe_add_partition(tp)
+            .expect("maybeAddPartition");
+        ctx.sender
+            .client_mut()
+            .prepare_response(add_partitions_to_txn_response(&[(tp.clone(), Errors::None)]));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(
+            ctx.transaction_manager().lock().unwrap().transaction_contains_partition(tp),
+            "the AddPartitionsToTxn response must have landed"
+        );
+        assert!(!ctx.sender.has_in_flight_request());
+    }
+
+    /// Translated from `SenderTest.testTransactionalRequestsSentOnShutdown`
+    /// (Java 2736-2767).
+    ///
+    /// `initiateClose` then `beginCommit`: the `EndTxn` was enqueued *after* the run
+    /// loop was told to stop, so only `Sender.run`'s drain loop (`Sender.java:257-265`,
+    /// whose condition includes `hasPendingTransactionalRequests()`) can send it. That
+    /// is the behaviour under test.
+    #[tokio::test]
+    async fn test_transactional_requests_sent_on_shutdown() {
+        let mut ctx = SenderTestContext::transactional();
+        run_init_transactions(&mut ctx).await;
+        let tp = ctx.tp1.clone();
+        begin_transaction_with_partition(&mut ctx, &tp).await;
+
+        ctx.sender.initiate_close();
+        let commit = ctx
+            .transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_commit(&mut ctx.sender.pending_requests.lock().unwrap())
+            .expect("beginCommit");
+
+        // One iteration sends the EndTxn but leaves it unanswered, which is where
+        // Java's `AssertEndTxnRequestMatcher` inspects it. Asserting against the parked
+        // handler is more direct than a response predicate: it cannot silently not run.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_pending_end_txn(&ctx, true);
+
+        // `respond` rather than `prepare_response`: the request is already sent, and a
+        // prepared response is only matched at send time.
+        ctx.sender.client_mut().respond(end_txn_response(Errors::None));
+        ctx.sender.run().await;
+        assert!(
+            commit.is_completed(),
+            "the drain loop must have sent the EndTxn and taken its response"
+        );
+        commit.await_result().await.expect("the commit succeeded");
+    }
+
+    /// Translated from `SenderTest.testIncompleteTransactionAbortOnShutdown`
+    /// (Java 2896-2925).
+    ///
+    /// No commit or abort is requested; `Sender.run`'s third loop
+    /// (`Sender.java:266-285`) notices the ongoing transaction and aborts it itself.
+    ///
+    /// Java's `AssertEndTxnRequestMatcher(TransactionResult.ABORT)` has no equivalent
+    /// here: the `EndTxn` is both created *and* answered inside the single
+    /// `Sender::run` call, so there is no point at which the parked handler can be
+    /// inspected — leaving it unanswered would spin that loop forever, since its
+    /// condition is `hasOngoingTransaction()`. The `TransactionResult` discrimination
+    /// is asserted in [`test_transactional_requests_sent_on_shutdown`], whose commit is
+    /// requested from the test and so *can* be intercepted. What is asserted here is
+    /// the property the test is named for: the shutdown ends the transaction without
+    /// anyone asking it to.
+    #[tokio::test]
+    async fn test_incomplete_transaction_abort_on_shutdown() {
+        let mut ctx = SenderTestContext::transactional();
+        run_init_transactions(&mut ctx).await;
+        let tp = ctx.tp1.clone();
+        begin_transaction_with_partition(&mut ctx, &tp).await;
+
+        ctx.sender.initiate_close();
+        ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+        ctx.sender.run().await;
+        assert!(
+            !ctx.transaction_manager().lock().unwrap().has_ongoing_transaction(),
+            "the shutdown abort loop must have ended the transaction"
+        );
+    }
+
+    /// Translated from `SenderTest.testForceShutdownWithIncompleteTransaction`
+    /// (Java 2927-2957).
+    ///
+    /// The commit is requested and then the Sender is force-closed, so the `EndTxn` is
+    /// never sent and `TransactionManager.close` fails the pending request.
+    #[tokio::test]
+    async fn test_force_shutdown_with_incomplete_transaction() {
+        let mut ctx = SenderTestContext::transactional();
+        run_init_transactions(&mut ctx).await;
+        let tp = ctx.tp1.clone();
+        begin_transaction_with_partition(&mut ctx, &tp).await;
+
+        let commit = ctx
+            .transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_commit(&mut ctx.sender.pending_requests.lock().unwrap())
+            .expect("beginCommit");
+
+        ctx.sender.force_close();
+        ctx.sender.run().await;
+
+        let error = commit
+            .await_result()
+            .await
+            .expect_err("forcefully closing the sender must fail the commit");
+        assert_eq!(error.message(), "The producer closed forcefully");
+    }
+
+    /// Translated from
+    /// `SenderTest.testTransactionAbortedExceptionOnAbortWithoutError`
+    /// (Java 2963-2988).
+    ///
+    /// A record is appended and the transaction aborted before it can be drained, so
+    /// `maybeSendAndPollTransactionalRequest`'s `isAborting()` arm
+    /// (`Sender.java:468-470`) must fail the undrained batch with
+    /// `TransactionAbortedException` rather than send it.
+    #[tokio::test]
+    async fn test_transaction_aborted_exception_on_abort_without_error() {
+        let mut ctx = SenderTestContext::transactional();
+        run_init_transactions(&mut ctx).await;
+        let tp = ctx.tp0.clone();
+        begin_transaction_with_partition(&mut ctx, &tp).await;
+
+        let future = ctx.append_to_accumulator(&tp).await;
+
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_abort(&mut ctx.sender.pending_requests.lock().unwrap(), Caller::App)
+            .expect("beginAbort");
+
+        // This must abort the existing transaction and drain all the unsent batches
+        // with a TransactionAbortedException.
+        ctx.sender.run_once().await.expect("run_once");
+
+        let error = future.get().await.expect_err("the batch is aborted, not sent");
+        assert_eq!(error.message(), "Failing batch since transaction was aborted");
+    }
+
     #[test]
     fn test_transactional_response_without_a_body_is_fatal() {
         let mut ctx = SenderTestContext::idempotent();
