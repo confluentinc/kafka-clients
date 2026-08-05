@@ -44,15 +44,15 @@ public sealed class ConsumerCompletionBridgeTests
     private static string[] ProofTopic() => new[] { "proof-topic" };
 
     [Fact]
-    public async Task SubscribeAsync_OnMock_ResolvesSuccessfully()
+    public async Task SubscribeWithCallback_OnMock_ResolvesSuccessfully()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        await TestTimeout.Run(() => consumer.SubscribeAsync(ProofTopic()), s_deadline);
+        await TestTimeout.Run(() => consumer.SubscribeWithCallback(ProofTopic()), s_deadline);
     }
 
     [Fact]
-    public async Task SubscribeAsync_Churned_ResolvesEachTime_NoCorruption()
+    public async Task SubscribeWithCallback_Churned_ResolvesEachTime_NoCorruption()
     {
         // The loop is the corruption detector: a double-free of the GCHandle /
         // error handle, or a leak, would corrupt the allocator over many ops.
@@ -60,17 +60,17 @@ public sealed class ConsumerCompletionBridgeTests
 
         for (int i = 0; i < 200; i++)
         {
-            await TestTimeout.Run(() => consumer.SubscribeAsync(ProofTopic()), s_deadline);
+            await TestTimeout.Run(() => consumer.SubscribeWithCallback(ProofTopic()), s_deadline);
         }
     }
 
     [Fact]
-    public async Task SeekAsync_UnassignedPartition_FaultsWithKafkaException()
+    public async Task SeekWithCallback_UnassignedPartition_FaultsWithKafkaException()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => consumer.SeekAsync("proof-topic", 0, 0L), s_deadline));
+            () => TestTimeout.Run(() => consumer.SeekWithCallback("proof-topic", 0, 0L), s_deadline));
 
         // Assert TYPE + Code (indistinct -1) + flags + a non-empty Message — never a
         // distinctive code (PLAN finding #4).
@@ -81,7 +81,7 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
-    public async Task SeekAsync_Churned_FaultsEachTime_NoCorruption()
+    public async Task SeekWithCallback_Churned_FaultsEachTime_NoCorruption()
     {
         // The error path frees an owned KafkaError handle + the GCHandle each time;
         // churn to catch a double-free / leak on the failure branch.
@@ -90,7 +90,7 @@ public sealed class ConsumerCompletionBridgeTests
         for (int i = 0; i < 50; i++)
         {
             await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => consumer.SeekAsync("proof-topic", 0, 0L), s_deadline));
+                () => TestTimeout.Run(() => consumer.SeekWithCallback("proof-topic", 0, 0L), s_deadline));
         }
     }
 
@@ -153,9 +153,9 @@ public sealed class ConsumerCompletionBridgeTests
         await TestTimeout.Run(
             async () =>
             {
-                await consumer.SubscribeAsync(ProofTopic());
-                await consumer.SubscribeAsync(ProofTopic());
-                await consumer.SubscribeAsync(ProofTopic());
+                await consumer.SubscribeWithCallback(ProofTopic());
+                await consumer.SubscribeWithCallback(ProofTopic());
+                await consumer.SubscribeWithCallback(ProofTopic());
             },
             s_deadline);
     }
@@ -170,7 +170,7 @@ public sealed class ConsumerCompletionBridgeTests
 
         for (int i = 0; i < 50; i++)
         {
-            Task op = consumer.SubscribeAsync(ProofTopic());
+            Task op = consumer.SubscribeWithCallback(ProofTopic());
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();

@@ -15,23 +15,18 @@
 using System.Collections;
 using System.Collections.Generic;
 
-namespace Confluent.Kafka.Internal;
+namespace Confluent.Kafka;
 
 /// <summary>
 /// The result of a poll — an owned, immutable collection of
-/// <see cref="ConsumerRecord"/> copied out of the (now-destroyed) native batch (the
-/// .NET realization of Java's <c>ConsumerRecords</c>, ffi-marshalling.md §6.4). An
-/// empty poll yields a non-null instance with <see cref="Count"/> <c>== 0</c> —
-/// success, not failure. Records are enumerated in the batch's insertion order.
+/// <see cref="ConsumerRecord"/> — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.consumer.ConsumerRecords</c>. The records are copied out
+/// of the (now-destroyed) native batch (ffi-marshalling.md §6.4), so this holds only
+/// owned managed values: there is no native handle, no <see cref="System.IDisposable"/>,
+/// and nothing to keep alive. An empty poll yields a non-null instance with
+/// <see cref="Count"/> <c>== 0</c> — success, not failure.
 /// </summary>
-/// <remarks>
-/// <b>Internal this phase (PLAN decision 1).</b> The public <c>ConsumerRecords</c>
-/// lands with the first public client; this type proves the owned-handle receive-path
-/// shape. Because the copy-out already happened on the dispatcher thread, this holds
-/// only owned managed values — there is no native handle, no <c>IDisposable</c>, and
-/// nothing to keep alive.
-/// </remarks>
-internal sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord>
+public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord>
 {
     private readonly IReadOnlyList<ConsumerRecord> _records;
 

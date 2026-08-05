@@ -22,6 +22,11 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
+// GC.GetTotalAllocatedBytes has no net462 equivalent, and this is a runtime-behavior
+// test (net462 runs are Windows/CI-only anyway) — so the whole class is net8.0+ only,
+// keeping the net462 TFM smoke leg (PLAN §5.7) compiling.
+#if NET8_0_OR_GREATER
+
 /// <summary>
 /// Per-record receive-path allocation budget (ffi-marshalling.md §B4,
 /// consumer-threading §27, DoD §10). The copy-out (§6.4) allocates only the owned
@@ -68,7 +73,7 @@ public sealed class ConsumerPollAllocationBudgetTests
     private const long PerRecordBudgetBytes = 1024;
 
     [Fact]
-    public async Task PollAsync_PerRecordAllocation_WithinCopyOutBudget()
+    public async Task PollWithCallback_PerRecordAllocation_WithinCopyOutBudget()
     {
         byte[] key = MakeBytes(KeySize, 0xAB);
         byte[] value = MakeBytes(ValueSize, 0xCD);
@@ -99,7 +104,7 @@ public sealed class ConsumerPollAllocationBudgetTests
 
     /// <summary>
     /// Sets up a consumer + records OUTSIDE the measured window, then brackets <b>only</b>
-    /// the <c>PollAsync</c> call — where the copy-out happens — with the process-wide
+    /// the <c>PollWithCallback</c> call — where the copy-out happens — with the process-wide
     /// precise allocation counter. Consumer create / assign / seek / the per-record
     /// <c>AddRecord</c> marshal loop / dispose are all excluded (none is copy-out;
     /// Finding 2). The owned copy-out <see cref="ConsumerRecords"/> holds only managed
@@ -112,7 +117,7 @@ public sealed class ConsumerPollAllocationBudgetTests
         try
         {
             consumer.Assign(new[] { (Topic, Partition) });
-            await consumer.SeekAsync(Topic, Partition, offset: 0);
+            await consumer.SeekWithCallback(Topic, Partition, offset: 0);
             for (int i = 0; i < recordCount; i++)
             {
                 consumer.AddRecord(Topic, Partition, offset: i, key, value);
@@ -129,7 +134,7 @@ public sealed class ConsumerPollAllocationBudgetTests
             // ambient allocation this process-wide counter also sees, leaving the
             // per-record copy-out cost.
             long before = GC.GetTotalAllocatedBytes(precise: true);
-            ConsumerRecords records = await consumer.PollAsync(s_pollTimeout);
+            ConsumerRecords records = await consumer.PollWithCallback(s_pollTimeout);
             long after = GC.GetTotalAllocatedBytes(precise: true);
 
             // Touch the result so the JIT cannot elide the copy-out.
@@ -153,3 +158,5 @@ public sealed class ConsumerPollAllocationBudgetTests
         return bytes;
     }
 }
+
+#endif

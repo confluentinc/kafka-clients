@@ -195,6 +195,19 @@ internal static class NativeMethods
         IntPtr userData);
 
     /// <summary>
+    /// <c>kafka_consumer_Consumer_unsubscribe_async</c> — unsubscribes from all
+    /// topics / partitions (async). Reuses the same void-result completion callback
+    /// as <see cref="ConsumerSubscribeAsync"/> (null error = success); takes no other
+    /// arguments. <paramref name="userData"/> is a
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> over the per-op context.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_unsubscribe_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerUnsubscribeAsync(
+        IntPtr consumer,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
     /// <c>kafka_consumer_Consumer_wakeup</c> — interrupts a blocked op. Sync,
     /// <b>bypasses</b> the access guard, callable from any thread (ffi §B5 /
     /// consumer-threading §11); null-safe. Fires the consumer's one-shot wakeup.
@@ -233,6 +246,33 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_group_id", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerGroupMetadataGroupId(IntPtr meta);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerGroupMetadata_generation_id</c> — the group
+    /// generation id (an <c>int32_t</c> scalar; <c>-1</c> when the consumer has not
+    /// joined a group).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_generation_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerGroupMetadataGenerationId(IntPtr meta);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerGroupMetadata_member_id</c> — the member id as a
+    /// NUL-terminated <c>const char*</c> owned by the metadata handle (borrowed;
+    /// copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy). Empty
+    /// before the consumer has joined a group.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_member_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupMetadataMemberId(IntPtr meta);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerGroupMetadata_group_instance_id</c> — the static
+    /// group instance id as a NUL-terminated <c>const char*</c> owned by the metadata
+    /// handle, or <see cref="IntPtr.Zero"/> when absent (the ABI returns null for a
+    /// non-static member). Copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/>
+    /// (null → <see langword="null"/>) before destroy.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_group_instance_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupMetadataGroupInstanceId(IntPtr meta);
 
     /// <summary>
     /// <c>kafka_consumer_ConsumerGroupMetadata_destroy</c> — frees an owned

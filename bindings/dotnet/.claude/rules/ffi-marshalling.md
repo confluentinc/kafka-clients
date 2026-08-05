@@ -242,7 +242,7 @@ runtime + one Sender task over a single async Selector; the .NET side adds at mo
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     SendAsync → Producer_send ──────│──────►│     RecordAccumulator (enqueue, returns fast)
+     Send → Producer_send ──────│──────►│     RecordAccumulator (enqueue, returns fast)
    completion pump (1 bg thread):    │       │   Sender task (spawned once in _new):
      get_all(futures) ─block_on─────►│──────►│     NetworkClient + ONE async Selector
      ◄── per-message metadata/err ───│◄──────│       ↕ multiplexes ALL brokers (event-driven)
@@ -259,7 +259,7 @@ runtime + one Sender task over a single async Selector; the .NET side adds at mo
     per-send threads. **No poll loop** — the core self-drives, so a stalled pump
     delays result delivery but not sending.
   - FFI is callable from any .NET thread; the core serializes via the producer's
-    internal `Mutex`, so concurrent `SendAsync` is safe — don't add your own lock.
+    internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
     the runtime's worker threads, so a blocked pump can't deadlock it.
   - The one callback (`RecordMetadata_copy`) fires synchronously on the caller's
@@ -272,13 +272,13 @@ pump deadlock-free (the Sender runs on other worker threads).
 **Anti-patterns:**
 
   - A binding-side lock around producer sends — the producer's `Mutex` already
-    serializes concurrent `SendAsync` (don't double-lock).
+    serializes concurrent `Send` (don't double-lock).
   - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
     (shared, §0.3).
 
 **Tests required:**
 
-  - Concurrent `SendAsync` from many threads is correct (the `Mutex` holds).
+  - Concurrent `Send` from many threads is correct (the `Mutex` holds).
   - `Dispose` drains before destroying the handle — joins the pump (Option A, §A7).
   - *(Option A only)* a long-blocked pump doesn't stop new sends being enqueued.
 
@@ -598,7 +598,7 @@ deferred. Both bridge to `Task<T>` via a `TaskCompletionSource` built with
 `RunContinuationsAsynchronously`.
 
 **Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
-`Task<RecordMetadata>`, completed by **one** background pump. `SendAsync` enqueues
+`Task<RecordMetadata>`, completed by **one** background pump. `Send` enqueues
 and returns instantly with a `TaskCompletionSource`-backed `Task`; the pump blocks
 on the batched `get_all` and completes each TCS. Mirrors the Python binding's
 `poll_futures_thread` (python-ffi.md §6).
@@ -606,7 +606,7 @@ on the batched `get_all` and completes each TCS. Mirrors the Python binding's
 ```
 Caller thread                         Completion pump (one bg thread)
 ─────────────                         ───────────────────────────────
-SendAsync():                          loop:
+Send():                          loop:
   pin key/value (call-scoped, §A4)      drain a batch of (future, tcs)
   Producer_send() → future handle       get_all(futures[])   ← BLOCKS
   new TaskCompletionSource (tcs)        tcs[i].SetResult / SetException
@@ -616,7 +616,7 @@ Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pend
 
 **Rule (Option A):**
 
-  - `SendAsync` never calls a blocking `_get`/`_get_all` on the caller's thread —
+  - `Send` never calls a blocking `_get`/`_get_all` on the caller's thread —
     it pins (§A4), calls `Producer_send` (inline; a fast enqueue), checks the sync
     `out_error`, enqueues `(future, tcs)`, returns `tcs.Task`. Inline send is fine
     because .NET has no GIL (a send-batching thread is an optional throughput
@@ -643,7 +643,7 @@ design.)
 **Option B: push callback (available *now*, not future).** The producer ABI
 *already* ships `Producer_send_async(…, callback, user_data)` (verified:
 `src/ffi/producer.rs`, `confluent_kafka.h`), firing on a per-producer dispatcher
-thread with `(RecordMetadata*, KafkaError*)`. `SendAsync` would register a
+thread with `(RecordMetadata*, KafkaError*)`. `Send` would register a
 kept-alive Cdecl callback (§A6) + a `GCHandle`(TCS); the callback completes the
 TCS. **Zero blocked threads, per-message, no pump.**
 
@@ -662,7 +662,7 @@ defers the consumer's copy-out-vs-keep-alive).
 
 **Anti-patterns:**
 
-  - `Task.Run(get)` per send / any one-thread-per-message pattern; a `SendAsync`
+  - `Task.Run(get)` per send / any one-thread-per-message pattern; a `Send`
     that blocks on `_get`/`_get_all` directly.
   - A TCS without `RunContinuationsAsynchronously`; running user code on the pump.
   - Destroying the producer before joining the pump; assuming cancel aborts the
@@ -692,7 +692,7 @@ dispatcher thread.
    .NET (managed)                    │ C ABI │       Rust core (native, per consumer)
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     PollAsync → *_async(…, cb) ─────│──────►│     consumer bg task (ConsumerNetworkThread):
+     PollWithCallback → *_async(…, cb) ─│──────►│     consumer bg task (ConsumerNetworkThread):
        returns Task (core guards)    │       │       NetworkClient + ONE async Selector
    (NO .NET pump, NO managed guard)  │       │       ↕ multiplexes ALL brokers (event-driven)
      ◄── cb fires here (→ TCS) ──────│◄──────│     callback-dispatcher thread (1, native):
@@ -1024,8 +1024,9 @@ shapes: **wakeup** and **concurrent use**.
   - **Concurrent use** (the consumer is single-owner / one-operation-in-flight;
     serialized by the **Rust core's** guard, not a managed one — M3/P2) splits by
     method, and the split is enforced **core-side**, not by a managed pre-check: a
-    concurrent **async op** (`PollAsync` / `CommitAsync` / `SubscribeAsync` /
-    `SeekAsync`) is rejected by the core **inline** (it fires the completion callback
+    concurrent **async op** (`PollWithCallback` / `CommitWithCallback` /
+    `SubscribeWithCallback` / `SeekWithCallback`) is rejected by the core **inline**
+    (it fires the completion callback
     on the caller thread with a `ConcurrentModification` error), which the bridge
     surfaces as a **faulted `Task`** carrying a **`KafkaException`** — *not* a
     managed synchronous throw. A concurrent sync **state read** (`Assignment` /
@@ -1162,7 +1163,7 @@ serialized by the **Rust core's** guard — **no managed guard** (M3/P2). Bridge
 ```
 Caller thread                       Core: runtime worker ──▶ dispatcher thread (1/consumer)
 ─────────────                       ────────────────────────────────────────────────────
-PollAsync():                        worker task: poll(timeout).await   ← runs the op
+PollWithCallback():                 worker task: poll(timeout).await   ← runs the op
   tcs = new TaskCompletionSource                 build (records | error)
   ud  = GCHandle.Alloc(tcs)  (§B6)                enqueue completion ──┐
   Consumer_poll_async(…, cb, ud) ─► (core guard serializes ops)       ▼
@@ -1174,7 +1175,7 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
 
 **Rule:**
 
-  - `PollAsync` (etc.) makes a `TaskCompletionSource`, `GCHandle.Alloc`s it as
+  - `PollWithCallback` (etc.) makes a `TaskCompletionSource`, `GCHandle.Alloc`s it as
     `user_data` (§B6), submits the `*_async` op with a kept-alive Cdecl callback,
     and returns `tcs.Task` immediately — no blocked thread.
   - The callback fires on a **dedicated callback-dispatcher thread** — the core
@@ -1240,7 +1241,7 @@ window).
 
 **Tests required:**
 
-  - `PollAsync` resolves with records / faults with `KafkaException` (mock
+  - `PollWithCallback` resolves with records / faults with `KafkaException` (mock
     `set_poll_error`); the result/error handle + `GCHandle` are freed exactly once.
   - `wakeup()` during an in-flight `poll` cancels/faults the `Task` **once**, then
     the consumer is reusable (§B5); a `CancellationToken` cancel →
