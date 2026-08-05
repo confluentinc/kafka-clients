@@ -5815,10 +5815,34 @@ mod tests {
     /// Java's shutdown loop depends on (`Sender.java:269-271`), which is rules §1's
     /// named anti-pattern.
     ///
-    /// `READY` is the invalid source used because it is the one the shutdown window
-    /// actually produces: the loop's guard admits `IN_TRANSACTION` /
-    /// `ABORTABLE_ERROR`, and the application task completing a transaction between
-    /// that guard read and this call leaves `READY` behind.
+    /// # What this pair does and does not claim about reachability
+    ///
+    /// `READY` is used simply because it is an invalid source for
+    /// `→ ABORTING_TRANSACTION` that the fixture reaches directly. It is **not** a
+    /// state the shutdown window can present to `begin_abort` today, and an earlier
+    /// revision of this comment said it was — the correction is Critic 45 5b pass 2.
+    /// `State::Ready` has exactly two production writers,
+    /// [`TransactionManager::reset_transaction_state`] and
+    /// [`TransactionManager::handle_init_producer_id_response`], **both**
+    /// [`Caller::Sender`]; and `reset_transaction_state`'s only callers
+    /// ([`TransactionManager::next_request`] and
+    /// `handle_end_txn_response`) run on the Sender's own response path inside
+    /// `run_once`, so the shutdown loop re-evaluates `has_ongoing_transaction()` and
+    /// *exits* before reaching `begin_abort`. No interleaving delivers `READY` here.
+    ///
+    /// Nor is some other state a live path: `COMMITTING_TRANSACTION` — the app calling
+    /// `commit_transaction` in the window, and not a valid source — is intercepted by
+    /// [`TransactionManager::handle_cached_transaction_request_result`]'s
+    /// pending-transition guard before the supplier runs, and
+    /// `prepare_transaction` lands on `PREPARED_TRANSACTION`, which *is* valid.
+    ///
+    /// So what the pair pins is a **contract**, not a live path: the poisoning
+    /// asymmetry must already hold when Phase 6 opens the application-side caller
+    /// (`KafkaProducer.abortTransaction`) and removes
+    /// `KafkaProducer::from_config`'s `transactional.id` guard. That is worth as much
+    /// — it is the guarantee Java's shutdown loop is written against
+    /// (`Sender.java:269-271`) — and it is why an unreachable-today invalid source is
+    /// a fine choice.
     #[tokio::test]
     async fn test_begin_abort_poisons_only_on_the_sender_side() {
         let expected = format!(

@@ -1212,3 +1212,237 @@ after the prose edits: `90 1 89` / `['is2PCEnabled']`; guard ok; group A owed 0;
 no-stub `awk` still 0. `producer_perf_test` p99 across three serial runs reported in
 the fixup commit, since issue 1 changes `transition_to`'s call shape on the Sender
 path.
+# Critic 45 — Milestone 11 Phase 5b review (pass 2)
+
+Range: `b70e353..HEAD` (`cc2bd48`, `9b73389`).
+
+All four pass-1 findings are fixed. Verified green independently: `cargo xtask lint` 0,
+`cargo xtask format-check` 0, `cargo test --lib` 2371 passed / 0 failed / 2 ignored. The
+production-region diff is exactly the two lines reported — `caller: Caller` added to
+`begin_abort` and forwarded to `transition_to`, and `Caller::Sender` at the `sender.rs` call
+site; everything else in both files is comments and tests.
+
+**One finding**, in a rustdoc sentence introduced by the finding-1 fix. It does not affect the
+tests' validity — they are correct and they discriminate as claimed.
+
+---
+
+## Issue 1: the two new tests justify their choice of `READY` with a reachability that does not exist — the application task cannot produce `READY`
+
+- **File**: `src/producer/internals/transaction_manager.rs:5818-5821` and
+  `src/producer/internals/sender.rs:7341-7344` (the same sentence, both sites)
+- **Severity**: Design Flaw (wrong justification introduced by the fix)
+- **Java Reference**: `TransactionManager.java:1330-1338`, `:1500-1510`; `Sender.java:266-285`
+
+**Description.** Both new tests carry this rationale verbatim:
+
+```rust
+/// `READY` is used as the invalid source because it is the state the shutdown
+/// window actually produces — the loop's guard admits `IN_TRANSACTION` /
+/// `ABORTABLE_ERROR`, and the application task completing a transaction between
+/// that guard read and this call leaves `READY` behind.
+```
+
+The application task cannot leave `READY` behind. `State::Ready` has exactly two production
+writers, and both are Sender-side:
+
+| writer | line | caller |
+|---|---|---|
+| `reset_transaction_state` | `transaction_manager.rs:2116` | `Caller::Sender` (hardcoded, PLAN §10.7 dev 11) |
+| `handle_init_producer_id_response` | `:3873` | `Caller::Sender` |
+
+and `reset_transaction_state`'s only callers are `next_request` (`:3357`) and
+`handle_end_txn_response` (`:4124`) — both on the Sender's own response path. So "a transaction
+completing" does produce `READY`, but the *Sender* produces it, not the application task.
+
+And when the Sender produces it, this call is not reached: `reset_transaction_state` runs inside
+`run_once`, so the loop re-evaluates `has_ongoing_transaction()` next — `READY` is not
+`IN_TRANSACTION`, is not completing, and has no abortable error, so the **loop exits** before
+`begin_abort`. There is no ordering in which the shutdown window presents `READY` to
+`begin_abort`.
+
+I then tried to find the state that *does* reach an invalid transition there, and could not
+construct one through the current guards. `COMMITTING_TRANSACTION` is the obvious candidate —
+the app calling `commit_transaction` in the window, and it is not a valid source for
+`→ ABORTING_TRANSACTION` — but `begin_commit` installs a `pending_transition`, so
+`handle_cached_transaction_request_result` returns the different-operation
+`IllegalState` before the supplier runs and no transition is attempted. Every other app-side
+move is intercepted the same way or by the supplier's own `maybe_fail_with_error`
+(`FATAL_ERROR`), and `prepare_transaction` lands on `PREPARED_TRANSACTION`, which is a *valid*
+source. So the honest justification is not a reachable path at all — it is that the pair pins a
+**contract** that must already hold when Phase 6 opens the application-side caller, which is
+worth exactly as much and is what makes `READY` a perfectly good choice of invalid source.
+
+Notably `begin_abort`'s own rustdoc gets this right and does not name a state
+(`transaction_manager.rs:1509-1511`): *"the application task **can move the state** between
+that guard read and this call, because the manager lock is released in between"*. That sentence
+is defensible as written. The two test docs went one step further and named the state, and that
+step is the error — so the fix is to bring them back in line with the method doc they sit under.
+
+- **Expected**: state that `READY` is simply an invalid source reachable from the fixture, and
+  that the pair pins the forwarding contract rather than covering a live path; or, if a
+  reachable window is to be claimed, name a state and an interleaving that survives
+  `handle_cached_transaction_request_result`'s pending-transition guard.
+- **Actual**: attributes `READY` to the application task, which has no path to it, in a window
+  whose guard would have exited first.
+
+---
+
+## Fixes verified
+
+**Finding 1 — the `Caller` fix and its two tests.** `begin_abort` now takes `caller: Caller`
+and forwards it (`:1547`); `Sender::begin_abort` passes `Caller::Sender` (`sender.rs:702`). The
+Actor's sharpening is right and I confirmed it: `KafkaProducer::from_config` still rejects
+`transactional.id`, so the Sender was the *only live* caller and the hardcode was wrong for
+every caller that exists — worse than I filed it.
+
+The re-derived entry-point sweep is accurate. `grep -rn '\.beginAbort(' producer/` gives the two
+callers claimed (`KafkaProducer.java:818`, `Sender.java:273`), and I re-checked each sibling:
+`beginCommit` `:783`, `sendOffsetsToTransaction` `:740`, `maybeAddPartition` `:1045`,
+`initializeTransactions` `:652`, `beginTransaction` `:679` — one application-side caller each.
+The `prepareTransaction` note's positive evidence checks out too:
+`KafkaProducerMetrics.java:80` is exactly
+`"Total time producer has spent in prepareTransaction in nanoseconds."`, i.e. a latency sensor
+over a user-called blocking method — sound evidence for application-facing-ness where a
+call-site grep finds nothing.
+
+Both tests exist and **discriminate as claimed**.
+`test_begin_abort_poisons_only_on_the_sender_side` (`transaction_manager.rs:5823`) drives
+`begin_abort` from `READY` with each `Caller` and asserts the asymmetry completely — App:
+error returned, state stays `Ready`, `last_error` none; Sender: `FatalError`, `last_error`
+recorded, same message, with the `TransactionalId foobar: ` prefix asserted. It pins
+*forwarding* and would indeed pass either way if the call site regressed, because it passes the
+caller explicitly. `test_sender_begin_abort_poisons_the_state_machine` (`sender.rs:7347`)
+asserts `has_fatal_error()` after `ctx.sender.begin_abort()`, which is the only assertion
+sensitive to the argument at the call site. So both are needed, for the reason given. The
+compile-failure claim holds structurally: `#![deny(warnings)]` is at `src/lib.rs:16`, so
+re-hardcoding inside `begin_abort` leaves `caller` unused and fails the build rather than the
+suite. See issue 1 for the one sentence in each doc that overreaches.
+
+**Finding 2 — both prose sites, and the second was real.** I diffed the field doc against
+`b70e353`: it previously read *"so a retry re-sends exactly what is still outstanding"* — the
+same false claim I filed against the response handler, which I had missed. Both now match
+Java's behaviour. The response-handler doc (`:4281-4299`) states that both builders snapshot at
+construction (Java's `setTopics(getTopics(..))` and `TxnOffsetCommitRequestBuilder::new`'s copy,
+with the borrow-checker reason), that `reenqueue()`/`retry` re-enqueue the same builder, that a
+retry therefore re-sends the **full original** list, what the map really governs (the tail's
+three-way choice and the *next* construction), and carries the explicit
+do-not-rebuild-before-retry warning. The field doc (`:1080-1091`) now draws the same distinction
+between a fresh construction and a retry of a built handler. Both accurate.
+
+**Finding 3 — count and placement, re-run.** Both shipped checks reproduce exactly: `56`, and
+`53 / 2 / 1` across the three named files. The placement argument is not merely suggestive — I
+verified each file's first match line against its `#[cfg(test)]` line (4993 > 4671,
+3875 > 2274, 1918 > 1813) **and** that each file has exactly one module-level `#[cfg(test)]`, so
+"no further module boundaries below" closes the argument: zero `expect` on a production path.
+The no-bare-number shape holds — the only numerals in the entry are derivation output, line
+numbers, the Java citation, and `35` appearing solely as the self-recorded correction.
+
+**Finding 4 — the direction argument is sound, and every claim reproduces.**
+
+- `verifyProducerFenced(` is inert at **0 of 107**, and the shipped no-op check is real: I
+  re-ran the classifier with it dropped from the alternation and `diff` is **empty**. Keeping it
+  in with a check beside it is the better call than deleting it, since the check is what makes
+  the inertness verifiable rather than asserted.
+- The stated *why* is right: its only call sites (Java 2077, 2101) sit inside the private
+  helpers `verifyProducerFencedForAddPartitionsToTxn` (`:2066`) and `..ForAddOffsetsToTxn`
+  (`:2090`), and the splitter stops at `^    private `.
+- `verifyCommitOrAbortTransactionRetriable` accounts for **4** of the 47 — I counted it
+  independently over the OWED set.
+- **The direction argument holds.** Not following private helpers can only fail to see
+  accumulator contact, i.e. produce a false `MGR`, never a false `ACC` (an `ACC` requires a
+  textual match in the scanned body). A false `MGR` can only *add* rows to the
+  `OWED ∧ MGR` join, never remove them — so an empty join cannot be manufactured by this error.
+  That is the right shape of argument for trusting a classifier, and it is the one that makes
+  the `0` load-bearing rather than decorative.
+- The four methods it mis-labels are named correctly: Java 2057, 2062, 2081, 2086 are exactly
+  the `verifyProducerFenced` family, all four labelled `MGR` by the classifier, and all four are
+  `HAVE` — each appears in the pasted GROUP-B-translated table (`:10093-10096`) and is named in a
+  Rust test's rustdoc (`:7695-7696` pairs the two AddPartition ones, `:7463-7464` the two
+  AddOffsets ones).
+- **4b**: the note now says "**more than one** line number", declines to record the count
+  because "it differs per title and moves with every prose edit", and keeps the at-the-time
+  values with the self-correction. My re-run makes the point for it: `PHASE-5B METHOD
+  ACCOUNTING` now gives **six** unanchored where the note recorded four — while the anchored
+  form gives `1` for both titles, which is what the derivations use. Exactly the right shape.
+
+**All derivations re-run post-edit, one from each block.** Method accounting: extracted with
+guards (23 lines, braces balanced) and run — `90 1 89` and `['is2PCEnabled']`, exit 0,
+identical to the paste. Test accounting: the `awk` extracted with guards (28 lines, 6/6 braces)
+gives 141 rows, and every downstream number reproduces — `57` MGR, `50` ACC, group-A OWED `0`,
+group-B HAVE `60`, group-B OWED `47`, and **the load-bearing join `0`**. The section-excision
+guard in the status derivation still fires correctly after the prose moved (21183 lines > 15000),
+which was the thing most likely to break on a comment-only edit.
+
+**Perf.** The 14/15/14 ms re-run is consistent with the 13-15 ms band recorded at Phase 4
+closure, and the change is one extra `Caller` argument on a per-transaction path — no send-path
+call shape is touched.
+
+---
+---
+
+# Critic 45 — Phase 5b pass 2: RESOLVED (fixup over `9b73389`)
+
+One finding, conceded. Re-derived before fixing rather than taking it.
+
+## Issue 1 — both test rustdocs justified `READY` with a reachability that does not exist. FIXED.
+
+Verified the Critic's claim directly:
+
+```
+$ cut=$(grep -n '^#\[cfg(test)\]' transaction_manager.rs | head -1 | cut -d: -f1)   # 4671
+$ grep -n "transition_to(State::Ready" transaction_manager.rs | awk -F: -v c=$cut '$1 < c'
+2116:            self.transition_to(State::Ready, None, Caller::Sender)?;
+3873:                self.transition_to(State::Ready, None, Caller::Sender)?;
+$ grep -n "reset_transaction_state()" transaction_manager.rs | awk -F: -v c=$cut '$1 < c'
+3357:   # inside pub(crate) fn next_request
+4124:   # inside fn handle_end_txn_response
+```
+
+Two production writers of `State::Ready`, **both** `Caller::Sender`; and
+`reset_transaction_state`'s only two callers are on the Sender's own response path
+inside `run_once`, so the shutdown loop re-evaluates `has_ongoing_transaction()` and
+exits before `begin_abort`. The application task has no path to `READY`, and no
+interleaving delivers it to that call. The sentence was wrong.
+
+Both docs now state what is actually true: `READY` is used because it is an invalid
+source for `→ ABORTING_TRANSACTION` that the fixture reaches directly, and the pair
+pins a **contract** that must already hold when Phase 6 opens the application-side
+caller and removes `KafkaProducer::from_config`'s `transactional.id` guard — the
+guarantee Java's shutdown loop is written against (`Sender.java:269-271`). The
+sibling doc in `transaction_manager.rs` also carries the Critic's survey of why no
+*other* state reaches an invalid transition there today
+(`COMMITTING_TRANSACTION` intercepted by `handle_cached_transaction_request_result`'s
+pending-transition guard; `prepare_transaction` landing on a valid source), so the
+next reader does not re-derive it; the `sender.rs` doc points at that survey rather
+than duplicating it.
+
+Scope held to the two comments as instructed. `begin_abort`'s own method rustdoc is
+untouched — the Critic is right that it does not name a state and is defensible as
+written, and it is what the two test docs are now aligned with. **The tests
+themselves are byte-identical**; both still pass and still discriminate (the pair's
+mutation checks from pass 1 are unaffected, since neither assertion changed).
+
+The class of error is worth naming: the fix for pass-1 issue 1 was correct, and in
+writing up *why* the test was shaped that way I invented a mechanism to justify a
+choice that needed no mechanism. A justification is a claim about the code and gets
+checked like one.
+
+## Verification — scoped down, deliberately
+
+This is prose inside two `#[cfg(test)]` rustdocs. No production line, no test body, no
+assertion changed, so the integration and C suites cannot be affected by it: scoped to
+`cargo build` **0**, `cargo test` **0** (2371 lib), `cargo xtask format-check` **0**,
+`cargo xtask lint` **0**, plus the two tests run by name. The pre-commit hook runs the
+full `make verify-sandbox` regardless, so the gate is not skipped — only my
+out-of-band re-run of it is. No perf run either, for the same reason (pass 1's
+14/15/14 ms stands; nothing executable moved since).
+
+Accounting derivations re-run, because the edit moves the line ranges the blocks read
+(per this phase's own rule): extraction guard ok at 21 217 lines; `90 1 89` +
+`['is2PCEnabled']`; group A owed **0**; **60 HAVE / 47 OWED**; the load-bearing
+`OWED_MGR` join **0**; both pasted GROUP-B tables still diff byte-identically; the
+no-stub `awk` still **0**. Also re-derived the numbers PLAN §10.8 deviation 3 pastes,
+since they are line numbers in the same files: 56 sites, and the `#[cfg(test)]`
+placement triple is unchanged (4993 > 4671, 3875 > 2274, 1918 > 1813, one module-level
+`#[cfg(test)]` per file).

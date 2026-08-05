@@ -7338,11 +7338,21 @@ mod tests {
     /// that would fail if the argument reverted to [`Caller::App`]. Both are needed:
     /// the forwarding test passes either way.
     ///
-    /// `READY` is used as the invalid source because it is the state the shutdown
-    /// window actually produces — the loop's guard admits `IN_TRANSACTION` /
-    /// `ABORTABLE_ERROR`, and the application task completing a transaction between
-    /// that guard read and this call leaves `READY` behind. Java anticipates the throw
-    /// here (`Sender.java:269-271`) and force-closes on it.
+    /// `READY` is used simply because it is an invalid source for
+    /// `→ ABORTING_TRANSACTION` that the fixture reaches directly — **not** because the
+    /// shutdown window can present it. It cannot: `State::Ready`'s only two production
+    /// writers are both `Caller::Sender`, and the one that runs on a completing
+    /// transaction (`reset_transaction_state`, via `next_request` /
+    /// `handle_end_txn_response`) fires inside `run_once`, so the loop re-evaluates
+    /// `has_ongoing_transaction()` and *exits* before reaching this call. An earlier
+    /// revision of this comment claimed otherwise; the correction, and the survey
+    /// showing no other state reaches an invalid transition here today, is in the
+    /// sibling test's rustdoc (Critic 45 5b pass 2).
+    ///
+    /// What the pair pins is therefore a **contract** rather than a live path: the
+    /// poisoning must already hold when Phase 6 opens the application-side caller. That
+    /// is the guarantee Java's shutdown loop is written against — it anticipates the
+    /// throw here (`Sender.java:269-271`) and force-closes on it.
     #[tokio::test]
     async fn test_sender_begin_abort_poisons_the_state_machine() {
         let transaction_manager = transactional_transaction_manager();
