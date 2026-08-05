@@ -9872,6 +9872,660 @@ mod tests {
         assert!(second_response_future.is_done());
     }
 
+    /// Translated from
+    /// `TransactionManagerTest.testRecoveryFromAbortableErrorProduceRequestInRetry`
+    /// (Java 1799-1860).
+    #[tokio::test]
+    async fn test_recovery_from_abortable_error_produce_request_in_retry() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let unauthorized_partition = TopicPartition::new("foo".to_string(), 0);
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::None)]);
+
+        let authorized_topic_produce_future = ctx.append_to_accumulator(&tp0).await;
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            let tp0 = tp0.clone();
+            run_until(&mut ctx.sender, move |_| {
+                manager.lock().unwrap().transaction_contains_partition(&tp0)
+            })
+            .await;
+        }
+
+        ctx.accumulator.begin_flush();
+        prepare_produce_response(&mut ctx, Errors::RequestTimedOut, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+        assert!(!authorized_topic_produce_future.is_done());
+        assert!(ctx.accumulator.has_incomplete());
+
+        maybe_add_partition(&ctx, &unauthorized_partition);
+        let unauthorized_topic_produce_future = ctx.append_to_accumulator(&unauthorized_partition).await;
+        prepare_add_partitions_to_txn(&mut ctx, &[(unauthorized_partition.clone(), Errors::TopicAuthorizationFailed)]);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().has_abortable_error()).await;
+        }
+        assert!(manager.lock().unwrap().transaction_contains_partition(&tp0));
+        assert!(!manager.lock().unwrap().transaction_contains_partition(&unauthorized_partition));
+        assert!(!authorized_topic_produce_future.is_done());
+
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        {
+            let authorized_topic_produce_future = Arc::clone(&authorized_topic_produce_future);
+            run_until(&mut ctx.sender, move |_| authorized_topic_produce_future.is_done()).await;
+        }
+
+        assert_produce_future_failed(&unauthorized_topic_produce_future).await;
+        authorized_topic_produce_future
+            .get()
+            .await
+            .expect("the retried send to an added partition succeeds");
+        assert!(authorized_topic_produce_future.is_done());
+
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+        let abort_result = begin_abort(&ctx);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().is_ready()).await;
+        }
+        assert!(manager.lock().unwrap().is_ready());
+        assert!(!manager.lock().unwrap().has_partitions_to_add());
+        assert!(!ctx.accumulator.has_incomplete());
+        assert!(abort_result.is_successful());
+        abort_result.await_result().await.expect("the abort succeeded");
+
+        // Ensure we can now start a new transaction.
+        begin_transaction(&ctx);
+        maybe_add_partition(&ctx, &tp0);
+
+        let next_transaction_future = ctx.append_to_accumulator(&tp0).await;
+
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::None)]);
+        {
+            let manager = Arc::clone(&manager);
+            let tp0 = tp0.clone();
+            run_until(&mut ctx.sender, move |_| {
+                manager.lock().unwrap().transaction_contains_partition(&tp0)
+            })
+            .await;
+        }
+        assert!(!manager.lock().unwrap().has_partitions_to_add());
+
+        begin_commit(&ctx);
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        {
+            let next_transaction_future = Arc::clone(&next_transaction_future);
+            run_until(&mut ctx.sender, move |_| next_transaction_future.is_done()).await;
+        }
+        next_transaction_future.get().await.expect("the send succeeded");
+
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().is_ready()).await;
+        }
+    }
+
+    /// The four `assertThrows(KafkaException.class, ..)` follow-up calls that
+    /// `testInvalidProducerEpochConvertToProducerFencedInEndTxn` (Java 2143-2148) makes
+    /// to prove the fatal error is raised directly by each entry point.
+    fn assert_all_transactional_entry_points_are_refused(ctx: &SenderTestContext) {
+        let manager = ctx.transaction_manager();
+        let pending_requests = ctx.pending_requests();
+        let mut pending_requests = pending_requests.lock().unwrap();
+        let mut manager = manager.lock().unwrap();
+        manager.begin_transaction().expect_err("beginTransaction is refused");
+        manager.begin_commit(&mut pending_requests).expect_err("beginCommit is refused");
+        manager
+            .begin_abort(&mut pending_requests, Caller::App)
+            .expect_err("beginAbort is refused");
+        #[allow(deprecated)]
+        let dummy = ConsumerGroupMetadata::new("dummyId");
+        manager
+            .send_offsets_to_transaction(HashMap::new(), dummy, &mut pending_requests)
+            .expect_err("sendOffsetsToTransaction is refused");
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testInvalidProducerEpochConvertToProducerFencedInEndTxn`
+    /// (Java 2125-2152).
+    #[tokio::test]
+    async fn test_invalid_producer_epoch_convert_to_producer_fenced_in_end_txn() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        let commit_result = begin_commit(&ctx);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        prepare_end_txn_response(
+            &mut ctx,
+            Errors::InvalidProducerEpoch,
+            TransactionResult::Commit,
+            TXN_PRODUCER_ID,
+            TXN_EPOCH,
+        );
+
+        {
+            let commit_result = Arc::clone(&commit_result);
+            run_until(&mut ctx.sender, move |_| commit_result.is_completed()).await;
+        }
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+
+        let error = commit_result.await_result().await.expect_err("the commit was fenced");
+        // `INVALID_PRODUCER_EPOCH` is converted to `ProducerFencedException` on the
+        // EndTxn path (`TransactionManager.java`'s EndTxn handler).
+        assert_eq!(error.error(), Errors::ProducerFenced);
+        assert!(!commit_result.is_successful());
+        assert!(commit_result.is_acked());
+
+        assert_all_transactional_entry_points_are_refused(&ctx);
+    }
+
+    /// Translated from `TransactionManagerTest.testInvalidProducerEpochFromProduce`
+    /// (Java 2155-2186).
+    #[tokio::test]
+    async fn test_invalid_producer_epoch_from_produce() {
+        use crate::common::protocol::ApiKeys;
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::InvalidProducerEpoch, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+
+        ctx.sender.run_once().await.expect("run_once");
+
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+        assert!(ctx.transaction_manager().lock().unwrap().has_error());
+
+        begin_abort(&ctx);
+
+        // First we will get an EndTxn for the abort.
+        let handler = ctx.next_request(false).expect("an EndTxn must be queued");
+        assert_eq!(handler.api_key(), &ApiKeys::END_TXN);
+
+        // Second we will see an InitProducerId for handling InvalidProducerEpoch.
+        let handler = ctx.next_request(false).expect("an InitProducerId must be queued");
+        assert_eq!(handler.api_key(), &ApiKeys::INIT_PRODUCER_ID);
+    }
+
+    /// Translated from `TransactionManagerTest.testDisallowCommitOnProduceFailure`
+    /// (Java 2189-2214).
+    #[tokio::test]
+    async fn test_disallow_commit_on_produce_failure() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        let commit_result = begin_commit(&ctx);
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::OutOfOrderSequenceNumber, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+
+        // The commit should be cancelled with an exception without being sent.
+        {
+            let commit_result = Arc::clone(&commit_result);
+            run_until(&mut ctx.sender, move |_| commit_result.is_completed()).await;
+        }
+
+        commit_result.await_result().await.expect_err("the commit was cancelled");
+        let error = response_future.get().await.expect_err("the produce failed");
+        assert_eq!(error.error(), Errors::OutOfOrderSequenceNumber);
+
+        // Commit is not allowed, so let's abort and try again.
+        let abort_result = begin_abort(&ctx);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+        prepare_init_pid_response(&mut ctx, Errors::None, false, TXN_PRODUCER_ID, TXN_EPOCH + 1);
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(abort_result.is_successful());
+        // Make sure we are ready for a transaction now.
+        assert!(ctx.transaction_manager().lock().unwrap().is_ready());
+    }
+
+    /// Translated from `TransactionManagerTest.testAllowAbortOnProduceFailure`
+    /// (Java 2217-2237).
+    #[tokio::test]
+    async fn test_allow_abort_on_produce_failure() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::OutOfOrderSequenceNumber, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+
+        // Because this is a failure that triggers an epoch bump, the abort will trigger
+        // an InitProducerId call.
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().has_abortable_error()).await;
+        }
+        let abort_result = begin_abort(&ctx);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+        prepare_init_pid_response(&mut ctx, Errors::None, false, TXN_PRODUCER_ID, TXN_EPOCH + 1);
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(abort_result.is_successful());
+        assert!(manager.lock().unwrap().is_ready());
+    }
+
+    /// Translated from `TransactionManagerTest.testAbortableErrorWhileAbortInProgress`
+    /// (Java 2240-2267).
+    #[tokio::test]
+    async fn test_abortable_error_while_abort_in_progress() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        {
+            let accumulator = Arc::clone(&ctx.accumulator);
+            run_until(&mut ctx.sender, move |_| !accumulator.has_undrained()).await;
+        }
+
+        let abort_result = begin_abort(&ctx);
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().is_aborting());
+        assert!(!manager.lock().unwrap().has_error());
+
+        send_produce_response(&mut ctx, Errors::OutOfOrderSequenceNumber, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+
+        // We do not transition to ABORTABLE_ERROR since we were already aborting.
+        assert!(manager.lock().unwrap().is_aborting());
+        assert!(!manager.lock().unwrap().has_error());
+
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(abort_result.is_successful());
+        assert!(manager.lock().unwrap().is_ready());
+    }
+
+    /// Java's `AtomicInteger numRuns; runUntil(() -> numRuns.incrementAndGet() >= 4)`,
+    /// which is "spin the Sender a few more times and assert nothing changed".
+    ///
+    /// The count is reproduced exactly rather than approximated: `run_until` evaluates
+    /// the predicate before each iteration and once more for its closing assertion, so
+    /// Java's version performs **three** `runOnce` calls and five increments.
+    fn run_a_few_more_times() -> impl Fn(&Sender<MockClient>) -> bool {
+        let runs = std::sync::atomic::AtomicUsize::new(0);
+        move |_| runs.fetch_add(1, Ordering::SeqCst) + 1 >= 4
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testCommitTransactionWithUnsentProduceRequest`
+    /// (Java 2270-2310).
+    #[tokio::test]
+    async fn test_commit_transaction_with_unsent_produce_request() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::None)]);
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+        assert!(ctx.accumulator.has_undrained());
+
+        // Committing the transaction should cause the unsent batch to be flushed.
+        begin_commit(&ctx);
+        {
+            let accumulator = Arc::clone(&ctx.accumulator);
+            run_until(&mut ctx.sender, move |_| !accumulator.has_undrained()).await;
+        }
+        assert!(ctx.accumulator.has_incomplete());
+        assert!(!ctx.sender.has_in_flight_request());
+        assert!(!response_future.is_done());
+
+        // Until the produce future returns, we will not send EndTxn.
+        run_until(&mut ctx.sender, run_a_few_more_times()).await;
+        assert!(!ctx.accumulator.has_undrained());
+        assert!(ctx.accumulator.has_incomplete());
+        assert!(!ctx.sender.has_in_flight_request());
+        assert!(!response_future.is_done());
+
+        // Now the produce response returns.
+        send_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+        assert!(!ctx.accumulator.has_undrained());
+        assert!(!ctx.accumulator.has_incomplete());
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // Now we send EndTxn.
+        run_until(&mut ctx.sender, |sender| sender.has_in_flight_request()).await;
+        send_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
+
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().is_ready()).await;
+        }
+        assert!(!ctx.sender.has_in_flight_request());
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testCommitTransactionWithInFlightProduceRequest`
+    /// (Java 2313-2352).
+    #[tokio::test]
+    async fn test_commit_transaction_with_in_flight_produce_request() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::None)]);
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| !manager.lock().unwrap().has_partitions_to_add()).await;
+        }
+        assert!(ctx.accumulator.has_undrained());
+
+        ctx.accumulator.begin_flush();
+        {
+            let accumulator = Arc::clone(&ctx.accumulator);
+            run_until(&mut ctx.sender, move |_| !accumulator.has_undrained()).await;
+        }
+        assert!(!ctx.accumulator.has_undrained());
+        assert!(ctx.accumulator.has_incomplete());
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // Now we begin the commit with the produce request still pending.
+        begin_commit(&ctx);
+        run_until(&mut ctx.sender, run_a_few_more_times()).await;
+        assert!(!ctx.accumulator.has_undrained());
+        assert!(ctx.accumulator.has_incomplete());
+        assert!(!ctx.sender.has_in_flight_request());
+        assert!(!response_future.is_done());
+
+        // Now the produce response returns.
+        send_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+        assert!(!ctx.accumulator.has_undrained());
+        assert!(!ctx.accumulator.has_incomplete());
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // Now we send EndTxn.
+        run_until(&mut ctx.sender, |sender| sender.has_in_flight_request()).await;
+        send_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().is_ready()).await;
+        }
+        assert!(!ctx.sender.has_in_flight_request());
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testCancelUnsentAddPartitionsAndProduceOnAbort`
+    /// (Java 2377-2395).
+    #[tokio::test]
+    async fn test_cancel_unsent_add_partitions_and_produce_on_abort() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+        assert!(!response_future.is_done());
+
+        let abort_result = begin_abort(&ctx);
+        // Note: since no partitions were added to the transaction, no EndTxn will be sent.
+
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(abort_result.is_successful());
+        assert!(ctx.transaction_manager().lock().unwrap().is_ready());
+
+        let error = response_future.get().await.expect_err("the unsent batch is aborted");
+        assert!(
+            matches!(error, KafkaError::TransactionAborted(_)),
+            "expected a TransactionAbortedException, got {error}"
+        );
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testAbortResendsAddPartitionErrorIfRetried`
+    /// (Java 2398-2421).
+    #[tokio::test]
+    async fn test_abort_resends_add_partition_error_if_retried() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions_with(&mut ctx, TXN_PRODUCER_ID, TXN_EPOCH).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        prepare_add_partitions_to_txn_response(
+            &mut ctx,
+            Errors::UnknownTopicOrPartition,
+            &tp0,
+            TXN_EPOCH,
+            TXN_PRODUCER_ID,
+        );
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+        assert!(!response_future.is_done());
+
+        let abort_result = begin_abort(&ctx);
+
+        // We should resend the AddPartitions.
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(abort_result.is_successful());
+        assert!(ctx.transaction_manager().lock().unwrap().is_ready());
+
+        let error = response_future.get().await.expect_err("the unsent batch is aborted");
+        assert!(
+            matches!(error, KafkaError::TransactionAborted(_)),
+            "expected a TransactionAbortedException, got {error}"
+        );
+    }
+
+    /// Translated from `TransactionManagerTest.testAbortResendsProduceRequestIfRetried`
+    /// (Java 2424-2449).
+    #[tokio::test]
+    async fn test_abort_resends_produce_request_if_retried() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions_with(&mut ctx, TXN_PRODUCER_ID, TXN_EPOCH).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::RequestTimedOut, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+        assert!(!response_future.is_done());
+
+        let abort_result = begin_abort(&ctx);
+
+        // We should resend the ProduceRequest before aborting.
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(abort_result.is_successful());
+        assert!(ctx.transaction_manager().lock().unwrap().is_ready());
+
+        let record_metadata = response_future.get().await.expect("the retried send succeeded");
+        assert_eq!(record_metadata.topic(), tp0.topic());
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testHandlingOfUnknownTopicPartitionErrorOnAddPartitions`
+    /// (Java 2452-2470).
+    #[tokio::test]
+    async fn test_handling_of_unknown_topic_partition_error_on_add_partitions() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(
+            &mut ctx,
+            Errors::UnknownTopicOrPartition,
+            &tp0,
+            TXN_EPOCH,
+            TXN_PRODUCER_ID,
+        );
+
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+        let manager = ctx.transaction_manager();
+        // The partition should not yet be added.
+        assert!(!manager.lock().unwrap().transaction_contains_partition(&tp0));
+
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        {
+            let manager = Arc::clone(&manager);
+            let tp0 = tp0.clone();
+            run_until(&mut ctx.sender, move |_| {
+                manager.lock().unwrap().transaction_contains_partition(&tp0)
+            })
+            .await;
+        }
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed`
+    /// (Java 2574-2585).
+    #[tokio::test]
+    async fn should_not_add_partitions_to_transaction_when_topic_authorization_failed() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::TopicAuthorizationFailed)]);
+        let manager = ctx.transaction_manager();
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().has_error()).await;
+        }
+        assert!(!manager.lock().unwrap().transaction_contains_partition(&tp0));
+    }
+
     #[test]
     fn test_transactional_response_without_a_body_is_fatal() {
         let mut ctx = SenderTestContext::idempotent();
