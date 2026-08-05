@@ -22,10 +22,13 @@
 //!
 //! # Transactional API
 //!
-//! Transactional methods (`initTransactions`, `beginTransaction`,
-//! `commitTransaction`, `abortTransaction`, `sendOffsetsToTransaction`) are
-//! excluded from this implementation because the [`Producer`] trait does not
-//! include them. They can be added in a future phase if needed.
+//! The [`Producer`] trait's transactional methods (`init_transactions`,
+//! `begin_transaction`, `commit_transaction`, `abort_transaction`,
+//! `send_offsets_to_transaction`) are implemented here only as explicit
+//! `UnsupportedVersion` failures (CLAUDE.md §5). The state they need — Java's
+//! `transactionInitialized` (`MockProducer.java:70`), `transactionInFlight`
+//! (`:71`), `sentOffsets` (`:75`) and the uncommitted-record staging — is
+//! Milestone 11 Phase 7 (`design/history/Milestone-11/PLAN.md` §Phase-7).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -42,6 +45,8 @@ use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::record::RecordBatch;
+use crate::consumer::ConsumerGroupMetadata;
+use crate::consumer::OffsetAndMetadata;
 
 use super::Callback;
 
@@ -52,7 +57,7 @@ use super::Callback;
 /// the call and supply an optional error for the producer to throw.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.producer.MockProducer`
-/// (non-transactional subset).
+/// (non-transactional subset — see the module docs).
 ///
 /// # Thread Safety
 ///
@@ -283,6 +288,18 @@ impl<K, V> MockProducer<K, V> {
     }
 }
 
+impl<K, V> MockProducer<K, V> {
+    /// The error every `MockProducer` transactional method returns until Phase 7
+    /// translates the surface behind them.
+    fn transactions_not_implemented(operation: &str) -> KafkaError {
+        KafkaError::unsupported_version(format!(
+            "MockProducer.{} is not implemented yet (Milestone 11, Phase 7); \
+             use KafkaProducer for transactional tests.",
+            operation
+        ))
+    }
+}
+
 impl<K, V> Default for MockProducer<K, V> {
     /// Create a new mock producer with an empty cluster and `auto_complete=false`.
     ///
@@ -293,6 +310,41 @@ impl<K, V> Default for MockProducer<K, V> {
 }
 
 impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
+    /// Not yet translated: `MockProducer`'s transactional surface is Phase 7 of
+    /// Milestone 11 (`design/history/Milestone-11/PLAN.md` §Phase-7), which owns
+    /// `transactionInitialized` (Java 70), `transactionInFlight` (71),
+    /// `sentOffsets` (75) and the uncommitted-record staging that gives these
+    /// methods anything to do.
+    ///
+    /// Returns an explicit error rather than silently succeeding, per CLAUDE.md §5.
+    async fn init_transactions(&self) -> Result<(), KafkaError> {
+        Err(Self::transactions_not_implemented("initTransactions"))
+    }
+
+    /// Not yet translated — see [`Self::init_transactions`].
+    fn begin_transaction(&self) -> Result<(), KafkaError> {
+        Err(Self::transactions_not_implemented("beginTransaction"))
+    }
+
+    /// Not yet translated — see [`Self::init_transactions`].
+    async fn send_offsets_to_transaction(
+        &self,
+        _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        _group_metadata: ConsumerGroupMetadata,
+    ) -> Result<(), KafkaError> {
+        Err(Self::transactions_not_implemented("sendOffsetsToTransaction"))
+    }
+
+    /// Not yet translated — see [`Self::init_transactions`].
+    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+        Err(Self::transactions_not_implemented("commitTransaction"))
+    }
+
+    /// Not yet translated — see [`Self::init_transactions`].
+    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+        Err(Self::transactions_not_implemented("abortTransaction"))
+    }
+
     async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.send_with_callback(record, None).await
     }

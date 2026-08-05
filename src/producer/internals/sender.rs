@@ -2242,12 +2242,35 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
+        // Java 922-928. Both stay at their defaults for a non-transactional or
+        // purely idempotent producer: `transactionalId` is null and
+        // `useTransactionV1Version` false.
+        let (transactional_id, use_transaction_v1_version) = match &self.transaction_manager {
+            Some(transaction_manager) => {
+                let transaction_manager = transaction_manager.lock().unwrap();
+                if transaction_manager.is_transactional() {
+                    (
+                        transaction_manager.transactional_id().map(str::to_string),
+                        !transaction_manager.is_transaction_v2_enabled(),
+                    )
+                } else {
+                    (None, false)
+                }
+            },
+            None => (None, false),
+        };
+
         let mut data = ProduceRequestData::new();
         data.set_acks(acks);
         data.set_timeout_ms(timeout);
+        data.set_transactional_id(transactional_id);
         data.set_topic_data(topic_data_list);
 
-        let request_builder = ProduceRequestBuilder::new(data);
+        // Java 930-936: `ProduceRequest.builder(data, useTransactionV1Version)` caps
+        // the version at the last Transaction V1 one when the flag is set, so a
+        // broker that has not finalized `transaction.version` 2 is not sent a v12+
+        // produce request.
+        let request_builder = ProduceRequestBuilder::builder(data, use_transaction_v1_version);
 
         // Capture debug representation before request_builder is moved into Box.
         let request_debug = if log::log_enabled!(log::Level::Trace) {

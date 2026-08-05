@@ -20,8 +20,10 @@
 //! The producer is thread-safe and sharing a single producer instance across
 //! threads will generally be faster than having multiple instances.
 //!
-//! Transactional methods are not translated in this phase.
+//! Transactional methods are translated: see [`KafkaProducer::init_transactions`]
+//! and its four siblings.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,8 +46,11 @@ use crate::common::network::channel_builders;
 use crate::common::record::CompressionType;
 use crate::common::record::RecordBatch;
 use crate::common::record::abstract_records;
+use crate::common::requests::txn_offset_commit_request;
 use crate::common::serialization::Serializer;
 use crate::common::utils::LogContext;
+use crate::consumer::ConsumerGroupMetadata;
+use crate::consumer::OffsetAndMetadata;
 use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
@@ -289,25 +294,13 @@ impl<K, V> KafkaProducer<K, V> {
         //    Translated from KafkaProducer.configureDeliveryTimeout().
         let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
 
-        // MILESTONE-11 GUARD: reject configurations that ask for transactions, which
-        // are not implemented yet.
-        //
-        // The idempotence arm of this guard is gone as of Phase 4: `enable.idempotence`
-        // is now honoured for real — `configure_transaction_state` below builds a
-        // `TransactionManager`, the accumulator's drain assigns producer ids, epochs
-        // and sequence numbers, and `Sender.runOnce` acquires and bumps the producer
-        // id. The transactional arm remains until Phase 6 wires
-        // `init_transactions` / `commit_transaction` / `abort_transaction`.
-        //
-        // The check lives here, not in `ProducerConfig`, so the config translation
-        // stays a faithful mirror of Java and free of "not yet implemented".
-        if config.transactional_id.is_some() {
-            return Err(KafkaError::unsupported_version(format!(
-                "Transactions are not yet implemented in this client (Milestone 11, Phase 6); \
-                 remove `{}` from the producer configuration.",
-                ProducerConfig::TRANSACTIONAL_ID_CONFIG
-            )));
-        }
+        // The MILESTONE-11 GUARD that used to sit here is gone. Its idempotence arm
+        // was removed in Phase 4, when `enable.idempotence` began to be honoured for
+        // real; its transactional arm is removed here, now that
+        // `init_transactions` / `begin_transaction` / `send_offsets_to_transaction` /
+        // `commit_transaction` / `abort_transaction` are implemented. PLAN §7.1 named
+        // this removal as an explicit Phase-6 deliverable, so nothing is left behind
+        // (CLAUDE.md §5).
 
         // 3. Derive compression from config
         //    Translated from KafkaProducer.configureCompression().
@@ -378,7 +371,7 @@ impl<K, V> KafkaProducer<K, V> {
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
         //    at the same point in the constructor (`KafkaProducer.java:415`, ahead
         //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
-        let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context)?;
+        let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
 
         // 9. Create BufferPool and RecordAccumulator
         //    As per Kafka configuration documentation, batch.size may be set to 0
@@ -425,17 +418,17 @@ impl<K, V> KafkaProducer<K, V> {
     /// so `AbstractConfig` does not warn about it, which has no Rust analogue —
     /// `ProducerConfig` parses every key eagerly.
     ///
-    /// Returns `Ok(None)` when idempotence is disabled, mirroring Java's null
-    /// `transactionManager`. The `Result` is kept because
-    /// [`Self::from_config`]'s own guard on `transactional.id` (PLAN §7.1) is the
-    /// error this function's callers must still be able to surface.
+    /// Returns `None` when idempotence is disabled, mirroring Java's null
+    /// `transactionManager`. It no longer returns a `Result`: the only error it
+    /// ever carried was [`Self::from_config`]'s temporary guard on
+    /// `transactional.id` (PLAN §7.1), which Phase 6 removed.
     fn configure_transaction_state(
         config: &ProducerConfig,
         api_versions: &Arc<ApiVersions>,
         log_context: &LogContext,
-    ) -> Result<Option<Arc<Mutex<TransactionManager>>>, KafkaError> {
+    ) -> Option<Arc<Mutex<TransactionManager>>> {
         if !config.enable_idempotence {
-            return Ok(None);
+            return None;
         }
 
         let transaction_manager = TransactionManager::new(
@@ -453,7 +446,7 @@ impl<K, V> KafkaProducer<K, V> {
             kafka_info!(log_context, "Instantiated an idempotent producer.");
         }
 
-        Ok(Some(Arc::new(Mutex::new(transaction_manager))))
+        Some(Arc::new(Mutex::new(transaction_manager)))
     }
 
     /// Creates a `KafkaProducer` from pre-built collaborators and spawns the
@@ -595,6 +588,338 @@ impl<K, V> KafkaProducer<K, V> {
         (self.time_provider)()
     }
 
+    /// `max.block.ms` as a [`Duration`], for the four transactional methods that
+    /// bound their wait with it (`result.await(maxBlockTimeMs, MILLISECONDS)`).
+    ///
+    /// Clamped at zero: a negative `max.block.ms` cannot be configured, and
+    /// `Duration` has no negative representation.
+    fn max_block_timeout(&self) -> Duration {
+        Duration::from_millis(self.max_block_ms.max(0) as u64)
+    }
+
+    /// Needs to be called before any other method when the `transactional.id` is
+    /// set in the configuration.
+    ///
+    /// Translated from `KafkaProducer.initTransactions()`
+    /// (`KafkaProducer.java:648-659`). This method does the following:
+    ///
+    /// 1. Ensures any transactions initiated by previous instances of the producer
+    ///    with the same `transactional.id` are completed. If the previous instance
+    ///    had failed with a transaction in progress, it will be aborted. If the
+    ///    last transaction had begun completion, but not yet finished, this method
+    ///    awaits its completion.
+    /// 2. Gets the internal producer id and epoch, used in all future
+    ///    transactional messages issued by the producer.
+    ///
+    /// Java blocks on `result.await(maxBlockTimeMs, ..)`, so this is `async`
+    /// (CLAUDE.md §9.1) and returns [`KafkaError::Timeout`] when the transactional
+    /// state cannot be initialized before `max.block.ms` expires. It is safe to
+    /// retry in that case, but once the transactional state has been successfully
+    /// initialized this method should no longer be used.
+    ///
+    /// Java's `InterruptException` path has no Rust analogue — a task is not
+    /// interrupted, it is dropped.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    ///   does not support transactions
+    /// - An authorization error indicating that the configured `transactional.id`
+    ///   is not authorized, or the idempotent producer id is unavailable; the user
+    ///   may retry after fixing the permission
+    /// - Any previous fatal error the producer has encountered
+    /// - [`KafkaError::Timeout`] if initializing the transaction takes longer than
+    ///   `max.block.ms`
+    pub async fn init_transactions(&self) -> Result<(), KafkaError> {
+        let transaction_manager = self.transaction_manager_or_error()?;
+        self.ensure_not_closed()?;
+        // Java measures `time.nanoseconds()` around the wait for
+        // `producerMetrics.recordInit(..)`. There is no metrics layer in this crate
+        // yet — `KafkaProducerMetrics` and the whole `org.apache.kafka.common.metrics`
+        // package are listed in `remaining_classes.txt` — so the timing statements
+        // that exist only to feed a sensor are not translated. The same note covers
+        // `recordBeginTxn`, `recordSendOffsets`, `recordCommitTxn` and
+        // `recordAbortTxn` below.
+        let result = {
+            // `pending_requests` before the manager, per the field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
+            transaction_manager
+                .lock()
+                .unwrap()
+                .initialize_transactions(false, &mut pending_requests)?
+        };
+        self.wakeup.notify_one();
+        result.await_result_timeout(self.max_block_timeout()).await?;
+        // Java runs this only after a successful await, so the `?` above must stay
+        // ahead of it.
+        transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
+        Ok(())
+    }
+
+    /// Should be called before the start of each new transaction. Note that prior
+    /// to the first invocation of this method, [`Self::init_transactions`] must be
+    /// invoked exactly one time.
+    ///
+    /// Translated from `KafkaProducer.beginTransaction()`
+    /// (`KafkaProducer.java:674-681`). Stays synchronous: Java's body is a pure
+    /// state transition with no wait, so CLAUDE.md §9.1 does not apply.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    ///   or if [`Self::init_transactions`] has not yet been invoked
+    /// - A producer-fenced error if another producer with the same
+    ///   `transactional.id` is active
+    /// - An invalid-producer-epoch error if the producer has attempted to produce
+    ///   with an old epoch to the partition leader
+    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    ///   does not support transactions
+    /// - Any previous fatal error the producer has encountered
+    pub fn begin_transaction(&self) -> Result<(), KafkaError> {
+        let transaction_manager = self.transaction_manager_or_error()?;
+        self.ensure_not_closed()?;
+        self.throw_if_in_prepared_state()?;
+        transaction_manager.lock().unwrap().begin_transaction()
+    }
+
+    /// Sends a list of specified offsets to the consumer group coordinator, and
+    /// also marks those offsets as part of the current transaction. These offsets
+    /// will be considered committed only if the transaction is committed
+    /// successfully.
+    ///
+    /// Translated from
+    /// `KafkaProducer.sendOffsetsToTransaction(Map, ConsumerGroupMetadata)`
+    /// (`KafkaProducer.java:733-746`).
+    ///
+    /// The committed offset should be the next message the application will
+    /// consume, i.e. `next_record_to_be_processed.offset()`. The leader epoch
+    /// should also be added as commit metadata.
+    ///
+    /// This method should be used when consumed and produced messages need to be
+    /// batched together, typically in a consume-transform-produce pattern. Thus
+    /// `group_metadata` should be obtained from the consumer's `group_metadata()`
+    /// to leverage consumer group metadata, which provides stronger fencing than
+    /// `ConsumerGroupMetadata::new(group_id)`.
+    ///
+    /// Java blocks until the request has been received and acknowledged by the
+    /// consumer group coordinator; the offsets are not considered committed until
+    /// the transaction itself is successfully committed via
+    /// [`Self::commit_transaction`].
+    ///
+    /// Note that the consumer should have `enable.auto.commit=false` and should
+    /// also not commit offsets manually.
+    ///
+    /// `offsets` and `group_metadata` are taken by value because the transaction
+    /// manager moves both into the `AddOffsetsToTxn` handler that carries them to
+    /// the coordinator — the same convention
+    /// `AsyncKafkaConsumer::commit_sync_offsets` already uses for an offsets map.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalArgument`] if `group_metadata` has a generation id
+    ///   greater than zero but an unknown member id
+    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    ///   or no transaction has been started
+    /// - A producer-fenced error if another producer with the same
+    ///   `transactional.id` is active
+    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    ///   does not support transactions, or does not support the latest version of
+    ///   the transactional API with all consumer group metadata
+    /// - An authorization error indicating that the configured `transactional.id`
+    ///   or the consumer group id is not authorized
+    /// - A commit-failed error if the commit cannot be retried (e.g. the consumer
+    ///   has been kicked out of the group); users should handle this by aborting
+    ///   the transaction
+    /// - [`KafkaError::Timeout`] if sending the offsets takes longer than
+    ///   `max.block.ms`
+    pub async fn send_offsets_to_transaction(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
+    ) -> Result<(), KafkaError> {
+        Self::throw_if_invalid_group_metadata(&group_metadata)?;
+        let transaction_manager = self.transaction_manager_or_error()?;
+        self.ensure_not_closed()?;
+
+        // Java 738: an empty map is a no-op, and in particular does not consult the
+        // transaction state at all.
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        let result = {
+            // `pending_requests` before the manager, per the field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
+            transaction_manager.lock().unwrap().send_offsets_to_transaction(
+                offsets,
+                group_metadata,
+                &mut pending_requests,
+            )?
+        };
+        self.wakeup.notify_one();
+        result.await_result_timeout(self.max_block_timeout()).await
+    }
+
+    /// Commits the ongoing transaction. This method will flush any unsent records
+    /// before actually committing the transaction.
+    ///
+    /// Translated from `KafkaProducer.commitTransaction()`
+    /// (`KafkaProducer.java:779-786`).
+    ///
+    /// If any of the [`send`](Self::send) calls which were part of the transaction
+    /// hit irrecoverable errors, this method returns the last received error
+    /// immediately and the transaction is not committed. So all `send` calls in a
+    /// transaction must succeed in order for this method to succeed.
+    ///
+    /// If the transaction is committed successfully and this method returns
+    /// `Ok(())`, it is guaranteed that all callbacks for records in the
+    /// transaction will have been invoked and completed. Note that errors returned
+    /// by callbacks are ignored; the producer proceeds to commit the transaction in
+    /// any case.
+    ///
+    /// A [`KafkaError::Timeout`] does **not** mean the request did not reach the
+    /// broker — only that the acknowledgement did not arrive in time, so it is up
+    /// to the application to decide how to handle it. It is safe to retry, but it
+    /// is not possible to attempt a different operation (such as
+    /// [`Self::abort_transaction`]) since the commit may already be in the process
+    /// of completing. If not retrying, the only option is to close the producer.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    ///   or no transaction has been started
+    /// - A producer-fenced error if another producer with the same
+    ///   `transactional.id` is active
+    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    ///   does not support transactions
+    /// - An authorization error indicating that the configured `transactional.id`
+    ///   is not authorized
+    /// - An invalid-producer-epoch error if the producer has attempted to produce
+    ///   with an old epoch to the partition leader
+    /// - Any previous fatal or abortable error the producer has encountered
+    /// - [`KafkaError::Timeout`] if committing takes longer than `max.block.ms`
+    pub async fn commit_transaction(&self) -> Result<(), KafkaError> {
+        let transaction_manager = self.transaction_manager_or_error()?;
+        self.ensure_not_closed()?;
+        let result = {
+            // `pending_requests` before the manager, per the field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
+            transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
+        };
+        self.wakeup.notify_one();
+        result.await_result_timeout(self.max_block_timeout()).await
+    }
+
+    /// Aborts the ongoing transaction. Any unflushed produce messages will be
+    /// aborted when this call is made.
+    ///
+    /// Translated from `KafkaProducer.abortTransaction()`
+    /// (`KafkaProducer.java:813-821`).
+    ///
+    /// This call returns an error immediately if any prior [`send`](Self::send)
+    /// call failed with a producer-fenced or an authorization error.
+    ///
+    /// A [`KafkaError::Timeout`] does **not** mean the request did not reach the
+    /// broker — see [`Self::commit_transaction`] for the full note; it is safe to
+    /// retry, but not to attempt a different operation.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    ///   or no transaction has been started
+    /// - A producer-fenced error if another producer with the same
+    ///   `transactional.id` is active
+    /// - An invalid-producer-epoch error if the producer has attempted to produce
+    ///   with an old epoch to the partition leader
+    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    ///   does not support transactions
+    /// - An authorization error indicating that the configured `transactional.id`
+    ///   is not authorized
+    /// - Any previous fatal error the producer has encountered
+    /// - [`KafkaError::Timeout`] if aborting takes longer than `max.block.ms`
+    pub async fn abort_transaction(&self) -> Result<(), KafkaError> {
+        let transaction_manager = self.transaction_manager_or_error()?;
+        self.ensure_not_closed()?;
+        kafka_info!(self.log_context, "Aborting incomplete transaction");
+        let result = {
+            // `pending_requests` before the manager, per the field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
+            // `Caller::App`: this runs on the application task (rules §1).
+            transaction_manager
+                .lock()
+                .unwrap()
+                .begin_abort(&mut pending_requests, Caller::App)?
+        };
+        self.wakeup.notify_one();
+        result.await_result_timeout(self.max_block_timeout()).await
+    }
+
+    /// The shared [`TransactionManager`], or the error Java's
+    /// `throwIfNoTransactionManager()` (`KafkaProducer.java:1507-1511`) throws.
+    ///
+    /// Java checks `transactionManager == null` only, so an *idempotent* producer
+    /// passes this check and is rejected one level down by the manager's own
+    /// `ensureTransactional()` with a different message. That split is preserved:
+    /// this must not also test `is_transactional()`.
+    fn transaction_manager_or_error(&self) -> Result<Arc<Mutex<TransactionManager>>, KafkaError> {
+        match &self.transaction_manager {
+            Some(transaction_manager) => Ok(Arc::clone(transaction_manager)),
+            None => Err(KafkaError::illegal_state(format!(
+                "Cannot use transactional methods without enabling transactions by setting the {} configuration property",
+                ProducerConfig::TRANSACTIONAL_ID_CONFIG
+            ))),
+        }
+    }
+
+    /// Returns an error if the transaction is in a prepared state.
+    ///
+    /// Translated from `KafkaProducer.throwIfInPreparedState()`
+    /// (`KafkaProducer.java:968-976`). In a two-phase commit (2PC) flow, once a
+    /// transaction enters the prepared state, only commit, abort, or complete
+    /// operations are allowed.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalState`] if any other operation is attempted in the
+    /// prepared state.
+    fn throw_if_in_prepared_state(&self) -> Result<(), KafkaError> {
+        if let Some(transaction_manager) = &self.transaction_manager {
+            let transaction_manager = transaction_manager.lock().unwrap();
+            if transaction_manager.is_transactional() && transaction_manager.is_prepared() {
+                return Err(KafkaError::illegal_state(
+                    "Cannot perform operation while the transaction is in a prepared state. \
+                     Only commitTransaction(), abortTransaction(), or completeTransaction() are permitted.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates the consumer group metadata handed to
+    /// [`Self::send_offsets_to_transaction`].
+    ///
+    /// Translated from `KafkaProducer.throwIfInvalidGroupMetadata`
+    /// (`KafkaProducer.java:1498-1505`). Java's first arm rejects a `null`
+    /// argument; a `ConsumerGroupMetadata` value cannot be null in Rust, so the
+    /// type system enforces that arm and only the second is translated.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalArgument`] when the generation id is greater than zero
+    /// but the member id is unknown.
+    fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), KafkaError> {
+        if group_metadata.generation_id() > 0
+            && group_metadata.member_id() == txn_offset_commit_request::UNKNOWN_MEMBER_ID
+        {
+            return Err(KafkaError::illegal_argument(format!(
+                "Passed in group metadata {} has generationId > 0 but the member.id is unknown",
+                group_metadata
+            )));
+        }
+        Ok(())
+    }
+
     /// Verify that this producer instance has not been closed.
     ///
     /// Corresponds to Java's `throwIfProducerClosed()`.
@@ -625,6 +950,9 @@ impl<K, V> KafkaProducer<K, V> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
+        // Java 989: a send is one of the operations 2PC forbids once the transaction
+        // is prepared.
+        self.throw_if_in_prepared_state()?;
 
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
@@ -1101,6 +1429,37 @@ where
     K: Send + Sync,
     V: Send + Sync,
 {
+    /// Needs to be called before any other method when the `transactional.id` is
+    /// set in the configuration.
+    async fn init_transactions(&self) -> Result<(), KafkaError> {
+        KafkaProducer::init_transactions(self).await
+    }
+
+    /// Should be called before the start of each new transaction.
+    fn begin_transaction(&self) -> Result<(), KafkaError> {
+        KafkaProducer::begin_transaction(self)
+    }
+
+    /// Sends a list of specified offsets to the consumer group coordinator, and
+    /// also marks those offsets as part of the current transaction.
+    async fn send_offsets_to_transaction(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
+    ) -> Result<(), KafkaError> {
+        KafkaProducer::send_offsets_to_transaction(self, offsets, group_metadata).await
+    }
+
+    /// Commits the ongoing transaction.
+    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+        KafkaProducer::commit_transaction(self).await
+    }
+
+    /// Aborts the ongoing transaction.
+    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+        KafkaProducer::abort_transaction(self).await
+    }
+
     /// Asynchronously send a record to a topic.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
@@ -2243,12 +2602,13 @@ mod tests {
         );
     }
 
-    // -- MILESTONE-11 GUARD tests -------------------------------------------
+    // -- `configureTransactionState` tests ----------------------------------
     //
-    // These cover the temporary guard in `from_config` that rejects transactional
-    // configuration. They are deleted along with the guard itself in Phase 6. The
-    // idempotence cases below are no longer rejections: as of Phase 4
-    // `enable.idempotence` is honoured, so all three must construct.
+    // These began life covering the temporary MILESTONE-11 GUARD in `from_config`.
+    // Phase 4 turned the idempotence cases from rejections into constructions, and
+    // Phase 6 removed the guard's last (transactional) arm — so what they now cover
+    // is `configureTransactionState` (`KafkaProducer.java:592-620`) across its three
+    // outcomes: no manager, an idempotent manager, and a transactional manager.
 
     fn guard_props(extra: &[(&str, &str)]) -> HashMap<String, String> {
         let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())]);
@@ -2264,8 +2624,7 @@ mod tests {
             .map(|_| ())
     }
 
-    /// The default configuration must construct. `#[tokio::test]`: unlike the
-    /// rejection case, which errors before doing any work, a successful
+    /// The default configuration must construct. `#[tokio::test]`: a successful
     /// `from_config` spawns the Sender task and so needs a runtime. The spawned task
     /// attempts to reach localhost:9999, fails harmlessly, and is dropped with the
     /// test.
@@ -2313,14 +2672,110 @@ mod tests {
         assert!(producer.transaction_manager.is_none());
     }
 
-    #[test]
-    fn test_guard_rejects_transactional_id() {
-        let error = from_guard_props(&guard_props(&[("transactional.id", "my-txn")]))
-            .expect_err("transactional.id must be rejected until Phase 6");
-        assert!(
-            error.message().contains("Transactions are not yet implemented"),
-            "unexpected message: {}",
-            error.message()
+    /// `transactional.id` is accepted as of Phase 6, and the producer really is
+    /// transactional: `configureTransactionState` passes the id through to the
+    /// manager (`KafkaProducer.java:597`, `:602`) and `isTransactional()` reports it.
+    ///
+    /// This replaces the Phase-1 `test_guard_rejects_transactional_id`, whose whole
+    /// subject — the `from_config` guard of PLAN §7.1 — is what this phase deleted.
+    #[tokio::test]
+    async fn test_transactional_id_builds_a_transactional_manager() {
+        let props = guard_props(&[("transactional.id", "my-txn")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("transactional.id is supported as of Phase 6");
+        let transaction_manager = producer
+            .transaction_manager
+            .as_ref()
+            .expect("configureTransactionState builds a manager when transactional.id is set");
+        let manager = transaction_manager.lock().unwrap();
+        assert!(manager.is_transactional());
+        assert_eq!(manager.transactional_id(), Some("my-txn"));
+    }
+
+    /// A producer with no `transactional.id` rejects every transactional method
+    /// with Java's `throwIfNoTransactionManager` message — but only when there is
+    /// no manager at all, i.e. `enable.idempotence=false`. An *idempotent* producer
+    /// has a manager and is rejected one level down; the next test covers that.
+    ///
+    /// Java's message is built at `KafkaProducer.java:1508-1510`.
+    #[tokio::test]
+    async fn test_transactional_methods_without_a_manager() {
+        let props = guard_props(&[("enable.idempotence", "false")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("disabling idempotence is allowed");
+
+        const EXPECTED: &str = "Cannot use transactional methods without enabling transactions \
+                                by setting the transactional.id configuration property";
+
+        let expect_no_manager = |error: KafkaError, method: &str| {
+            assert_eq!(error.message(), EXPECTED, "{} reported the wrong error", method);
+        };
+        expect_no_manager(producer.init_transactions().await.expect_err("no manager"), "init_transactions");
+        expect_no_manager(producer.begin_transaction().expect_err("no manager"), "begin_transaction");
+        expect_no_manager(
+            producer.commit_transaction().await.expect_err("no manager"),
+            "commit_transaction",
+        );
+        expect_no_manager(producer.abort_transaction().await.expect_err("no manager"), "abort_transaction");
+        // Java's own tests carry `@SuppressWarnings("removal")` for the deprecated
+        // `ConsumerGroupMetadata(String)` constructor; this is that suppression.
+        #[allow(deprecated)]
+        let group_metadata = ConsumerGroupMetadata::new("group");
+        expect_no_manager(
+            producer
+                .send_offsets_to_transaction(
+                    HashMap::from([(
+                        TopicPartition::new(TOPIC.to_string(), 0),
+                        OffsetAndMetadata::new(1).expect("a non-negative offset"),
+                    )]),
+                    group_metadata,
+                )
+                .await
+                .expect_err("no manager"),
+            "send_offsets_to_transaction",
+        );
+    }
+
+    /// An idempotent (non-transactional) producer *does* hold a manager, so Java's
+    /// `throwIfNoTransactionManager` passes and the rejection comes from
+    /// `TransactionManager.ensureTransactional()` (`TransactionManager.java:1857`)
+    /// with a different message. Pinning both messages is what proves
+    /// [`KafkaProducer::transaction_manager_or_error`] does not additionally test
+    /// `is_transactional()`.
+    #[tokio::test]
+    async fn test_transactional_methods_on_an_idempotent_producer() {
+        let props = guard_props(&[("enable.idempotence", "true")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("explicit idempotence is supported as of Phase 4");
+
+        const EXPECTED: &str = "Transactional method invoked on a non-transactional producer.";
+        assert_eq!(
+            producer.init_transactions().await.expect_err("not transactional").message(),
+            EXPECTED
+        );
+        assert_eq!(producer.begin_transaction().expect_err("not transactional").message(), EXPECTED);
+        assert_eq!(
+            producer.commit_transaction().await.expect_err("not transactional").message(),
+            EXPECTED
+        );
+        assert_eq!(
+            producer.abort_transaction().await.expect_err("not transactional").message(),
+            EXPECTED
         );
     }
 }
