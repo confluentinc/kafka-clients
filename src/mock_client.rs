@@ -176,6 +176,9 @@ pub struct MockClient {
     /// request and *then* polls until `leastLoadedNode` turns null, which only
     /// terminates because the flag lags a poll behind the in-flight count.
     can_send_more: bool,
+    /// The `timeout_ms` of every [`KafkaClient::poll`] call, in order — see
+    /// [`Self::poll_timeouts`].
+    poll_timeouts: Vec<i64>,
     /// Whether the client is active.
     active: AtomicBool,
     /// Wakeup handle shared with callers of [`wakeup_notify`](Self::wakeup_notify),
@@ -197,6 +200,7 @@ impl MockClient {
             nodes,
             max_in_flight_one: false,
             can_send_more: true,
+            poll_timeouts: Vec::new(),
             active: AtomicBool::new(true),
             wakeup: Arc::new(Notify::new()),
         }
@@ -417,6 +421,18 @@ impl MockClient {
         });
     }
 
+    /// The `timeout_ms` of every [`KafkaClient::poll`] call, in order.
+    ///
+    /// Stands in for Mockito's `verify(client, times(n)).poll(eq(timeout), anyLong())`,
+    /// which `SenderTest.testDoNotPollWhenNoRequestSent` (Java 3001) uses to assert
+    /// that a `runOnce` which sends nothing also polls nothing. Recording the timeout
+    /// rather than a bare count is what makes the `eq(RETRY_BACKOFF_MS)` matcher
+    /// expressible: `Sender` polls with two different timeouts and only the
+    /// transactional one is being counted.
+    pub fn poll_timeouts(&self) -> &[i64] {
+        &self.poll_timeouts
+    }
+
     /// Returns the number of pending requests.
     pub fn request_count(&self) -> usize {
         self.requests.len()
@@ -448,6 +464,7 @@ impl MockClient {
         self.requests.clear();
         self.responses.clear();
         self.future_responses.clear();
+        self.poll_timeouts.clear();
     }
 
     /// Set the nodes for this mock client.
@@ -547,6 +564,8 @@ impl KafkaClient for MockClient {
     }
 
     async fn poll(&mut self, _timeout: i64, now: i64) -> Vec<ClientResponse> {
+        self.poll_timeouts.push(_timeout);
+
         // Java 3970: `canSendMore = inFlightRequestCount() < 1`, recomputed before the
         // superclass poll so the flag a later `leastLoadedNode` reads is this poll's
         // snapshot.
