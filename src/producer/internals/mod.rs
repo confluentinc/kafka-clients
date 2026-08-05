@@ -42,8 +42,8 @@ pub(crate) use sender::Sender;
 // than the file module path. Unused until then.
 #[allow(unused_imports)]
 pub(crate) use transaction_manager::{
-    Caller, InFlightBatchPool, PendingRequests, Priority, State, TransactionManager, TxnRequestHandler,
-    TxnRequestHandlerKind,
+    Caller, CoordinatorNodes, InFlightBatchPool, PendingRequests, Priority, State, TransactionManager,
+    TxnRequestHandler, TxnRequestHandlerKind,
 };
 pub(crate) use transactional_request_result::TransactionalRequestResult;
 pub(crate) use txn_partition_entry::{InFlightBatchKey, TxnPartitionEntry};

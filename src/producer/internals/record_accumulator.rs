@@ -1897,7 +1897,7 @@ mod tests {
     fn idempotent_transaction_manager(producer_id: i64, epoch: i16) -> Arc<Mutex<TransactionManager>> {
         use crate::common::requests::InitProducerIdResponse;
         use crate::init_producer_id_response_data::InitProducerIdResponseData;
-        use crate::producer::internals::{Caller, InFlightBatchPool, PendingRequests};
+        use crate::producer::internals::{Caller, CoordinatorNodes, InFlightBatchPool, PendingRequests};
 
         let mut manager = TransactionManager::new(
             LogContext::empty(),
@@ -1924,6 +1924,7 @@ mod tests {
             .handle_response(
                 handler,
                 &crate::common::requests::ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data)),
+                &mut CoordinatorNodes::new(),
                 &mut pending,
             )
             .expect("a successful InitProducerId response is handled");

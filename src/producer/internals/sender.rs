@@ -31,14 +31,17 @@
 //! `run()` (`:245-303`), and the unsynchronized half of
 //! `TxnRequestHandler.onComplete`.
 //!
-//! Still deferred: the transactional state machine and the coordinator subsystem
-//! (Phases 5 and 6). Concretely, `coordinator_type()` is `None` for every request
-//! this client can build, so `maybeSendAndPollTransactionalRequest`'s coordinator
-//! branches and `lookupCoordinator` return
-//! [`KafkaError::unsupported_version`](crate::common::KafkaError::unsupported_version)
-//! rather than being silently skipped, and `sendProduceRequest` does not yet set
-//! `transactional_id` / `use_transaction_v1_version` (`Sender.java:922-936`,
-//! Phase 6).
+//! Phase 5a wired the coordinator arms Phase 4 had to defer:
+//! `maybeSendAndPollTransactionalRequest`'s `coordinator(coordinatorType)` and
+//! "coordinator not known" branches (`:481`, `:489-492`), the
+//! `lookupCoordinator` calls in `maybeFindCoordinatorAndRetry` (`:522`) and in
+//! the `onComplete` disconnect branch
+//! (`TransactionManager.java:1414`), and `awaitNodeReady`'s
+//! `handleCoordinatorReady` (`:568`). The coordinator nodes themselves are
+//! [`Sender`] fields (rules §2); see [`CoordinatorNodes`].
+//!
+//! Still deferred: `sendProduceRequest` does not yet set `transactional_id` /
+//! `use_transaction_v1_version` (`Sender.java:922-936`, Phase 6).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,12 +51,14 @@ use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 
 use crate::client_response::ClientResponse;
 use crate::common::KafkaError;
+use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ProduceRequestBuilder;
+use crate::common::requests::find_coordinator_request::CoordinatorType;
 use crate::common::requests::{PartitionResponse, RecordError};
 use crate::kafka_client::KafkaClient;
 use crate::metadata::LeaderIdAndEpoch;
@@ -63,13 +68,14 @@ use crate::common::utils::LogContext;
 
 use super::Caller;
 use super::InFlightBatchPool;
-use super::PendingRequests;
 use super::ProduceRequestResult;
 use super::ProducerBatch;
 use super::ProducerMetadata;
 use super::RecordAccumulator;
 use super::TransactionManager;
 use super::TxnRequestHandler;
+use super::transaction_manager::coordinator_type_name;
+use super::{CoordinatorNodes, PendingRequests};
 // Constants are exported only by the file defining them (CLAUDE.md §2).
 use super::transaction_manager::NO_INFLIGHT_REQUEST_CORRELATION_ID;
 
@@ -264,6 +270,14 @@ pub struct Sender<C: KafkaClient> {
     /// `.claude/rules/producer-transactions.md` §2 and the
     /// [`PendingRequests`] docs.
     pending_requests: PendingRequests,
+    /// The coordinators this Sender has discovered.
+    ///
+    /// Translated from `TransactionManager.transactionCoordinator`
+    /// (`TransactionManager.java:137`) and `consumerGroupCoordinator` (`:138`),
+    /// which live **here** for the same reason as [`Self::pending_requests`]:
+    /// Java's only reader is `Sender.java:481` and both of its writers are
+    /// unsynchronized. See the [`CoordinatorNodes`] docs.
+    coordinators: CoordinatorNodes,
     /// The correlation id of the transactional request currently in flight, or
     /// [`NO_INFLIGHT_REQUEST_CORRELATION_ID`] when there is none.
     ///
@@ -362,6 +376,7 @@ impl<C: KafkaClient> Sender<C> {
             force_close,
             transaction_manager,
             pending_requests: PendingRequests::new(),
+            coordinators: CoordinatorNodes::new(),
             in_flight_request_correlation_id: NO_INFLIGHT_REQUEST_CORRELATION_ID,
             pending_transactional_response: None,
             in_flight_batches: HashMap::new(),
@@ -387,6 +402,20 @@ impl<C: KafkaClient> Sender<C> {
     /// (`TransactionManager.java:1005`).
     pub fn has_pending_requests(&self) -> bool {
         !self.pending_requests.is_empty()
+    }
+
+    /// The coordinator of the given type, or `None` if it has not been discovered.
+    ///
+    /// Translated from `TransactionManager.coordinator(CoordinatorType)`
+    /// (`TransactionManager.java:958`), whose body reads only Sender-confined
+    /// state — the same criterion that moved the four accessors below (rules §2).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`CoordinatorNodes::coordinator`]'s error for
+    /// [`CoordinatorType::Share`], which is Java's `default:` throw.
+    pub fn coordinator(&self, coordinator_type: CoordinatorType) -> Result<Option<&Node>, KafkaError> {
+        self.coordinators.coordinator(coordinator_type)
     }
 
     /// Records the correlation id of the transactional request now in flight.
@@ -451,19 +480,18 @@ impl<C: KafkaClient> Sender<C> {
         self.clear_in_flight_correlation_id();
         if response.was_disconnected() {
             kafka_debug!(self.log_context, "Disconnected from {}. Will retry.", response.destination());
-            let needs_coordinator = transaction_manager.lock().unwrap().needs_coordinator(&handler);
-            if needs_coordinator {
-                // Java 1414 looks the coordinator up again. Unreachable for an
-                // idempotent producer, whose `coordinatorType()` is null; Phase 5
-                // adds `lookupCoordinator` with the FindCoordinator handler.
-                return Err(KafkaError::unsupported_version(
-                    "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
-                ));
+            // Java 1413-1415: rediscover the coordinator before retrying, so the
+            // retry does not go straight back to a broker that just dropped us.
+            {
+                let manager = transaction_manager.lock().unwrap();
+                if manager.needs_coordinator(&handler) {
+                    manager.lookup_coordinator_for(&mut self.coordinators, &mut self.pending_requests, &handler)?;
+                }
+                // Java's `reenqueue()` (1394) takes the manager monitor for the two
+                // statements `isRetry = true; enqueueRequest(this)`, so `retry` is
+                // called under the lock here too.
+                manager.retry(&mut self.pending_requests, handler);
             }
-            // Java's `reenqueue()` (1394) takes the manager monitor for the two
-            // statements `isRetry = true; enqueueRequest(this)`, so `retry` is
-            // called under the lock here too.
-            transaction_manager.lock().unwrap().retry(&mut self.pending_requests, handler);
             return Ok(());
         }
         if let Some(version_mismatch) = response.version_mismatch() {
@@ -479,10 +507,12 @@ impl<C: KafkaClient> Sender<C> {
                     handler
                 );
                 // Java 1421-1423: this and only this runs under the monitor.
-                transaction_manager
-                    .lock()
-                    .unwrap()
-                    .handle_response(handler, response_body, &mut self.pending_requests)
+                transaction_manager.lock().unwrap().handle_response(
+                    handler,
+                    response_body,
+                    &mut self.coordinators,
+                    &mut self.pending_requests,
+                )
             },
             None => {
                 let error = KafkaError::with_message(
@@ -1070,7 +1100,7 @@ impl<C: KafkaClient> Sender<C> {
 
         // Java 472-474.
         let has_incomplete = self.accumulator.has_incomplete();
-        let mut next_request_handler = match transaction_manager
+        let next_request_handler = match transaction_manager
             .lock()
             .unwrap()
             .next_request(&mut self.pending_requests, has_incomplete)
@@ -1080,22 +1110,35 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         // Java 479-482. `coordinatorType()` is null for a non-transactional
-        // `InitProducerId` (Java 1482-1488), so the idempotent path always takes
-        // the least-loaded-node branch; `TransactionManager::coordinator` and the
-        // whole FindCoordinator subsystem arrive in Phase 5.
+        // `InitProducerId` (Java 1482-1488) and for a `FindCoordinator`
+        // (Java 1671), so those go to the least-loaded node; everything else is
+        // routed to the coordinator this Sender has discovered.
         let coordinator_type = transaction_manager.lock().unwrap().coordinator_type(&next_request_handler);
-        if coordinator_type.is_some() {
-            return Err(TransactionPhaseError::Other(KafkaError::unsupported_version(
-                "Routing a transactional request to a coordinator is not yet implemented in this client \
-                 (Milestone 11, Phase 5).",
-            )));
-        }
-        let now = (self.time_provider)();
-        let target_node = self.client.least_loaded_node(now).node().cloned();
+        let target_node = match coordinator_type {
+            Some(coordinator_type) => self
+                .coordinators
+                .coordinator(coordinator_type)
+                .map_err(TransactionPhaseError::Other)?
+                .cloned(),
+            None => {
+                let now = (self.time_provider)();
+                self.client.least_loaded_node(now).node().cloned()
+            },
+        };
 
         let Some(target_node) = target_node else {
-            // Java 493-498. `coordinatorType` is `None` on every reachable path
-            // here, so this is the final `else`: no nodes available.
+            if let Some(coordinator_type) = coordinator_type {
+                // Java 489-492.
+                kafka_trace!(
+                    self.log_context,
+                    "Coordinator not known for {}, will retry {} after finding coordinator.",
+                    coordinator_type_name(coordinator_type),
+                    next_request_handler.api_key().name()
+                );
+                self.maybe_find_coordinator_and_retry(next_request_handler).await?;
+                return Ok(true);
+            }
+            // Java 493-498: no nodes available.
             kafka_trace!(
                 self.log_context,
                 "No nodes available to send requests, will poll and retry when until a node is ready."
@@ -1110,7 +1153,7 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         // Java 483-488.
-        match self.await_node_ready(&target_node).await {
+        match self.await_node_ready(&target_node, coordinator_type).await {
             Ok(true) => {},
             Ok(false) => {
                 kafka_trace!(
@@ -1160,7 +1203,7 @@ impl<C: KafkaClient> Sender<C> {
         // as `Box<dyn RequestBuilder>` at that boundary, so the builder is cloned
         // instead — once per transactional request, i.e. once per producer lifetime on
         // the idempotent path, and never on a per-record or per-batch path.
-        let request_builder = next_request_handler.request_builder().clone();
+        let request_builder = next_request_handler.clone_request_builder();
         let request_debug = if log::log_enabled!(log::Level::Debug) {
             format!("{:?}", next_request_handler)
         } else {
@@ -1168,7 +1211,7 @@ impl<C: KafkaClient> Sender<C> {
         };
         let client_request = self.client.new_client_request_with_timeout(
             target_node.id_string(),
-            Box::new(request_builder),
+            request_builder,
             current_time_ms,
             true,
             self.request_timeout_ms,
@@ -1207,17 +1250,18 @@ impl<C: KafkaClient> Sender<C> {
         };
         let needs_coordinator = transaction_manager.lock().unwrap().needs_coordinator(&next_request_handler);
         if needs_coordinator {
-            // Java 522 calls `transactionManager.lookupCoordinator(..)`. Unreachable
-            // for an idempotent producer, whose `coordinatorType()` is null; Phase 5
-            // adds it with the FindCoordinator handler.
-            return Err(TransactionPhaseError::Other(KafkaError::unsupported_version(
-                "Coordinator lookup is not yet implemented in this client (Milestone 11, Phase 5).",
-            )));
+            // Java 522.
+            transaction_manager
+                .lock()
+                .unwrap()
+                .lookup_coordinator_for(&mut self.coordinators, &mut self.pending_requests, &next_request_handler)
+                .map_err(TransactionPhaseError::Other)?;
+        } else {
+            // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
+            // loop when no node is available.
+            sleep_ms(self.retry_backoff_ms).await;
+            self.metadata.request_update(false);
         }
-        // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
-        // loop when no node is available.
-        sleep_ms(self.retry_backoff_ms).await;
-        self.metadata.request_update(false);
 
         transaction_manager
             .lock()
@@ -1229,13 +1273,33 @@ impl<C: KafkaClient> Sender<C> {
     /// Waits for `node` to become ready, up to `request.timeout.ms`.
     ///
     /// Translated from `Sender.awaitNodeReady(Node, CoordinatorType)`
-    /// (Java 563-574). Java's `handleCoordinatorReady()` branch fires only for
-    /// `CoordinatorType.TRANSACTION`, which the idempotent path never reaches
-    /// (`coordinatorType()` is null), so it arrives with the rest of the coordinator
-    /// subsystem in Phase 5.
-    async fn await_node_ready(&mut self, node: &crate::common::Node) -> std::io::Result<bool> {
+    /// (Java 563-574).
+    ///
+    /// Java's comment on the `CoordinatorType.TRANSACTION` branch: "indicate to the
+    /// transaction manager that the coordinator is ready, allowing it to check
+    /// ApiVersions. This allows us to bump transactional epochs even if the
+    /// coordinator is temporarily unavailable at the time when the abortable error
+    /// is handled."
+    ///
+    /// The manager lock is taken *after* the await completes and dropped before
+    /// returning, so no guard crosses it (rules §4).
+    async fn await_node_ready(
+        &mut self,
+        node: &crate::common::Node,
+        coordinator_type: Option<CoordinatorType>,
+    ) -> std::io::Result<bool> {
         let request_timeout_ms = self.request_timeout_ms as i64;
-        crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms).await
+        if !crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
+            .await?
+        {
+            return Ok(false);
+        }
+        if coordinator_type == Some(CoordinatorType::Transaction)
+            && let Some(transaction_manager) = &self.transaction_manager
+        {
+            transaction_manager.lock().unwrap().handle_coordinator_ready(&self.coordinators);
+        }
+        Ok(true)
     }
 
     /// Aborts every incomplete batch, translating `Sender.maybeAbortBatches`
@@ -2199,7 +2263,7 @@ mod tests {
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::FutureRecordMetadata;
     use crate::producer::internals::PartitionerConfig;
-    use crate::producer::internals::{Caller, InFlightBatchPool};
+    use crate::producer::internals::{Caller, InFlightBatchPool, TransactionalRequestResult};
     use std::sync::atomic::AtomicI64;
 
     // Constants matching Java's SenderTest
@@ -2254,9 +2318,9 @@ mod tests {
     /// `TransactionManagerTest.initializeTransactionManager(Optional.empty(), ..)`.
     ///
     /// Nothing on the idempotent path reads `ApiVersions` — the manager consults it
-    /// only from `handleCoordinatorReady` (Java 1104) and
-    /// `maybeUpdateTransactionV2Enabled` (Java 493), both transactional and both
-    /// Phase 5 — so an empty instance is sufficient here.
+    /// only from `handleCoordinatorReady` (Java 1104), which is transactional, and
+    /// `maybeUpdateTransactionV2Enabled` (Java 493), which is Phase 5b — so an
+    /// empty instance is sufficient here.
     fn idempotent_transaction_manager() -> Arc<Mutex<TransactionManager>> {
         Arc::new(Mutex::new(TransactionManager::new(
             LogContext::empty(),
@@ -2264,6 +2328,36 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             RETRY_BACKOFF_MS,
             Arc::new(crate::ApiVersions::new()),
+            false,
+        )))
+    }
+
+    /// `transactionalId` (Java 133).
+    const TRANSACTIONAL_ID: &str = "foobar";
+
+    /// Builds a transactional [`TransactionManager`], mirroring
+    /// `TransactionManagerTest.initializeTransactionManager(Optional.of(transactionalId), false)`.
+    ///
+    /// Node `"0"` is registered with `INIT_PRODUCER_ID` v6 as Java's helper does
+    /// (Java 186-189), so `handleCoordinatorReady` finds epoch-bump support once
+    /// the coordinator connection is ready.
+    fn transactional_transaction_manager() -> Arc<Mutex<TransactionManager>> {
+        use crate::api_versions_response_data::ApiVersion;
+
+        let api_versions = Arc::new(crate::ApiVersions::new());
+        let mut init_producer_id = ApiVersion::new();
+        init_producer_id
+            .set_api_key(crate::common::protocol::ApiKeys::INIT_PRODUCER_ID.id())
+            .set_min_version(0)
+            .set_max_version(6);
+        api_versions.update("0", crate::NodeApiVersions::new(&[init_producer_id], &[], &[], 0));
+
+        Arc::new(Mutex::new(TransactionManager::new(
+            LogContext::empty(),
+            Some(TRANSACTIONAL_ID.to_string()),
+            TRANSACTION_TIMEOUT_MS,
+            RETRY_BACKOFF_MS,
+            api_versions,
             false,
         )))
     }
@@ -2312,6 +2406,12 @@ mod tests {
         /// `setupWithTransactionState(transactionManager)`.
         fn idempotent() -> Self {
             Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None)
+        }
+
+        /// Setup with a transactional [`TransactionManager`], mirroring
+        /// `TransactionManagerTest.setup()` (Java 161-169).
+        fn transactional() -> Self {
+            Self::with_transaction_state(false, i32::MAX, Some(transactional_transaction_manager()), None)
         }
 
         /// Idempotent setup with `guarantee_message_order` and a bounded retry count,
@@ -3848,6 +3948,179 @@ mod tests {
             .set_producer_epoch(epoch)
             .set_throttle_time_ms(0);
         ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data))
+    }
+
+    /// Builds a `FindCoordinator` response naming `node` as the coordinator.
+    fn find_coordinator_response(error: Errors, key: &str, node: &Node) -> ConcreteResponse {
+        use crate::common::requests::FindCoordinatorResponse;
+
+        ConcreteResponse::FindCoordinator(FindCoordinatorResponse::prepare_response(error, key, node))
+    }
+
+    /// Drives a transactional producer's `initTransactions` through
+    /// `Sender.runOnce`, the way `TransactionManagerTest.doInitTransactions`
+    /// (Java 4348) drives it.
+    ///
+    /// The three iterations are the three exits of
+    /// `maybeSendAndPollTransactionalRequest`: the coordinator is unknown so a
+    /// `FindCoordinator` is enqueued (`Sender.java:489-492`), the `FindCoordinator`
+    /// goes to the least-loaded node (`:481`), then the `InitProducerId` goes to the
+    /// coordinator.
+    async fn run_init_transactions(ctx: &mut SenderTestContext) -> Arc<TransactionalRequestResult> {
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        let result = ctx
+            .transaction_manager()
+            .lock()
+            .unwrap()
+            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        // Iteration 1: the coordinator is unknown, so only a FindCoordinator is
+        // enqueued — nothing is sent.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+
+        // Iteration 2: the FindCoordinator goes out and is answered.
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node),
+            "the coordinator must be discovered"
+        );
+
+        // Iteration 3: the InitProducerId goes to the coordinator.
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 13131, 1));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+        result.await_result().await.expect("initTransactions succeeded");
+        result
+    }
+
+    /// `Sender.maybeSendAndPollTransactionalRequest` routes a transactional
+    /// `InitProducerId` to the coordinator, after discovering it — the coordinator
+    /// arms at `Sender.java:479-492` that Phase 4 left as deferrals.
+    ///
+    /// Also covers `testDisconnectAndRetry`'s successful half and
+    /// `handleCoordinatorReady` reaching the manager through `awaitNodeReady`
+    /// (`Sender.java:565-570`).
+    #[tokio::test]
+    async fn test_transactional_init_producer_id_is_routed_to_the_coordinator() {
+        let mut ctx = SenderTestContext::transactional();
+        assert!(
+            ctx.sender
+                .coordinator(CoordinatorType::Transaction)
+                .expect("valid type")
+                .is_none()
+        );
+
+        run_init_transactions(&mut ctx).await;
+
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert_eq!(manager.producer_id_and_epoch().producer_id, 13131);
+        assert_eq!(manager.producer_id_and_epoch().epoch, 1);
+        assert!(
+            manager.need_to_trigger_epoch_bump_from_client(),
+            "awaitNodeReady must have called handleCoordinatorReady for the TRANSACTION coordinator"
+        );
+    }
+
+    /// Translated from `testLookupCoordinatorOnDisconnectAfterSend`
+    /// (Java 1260-1290): a disconnect while the `InitProducerId` is in flight
+    /// forgets the coordinator and re-enqueues both requests
+    /// (`TransactionManager.java:1411-1416`).
+    #[tokio::test]
+    async fn test_lookup_coordinator_on_disconnect_after_send() {
+        let mut ctx = SenderTestContext::transactional();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        let init_pid_result = ctx
+            .transaction_manager()
+            .lock()
+            .unwrap()
+            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node)
+        );
+
+        // Send the InitProducerId to the coordinator and disconnect before the
+        // response arrives.
+        ctx.sender
+            .client_mut()
+            .prepare_response_disconnected(init_producer_id_response(Errors::None, 13131, 1), true);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert!(
+            ctx.sender
+                .coordinator(CoordinatorType::Transaction)
+                .expect("valid type")
+                .is_none(),
+            "a disconnect must forget the coordinator"
+        );
+        assert!(!init_pid_result.is_completed());
+        assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // The retry finds the coordinator again and succeeds.
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node)
+        );
+        assert!(!init_pid_result.is_completed());
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 13131, 1));
+        ctx.sender.run_once().await.expect("run_once");
+        init_pid_result.await_result().await.expect("the second round succeeds");
+        assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
+    }
+
+    /// Translated from `testUnsupportedFindCoordinator` (Java 1100-1115): a version
+    /// mismatch on the `FindCoordinator` is fatal
+    /// (`TransactionManager.java:1417-1418`).
+    ///
+    /// Java's response matcher also asserts the outgoing request's shape; those
+    /// assertions live in the manager-level
+    /// `test_lookup_coordinator_clears_the_node_and_enqueues_a_find_coordinator_first`,
+    /// because `MockClient::prepare_unsupported_version_response` takes no matcher.
+    #[tokio::test]
+    async fn test_unsupported_find_coordinator() {
+        let mut ctx = SenderTestContext::transactional();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender.client_mut().prepare_unsupported_version_response();
+        ctx.sender.run_once().await.expect("run_once");
+
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            manager.last_error().expect("recorded").error(),
+            Errors::UnsupportedVersion,
+            "Java asserts an UnsupportedVersionException"
+        );
     }
 
     /// `Sender.java:318-323`: a fatal transaction-manager error aborts the batches
