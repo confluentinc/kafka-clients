@@ -685,6 +685,12 @@ impl<C: KafkaClient> Sender<C> {
     /// `EndTxn` the call enqueued, and the loop's own `hasOngoingTransaction`
     /// condition — not the result — is what observes completion.
     ///
+    /// Passes [`Caller::Sender`], which is what makes an invalid
+    /// `→ ABORTING_TRANSACTION` **poison** the state machine here rather than
+    /// returning cleanly (rules §1). Java anticipates precisely that throw at this
+    /// call site (`Sender.java:269-271`) and force-closes on it, which is what the
+    /// caller below does with the error.
+    ///
     /// [`TransactionalRequestResult`]: crate::producer::internals::TransactionalRequestResult
     fn begin_abort(&mut self) -> Result<(), KafkaError> {
         match &self.transaction_manager {
@@ -693,7 +699,7 @@ impl<C: KafkaClient> Sender<C> {
                 transaction_manager
                     .lock()
                     .unwrap()
-                    .begin_abort(&mut self.pending_requests)
+                    .begin_abort(&mut self.pending_requests, Caller::Sender)
                     .map(|_result| ())
             },
             // Unreachable: the enclosing loop is gated on `has_ongoing_transaction`.
@@ -7319,6 +7325,47 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
         assert!(future_is_produced.is_done(), "Request to tp0 successfully done");
         assert_eq!(future_is_produced.get().await.expect("succeeds").offset(), offset);
+    }
+
+    /// [`Sender::begin_abort`] passes [`Caller::Sender`], so an invalid
+    /// `→ ABORTING_TRANSACTION` reached from the shutdown loop **poisons** the state
+    /// machine (rules §1).
+    ///
+    /// The sibling test in `transaction_manager.rs`
+    /// (`test_begin_abort_poisons_only_on_the_sender_side`) pins that
+    /// `TransactionManager::begin_abort` *forwards* whatever caller it is given; this
+    /// one pins which caller this call site chooses, and it is the only assertion
+    /// that would fail if the argument reverted to [`Caller::App`]. Both are needed:
+    /// the forwarding test passes either way.
+    ///
+    /// `READY` is used as the invalid source because it is the state the shutdown
+    /// window actually produces — the loop's guard admits `IN_TRANSACTION` /
+    /// `ABORTABLE_ERROR`, and the application task completing a transaction between
+    /// that guard read and this call leaves `READY` behind. Java anticipates the throw
+    /// here (`Sender.java:269-271`) and force-closes on it.
+    #[tokio::test]
+    async fn test_sender_begin_abort_poisons_the_state_machine() {
+        let transaction_manager = transactional_transaction_manager();
+        let mut ctx =
+            SenderTestContext::with_transaction_state(false, i32::MAX, Some(Arc::clone(&transaction_manager)), None);
+        run_init_transactions(&mut ctx).await;
+        assert!(transaction_manager.lock().unwrap().is_ready());
+
+        let error = ctx.sender.begin_abort().expect_err("READY -> ABORTING_TRANSACTION is invalid");
+        assert_eq!(
+            error.message(),
+            format!(
+                "TransactionalId {TRANSACTIONAL_ID}: Invalid transition attempted from state READY to state \
+                 ABORTING_TRANSACTION"
+            )
+        );
+
+        let manager = transaction_manager.lock().unwrap();
+        assert!(
+            manager.has_fatal_error(),
+            "the Sender-side caller must poison, not return cleanly"
+        );
+        assert_eq!(manager.last_error().expect("poisoned").message(), error.message());
     }
 
     // =====================================================================

@@ -1081,9 +1081,13 @@ pub(crate) struct TransactionManager {
     ///
     /// Filled by [`Self::txn_offset_commit_handler`] (Java 1226) and drained
     /// per-partition by [`Self::handle_txn_offset_commit_response`] (Java 1930).
-    /// Note the handler builds its request from *this* map rather than from the
-    /// offsets it was handed, so a retry re-sends exactly what is still
-    /// outstanding.
+    ///
+    /// The handler builds its request from *this* map rather than from the offsets it
+    /// was handed, so each construction picks up whatever is still outstanding — but
+    /// a *retry* of an already-built handler re-sends that construction's snapshot,
+    /// not a shrunken one. See
+    /// [`Self::handle_txn_offset_commit_response`] for why, and for why narrowing the
+    /// retry would be a wire-level divergence.
     pending_txn_offset_commits: HashMap<TopicPartition, CommittedOffset>,
 
     // If a batch bound for a partition expired locally after being sent at least once, the partition is considered
@@ -1475,14 +1479,53 @@ impl TransactionManager {
         )
     }
 
-    /// Begins aborting the transaction, returning the handle the application awaits.
+    /// Begins aborting the transaction, returning the handle the caller awaits.
     ///
     /// Translated from `beginAbort()` (Java 361).
     ///
-    /// `Sender.run`'s shutdown loop calls this at `Sender.java:273` inside a
-    /// `try`/`catch` that force-closes the producer if it throws (`:274-278`); for a
-    /// *non*-transactional producer the `ensureTransactional()` guard inside
-    /// [`Self::handle_cached_transaction_request_result`] is what throws.
+    /// # Why this one takes a `Caller` when its siblings do not
+    ///
+    /// `beginAbort()` is the **only** transactional entry point Java reaches from two
+    /// threads (`grep -rn '\.beginAbort(' producer/`):
+    ///
+    ///   - `KafkaProducer.abortTransaction` (`KafkaProducer.java:818`) — application;
+    ///   - `Sender.run`'s shutdown abort loop (`Sender.java:273`) — the Sender task.
+    ///
+    /// So rules §1's "where a method is reachable from both, it takes `caller` as a
+    /// parameter and forwards it — do NOT default it" applies here and nowhere else in
+    /// this phase: `beginCommit` (`KafkaProducer.java:783`),
+    /// `sendOffsetsToTransaction` (`:740`), `maybeAddPartition` (`:1045`),
+    /// `initializeTransactions` (`:652`) and `beginTransaction` (`:679`) each have
+    /// exactly one Java caller, all application-side.
+    ///
+    /// The difference is not cosmetic. An invalid `→ ABORTING_TRANSACTION` on the
+    /// Sender side must **poison**: `FATAL_ERROR` plus a recorded `lastError` before
+    /// the error propagates (Java 1124-1127). Java anticipates exactly that throw at
+    /// this call site — `Sender.java:269-271` reads *"It is possible for the
+    /// transaction manager to throw errors when aborting. Catch these so as not to
+    /// interfere with the rest of the shutdown logic"* — and force-closes on it.
+    ///
+    /// The window is real in both languages: the shutdown loop's guard admits
+    /// `IN_TRANSACTION` and `ABORTABLE_ERROR` (both valid sources), and the
+    /// application task can move the state between that guard read and this call,
+    /// because the manager lock is released in between — Java's separate
+    /// `synchronized` calls and [`Sender::begin_abort`]'s separate `lock()`s behave
+    /// identically there.
+    ///
+    /// The Sender is currently the *only* live caller, since
+    /// `KafkaProducer::from_config` still rejects `transactional.id` until Phase 6
+    /// (PLAN §7.1) — so hardcoding [`Caller::App`] was wrong for the one caller that
+    /// exists.
+    ///
+    /// # Everything below the transition needs no `caller`
+    ///
+    /// [`Self::begin_completing_transaction`] performs no transition of its own, and
+    /// the one it can reach — `initializeTransactions`'s `!isEpochBump` arm — is
+    /// unreachable from here: this path always passes a valid `producerIdAndEpoch`
+    /// (an abort requires a live transaction, which requires a producer id), so
+    /// `is_epoch_bump` is always true. `resetTransactionState`, which the resulting
+    /// `EndTxn` response drives, hardcodes [`Caller::Sender`] for its own reason
+    /// (PLAN §10.7 deviation 11).
     ///
     /// Note `maybeFailWithError` is **skipped** when the manager is already in
     /// [`State::AbortableError`] (Java 363-364) — that is the whole point of an
@@ -1492,16 +1535,21 @@ impl TransactionManager {
     /// # Errors
     ///
     /// As [`Self::begin_commit`], with `→ ABORTING_TRANSACTION` as the transition.
+    /// With [`Caller::Sender`] an invalid transition additionally leaves the manager
+    /// in [`State::FatalError`].
+    ///
+    /// [`Sender::begin_abort`]: crate::producer::internals::Sender
     pub(crate) fn begin_abort(
         &mut self,
         pending_requests: &mut PendingRequests,
+        caller: Caller,
     ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
         self.handle_cached_transaction_request_result(
             |manager| {
                 if manager.current_state != State::AbortableError {
                     manager.maybe_fail_with_error()?;
                 }
-                manager.transition_to(State::AbortingTransaction, None, Caller::App)?;
+                manager.transition_to(State::AbortingTransaction, None, caller)?;
 
                 // We're aborting the transaction, so there should be no need to add new partitions
                 manager.new_partitions_in_transaction.clear();
@@ -4228,8 +4276,27 @@ impl TransactionManager {
     /// clearing and retrying. `coordinatorReloaded` makes the group-coordinator
     /// lookup happen at most once per response even when several partitions report
     /// it (Java 1922). And `Errors.NONE` *removes* the partition from
-    /// `pendingTxnOffsetCommits` while the retriable arm leaves it in place, which
-    /// is what makes the re-enqueued request carry only the outstanding offsets.
+    /// `pendingTxnOffsetCommits` while the retriable arm leaves it in place.
+    ///
+    /// # What `pendingTxnOffsetCommits` does **not** do: shrink the retry
+    ///
+    /// Both builders snapshot the topic collection at construction — Java's
+    /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
+    /// and [`TxnOffsetCommitRequestBuilder::new`] takes the map by reference and
+    /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
+    /// since the handler outlives the call). `reenqueue()` (Java 1394) and
+    /// [`Self::retry`] both re-enqueue the *same handler with the same builder*, and
+    /// nothing between the two touches `builder.data`. So a retry re-sends the **full
+    /// original** offset list, including partitions that already returned `NONE`.
+    ///
+    /// What the map governs is (a) the tail's three-way choice above, and (b) the
+    /// contents of the *next* [`Self::txn_offset_commit_handler`] construction — e.g.
+    /// a subsequent `sendOffsetsToTransaction`, which is where leftovers are folded
+    /// in.
+    ///
+    /// **Do not "fix" this by rebuilding the builder before `retry`.** It would send
+    /// a reduced request where Java sends the full one — a wire-level divergence
+    /// introduced by making the code match a comment rather than the Java.
     fn handle_txn_offset_commit_response(
         &mut self,
         handler: TxnRequestHandler,
@@ -5226,7 +5293,7 @@ mod tests {
         assert!(manager.has_error());
 
         manager
-            .begin_abort(pending_requests)
+            .begin_abort(pending_requests, Caller::App)
             .expect("an abort clears an abortable error");
         assert!(!manager.has_error());
     }
@@ -5245,7 +5312,7 @@ mod tests {
                 "the recorded cause must be {cause:?} on attempt {attempt}"
             );
             manager
-                .begin_abort(pending_requests)
+                .begin_abort(pending_requests, Caller::App)
                 .expect_err("aborting after a fatal error must be refused");
             assert!(manager.has_error());
         }
@@ -5734,6 +5801,57 @@ mod tests {
             assert!(manager.has_fatal_error());
             assert_eq!(manager.last_error().expect("poisoned").message(), error.message());
         }
+    }
+
+    /// `beginAbort` carries the caller's origin through to `transitionTo`, so an
+    /// invalid `→ ABORTING_TRANSACTION` poisons on the Sender side and does not on
+    /// the application side.
+    ///
+    /// The pair matters because `beginAbort` is the *only* transactional entry point
+    /// Java reaches from both threads — `KafkaProducer.java:818` and
+    /// `Sender.java:273` — and the Sender is currently this crate's only live caller
+    /// (see [`TransactionManager::begin_abort`]). Hardcoding [`Caller::App`] there
+    /// compiled, passed every other test, and silently dropped the poisoning contract
+    /// Java's shutdown loop depends on (`Sender.java:269-271`), which is rules §1's
+    /// named anti-pattern.
+    ///
+    /// `READY` is the invalid source used because it is the one the shutdown window
+    /// actually produces: the loop's guard admits `IN_TRANSACTION` /
+    /// `ABORTABLE_ERROR`, and the application task completing a transaction between
+    /// that guard read and this call leaves `READY` behind.
+    #[tokio::test]
+    async fn test_begin_abort_poisons_only_on_the_sender_side() {
+        let expected = format!(
+            "TransactionalId {TRANSACTIONAL_ID}: Invalid transition attempted from state READY to state \
+             ABORTING_TRANSACTION"
+        );
+
+        // Application side: the error is returned and nothing moves.
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_ready());
+        let error = manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect_err("READY -> ABORTING_TRANSACTION is invalid");
+        assert_eq!(error.message(), expected);
+        assert_eq!(manager.current_state(), State::Ready);
+        assert!(manager.last_error().is_none());
+        assert!(!manager.has_error());
+
+        // Sender side: the state is poisoned to FATAL_ERROR and the error recorded,
+        // before the same error propagates (Java 1124-1127).
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_ready());
+        let error = manager
+            .begin_abort(&mut pending, Caller::Sender)
+            .expect_err("READY -> ABORTING_TRANSACTION is invalid");
+        assert_eq!(error.message(), expected);
+        assert_eq!(manager.current_state(), State::FatalError);
+        assert!(manager.has_fatal_error());
+        assert_eq!(manager.last_error().expect("poisoned").message(), expected);
     }
 
     /// Moving to an error state without an error is rejected (Java 1131-1134).
@@ -6881,7 +6999,9 @@ mod tests {
             .expect("a successful AddPartitionsToTxn response is handled");
         assert!(manager.transaction_contains_partition(&partition));
 
-        manager.begin_abort(&mut pending).expect("IN_TRANSACTION -> ABORTING is valid");
+        manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("IN_TRANSACTION -> ABORTING is valid");
         assert!(manager.has_ongoing_transaction());
 
         run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Abort, Errors::None)
@@ -6916,7 +7036,9 @@ mod tests {
         assert!(manager.has_ongoing_transaction());
 
         // `beginAbort` skips `maybeFailWithError` in ABORTABLE_ERROR (Java 363).
-        manager.begin_abort(&mut pending).expect("ABORTABLE_ERROR -> ABORTING is valid");
+        manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("ABORTABLE_ERROR -> ABORTING is valid");
         assert!(manager.has_ongoing_transaction());
 
         run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Abort, Errors::None)
@@ -7750,7 +7872,7 @@ mod tests {
                     .message()
                     .to_string(),
                 manager
-                    .begin_abort(&mut pending)
+                    .begin_abort(&mut pending, Caller::App)
                     .expect_err("beginAbort is fenced")
                     .message()
                     .to_string(),
@@ -7782,7 +7904,9 @@ mod tests {
         run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::TopicAuthorizationFailed)])
             .expect("a TOPIC_AUTHORIZATION_FAILED response moves to an abortable error");
 
-        let abort_result = manager.begin_abort(&mut pending).expect("ABORTABLE_ERROR -> ABORTING is valid");
+        let abort_result = manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("ABORTABLE_ERROR -> ABORTING is valid");
         assert!(!abort_result.is_completed());
 
         assert!(
@@ -7825,7 +7949,9 @@ mod tests {
             manager
                 .send_offsets_to_transaction(offsets, consumer_group_metadata(), &mut pending)
                 .expect("sendOffsetsToTransaction is valid in IN_TRANSACTION");
-            let abort_result = manager.begin_abort(&mut pending).expect("IN_TRANSACTION -> ABORTING is valid");
+            let abort_result = manager
+                .begin_abort(&mut pending, Caller::App)
+                .expect("IN_TRANSACTION -> ABORTING is valid");
 
             run_add_offsets_to_txn(&mut manager, &mut coordinators, &mut pending, CONSUMER_GROUP_ID, error)
                 .expect("the AddOffsetsToTxn response is handled");
@@ -7867,7 +7993,7 @@ mod tests {
         // Intentionally perform an operation that will cause an invalid state transition. The detection of this
         // will not poison the transaction manager since it was performed in the foreground.
         manager
-            .begin_abort(&mut pending)
+            .begin_abort(&mut pending, Caller::App)
             .expect_err("UNINITIALIZED -> ABORTING_TRANSACTION is not valid");
         assert!(!manager.has_fatal_error());
 
@@ -8070,7 +8196,9 @@ mod tests {
         assert!(manager.has_abortable_error());
         assert!(manager.client_side_epoch_bump_required());
 
-        let abort_result = manager.begin_abort(&mut pending).expect("ABORTABLE_ERROR -> ABORTING is valid");
+        let abort_result = manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("ABORTABLE_ERROR -> ABORTING is valid");
         // `nextRequest` short-circuits the EndTxn (nothing was ever added) and polls
         // again in the *same* call (Java 924), so it hands back the epoch-bump
         // `InitProducerId` directly.
@@ -8183,7 +8311,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .begin_abort(&mut pending)
+                .begin_abort(&mut pending, Caller::App)
                 .expect_err("beginAbort is blocked by the unacknowledged result")
                 .message(),
             expected.replace("`beginTransaction`", "`abortTransaction`")
@@ -8389,7 +8517,11 @@ mod tests {
         // Validate that these operations fail after the invalid state transition attempt above.
         for message in [
             manager.begin_transaction().expect_err("poisoned").message().to_string(),
-            manager.begin_abort(&mut pending).expect_err("poisoned").message().to_string(),
+            manager
+                .begin_abort(&mut pending, Caller::App)
+                .expect_err("poisoned")
+                .message()
+                .to_string(),
             manager.begin_commit(&mut pending).expect_err("poisoned").message().to_string(),
             manager.maybe_add_partition(&tp0()).expect_err("poisoned").message().to_string(),
             manager
@@ -9819,9 +9951,13 @@ mod tests {
     //   T=src/producer/internals/transaction_manager.rs
     //   S=src/producer/internals/sender.rs
     //   # anchored at the start of the line, because each title also appears inside
-    //   # a doc comment and inside this very derivation — an unanchored grep returns
-    //   # three line numbers and the arithmetic below then fails loudly rather than
-    //   # cutting the wrong range.
+    //   # a doc comment and inside this very derivation, so an unanchored grep returns
+    //   # **more than one** line number and `$(( .. - 1 ))` then fails loudly rather
+    //   # than cutting the wrong range. How many varies per title and with every edit
+    //   # to the surrounding prose, so the count is not written down here — check it
+    //   # with, e.g.:
+    //   #   grep -c 'PHASE-5B METHOD ACCOUNTING' $T   # unanchored: >1
+    //   #   grep -c '^// PHASE-5B METHOD ACCOUNTING' $T   # anchored:   1
     //   ma=$(( $(grep -n '^// PHASE-5B METHOD ACCOUNTING' $T | cut -d: -f1) - 1 ))
     //   mb=$(awk -v s=$ma 'NR>s && /^\/\/ ={20,}/{print NR; exit}' $T)
     //   ta=$(( $(grep -n '^    // PHASE-5B TEST ACCOUNTING' $T | cut -d: -f1) - 1 ))
@@ -9850,10 +9986,30 @@ mod tests {
     //
     // WHY THE 47 ARE OWED, and the check that says so. Every one of them drives the
     // **accumulator or the `Sender`** — `appendToAccumulator`, a produce response, a
-    // drain, `initiateClose`, or one of the two helpers that do
-    // (`verifyCommitOrAbortTransactionRetriable`, `verifyProducerFenced`). None is
-    // blocked on manager surface: Phase 5b translates all 90 of
+    // drain, `initiateClose`, or `verifyCommitOrAbortTransactionRetriable`, the one
+    // helper that reaches them and is itself reachable (it accounts for 4 of the 47).
+    // None is blocked on manager surface: Phase 5b translates all 90 of
     // `TransactionManager`'s methods (see the PHASE-5B METHOD ACCOUNTING block).
+    //
+    // `verifyProducerFenced(` is in the classifier's alternation below and matches
+    // **0 of the 107** — it is inert, and an earlier revision of this paragraph cited
+    // it as one of "two helpers that do", over-stating the evidence for the phase's
+    // most load-bearing check (Critic 45 5b issue 4a). Why it is inert is the more
+    // useful fact: its only call sites (Java 2077, 2101) sit inside the *private*
+    // helpers `verifyProducerFencedForAddPartitionsToTxn` / `..ForAddOffsetsToTxn`,
+    // and the splitter stops collecting at `^    private `, so no test method's marker
+    // set can contain it. Kept in the alternation rather than deleted, because
+    // removing it must be a no-op and that is checkable:
+    //
+    //   # rerun the classifier with `verifyProducerFenced(` dropped from the grep
+    //   diff /tmp/class.tsv /tmp/class_nofence.tsv   # empty
+    //
+    // **This is also the classifier's one error direction, and it is the harmless
+    // one.** Not following private helpers can only under-report ACC, i.e. produce a
+    // false *MGR* — never a false ACC. So it cannot manufacture the `OWED_MGR == 0`
+    // below. The four methods it actually mis-labels are the `verifyProducerFenced`
+    // family (Java 2057, 2062, 2081, 2086), and all four are `HAVE`, each translated
+    // minus the produce-future assertion its own rustdoc names.
     // They belong with the transactional `SenderTest` group, whose harness is
     // `sender.rs`'s `SenderTestContext`; the `SenderTest.java` accounting block in
     // that file is where they are owed.
