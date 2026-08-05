@@ -5233,6 +5233,19 @@ mod tests {
         ConsumerGroupMetadata::new(CONSUMER_GROUP_ID)
     }
 
+    /// The throwaway group metadata Java's fence check passes — `"dummyId"`
+    /// (Java 2054) — where the call is expected to fail before the group is used.
+    fn dummy_group_metadata() -> ConsumerGroupMetadata {
+        #[allow(deprecated)]
+        ConsumerGroupMetadata::new("dummyId")
+    }
+
+    /// As [`dummy_group_metadata`], for Java's `"fake-group-id"` (Java 3837).
+    fn fake_group_metadata() -> ConsumerGroupMetadata {
+        #[allow(deprecated)]
+        ConsumerGroupMetadata::new("fake-group-id")
+    }
+
     /// Acquires a producer id for an idempotent producer.
     ///
     /// Mirrors `initializeIdempotentProducerId` (Java 4333). Java drives
@@ -5314,6 +5327,23 @@ mod tests {
         // `client_side_epoch_bump_required` side effect (Java 500-501), so this only
         // latches the fixture's finalized `transaction.version` level.
         manager.maybe_update_transaction_v2_enabled(true);
+
+        // Java's helper spins `Sender.runOnce`, which connects to the transaction
+        // coordinator and so runs `handleCoordinatorReady` (`Sender.java:569`). That
+        // is a *manager* method with observable state — it is the only writer of
+        // `coordinatorSupportsBumpingEpoch`, which decides whether an abortable
+        // error is recoverable (Java 1326) — so the manager-level drive has to make
+        // the same call or every `abortableErrorIfPossible` arm below would take the
+        // fatal branch that Java does not.
+        let mut coordinators = CoordinatorNodes::new();
+        coordinators
+            .set(CoordinatorType::Transaction, broker_node())
+            .expect("TRANSACTION is a valid coordinator type");
+        manager.handle_coordinator_ready(&coordinators);
+        assert!(
+            manager.can_handle_abortable_error(),
+            "the fixture advertises InitProducerId v6, so a client-side bump is supported"
+        );
 
         // Java: `result.await(); assertTrue(result.isSuccessful()); assertTrue(result.isAcked());`
         assert!(result.is_successful());
@@ -7063,6 +7093,973 @@ mod tests {
         assert_eq!(handler.retry_backoff_ms(), DEFAULT_RETRY_BACKOFF_MS);
     }
 
+    /// Translated from the six `testIsSendToPartitionAllowedWith*After*Error`
+    /// methods (Java 531-612), one loop iteration each.
+    ///
+    /// The distinction they pin: `isSendToPartitionAllowed` (Java 466) refuses a
+    /// partition that is only *pending* — because nothing may be sent for it until
+    /// the coordinator confirms it — and allows one already confirmed, unless the
+    /// producer is in a fatal state, in which case nothing is allowed at all.
+    ///
+    /// Java's two "in-flight partition add" variants reach the in-flight state with
+    /// `runUntil(transactionManager::hasInFlightRequest)`, i.e. by having the Sender
+    /// send the `AddPartitionsToTxn` and leaving it unanswered. Here that is
+    /// `next_request` without a following `handle_response`, which is the same
+    /// manager-visible state: the partition has left `newPartitionsInTransaction`
+    /// for `pendingPartitionsInTransaction`.
+    #[tokio::test]
+    async fn test_is_send_to_partition_allowed_after_an_error() {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Stage {
+            /// Registered locally, request not yet sent (Java 532, 559).
+            Pending,
+            /// Request sent and unanswered (Java 544, 571).
+            InFlight,
+            /// Confirmed by the coordinator (Java 586, 602).
+            Added,
+        }
+
+        for (stage, fatal, expected_allowed) in [
+            (Stage::Pending, false, false),
+            (Stage::InFlight, false, false),
+            (Stage::Pending, true, false),
+            (Stage::InFlight, true, false),
+            (Stage::Added, false, true),
+            (Stage::Added, true, false),
+        ] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+            manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+            manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+
+            match stage {
+                Stage::Pending => {},
+                Stage::InFlight => {
+                    // Send the AddPartitionsToTxn request and leave it in-flight.
+                    manager
+                        .next_request(&mut pending, false)
+                        .expect("next_request does not fail on this path")
+                        .expect("an AddPartitionsToTxn request must be pending");
+                    assert!(manager.is_partition_pending_add(&tp0()));
+                },
+                Stage::Added => {
+                    run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::None)])
+                        .expect("a successful AddPartitionsToTxn response is handled");
+                    assert!(!manager.has_partitions_to_add());
+                },
+            }
+
+            if fatal {
+                manager
+                    .transition_to_fatal_error(kafka_exception(), Caller::App)
+                    .expect("FATAL_ERROR is always a valid target");
+                assert!(manager.has_fatal_error());
+            } else {
+                manager
+                    .transition_to_abortable_error(kafka_exception(), Caller::App)
+                    .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+                assert!(manager.has_abortable_error());
+            }
+
+            assert_eq!(manager.is_send_to_partition_allowed(&tp0()), expected_allowed);
+        }
+    }
+
+    /// Translated from `testTransactionalIdAuthorizationFailureInInitProducerId`
+    /// (Java 1365-1379).
+    #[tokio::test]
+    async fn test_transactional_id_authorization_failure_in_init_producer_id() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let init_pid_result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("an InitProducerId request must be pending");
+        complete_init_producer_id(
+            &mut manager,
+            &mut pending,
+            handler,
+            Errors::TransactionalIdAuthorizationFailed,
+            PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+        )
+        .expect("an authorization failure moves to an abortable error");
+
+        assert!(manager.has_error());
+        assert!(init_pid_result.is_completed());
+        assert!(!init_pid_result.is_successful());
+        assert_eq!(
+            init_pid_result.error().expect("the result carries an error").error(),
+            Errors::TransactionalIdAuthorizationFailed
+        );
+        // Java: `assertThrows(.., initPidResult::await)`. Awaiting is what marks the
+        // result acknowledged (rules §5), which releases the pending-transition slot
+        // so `assertAbortableError`'s `beginCommit` is not refused for the wrong
+        // reason.
+        let error = init_pid_result.await_result().await.expect_err("initTransactions failed");
+        assert_eq!(error.error(), Errors::TransactionalIdAuthorizationFailed);
+        assert_abortable_error(&mut manager, &mut pending, Errors::TransactionalIdAuthorizationFailed);
+    }
+
+    /// Translated from `testTransactionAbortableExceptionInInitProducerId`
+    /// (Java 3871-3885).
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_in_init_producer_id() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let init_pid_result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("an InitProducerId request must be pending");
+        complete_init_producer_id(
+            &mut manager,
+            &mut pending,
+            handler,
+            Errors::TransactionAbortable,
+            PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+        )
+        .expect("TRANSACTION_ABORTABLE moves to an abortable error");
+
+        assert!(manager.has_error());
+        assert!(init_pid_result.is_completed());
+        assert!(!init_pid_result.is_successful());
+        assert_eq!(
+            init_pid_result.error().expect("the result carries an error").error(),
+            Errors::TransactionAbortable
+        );
+        // Java: `assertThrows(.., initPidResult::await)`. Awaiting is what marks the
+        // result acknowledged (rules §5), which releases the pending-transition slot
+        // so `assertAbortableError`'s `beginCommit` is not refused for the wrong
+        // reason.
+        let error = init_pid_result.await_result().await.expect_err("initTransactions failed");
+        assert_eq!(error.error(), Errors::TransactionAbortable);
+        assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
+    }
+
+    /// The shared prologue of the `*InAddOffsetsToTxn` family (Java 1451, 1471,
+    /// 3950): a `sendOffsetsToTransaction` whose `AddOffsetsToTxn` fails.
+    async fn add_offsets_to_txn_failure(
+        error: Errors,
+    ) -> (TransactionManager, PendingRequests, Arc<TransactionalRequestResult>) {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let offsets = HashMap::from([(partition, offset(39))]);
+        let send_offsets_result = manager
+            .send_offsets_to_transaction(offsets, consumer_group_metadata(), &mut pending)
+            .expect("sendOffsetsToTransaction is valid in IN_TRANSACTION");
+        run_add_offsets_to_txn(&mut manager, &mut coordinators, &mut pending, CONSUMER_GROUP_ID, error)
+            .expect("the AddOffsetsToTxn response is handled");
+
+        assert!(manager.has_error());
+        assert!(send_offsets_result.is_completed());
+        assert!(!send_offsets_result.is_successful());
+        (manager, pending, send_offsets_result)
+    }
+
+    /// Translated from `testTransactionalIdAuthorizationFailureInAddOffsetsToTxn`
+    /// (Java 1450-1468).
+    #[tokio::test]
+    async fn test_transactional_id_authorization_failure_in_add_offsets_to_txn() {
+        let (mut manager, mut pending, send_offsets_result) =
+            add_offsets_to_txn_failure(Errors::TransactionalIdAuthorizationFailed).await;
+        assert_eq!(
+            send_offsets_result.error().expect("the result carries an error").error(),
+            Errors::TransactionalIdAuthorizationFailed
+        );
+        assert_fatal_error(&mut manager, &mut pending, Errors::TransactionalIdAuthorizationFailed);
+    }
+
+    /// Translated from `testInvalidTxnStateFailureInAddOffsetsToTxn`
+    /// (Java 1470-1488).
+    #[tokio::test]
+    async fn test_invalid_txn_state_failure_in_add_offsets_to_txn() {
+        let (mut manager, mut pending, send_offsets_result) = add_offsets_to_txn_failure(Errors::InvalidTxnState).await;
+        assert_eq!(
+            send_offsets_result.error().expect("the result carries an error").error(),
+            Errors::InvalidTxnState
+        );
+        assert_fatal_error(&mut manager, &mut pending, Errors::InvalidTxnState);
+    }
+
+    /// Translated from `testTransactionAbortableExceptionInAddOffsetsToTxn`
+    /// (Java 3949-3967).
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_in_add_offsets_to_txn() {
+        let (mut manager, mut pending, send_offsets_result) =
+            add_offsets_to_txn_failure(Errors::TransactionAbortable).await;
+        assert_eq!(
+            send_offsets_result.error().expect("the result carries an error").error(),
+            Errors::TransactionAbortable
+        );
+        assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
+    }
+
+    /// Translated from `testProducerFencedInAddOffSetsToTxn` (Java 2080-2084) and
+    /// `testInvalidProducerEpochConvertToProducerFencedInAddOffSetsToTxn`
+    /// (Java 2085-2089), which differ only in the triggering code: both are
+    /// converted to `PRODUCER_FENCED` (Java 1836-1839).
+    ///
+    /// Java's `verifyProducerFenced` also asserts on the produce future, which needs
+    /// the accumulator; that half belongs with the `SenderTest` group.
+    #[tokio::test]
+    async fn test_producer_fenced_in_add_offsets_to_txn() {
+        for triggered in [Errors::ProducerFenced, Errors::InvalidProducerEpoch] {
+            let (manager, _pending, send_offsets_result) = add_offsets_to_txn_failure(triggered).await;
+            assert!(manager.has_fatal_error());
+            assert_eq!(
+                send_offsets_result.error().expect("the result carries an error").error(),
+                Errors::ProducerFenced
+            );
+        }
+    }
+
+    /// The shared prologue of the `*InTxnOffsetCommit` family (Java 1137, 1406,
+    /// 1491, 3970): a `sendOffsetsToTransaction` whose `TxnOffsetCommit` fails.
+    async fn txn_offset_commit_failure(
+        error: Errors,
+    ) -> (TransactionManager, PendingRequests, Arc<TransactionalRequestResult>) {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let send_offsets_result = send_offsets_and_discover_group_coordinator(
+            &mut manager,
+            &mut coordinators,
+            &mut pending,
+            consumer_group_metadata(),
+            &[(partition.clone(), 39)],
+        )
+        .await;
+
+        run_txn_offset_commit(
+            &mut manager,
+            &mut coordinators,
+            &mut pending,
+            CONSUMER_GROUP_ID,
+            &[(partition, error)],
+        )
+        .expect("the TxnOffsetCommit response is handled");
+
+        assert!(manager.has_error());
+        assert!(send_offsets_result.is_completed());
+        assert!(!send_offsets_result.is_successful());
+        (manager, pending, send_offsets_result)
+    }
+
+    /// Translated from `testUnsupportedForMessageFormatInTxnOffsetCommit`
+    /// (Java 1136-1156).
+    #[tokio::test]
+    async fn test_unsupported_for_message_format_in_txn_offset_commit() {
+        let (mut manager, mut pending, send_offsets_result) =
+            txn_offset_commit_failure(Errors::UnsupportedForMessageFormat).await;
+        assert_eq!(
+            send_offsets_result.error().expect("the result carries an error").error(),
+            Errors::UnsupportedForMessageFormat
+        );
+        assert_fatal_error(&mut manager, &mut pending, Errors::UnsupportedForMessageFormat);
+    }
+
+    /// Translated from `testTransactionalIdAuthorizationFailureInTxnOffsetCommit`
+    /// (Java 1490-1513).
+    #[tokio::test]
+    async fn test_transactional_id_authorization_failure_in_txn_offset_commit() {
+        let (mut manager, mut pending, send_offsets_result) =
+            txn_offset_commit_failure(Errors::TransactionalIdAuthorizationFailed).await;
+        assert_eq!(
+            send_offsets_result.error().expect("the result carries an error").error(),
+            Errors::TransactionalIdAuthorizationFailed
+        );
+        assert_fatal_error(&mut manager, &mut pending, Errors::TransactionalIdAuthorizationFailed);
+    }
+
+    /// Translated from `testTransactionAbortableExceptionInTxnOffsetCommit`
+    /// (Java 3969-3988).
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_in_txn_offset_commit() {
+        let (mut manager, mut pending, send_offsets_result) =
+            txn_offset_commit_failure(Errors::TransactionAbortable).await;
+        assert_eq!(
+            send_offsets_result.error().expect("the result carries an error").error(),
+            Errors::TransactionAbortable
+        );
+        assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
+    }
+
+    /// Translated from `testGroupAuthorizationFailureInTxnOffsetCommit`
+    /// (Java 1405-1433).
+    ///
+    /// The extra assertions over the family's shared shape: the error carries the
+    /// group id (Java's `GroupAuthorizationException.groupId()`), and the pending
+    /// offsets are cleared — the `break` leaves `pendingTxnOffsetCommits` non-empty
+    /// but the tail's `result.isCompleted()` arm clears it (Java 1945).
+    #[tokio::test]
+    async fn test_group_authorization_failure_in_txn_offset_commit() {
+        let (mut manager, mut pending, send_offsets_result) =
+            txn_offset_commit_failure(Errors::GroupAuthorizationFailed).await;
+        let error = send_offsets_result.error().expect("the result carries an error");
+        assert_eq!(error.error(), Errors::GroupAuthorizationFailed);
+        // Java: `((GroupAuthorizationException) result.error()).groupId()`.
+        let KafkaError::GroupAuthorization(group_error) = &error else {
+            panic!("expected a GroupAuthorization error, got {error:?}");
+        };
+        assert_eq!(group_error.group_id, CONSUMER_GROUP_ID);
+        assert!(!manager.has_pending_offset_commits());
+        assert_abortable_error(&mut manager, &mut pending, Errors::GroupAuthorizationFailed);
+    }
+
+    /// Translated from `testGroupAuthorizationFailureInFindCoordinator`
+    /// (Java 1380-1404) and `testTransactionAbortableExceptionInFindCoordinator`
+    /// (Java 3902-3923), which differ only in the triggering code.
+    ///
+    /// Phase 5a covered the production branches through
+    /// `test_find_coordinator_remaining_error_arms`; this drives them the way Java
+    /// does, through `sendOffsetsToTransaction` → `AddOffsetsToTxn` → the group
+    /// coordinator lookup, and adds the `assertAbortableError` tail.
+    #[tokio::test]
+    async fn test_group_coordinator_lookup_failure_after_add_offsets_to_txn() {
+        for (triggered, expected) in [
+            (Errors::GroupAuthorizationFailed, Errors::GroupAuthorizationFailed),
+            (Errors::TransactionAbortable, Errors::TransactionAbortable),
+        ] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            let mut coordinators = CoordinatorNodes::new();
+            do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+            manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+            let partition = TopicPartition::new("foo".to_string(), 0);
+            let offsets = HashMap::from([(partition, offset(39))]);
+            let send_offsets_result = manager
+                .send_offsets_to_transaction(offsets, consumer_group_metadata(), &mut pending)
+                .expect("sendOffsetsToTransaction is valid in IN_TRANSACTION");
+            run_add_offsets_to_txn(&mut manager, &mut coordinators, &mut pending, CONSUMER_GROUP_ID, Errors::None)
+                .expect("a successful AddOffsetsToTxn response is handled");
+            assert!(!manager.has_partitions_to_add());
+
+            // The Sender finds the group coordinator unknown and looks it up
+            // (`Sender.java:479-492`, `:520-529`); the response carries the error.
+            let commit = manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .expect("a TxnOffsetCommit request must be pending");
+            manager
+                .lookup_coordinator_for(&mut coordinators, &mut pending, &commit)
+                .expect("GROUP is a valid coordinator type");
+            manager.retry(&mut pending, commit);
+            let find_coordinator = manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .expect("the FindCoordinator overtakes the TxnOffsetCommit");
+            complete_find_coordinator(
+                &mut manager,
+                &mut coordinators,
+                &mut pending,
+                find_coordinator,
+                triggered,
+                CONSUMER_GROUP_ID,
+                &broker_node(),
+            )
+            .expect("the FindCoordinator error is handled");
+
+            assert_eq!(
+                manager.last_error().expect("an error is recorded").error(),
+                expected,
+                "unexpected error for {triggered:?}"
+            );
+            // Java: `runUntil(sendOffsetsResult::isCompleted)`. The FindCoordinator
+            // fails its own handler; the *caller's* handle is failed by
+            // `maybeTerminateRequestWithError` when the queued TxnOffsetCommit is
+            // next dequeued (Java 1174-1183).
+            assert!(
+                manager
+                    .next_request(&mut pending, false)
+                    .expect("next_request does not fail on this path")
+                    .is_none(),
+                "the queued TxnOffsetCommit is terminated, not sent"
+            );
+            assert!(send_offsets_result.is_completed());
+            assert!(!send_offsets_result.is_successful());
+            assert_eq!(
+                send_offsets_result.error().expect("the result carries an error").error(),
+                expected
+            );
+            assert_abortable_error(&mut manager, &mut pending, expected);
+        }
+    }
+
+    /// The shared prologue of the `*InAddPartitions` family (Java 1863, 1879,
+    /// 3887): a registered partition whose `AddPartitionsToTxn` fails.
+    async fn add_partitions_failure(error: Errors) -> (TransactionManager, PendingRequests) {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition, error)])
+            .expect("the AddPartitionsToTxn response is handled");
+        assert!(manager.has_error());
+        (manager, pending)
+    }
+
+    /// Translated from `testTransactionalIdAuthorizationFailureInAddPartitions`
+    /// (Java 1862-1876).
+    #[tokio::test]
+    async fn test_transactional_id_authorization_failure_in_add_partitions() {
+        let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionalIdAuthorizationFailed).await;
+        assert_fatal_error(&mut manager, &mut pending, Errors::TransactionalIdAuthorizationFailed);
+    }
+
+    /// Translated from `testInvalidTxnStateInAddPartitions` (Java 1878-1892).
+    #[tokio::test]
+    async fn test_invalid_txn_state_in_add_partitions() {
+        let (mut manager, mut pending) = add_partitions_failure(Errors::InvalidTxnState).await;
+        assert_fatal_error(&mut manager, &mut pending, Errors::InvalidTxnState);
+    }
+
+    /// Translated from `testTransactionAbortableExceptionInAddPartitions`
+    /// (Java 3886-3900).
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_in_add_partitions() {
+        let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionAbortable).await;
+        assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
+    }
+
+    /// Translated from `testProducerFencedInAddPartitionToTxn` (Java 2056-2060) and
+    /// `testInvalidProducerEpochConvertToProducerFencedInAddPartitionToTxn`
+    /// (Java 2061-2065), which differ only in the triggering code: both are
+    /// converted to `PRODUCER_FENCED` (Java 1591-1594).
+    ///
+    /// Java's `verifyProducerFenced` also asserts the produce future fails, which
+    /// needs the accumulator; that half is owed with the `SenderTest` group.
+    #[tokio::test]
+    async fn test_producer_fenced_in_add_partition_to_txn() {
+        for triggered in [Errors::ProducerFenced, Errors::InvalidProducerEpoch] {
+            let (manager, _pending) = add_partitions_failure(triggered).await;
+            assert!(manager.has_fatal_error(), "unexpected state for {triggered:?}");
+            assert_eq!(
+                manager.last_error().expect("an error is recorded").error(),
+                Errors::ProducerFenced
+            );
+        }
+    }
+
+    /// Translated from the parameterized `testRetriableErrors(Errors)`
+    /// (Java 1970-2010), whose `@EnumSource` names four codes — translated as a real
+    /// loop rather than one invocation (`definition-of-done.md` §3).
+    ///
+    /// Covers a retry of every request family the phase adds except
+    /// `TxnOffsetCommit`, which Java's own comment defers to
+    /// `testRetriableErrorInTxnOffsetCommit`. Note Java substitutes
+    /// `COORDINATOR_LOAD_IN_PROGRESS` for the `AddPartitionsToTxn` leg when the
+    /// parameter is `CONCURRENT_TRANSACTIONS`, because that code takes the
+    /// backoff-override arm (Java 1585) rather than the generic retriable one.
+    #[tokio::test]
+    async fn test_retriable_errors() {
+        for error in [
+            Errors::UnknownTopicOrPartition,
+            Errors::RequestTimedOut,
+            Errors::CoordinatorLoadInProgress,
+            Errors::ConcurrentTransactions,
+        ] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            let mut coordinators = CoordinatorNodes::new();
+            let result = manager
+                .initialize_transactions(false, &mut pending)
+                .expect("initTransactions is valid from UNINITIALIZED");
+
+            // Ensure FindCoordinator retries. Java's tests get the FindCoordinator
+            // from `Sender.maybeFindCoordinatorAndRetry`; here it is enqueued
+            // directly, which is what that method calls (`Sender.java:522`).
+            manager
+                .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
+                .expect("TRANSACTION is a valid coordinator type");
+            for attempt_error in [error, Errors::None] {
+                let handler = manager
+                    .next_request(&mut pending, false)
+                    .expect("next_request does not fail on this path")
+                    .expect("a FindCoordinator request must be pending");
+                assert!(
+                    handler.find_coordinator_request_data().is_some(),
+                    "the FindCoordinator sorts ahead of the InitProducerId"
+                );
+                complete_find_coordinator(
+                    &mut manager,
+                    &mut coordinators,
+                    &mut pending,
+                    handler,
+                    attempt_error,
+                    TRANSACTIONAL_ID,
+                    &broker_node(),
+                )
+                .expect("the FindCoordinator response is handled");
+            }
+            assert_eq!(
+                coordinators
+                    .coordinator(CoordinatorType::Transaction)
+                    .expect("valid type")
+                    .cloned(),
+                Some(broker_node())
+            );
+
+            // Ensure InitPid retries.
+            for attempt_error in [error, Errors::None] {
+                let handler = manager
+                    .next_request(&mut pending, false)
+                    .expect("next_request does not fail on this path")
+                    .expect("an InitProducerId request must be pending");
+                complete_init_producer_id_with_coordinators(
+                    &mut manager,
+                    &mut coordinators,
+                    &mut pending,
+                    handler,
+                    attempt_error,
+                    PRODUCER_ID,
+                    EPOCH,
+                )
+                .expect("the InitProducerId response is handled");
+            }
+            assert!(manager.has_producer_id());
+
+            result.await_result().await.expect("initTransactions succeeded");
+            manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+            // Ensure AddPartitionsToTxn retries. Since CONCURRENT_TRANSACTIONS is handled differently here, we
+            // substitute.
+            let add_partitions_error = if error == Errors::ConcurrentTransactions {
+                Errors::CoordinatorLoadInProgress
+            } else {
+                error
+            };
+            manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+            for attempt_error in [add_partitions_error, Errors::None] {
+                run_add_partitions_to_txn_with_coordinators(
+                    &mut manager,
+                    &mut coordinators,
+                    &mut pending,
+                    &[(tp0(), attempt_error)],
+                )
+                .expect("the AddPartitionsToTxn response is handled");
+            }
+            assert!(manager.transaction_contains_partition(&tp0()));
+
+            // Ensure txnOffsetCommit retries is tested in testRetriableErrorInTxnOffsetCommit.
+
+            // Ensure EndTxn retries.
+            let abort_result = manager
+                .begin_commit(&mut pending)
+                .expect("IN_TRANSACTION -> COMMITTING is valid");
+            for attempt_error in [error, Errors::None] {
+                run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Commit, attempt_error)
+                    .expect("the EndTxn response is handled");
+            }
+            assert!(abort_result.is_completed(), "unexpected outcome for {error:?}");
+            assert!(abort_result.is_successful());
+        }
+    }
+
+    /// Translated from `verifyProducerFencedForInitProducerId(Errors)` (Java 2037),
+    /// which `testProducerFencedExceptionInInitProducerId` (2027) and
+    /// `testInvalidProducerEpochConvertToProducerFencedInInitProducerId` (2032)
+    /// parameterise — translated as a loop.
+    ///
+    /// The payload is the four-method fence check: once fenced, `beginTransaction`,
+    /// `beginCommit`, `beginAbort` and `sendOffsetsToTransaction` must all fail, and
+    /// with Java's `ProducerFencedException` message rather than a wrapped
+    /// `KafkaException` — `maybeFailWithError`'s first branch (Java 1160-1164).
+    #[tokio::test]
+    async fn test_producer_fenced_for_init_producer_id() {
+        for triggered in [Errors::ProducerFenced, Errors::InvalidProducerEpoch] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            let result = manager
+                .initialize_transactions(false, &mut pending)
+                .expect("initTransactions is valid from UNINITIALIZED");
+
+            let handler = manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .expect("an InitProducerId request must be pending");
+            complete_init_producer_id(&mut manager, &mut pending, handler, triggered, PRODUCER_ID, EPOCH)
+                .expect("the InitProducerId response is handled");
+            assert!(manager.has_error());
+
+            let error = result.await_result().await.expect_err("initTransactions was fenced");
+            assert_eq!(error.error(), Errors::ProducerFenced, "unexpected error for {triggered:?}");
+
+            let fenced_message = format!(
+                "Producer with transactionalId '{TRANSACTIONAL_ID}' and {} has been fenced by another producer with \
+                 the same transactionalId",
+                manager.producer_id_and_epoch()
+            );
+            for message in [
+                manager
+                    .begin_transaction()
+                    .expect_err("beginTransaction is fenced")
+                    .message()
+                    .to_string(),
+                manager
+                    .begin_commit(&mut pending)
+                    .expect_err("beginCommit is fenced")
+                    .message()
+                    .to_string(),
+                manager
+                    .begin_abort(&mut pending)
+                    .expect_err("beginAbort is fenced")
+                    .message()
+                    .to_string(),
+                manager
+                    .send_offsets_to_transaction(HashMap::new(), dummy_group_metadata(), &mut pending)
+                    .expect_err("sendOffsetsToTransaction is fenced")
+                    .message()
+                    .to_string(),
+            ] {
+                assert_eq!(message, fenced_message);
+            }
+        }
+    }
+
+    /// Translated from `shouldNotSendAbortTxnRequestWhenOnlyAddPartitionsRequestFailed`
+    /// (Java 2587-2602).
+    ///
+    /// The abort succeeds *without* an `EndTxn` round trip: the failed
+    /// `AddPartitionsToTxn` never set `transactionStarted`, so `nextRequest`
+    /// short-circuits the `EndTxn` (Java 913-925).
+    #[tokio::test]
+    async fn test_should_not_send_abort_txn_request_when_only_add_partitions_request_failed() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::TopicAuthorizationFailed)])
+            .expect("a TOPIC_AUTHORIZATION_FAILED response moves to an abortable error");
+
+        let abort_result = manager.begin_abort(&mut pending).expect("ABORTABLE_ERROR -> ABORTING is valid");
+        assert!(!abort_result.is_completed());
+
+        assert!(
+            manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .is_none(),
+            "no EndTxn is sent for a transaction that never started"
+        );
+        assert!(abort_result.is_completed());
+        assert!(abort_result.is_successful());
+        assert!(manager.is_ready());
+    }
+
+    /// Translated from `shouldNotSendAbortTxnRequestWhenOnlyAddOffsetsRequestFailed`
+    /// (Java 2604-2621) and `shouldFailAbortIfAddOffsetsFailsWithFatalError`
+    /// (Java 2623-2640).
+    ///
+    /// Same shape, opposite outcome: `GROUP_AUTHORIZATION_FAILED` is abortable, so
+    /// the abort completes successfully and the manager returns to `READY`;
+    /// `UNKNOWN_SERVER_ERROR` is fatal, so the abort fails and the manager stays in
+    /// `FATAL_ERROR`. Both go through the same `nextRequest` short-circuit, because
+    /// the failed `AddOffsetsToTxn` never set `transactionStarted`.
+    ///
+    /// Note the abort is requested *before* the `AddOffsetsToTxn` response arrives,
+    /// which is what makes the queued `EndTxn` the thing that observes the error.
+    #[tokio::test]
+    async fn test_abort_after_add_offsets_to_txn_failure() {
+        for (error, expect_successful) in [
+            (Errors::GroupAuthorizationFailed, true),
+            (Errors::UnknownServerError, false),
+        ] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            let mut coordinators = CoordinatorNodes::new();
+            do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+            manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+            let offsets = HashMap::from([(tp1(), offset(1))]);
+            manager
+                .send_offsets_to_transaction(offsets, consumer_group_metadata(), &mut pending)
+                .expect("sendOffsetsToTransaction is valid in IN_TRANSACTION");
+            let abort_result = manager.begin_abort(&mut pending).expect("IN_TRANSACTION -> ABORTING is valid");
+
+            run_add_offsets_to_txn(&mut manager, &mut coordinators, &mut pending, CONSUMER_GROUP_ID, error)
+                .expect("the AddOffsetsToTxn response is handled");
+            // The queued EndTxn is dequeued next; it is short-circuited because
+            // nothing was ever added, and `maybeTerminateRequestWithError` fails it
+            // first in the fatal case.
+            assert!(
+                manager
+                    .next_request(&mut pending, false)
+                    .expect("next_request does not fail on this path")
+                    .is_none(),
+                "no EndTxn is sent for a transaction that never started ({error:?})"
+            );
+
+            assert!(abort_result.is_completed());
+            assert_eq!(
+                abort_result.is_successful(),
+                expect_successful,
+                "unexpected outcome for {error:?}"
+            );
+            if expect_successful {
+                assert!(manager.is_ready());
+            } else {
+                assert!(manager.has_fatal_error());
+            }
+        }
+    }
+
+    /// Translated from `testForegroundInvalidStateTransitionIsRecoverable`
+    /// (Java 3840-3869).
+    ///
+    /// An invalid transition attempted from the *application* side leaves the state
+    /// machine untouched (rules §1), so a full transaction still runs afterwards.
+    #[tokio::test]
+    async fn test_foreground_invalid_state_transition_is_recoverable() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        // Intentionally perform an operation that will cause an invalid state transition. The detection of this
+        // will not poison the transaction manager since it was performed in the foreground.
+        manager
+            .begin_abort(&mut pending)
+            .expect_err("UNINITIALIZED -> ABORTING_TRANSACTION is not valid");
+        assert!(!manager.has_fatal_error());
+
+        // Validate that the transactions can still run after the invalid state transition attempt above.
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_transactional());
+
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(!manager.has_fatal_error());
+
+        manager.maybe_add_partition(&tp1()).expect("a new partition is registered");
+        assert!(manager.has_ongoing_transaction());
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp1(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&tp1()));
+
+        let retry_result = manager
+            .begin_commit(&mut pending)
+            .expect("IN_TRANSACTION -> COMMITTING is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Commit, Errors::None)
+            .expect("a successful EndTxn response is handled");
+        assert!(!manager.has_ongoing_transaction());
+        assert!(retry_result.is_completed());
+        retry_result.await_result().await.expect("the commit succeeded");
+        assert!(retry_result.is_acked());
+    }
+
+    /// Translated from `testTransactionManagerEnablesV2` (Java 933-981).
+    ///
+    /// The upgrade path: a V1 transaction runs to completion, the cluster finalizes
+    /// `transaction.version` at 2 mid-transaction, and `beginCommit`'s
+    /// `maybeUpdateTransactionV2Enabled(false)` (Java 386) picks it up — which sets
+    /// `clientSideEpochBumpRequired`, so `beginCompletingTransaction` returns an
+    /// `initializeTransactions` result rather than the `EndTxn`'s, and the next
+    /// transaction starts on a bumped epoch.
+    ///
+    /// Java re-initializes the manager at features epoch 1 before updating to 2; the
+    /// Rust fixture starts at epoch 0, so the intermediate update is a no-op with
+    /// respect to the feature level and is skipped.
+    #[tokio::test]
+    async fn test_transaction_manager_enables_v2() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(!manager.has_fatal_error());
+        assert!(!manager.is_transaction_v2_enabled());
+
+        finalize_transaction_version(manager.api_versions(), 2, 2);
+
+        // The manager stays in transaction V2 disabled.
+        assert!(!manager.is_transaction_v2_enabled());
+
+        manager.maybe_add_partition(&tp1()).expect("a new partition is registered");
+        assert!(manager.has_ongoing_transaction());
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp1(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&tp1()));
+
+        let retry_result = manager
+            .begin_commit(&mut pending)
+            .expect("IN_TRANSACTION -> COMMITTING is valid");
+        assert!(manager.has_ongoing_transaction());
+        assert!(manager.is_transaction_v2_enabled());
+        assert!(
+            manager.client_side_epoch_bump_required(),
+            "upgrading to V2 mid-transaction must fence the old epoch"
+        );
+
+        run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Commit, Errors::None)
+            .expect("a successful EndTxn response is handled");
+        // `resetTransactionState` goes to INITIALIZING rather than READY while the
+        // bump is pending (Java 1331-1332), so the queued epoch-bump
+        // `InitProducerId` is what completes the caller's handle.
+        assert_eq!(manager.current_state(), State::Initializing);
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the epoch-bump InitProducerId must be pending");
+        assert_eq!(handler.priority(), Priority::EpochBump);
+        complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH + 1)
+            .expect("a successful InitProducerId response is handled");
+
+        assert!(!manager.has_ongoing_transaction());
+        assert!(retry_result.is_completed());
+        retry_result.await_result().await.expect("the commit succeeded");
+        assert!(retry_result.is_acked());
+
+        // After restart the transaction, the V2 is still enabled and epoch is bumped.
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(manager.is_transaction_v2_enabled());
+        assert_eq!(manager.producer_id_and_epoch().epoch, EPOCH + 1);
+    }
+
+    /// Translated from `testTransactionManagerDisablesV2` (Java 1033-1075).
+    ///
+    /// Java's body is almost entirely fixture construction; the payload is the last
+    /// two lines — with `transaction.version` finalized at 1, `doInitTransactions`'s
+    /// `maybeUpdateTransactionV2Enabled(true)` leaves Transaction V2 off.
+    #[tokio::test]
+    async fn test_transaction_manager_disables_v2() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(!manager.is_transaction_v2_enabled());
+        assert!(!manager.client_side_epoch_bump_required(), "no upgrade means no epoch bump");
+    }
+
+    /// Translated from `testTransactionV2AddPartitionAndOffsets` (Java 983-1031),
+    /// minus its two `appendToAccumulator` legs, which need the accumulator and are
+    /// owed with the `SenderTest` group.
+    ///
+    /// Under Transaction V2 both `maybeAddPartition` and `sendOffsetsToTransaction`
+    /// skip their registration RPC: the partition is confirmed immediately, and the
+    /// offsets go straight to `TxnOffsetCommit` with no `AddOffsetsToTxn`.
+    #[tokio::test]
+    async fn test_transaction_v2_add_partition_and_offsets() {
+        let mut manager = transactional_manager(true);
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_transaction_v2_enabled());
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+        assert!(manager.transaction_contains_partition(&tp0()));
+        assert!(manager.is_send_to_partition_allowed(&tp0()));
+        assert!(pending.is_empty(), "Transaction V2 sends no AddPartitionsToTxn");
+
+        // Now, test adding the offsets.
+        let offsets = HashMap::from([(tp1(), offset(1))]);
+        let add_offsets_result = manager
+            .send_offsets_to_transaction(offsets, consumer_group_metadata(), &mut pending)
+            .expect("sendOffsetsToTransaction is valid in IN_TRANSACTION");
+        assert!(manager.has_pending_offset_commits());
+        // the result doesn't complete until TxnOffsetCommit returns
+        assert!(!add_offsets_result.is_completed());
+
+        discover_group_coordinator(&mut manager, &mut coordinators, &mut pending, CONSUMER_GROUP_ID)
+            .expect("the group coordinator is discovered");
+        assert!(manager.has_pending_offset_commits());
+
+        run_txn_offset_commit(
+            &mut manager,
+            &mut coordinators,
+            &mut pending,
+            CONSUMER_GROUP_ID,
+            &[(tp1(), Errors::None)],
+        )
+        .expect("a successful TxnOffsetCommit response is handled");
+        assert!(!manager.has_pending_offset_commits());
+        // We should only be done after both RPCs complete.
+        assert!(add_offsets_result.is_completed());
+
+        manager
+            .begin_commit(&mut pending)
+            .expect("IN_TRANSACTION -> COMMITTING is valid");
+        // Under Transaction V2 the broker returns the bumped epoch on the EndTxn
+        // response (Java 1760-1766), which the handler absorbs.
+        run_end_txn(
+            &mut manager,
+            &mut pending,
+            TransactionResult::Commit,
+            Errors::None,
+            PRODUCER_ID,
+            EPOCH + 1,
+        )
+        .expect("a successful EndTxn response is handled");
+        assert!(!manager.has_ongoing_transaction());
+        assert!(!manager.is_completing());
+        assert_eq!(manager.producer_id_and_epoch(), ProducerIdAndEpoch::new(PRODUCER_ID, EPOCH + 1));
+    }
+
+    /// Translated from
+    /// `testBumpTransactionalEpochOnRecoverableAddPartitionRequestError`
+    /// (Java 3546-3564).
+    ///
+    /// An `UNKNOWN_PRODUCER_ID` on `AddPartitionsToTxn` takes
+    /// `abortableErrorIfPossible` (Java 1606), which arms
+    /// `clientSideEpochBumpRequired`; the abort then completes through the epoch-bump
+    /// `InitProducerId` rather than the `EndTxn`, and the producer is `READY` on a
+    /// bumped epoch.
+    #[tokio::test]
+    async fn test_bump_transactional_epoch_on_recoverable_add_partition_request_error() {
+        const INITIAL_EPOCH: i16 = 1;
+        const BUMPED_EPOCH: i16 = 2;
+
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, INITIAL_EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::UnknownProducerId)])
+            .expect("an UNKNOWN_PRODUCER_ID response moves to an abortable error");
+        assert!(manager.has_abortable_error());
+        assert!(manager.client_side_epoch_bump_required());
+
+        let abort_result = manager.begin_abort(&mut pending).expect("ABORTABLE_ERROR -> ABORTING is valid");
+        // `nextRequest` short-circuits the EndTxn (nothing was ever added) and polls
+        // again in the *same* call (Java 924), so it hands back the epoch-bump
+        // `InitProducerId` directly.
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the epoch-bump InitProducerId must be pending");
+        assert_eq!(handler.priority(), Priority::EpochBump);
+        complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, BUMPED_EPOCH)
+            .expect("a successful InitProducerId response is handled");
+
+        assert!(abort_result.is_completed());
+        assert_eq!(manager.producer_id_and_epoch().epoch, BUMPED_EPOCH);
+        assert!(abort_result.is_successful());
+        // make sure we are ready for a transaction now.
+        assert!(manager.is_ready());
+    }
+
     /// Translated from `testIsSendToPartitionAllowedWithPartitionNotAdded`
     /// (Java 616-621).
     #[tokio::test]
@@ -7104,9 +8101,7 @@ mod tests {
         assert!(!manager.has_error());
     }
 
-    /// Translated from `testRetryInitTransactionsAfterTimeout` (Java 1713-1744),
-    /// minus the three assertions that need Phase 5b's `beginAbort` / `beginCommit`
-    /// — recorded in the accounting block as a named 5b tail.
+    /// Translated from `testRetryInitTransactionsAfterTimeout` (Java 1713-1744).
     ///
     /// This is the core of `.claude/rules/producer-transactions.md` §5: an
     /// `initTransactions` whose caller timed out before acknowledging the result
@@ -7156,6 +8151,20 @@ mod tests {
                 .expect_err("beginTransaction is blocked by the unacknowledged result")
                 .message(),
             expected
+        );
+        assert_eq!(
+            manager
+                .begin_abort(&mut pending)
+                .expect_err("beginAbort is blocked by the unacknowledged result")
+                .message(),
+            expected.replace("`beginTransaction`", "`abortTransaction`")
+        );
+        assert_eq!(
+            manager
+                .begin_commit(&mut pending)
+                .expect_err("beginCommit is blocked by the unacknowledged result")
+                .message(),
+            expected.replace("`beginTransaction`", "`commitTransaction`")
         );
         assert_eq!(
             manager
@@ -7321,8 +8330,7 @@ mod tests {
     }
 
     /// Translated from `testBackgroundInvalidStateTransitionIsFatal`
-    /// (Java 3818-3838), minus the three follow-up calls that need Phase 5b
-    /// (`beginAbort`, `beginCommit`, `sendOffsetsToTransaction`).
+    /// (Java 3818-3838).
     ///
     /// Java forces the poison with
     /// `setShouldPoisonStateOnInvalidTransitionOverride(true)` on a test subclass;
@@ -7351,12 +8359,20 @@ mod tests {
 
         // Validate that these operations fail after the invalid state transition attempt above.
         for message in [
-            manager.begin_transaction().expect_err("poisoned").message(),
-            manager.maybe_add_partition(&tp0()).expect_err("poisoned").message(),
+            manager.begin_transaction().expect_err("poisoned").message().to_string(),
+            manager.begin_abort(&mut pending).expect_err("poisoned").message().to_string(),
+            manager.begin_commit(&mut pending).expect_err("poisoned").message().to_string(),
+            manager.maybe_add_partition(&tp0()).expect_err("poisoned").message().to_string(),
             manager
                 .initialize_transactions(false, &mut pending)
                 .expect_err("poisoned")
-                .message(),
+                .message()
+                .to_string(),
+            manager
+                .send_offsets_to_transaction(HashMap::new(), fake_group_metadata(), &mut pending)
+                .expect_err("poisoned")
+                .message()
+                .to_string(),
         ] {
             assert_eq!(
                 message,
@@ -7694,8 +8710,7 @@ mod tests {
     }
 
     /// Translated from `testTransactionalIdAuthorizationFailureInFindCoordinator`
-    /// (Java 1350-1363), minus the `assertFatalError(..)` tail that needs Phase
-    /// 5b's `beginAbort` — recorded in the accounting block.
+    /// (Java 1350-1363).
     #[tokio::test]
     async fn test_transactional_id_authorization_failure_in_find_coordinator() {
         let mut manager = transactional_manager(false);
@@ -7771,17 +8786,19 @@ mod tests {
                 .error(),
             Errors::TransactionalIdAuthorizationFailed
         );
+
+        assert_fatal_error(&mut manager, &mut pending, Errors::TransactionalIdAuthorizationFailed);
     }
 
     /// The remaining three error arms of
     /// `FindCoordinatorHandler.handleResponse` (Java 1710-1719).
     ///
     /// `GROUP_AUTHORIZATION_FAILED` needs a **group** lookup, which Java only
-    /// reaches through `sendOffsetsToTransaction` → `AddOffsetsToTxn` (Phase 5b) —
-    /// so `testGroupAuthorizationFailureInFindCoordinator` (Java 1381) and
-    /// `testTransactionAbortableExceptionInFindCoordinator` (Java 3903) are both
-    /// blocked on that. The arms themselves are driven directly here, since
-    /// `lookup_coordinator` takes the type as a parameter.
+    /// reaches through `sendOffsetsToTransaction` → `AddOffsetsToTxn`; the arms are
+    /// driven directly here, since `lookup_coordinator` takes the type as a
+    /// parameter, and end to end in
+    /// [`test_group_coordinator_lookup_failure_after_add_offsets_to_txn`], which is
+    /// the port of Java's two tests.
     #[tokio::test]
     async fn test_find_coordinator_remaining_error_arms() {
         // GROUP_AUTHORIZATION_FAILED → abortable, with the group id in the message.
@@ -8077,12 +9094,17 @@ mod tests {
             do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
             manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
             if coordinator_supports_bump {
-                let mut coordinators = CoordinatorNodes::new();
-                coordinators
-                    .set(CoordinatorType::Transaction, broker_node())
-                    .expect("TRANSACTION is a valid coordinator type");
-                manager.handle_coordinator_ready(&coordinators);
+                // Already true — `do_init_transactions` runs `handleCoordinatorReady`
+                // as `Sender.runOnce` does.
                 assert!(manager.can_handle_abortable_error());
+            } else {
+                // Java reaches "no bump support" by losing the coordinator:
+                // `handleCoordinatorReady` reads `apiVersions.get(null)` and records
+                // `false` (Java 1104-1106). That is the mechanism
+                // `testNeedToTriggerEpochBumpFromClientDuringCoordinatorDisconnect`
+                // (Java 3715) exercises.
+                manager.handle_coordinator_ready(&CoordinatorNodes::new());
+                assert!(!manager.can_handle_abortable_error());
             }
 
             // A batch that was sent, marked unresolved, and whose sequence never
