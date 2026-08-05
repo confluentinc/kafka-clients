@@ -1358,11 +1358,24 @@ impl<K, V> KafkaProducer<K, V> {
     /// returns `true` immediately.
     ///
     /// Corresponds to Java's `ioThread.join(closeTimer.remainingMs())`.
+    ///
+    /// On expiry the handle is **put back**, because Java's `close` force-closes and
+    /// then joins unconditionally (`KafkaProducer.java:1414-1418`) — dropping it here
+    /// would leave [`Self::await_sender_handle_indefinitely`] with nothing to join and
+    /// `close` would return while the Sender task was still running, which CLAUDE.md
+    /// §9.4 forbids. `JoinHandle` is `Unpin`, so `&mut` is enough to await it without
+    /// giving it away.
     async fn await_sender_handle(&self, timeout: Duration) -> bool {
         let handle = self.sender_handle.lock().unwrap().take();
         match handle {
             None => true,
-            Some(join_handle) => tokio::time::timeout(timeout, join_handle).await.is_ok(),
+            Some(mut join_handle) => {
+                let completed = tokio::time::timeout(timeout, &mut join_handle).await.is_ok();
+                if !completed {
+                    *self.sender_handle.lock().unwrap() = Some(join_handle);
+                }
+                completed
+            },
         }
     }
 
@@ -2641,6 +2654,34 @@ mod tests {
         Node::new(0, "host1".to_string(), 1000)
     }
 
+    /// The topic id [`TOPIC`] is published with, so a produce response can name the
+    /// same one the request carried.
+    fn topic_id() -> crate::common::Uuid {
+        crate::common::Uuid::from_string("MKXx1fIkQy2J9jXHhK8m1w").expect("valid UUID")
+    }
+
+    /// Publishes node `"0"`'s API versions with `transaction.version` finalized at
+    /// `level`, which is what `maybeUpdateTransactionV2Enabled`
+    /// (`TransactionManager.java:492-504`) reads.
+    fn seed_transaction_version(api_versions: &Arc<ApiVersions>, level: i16) {
+        use crate::api_versions_response_data::{FinalizedFeatureKey, SupportedFeatureKey};
+        use crate::node_api_versions::NodeApiVersions;
+
+        const FEATURE: &str = "transaction.version";
+
+        let mut supported = SupportedFeatureKey::new();
+        supported.set_name(FEATURE.to_string());
+        supported.set_max_version(level);
+        supported.set_min_version(0);
+
+        let mut finalized = FinalizedFeatureKey::new();
+        finalized.set_name(FEATURE.to_string());
+        finalized.set_max_version_level(level);
+        finalized.set_min_version_level(level);
+
+        api_versions.update("0", NodeApiVersions::new(&[], &[supported], &[finalized], 0));
+    }
+
     /// Shared mock clock, the same shape `SenderTest`'s uses.
     struct MockTime {
         now_ms: AtomicI64,
@@ -2690,6 +2731,21 @@ mod tests {
         /// `num_partitions` seeds the metadata for [`TOPIC`], standing in for Java's
         /// `RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1))`.
         fn new(extra: &[(&str, &str)], num_partitions: i32) -> Self {
+            Self::with_options(extra, num_partitions, false)
+        }
+
+        /// As [`Self::new`], but with `transaction.version` finalized at level 2 so the
+        /// manager enables KIP-890 Transaction V2 in `initTransactions`.
+        ///
+        /// Java seeds the same thing through `client.setNodeApiVersions(..)` plus
+        /// `apiVersions.update(NODE.idString(), nodeApiVersions)`; only the second half
+        /// is load-bearing, because `TransactionManager` reads `apiVersions` and never
+        /// the client.
+        fn transactional_v2(extra: &[(&str, &str)], num_partitions: i32) -> Self {
+            Self::with_options(extra, num_partitions, true)
+        }
+
+        fn with_options(extra: &[(&str, &str)], num_partitions: i32, transaction_v2: bool) -> Self {
             let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9000".to_string())]);
             for (key, value) in extra {
                 props.insert((*key).to_string(), (*value).to_string());
@@ -2698,6 +2754,9 @@ mod tests {
             let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
             let time = MockTime::new(1_000);
             let api_versions = Arc::new(ApiVersions::new());
+            if transaction_v2 {
+                seed_transaction_version(&api_versions, 2);
+            }
 
             let transaction_manager =
                 KafkaProducer::<String, String>::configure_transaction_state(&config, &api_versions, &log_context)
@@ -2713,9 +2772,16 @@ mod tests {
                 log_context.clone(),
             ));
             metadata.add(TOPIC, time.milliseconds());
-            let update = crate::common::requests::request_test_utils::metadata_update_with(
+            // `metadata_update_with_ids` rather than `metadata_update_with`: the produce
+            // path stamps the topic id from metadata onto the request, so a response has
+            // to carry the same one to be matched back to its batch.
+            let update = crate::common::requests::request_test_utils::metadata_update_with_ids(
+                "kafka-cluster",
                 1,
+                &HashMap::new(),
                 &HashMap::from([(TOPIC.to_string(), num_partitions)]),
+                &|_| None,
+                &HashMap::from([(TOPIC.to_string(), topic_id())]),
             );
             metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
@@ -3421,6 +3487,646 @@ mod tests {
             )
         );
     }
+
+    /// A `ProduceResponse` for one partition, mirroring
+    /// `KafkaProducerTest.produceResponse(TopicIdPartition, long, Errors, int, int)`.
+    fn produce_response(partition: i32, base_offset: i64, error: Errors, log_start_offset: i64) -> ConcreteResponse {
+        use crate::common::requests::ProduceResponse;
+        use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
+
+        let mut partition_response = PartitionProduceResponse::new();
+        partition_response.set_index(partition);
+        partition_response.set_base_offset(base_offset);
+        partition_response.set_error_code(error.code());
+        partition_response.set_log_start_offset(log_start_offset);
+
+        let mut topic_response = TopicProduceResponse::new();
+        topic_response.set_topic_id(topic_id());
+        topic_response.set_name(TOPIC.to_string());
+        topic_response.set_partition_responses(vec![partition_response]);
+
+        let mut data = ProduceResponseData::new();
+        data.set_responses(vec![topic_response]);
+        ConcreteResponse::Produce(ProduceResponse::new(data))
+    }
+
+    /// Java's `addOffsetsToTxnResponse(Errors error)`
+    /// (`KafkaProducerTest.java:2037-2041`).
+    fn add_offsets_to_txn_response(error: Errors) -> ConcreteResponse {
+        use crate::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
+        use crate::common::requests::AddOffsetsToTxnResponse;
+
+        let mut data = AddOffsetsToTxnResponseData::new();
+        data.set_error_code(error.code()).set_throttle_time_ms(10);
+        ConcreteResponse::AddOffsetsToTxn(AddOffsetsToTxnResponse::new(data))
+    }
+
+    /// Java's `txnOffsetsCommitResponse(Map<TopicPartition, Errors>)`
+    /// (`KafkaProducerTest.java:2043-2045`).
+    fn txn_offsets_commit_response(errors: &[(TopicPartition, Errors)]) -> ConcreteResponse {
+        use crate::common::requests::TxnOffsetCommitResponse;
+
+        let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
+        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(10, &error_map))
+    }
+
+    /// Translated from `KafkaProducerTest.testTransactionV2Produce` (Java 1771-1828).
+    ///
+    /// The full Transaction V2 round trip: `FindCoordinator`, `InitProducerId`, one
+    /// produce, `EndTxn`. No `AddPartitionsToTxn` is prepared or expected — under
+    /// KIP-890 the broker adds the partition implicitly, which is exactly what
+    /// `maybeAddPartition`'s V2 arm (`TransactionManager.java:448-451`) relies on.
+    #[tokio::test]
+    async fn test_transaction_v2_produce() {
+        let mut ctx = TxnProducerContext::transactional_v2(&[("transactional.id", "some-txn")], 1);
+        ctx.time.set_auto_tick(1);
+        let node = coordinator_node();
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some-txn", &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, EPOCH));
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        assert!(
+            ctx.transaction_manager.lock().unwrap().is_transaction_v2_enabled(),
+            "initTransactions ends with maybeUpdateTransactionV2Enabled(true)"
+        );
+
+        ctx.producer.begin_transaction().expect("beginTransaction");
+        ctx.sender
+            .client_mut()
+            .prepare_response(produce_response(0, 1, Errors::None, 0));
+        ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+
+        let record = ProducerRecord::with_partition(
+            TOPIC.to_string(),
+            Some(0),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .expect("a valid partition");
+        let future = ctx.producer.send(record).await.expect("send");
+        let metadata = drive(&mut ctx.sender, future.get()).await.expect("the produce succeeds");
+        assert_eq!(metadata.offset(), 1);
+
+        drive(&mut ctx.sender, ctx.producer.commit_transaction())
+            .await
+            .expect("commitTransaction");
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testTransactionV2ProduceWithConcurrentTransactionError`
+    /// (Java 1443-1500).
+    ///
+    /// As [`test_transaction_v2_produce`], but the first produce is answered with
+    /// `CONCURRENT_TRANSACTIONS`. That is retriable, so the batch is re-enqueued and
+    /// the second response completes it — which is what makes the commit that follows
+    /// succeed rather than fail on an abortable error.
+    #[tokio::test]
+    async fn test_transaction_v2_produce_with_concurrent_transaction_error() {
+        let mut ctx = TxnProducerContext::transactional_v2(&[("transactional.id", "some-txn")], 1);
+        ctx.time.set_auto_tick(1);
+        let node = coordinator_node();
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some-txn", &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, EPOCH));
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        ctx.producer.begin_transaction().expect("beginTransaction");
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(produce_response(0, 1, Errors::ConcurrentTransactions, 0));
+        ctx.sender
+            .client_mut()
+            .prepare_response(produce_response(0, 1, Errors::None, 0));
+        ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+
+        let record = ProducerRecord::with_partition(
+            TOPIC.to_string(),
+            Some(0),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .expect("a valid partition");
+        let future = ctx.producer.send(record).await.expect("send");
+        let metadata = drive(&mut ctx.sender, future.get()).await.expect("the retry succeeds");
+        assert_eq!(metadata.offset(), 1);
+
+        drive(&mut ctx.sender, ctx.producer.commit_transaction())
+            .await
+            .expect("commitTransaction");
+    }
+
+    /// Translated from `KafkaProducerTest.testSendTxnOffsetsWithGroupIdTransactionV2`
+    /// (Java 1714-1769).
+    ///
+    /// With Transaction V2 the client skips `AddOffsetsToTxn` and sends the
+    /// `TxnOffsetCommit` straight away (`TransactionManager.java:411-419`), after a
+    /// `FindCoordinator` for the *group* coordinator. Java's prepared sequence says the
+    /// same thing: `FindCoordinator`, `InitProducerId`, `FindCoordinator`,
+    /// `TxnOffsetCommit`, `EndTxn` — five responses with no `AddOffsetsToTxn` between
+    /// the second and third, unlike its V1 sibling.
+    #[tokio::test]
+    async fn test_send_txn_offsets_with_group_id_transaction_v2() {
+        let mut ctx = TxnProducerContext::transactional_v2(
+            &[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")],
+            1,
+        );
+        ctx.time.set_auto_tick(1);
+        let node = coordinator_node();
+        ctx.sender.client_mut().throttle(&node, 5000);
+        ctx.prepare_init_transactions(Errors::None, PRODUCER_ID, EPOCH);
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        assert!(ctx.transaction_manager.lock().unwrap().is_transaction_v2_enabled());
+        ctx.producer.begin_transaction().expect("beginTransaction");
+
+        const GROUP_ID: &str = "group";
+        let partition = TopicPartition::new(TOPIC.to_string(), 0);
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, GROUP_ID, &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(txn_offsets_commit_response(&[(partition.clone(), Errors::None)]));
+        ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+
+        #[allow(deprecated)]
+        let group_metadata = ConsumerGroupMetadata::new(GROUP_ID);
+        let offsets = HashMap::from([(partition, OffsetAndMetadata::new(5).expect("a non-negative offset"))]);
+        drive(
+            &mut ctx.sender,
+            ctx.producer.send_offsets_to_transaction(offsets, group_metadata),
+        )
+        .await
+        .expect("sendOffsetsToTransaction");
+
+        drive(&mut ctx.sender, ctx.producer.commit_transaction())
+            .await
+            .expect("commitTransaction");
+    }
+
+    /// Translated from `KafkaProducerTest.testMeasureAbortTransactionDuration`
+    /// (Java 1502-1530).
+    ///
+    /// # What is and is not covered
+    ///
+    /// Java's assertions are all on the `txn-abort-time-ns-total` sensor: that it is
+    /// positive after the first abort and larger after the second. There is no metrics
+    /// layer in this crate — `KafkaProducerMetrics` and the whole
+    /// `org.apache.kafka.common.metrics` package are in `remaining_classes.txt` — so
+    /// those two assertions are not representable and are dropped.
+    ///
+    /// The operation sequence they surround is translated in full and is not trivial:
+    /// two complete `beginTransaction` / `abortTransaction` cycles over one
+    /// `initTransactions`, which is what proves `abortTransaction` leaves the manager
+    /// in a state a *second* transaction can start from.
+    #[tokio::test]
+    async fn test_measure_abort_transaction_duration() {
+        let mut ctx = TxnProducerContext::transactional();
+        ctx.time.set_auto_tick(1);
+        init_transactions(&mut ctx).await;
+
+        for attempt in 0..2 {
+            ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+            ctx.producer
+                .begin_transaction()
+                .unwrap_or_else(|error| panic!("beginTransaction {}: {}", attempt, error));
+            drive(&mut ctx.sender, ctx.producer.abort_transaction())
+                .await
+                .unwrap_or_else(|error| panic!("abortTransaction {}: {}", attempt, error));
+        }
+    }
+
+    /// Translated from `KafkaProducerTest.testMeasureTransactionDurations`
+    /// (Java 1841-1891).
+    ///
+    /// The `txn-init-time-ns-total` / `txn-begin-time-ns-total` /
+    /// `txn-send-offsets-time-ns-total` / `txn-commit-time-ns-total` assertions are
+    /// dropped for the reason given on [`test_measure_abort_transaction_duration`].
+    /// What remains is the full V1 offsets round trip run **twice** over one
+    /// `initTransactions`: `AddOffsetsToTxn`, a `FindCoordinator` for the group,
+    /// `TxnOffsetCommit`, `EndTxn` — and, on the second pass, no second
+    /// `FindCoordinator`, because the group coordinator is already known. That
+    /// asymmetry is Java's too (the second batch of prepared responses omits it) and is
+    /// the part of this test that exercises real behaviour.
+    #[tokio::test]
+    async fn test_measure_transaction_durations() {
+        let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
+        // Java's `new MockTime(Duration.ofSeconds(1).toMillis())` — a one-second tick,
+        // which is what made the duration assertions meaningful.
+        ctx.time.set_auto_tick(1000);
+        init_transactions(&mut ctx).await;
+
+        const GROUP_ID: &str = "group";
+        let node = coordinator_node();
+        let partition = TopicPartition::new(TOPIC.to_string(), 0);
+
+        for (attempt, offset) in [(0usize, 5i64), (1, 10)] {
+            ctx.sender
+                .client_mut()
+                .prepare_response(add_offsets_to_txn_response(Errors::None));
+            if attempt == 0 {
+                ctx.sender
+                    .client_mut()
+                    .prepare_response(find_coordinator_response(Errors::None, GROUP_ID, &node));
+            }
+            ctx.sender
+                .client_mut()
+                .prepare_response(txn_offsets_commit_response(&[(partition.clone(), Errors::None)]));
+            ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+
+            ctx.producer
+                .begin_transaction()
+                .unwrap_or_else(|error| panic!("beginTransaction {}: {}", attempt, error));
+
+            #[allow(deprecated)]
+            let group_metadata = ConsumerGroupMetadata::new(GROUP_ID);
+            let offsets = HashMap::from([(
+                partition.clone(),
+                OffsetAndMetadata::new(offset).expect("a non-negative offset"),
+            )]);
+            drive(
+                &mut ctx.sender,
+                ctx.producer.send_offsets_to_transaction(offsets, group_metadata),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("sendOffsetsToTransaction {}: {}", attempt, error));
+
+            drive(&mut ctx.sender, ctx.producer.commit_transaction())
+                .await
+                .unwrap_or_else(|error| panic!("commitTransaction {}: {}", attempt, error));
+        }
+    }
+
+    /// A producer whose `Sender` is **spawned**, exactly as
+    /// [`KafkaProducer::with_client`] does in production.
+    ///
+    /// Needed by the three `testCloseIsForcedOn*` methods, whose subject is the
+    /// force-close path in `Sender::run`'s tail (`Sender.java:286-296`): it runs only
+    /// once the run loop itself exits, which driving `run_once` cannot reach. The price
+    /// is Java's — the `MockClient` moves into the task, so `prepare` queues every
+    /// response up front and the test cannot inspect the mock afterwards.
+    fn spawned_transactional_producer(
+        extra: &[(&str, &str)],
+        prepare: impl FnOnce(&mut MockClient),
+    ) -> KafkaProducer<String, String> {
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9000".to_string())]);
+        for (key, value) in extra {
+            props.insert((*key).to_string(), (*value).to_string());
+        }
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
+        let time = MockTime::new(1_000);
+        let api_versions = Arc::new(ApiVersions::new());
+
+        let transaction_manager =
+            KafkaProducer::<String, String>::configure_transaction_state(&config, &api_versions, &log_context)
+                .expect("these tests always enable idempotence");
+
+        let metadata = Arc::new(ProducerMetadata::with_log_context(
+            config.reconnect_backoff_ms,
+            config.reconnect_backoff_max_ms,
+            config.metadata_max_age_ms,
+            config.metadata_max_idle_ms,
+            ClusterResourceListeners::new(),
+            log_context.clone(),
+        ));
+        metadata.add(TOPIC, time.milliseconds());
+        let update = crate::common::requests::request_test_utils::metadata_update_with(
+            1,
+            &HashMap::from([(TOPIC.to_string(), 1)]),
+        );
+        metadata.update_with_current_request_version(&update, false, time.milliseconds());
+
+        let batch_size = config.batch_size.max(1);
+        let accumulator = Arc::new(RecordAccumulator::with_log_context(
+            batch_size,
+            Compression::of(config.compression_type),
+            config.linger_ms as i32,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            config.delivery_timeout_ms,
+            PartitionerConfig {
+                enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
+                partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
+            },
+            Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize)),
+            Some(Arc::clone(&transaction_manager)),
+            log_context,
+        ));
+
+        let mut client = MockClient::new(vec![coordinator_node()], time.as_provider());
+        prepare(&mut client);
+        let wakeup = client.wakeup_notify();
+        let running = Arc::new(AtomicBool::new(true));
+        let force_close = Arc::new(AtomicBool::new(false));
+        let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
+
+        let mut sender = Sender::new(
+            client,
+            Arc::clone(&metadata),
+            Arc::clone(&accumulator),
+            config.max_in_flight_requests_per_connection == 1,
+            config.max_request_size,
+            config.acks,
+            config.retries,
+            config.request_timeout_ms,
+            config.retry_backoff_ms,
+            Arc::clone(&running),
+            Arc::clone(&force_close),
+            time.as_provider(),
+            Some(Arc::clone(&transaction_manager)),
+            Arc::clone(&pending_requests),
+            LogContext::empty(),
+        );
+
+        // # Why the Sender gets its own thread and runtime here
+        //
+        // `with_client` would `tokio::task::spawn` it onto the test's runtime, and that
+        // deadlocks: `Sender::run` over a `MockClient` never awaits anything that is
+        // pending — `MockClient::poll` returns immediately — so the task never yields.
+        // In tokio only a worker parks on the time driver, and the sole awake worker is
+        // then stuck inside that task, so **no timer in the whole runtime ever fires**:
+        // the test's own `sleep` never returns and `close` is never called. (Diagnosed
+        // from a thread sample: the second worker sitting in `park_condvar` while the
+        // first spun in `run_once`.) A real `NetworkClient` cannot cause this, because
+        // its `poll` awaits the selector.
+        //
+        // `spawn_blocking` plus a private current-thread runtime gives the Sender its
+        // own OS thread and its own driver — which is also closer to Java, where the
+        // Sender genuinely *is* a separate thread (`ioThread`). The returned handle is
+        // still a `tokio::task::JoinHandle<()>`, so `close`'s join works unchanged.
+        let sender_handle = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime for the Sender")
+                .block_on(sender.run());
+        });
+
+        KafkaProducer::new(
+            &config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            metadata,
+            accumulator,
+            running,
+            force_close,
+            wakeup,
+            Some(sender_handle),
+            time.as_provider(),
+            Some(transaction_manager),
+            pending_requests,
+        )
+    }
+
+    /// The body all three `testCloseIsForcedOn*` methods share: start
+    /// `initTransactions` on another task, let its request go out, then `close` with a
+    /// one-second timeout and assert `close` **returned** instead of blocking behind the
+    /// pending request.
+    ///
+    /// Java writes it three times over, submitting to an `ExecutorService` and waiting
+    /// on a `CountDownLatch`; a spawned task and its `JoinHandle` are the direct
+    /// equivalent. `client.waitForRequests(1, 2000)` becomes a short sleep: the
+    /// `MockClient` has moved into the Sender task, so its request count is no longer
+    /// observable from here.
+    ///
+    /// # What is asserted, and why not more
+    ///
+    /// Java's last line is `assertionDoneLatch.await(5000, MILLISECONDS)` and it
+    /// **discards the boolean result**, so the test does not in fact require
+    /// `initTransactions` to have returned by then — and it cannot have, on either
+    /// side: the request that is in flight when `close` runs was already dequeued from
+    /// `pendingRequests` by `nextRequest`, so `TransactionManager.close`'s
+    /// `pendingRequests.forEach(handler -> handler.fail(..))`
+    /// (`TransactionManager.java:949-955`) has nothing to fail, and neither
+    /// `NetworkClient.close` nor `MockClient.close` runs completion handlers. The
+    /// caller is released by its own `max.block.ms` instead, 60 s later by default.
+    ///
+    /// So the assertion is the one the test names: `close` is *forced* — it returns
+    /// within its own timeout rather than waiting on a request that will never be
+    /// answered. The `initTransactions` task is then given a bounded window purely so
+    /// a run that *does* complete has its error inspected, exactly as far as Java goes.
+    ///
+    /// `multi_thread` is required at the call sites. `Sender::run` over a `MockClient`
+    /// never blocks — `MockClient::poll` returns immediately — so on the default
+    /// current-thread runtime it would starve the task doing the closing.
+    async fn assert_close_forces_pending_transactional_request(producer: KafkaProducer<String, String>) {
+        let producer = Arc::new(producer);
+        let init = {
+            let producer = Arc::clone(&producer);
+            tokio::task::spawn(async move { producer.init_transactions().await })
+        };
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = std::time::Instant::now();
+        producer.close_timeout(Duration::from_millis(1000)).await.expect("close");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "close must be forced after its 1000 ms timeout, not blocked behind the \
+             pending transactional request; it took {:?}",
+            elapsed
+        );
+
+        // Java's ignored `assertionDoneLatch.await(5000, ..)`. If the call did return,
+        // it must have returned an error — never a successful initTransactions.
+        if let Ok(joined) = tokio::time::timeout(Duration::from_millis(500), init).await {
+            let result = joined.expect("the initTransactions task did not panic");
+            assert!(result.is_err(), "initTransactions cannot succeed once the producer is closed");
+        }
+    }
+
+    /// Translated from `KafkaProducerTest.testTransactionalMethodThrowsWhenSenderClosed`
+    /// (Java 2162-2179).
+    #[tokio::test]
+    async fn test_transactional_method_throws_when_sender_closed() {
+        let ctx = TxnProducerContext::new(&[("transactional.id", "this-is-a-transactional-id")], 1);
+        ctx.producer.close().await.expect("close");
+        let error = ctx.producer.init_transactions().await.expect_err("the producer is closed");
+        assert_eq!(error.message(), "Cannot perform operation after producer has been closed");
+    }
+
+    /// Translated from `KafkaProducerTest.testCloseIsForcedOnPendingFindCoordinator`
+    /// (Java 2181-2208).
+    ///
+    /// No response is prepared, so the `FindCoordinator` is the request left in flight
+    /// when `close` runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_is_forced_on_pending_find_coordinator() {
+        let producer =
+            spawned_transactional_producer(&[("transactional.id", "this-is-a-transactional-id")], |_client| {});
+        assert_close_forces_pending_transactional_request(producer).await;
+    }
+
+    /// Translated from `KafkaProducerTest.testCloseIsForcedOnPendingInitProducerId`
+    /// (Java 2210-2237).
+    ///
+    /// The `FindCoordinator` is answered, so the `InitProducerId` is the request left
+    /// in flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_is_forced_on_pending_init_producer_id() {
+        let producer =
+            spawned_transactional_producer(&[("transactional.id", "this-is-a-transactional-id")], |client| {
+                client.prepare_response(find_coordinator_response(
+                    Errors::None,
+                    "this-is-a-transactional-id",
+                    &coordinator_node(),
+                ));
+            });
+        assert_close_forces_pending_transactional_request(producer).await;
+    }
+
+    /// Translated from `KafkaProducerTest.testCloseIsForcedOnPendingAddOffsetRequest`
+    /// (Java 2239-2266).
+    ///
+    /// In Apache Kafka 4.2 this method's body is **identical** to
+    /// `testCloseIsForcedOnPendingInitProducerId`'s — it prepares one
+    /// `FindCoordinator` and submits `initTransactions`, never reaching an
+    /// `AddOffsetsToTxn` despite the name. Translated as written rather than
+    /// "corrected": inventing the `sendOffsetsToTransaction` the name implies would be
+    /// a different test from the one Java runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_is_forced_on_pending_add_offset_request() {
+        let producer =
+            spawned_transactional_producer(&[("transactional.id", "this-is-a-transactional-id")], |client| {
+                client.prepare_response(find_coordinator_response(
+                    Errors::None,
+                    "this-is-a-transactional-id",
+                    &coordinator_node(),
+                ));
+            });
+        assert_close_forces_pending_transactional_request(producer).await;
+    }
+
+    // =====================================================================
+    // PHASE-6 TEST ACCOUNTING — the transactional `KafkaProducerTest` methods
+    //
+    // SCOPE CRITERION. A `KafkaProducerTest.java` method is in scope for Phase 6 iff
+    // its body (or a helper it calls) mentions one of the five public transactional
+    // methods, one of the three transactional config keys, or the
+    // `verifyInvalidGroupMetadata` helper. That is the marker set below.
+    //
+    // DERIVATION. The splitter counts braces rather than matching a declaration
+    // regexp, because several of these bodies contain anonymous classes and lambdas
+    // whose members would otherwise end a block early. Run from the repo root; awk
+    // version 20200816, exit 0:
+    //
+    //   T=kafka/clients/src/test/java/org/apache/kafka/clients/producer/KafkaProducerTest.java
+    //   M='initTransactions,beginTransaction,commitTransaction,abortTransaction,'
+    //   M="$M"'sendOffsetsToTransaction,verifyInvalidGroupMetadata,TRANSACTIONAL_ID_CONFIG'
+    //   awk -v MARKERS="$M" '
+    //     BEGIN { n = split(MARKERS, m, ","); depth = 0; inm = 0 }
+    //     {
+    //       line = $0
+    //       if (depth == 1 && !inm && line ~ /^    [a-zA-Z@<].*\(.*\{[ \t]*$/ &&
+    //           line !~ /^    (class|enum|interface|static \{)/) {
+    //         match(line, /[a-zA-Z0-9_]+\(/)
+    //         if (RSTART > 0) { name = substr(line, RSTART, RLENGTH-1); start = NR; inm = 1; delete hard }
+    //       }
+    //       if (inm) { for (i = 1; i <= n; i++) if (index(line, m[i]) > 0) hard[m[i]] = 1 }
+    //       o = gsub(/\{/, "{", line); c = gsub(/\}/, "}", line); depth += o - c
+    //       if (inm && depth <= 1) {
+    //         hits = ""
+    //         for (i = 1; i <= n; i++) if (m[i] in hard) hits = hits (hits == "" ? "" : "+") m[i]
+    //         if (hits != "") printf "%d\t%s\n", start, name
+    //         inm = 0
+    //       }
+    //     }' "$T"
+    //
+    // It prints **28** rows. `emit` walks `MARKERS` in declaration order, not
+    // `for (k in hard)`, so the output is reproducible on any awk (the sibling blocks
+    // in `sender.rs` / `transaction_manager.rs` record why that matters).
+    //
+    // ARITHMETIC. 28 printed rows = 1 helper (`verifyInvalidGroupMetadata`, 2000 — not
+    // a test method) + 27 test methods, which is the count §Phase-6 states. Those 27
+    // partition with no overlap into
+    //
+    //   22 translated here
+    // +  1 not translated, justified (`testNullGroupMetadataInSendOffsets`)
+    // +  4 translated in Phase 1, in `producer_config.rs`
+    // = 27.
+    //
+    // Each of the three groups is listed in full below, so the sum can be checked
+    // against the lists rather than taken on trust.
+    //
+    // TRANSLATED HERE (22 Rust tests):
+    //   1290 testInitTransactionsResponseAfterTimeout
+    //          -> test_init_transactions_response_after_timeout
+    //   1329 testInitTransactionTimeout               -> test_init_transaction_timeout
+    //   1364 testInitTransactionWhileThrottled        -> test_init_transaction_while_throttled
+    //   1390 testClusterAuthorizationFailure          -> test_cluster_authorization_failure
+    //   1419 testAbortTransaction                     -> test_abort_transaction
+    //   1444 testTransactionV2ProduceWithConcurrentTransactionError
+    //          -> test_transaction_v2_produce_with_concurrent_transaction_error
+    //   1503 testMeasureAbortTransactionDuration      -> test_measure_abort_transaction_duration
+    //   1533 testCommitTransactionWithRecordTooLargeException
+    //          -> test_commit_transaction_with_record_too_large_exception
+    //   1563 testCommitTransactionWithMetadataTimeoutForMissingTopic
+    //          -> test_commit_transaction_with_metadata_timeout_for_missing_topic
+    //   1600 testCommitTransactionWithMetadataTimeoutForPartitionOutOfRange
+    //          -> test_commit_transaction_with_metadata_timeout_for_partition_out_of_range
+    //   1637 testCommitTransactionWithSendToInvalidTopic
+    //          -> test_commit_transaction_with_send_to_invalid_topic
+    //   1677 testSendTxnOffsetsWithGroupId            -> test_send_txn_offsets_with_group_id
+    //   1715 testSendTxnOffsetsWithGroupIdTransactionV2
+    //          -> test_send_txn_offsets_with_group_id_transaction_v2
+    //   1772 testTransactionV2Produce                 -> test_transaction_v2_produce
+    //   1842 testMeasureTransactionDurations          -> test_measure_transaction_durations
+    //   1895 testSendTxnOffsetsWithGroupMetadata      -> test_send_txn_offsets_with_group_metadata
+    //   1950 testInvalidGenerationIdAndMemberIdCombinedInSendOffsets
+    //          -> test_invalid_generation_id_and_member_id_combined_in_send_offsets
+    //   2054 testOnlyCanExecuteCloseAfterInitTransactionsTimeout
+    //          -> test_only_can_execute_close_after_init_transactions_timeout
+    //   2163 testTransactionalMethodThrowsWhenSenderClosed
+    //          -> test_transactional_method_throws_when_sender_closed
+    //   2182 testCloseIsForcedOnPendingFindCoordinator
+    //          -> test_close_is_forced_on_pending_find_coordinator
+    //   2210 testCloseIsForcedOnPendingInitProducerId
+    //          -> test_close_is_forced_on_pending_init_producer_id
+    //   2239 testCloseIsForcedOnPendingAddOffsetRequest
+    //          -> test_close_is_forced_on_pending_add_offset_request
+    //
+    // NOT TRANSLATED, JUSTIFIED (1):
+    //   1944 testNullGroupMetadataInSendOffsets — passes `null` for the
+    //     `ConsumerGroupMetadata`. The Rust parameter is a value, so the argument
+    //     cannot be constructed and the arm it exercises
+    //     (`KafkaProducer.java:1499-1500`) is enforced by the type system instead of a
+    //     runtime check. Recorded again on
+    //     `test_invalid_generation_id_and_member_id_combined_in_send_offsets`, the
+    //     other caller of the same Java helper, which *is* translated.
+    //
+    // TRANSLATED IN PHASE 1, in `producer_config.rs` (4): these reference
+    // `TRANSACTIONAL_ID_CONFIG` only as an input to
+    // `postProcessAndValidateIdempotenceConfigs`, so they belong to `ProducerConfig`,
+    // not to this file. Verified present, not assumed:
+    //
+    //   $ grep -c 'fn test_overwrite_acks_and_retries_for_idempotent_producers\|fn test_acks_and_idempotence_for_idempotent_producers\|fn test_retries_and_idempotence_for_idempotent_producers\|fn test_inflight_requests_and_idempotence_for_idempotent_producers' src/producer/producer_config.rs
+    //   4
+    //
+    //   222 testOverwriteAcksAndRetriesForIdempotentProducers
+    //   238 testAcksAndIdempotenceForIdempotentProducers
+    //   341 testRetriesAndIdempotenceForIdempotentProducers
+    //   413 testInflightRequestsAndIdempotenceForIdempotentProducers
+    //
+    // ASSERTIONS DROPPED, NOT WHOLE TESTS (2 methods): every
+    // `getMetricValue(producer, "txn-*-time-ns-total")` in
+    // `testMeasureAbortTransactionDuration` and `testMeasureTransactionDurations`.
+    // `KafkaProducerMetrics` and the whole `org.apache.kafka.common.metrics` package
+    // are listed in `remaining_classes.txt`, so there is no sensor to read. Both
+    // methods are translated for the operation sequences they surround, which are the
+    // parts that exercise production behaviour; each says so at the test.
+    // =====================================================================
 
     // -- `configureTransactionState` tests ----------------------------------
     //
