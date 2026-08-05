@@ -1,5 +1,5 @@
 version: v1.0
-name: Translation agent
+name: build-test-release
 
 # Single CI pipeline that conditionally:
 #  - on the configured main branch (push, not PR) -> runs the narrowed
