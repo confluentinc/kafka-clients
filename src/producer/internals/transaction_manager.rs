@@ -9986,11 +9986,12 @@ mod tests {
     //   `testFailedInflightBatchAfterEpochBump` (3726) [4]
     //     → sender.rs test_failed_inflight_batch_after_epoch_bump.
     //
-    // GROUP B — the 107 Phase 5b owns. Phase 5b translates **60** and owes **47**,
-    // and that split is derived rather than asserted: a method counts as translated
-    // iff its name appears in the Rust producer sources *outside* the accounting
-    // blocks, which is exactly the property the "Translated from" header of every
-    // test above establishes.
+    // GROUP B — the 107 Phase 5b owns. Phase 5b translated 60 and owed 47; **Phase 8
+    // landed the 47, so group B is now wholly translated and nothing is owed.** The
+    // split is derived rather than asserted: a method counts as translated iff its name
+    // appears in the Rust producer sources *outside* the accounting blocks, which is
+    // exactly the property the "Translated from" header of every test above
+    // establishes.
     //
     //   # the Rust sources with the three accounting blocks cut out. The line
     //   # numbers are read from the files rather than written here, so an edit that
@@ -10023,22 +10024,33 @@ mod tests {
     //       grep -q "$nm\`" /tmp/rust_nonacct.txt && st=HAVE || st=OWED
     //       printf "%s\t%s\t%s\t%s\n" "$ln" "$nm" "$grp" "$st"; done > /tmp/status.tsv
     //   awk -F'\t' '$3=="-" && $4=="OWED"' /tmp/status.tsv | wc -l    # 0 — group A intact
-    //   awk -F'\t' '$3!="-" && $4=="HAVE"' /tmp/status.tsv | wc -l    # 60
-    //   awk -F'\t' '$3!="-" && $4=="OWED"' /tmp/status.tsv | wc -l    # 47
+    //   awk -F'\t' '$3!="-" && $4=="HAVE"' /tmp/status.tsv | wc -l    # 107
+    //   awk -F'\t' '$3!="-" && $4=="OWED"' /tmp/status.tsv | wc -l    # 0
     //
-    // Real output of the four, run from the repo root: the guard exits 0, then `0`,
-    // `60`, `47`. 33 + 60 + 47 = 140, so every method is still placed exactly once.
+    // Real output of the four, run from the repo root over the Phase-8 tree: the guard
+    // exits 0, then `0`, `107`, `0`. 33 + 107 + 0 = 140, so every method is still placed
+    // exactly once — and now every one of them is translated. The named listing of what
+    // is still owed is the empty set, which is checkable in one line rather than trusted:
+    //
+    //   awk -F'\t' '$4=="OWED" {print $1"\t"$2}' /tmp/status.tsv    # prints nothing
     //
     // Note the status grep matches `NAME`` rather than ``NAME`` — one Rust test
     // writes `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`, and
     // requiring the opening backtick reported it as owed when it is not.
     //
-    // WHY THE 47 ARE OWED, and the check that says so. Every one of them drives the
-    // **accumulator or the `Sender`** — `appendToAccumulator`, a produce response, a
-    // drain, `initiateClose`, or `verifyCommitOrAbortTransactionRetriable`, the one
-    // helper that reaches them and is itself reachable (it accounts for 4 of the 47).
-    // None is blocked on manager surface: Phase 5b translates all 90 of
-    // `TransactionManager`'s methods (see the PHASE-5B METHOD ACCOUNTING block).
+    // WHY THE 47 WERE OWED, and the check that said so — kept because it is what made
+    // the hand-forward to Phase 8 checkable rather than asserted, and because the
+    // classifier below is still the cross-check that the marker set has not drifted.
+    // Every one of the 47 drove the **accumulator or the `Sender`** —
+    // `appendToAccumulator`, a produce response, a drain, `initiateClose`, or
+    // `verifyCommitOrAbortTransactionRetriable`, the one helper that reaches them and is
+    // itself reachable (it accounted for 4 of the 47). None was blocked on manager
+    // surface: Phase 5b translated all 90 of `TransactionManager`'s methods (see the
+    // PHASE-5B METHOD ACCOUNTING block), which is why Phase 8 needed only the harness in
+    // `sender.rs` and no new production surface. **All 47 landed in `sender.rs`**, beside
+    // the six group-A entries that were already there, for the reason its section header
+    // gives: Java's `TransactionManagerTest` builds its own accumulator + `Sender` +
+    // `MockClient` and every one of these bodies drives them.
     //
     // `verifyProducerFenced(` is in the classifier's alternation below and matches
     // **0 of the 107** — it is inert, and an earlier revision of this paragraph cited
@@ -10075,26 +10087,29 @@ mod tests {
     //   awk -F'\t' '$3=="MGR"' /tmp/class.tsv | wc -l                  # 57
     //   awk -F'\t' '$3=="ACC"' /tmp/class.tsv | wc -l                  # 50
     //
-    //   # THE LOAD-BEARING ONE: no owed method is manager-only, i.e. nothing is
-    //   # deferred that this phase's own surface could have covered.
+    //   # THE LOAD-BEARING ONE while anything was owed: no owed method was manager-only,
+    //   # i.e. nothing was deferred that Phase 5b's own surface could have covered. It is
+    //   # now trivially 0 because the OWED set is empty; kept so a reviewer re-running the
+    //   # block gets the same transcript, and so the check is already in place if a future
+    //   # phase ever defers one of these again.
     //   join -t$'\t' -1 2 -2 2 \
     //     <(awk -F'\t' '$3!="-" && $4=="OWED" {print $1"\t"$2}' /tmp/status.tsv | sort -t$'\t' -k2,2) \
     //     <(sort -t$'\t' -k2,2 /tmp/class.tsv) | awk -F'\t' '$4=="MGR"' | wc -l   # 0
     //
     // Real output of the three: `57`, `50`, `0`.
     //
-    // 57 MGR + 50 ACC = 107 while 60 HAVE + 47 OWED = 107, and the two splits are
-    // *not* the same partition: three ACC methods are translated anyway, minus a
-    // named accumulator leg — `testTransactionV2AddPartitionAndOffsets` (984, minus
-    // its two `appendToAccumulator` legs),
-    // `testMaybeResolveSequencesTransactionalProducer` (3159, whose branch is driven
-    // directly) and `testFindCoordinatorAllowedInAbortableErrorState` (2355,
-    // likewise). Each says so in its own rustdoc. The empty join above is what
-    // matters: the reverse direction — a manager-only method left untranslated — is
-    // what would be a gap, and there are none.
+    // 57 MGR + 50 ACC = 107, which is now also 107 HAVE + 0 OWED. The MGR/ACC split is
+    // *not* the HAVE/OWED partition and never was — three ACC methods were translated by
+    // Phase 5b anyway, minus a named accumulator leg:
+    // `testTransactionV2AddPartitionAndOffsets` (984, minus its two
+    // `appendToAccumulator` legs), `testMaybeResolveSequencesTransactionalProducer`
+    // (3159, whose branch is driven directly) and
+    // `testFindCoordinatorAllowedInAbortableErrorState` (2355, likewise). Each says so in
+    // its own rustdoc, and each **keeps** that note: Phase 8 did not revisit them, so the
+    // named legs are still elided and the rustdoc is still the record of it.
     //
-    // GROUP B, TRANSLATED (60). Columns: Java declaration line, Java name, the
-    // blocking identifiers the derivation found (`ABBREV` above spells them). This
+    // GROUP B, TRANSLATED (107) — all of it. Columns: Java declaration line, Java name,
+    // the blocking identifiers the derivation found (`ABBREV` above spells them). This
     // *is* pasted derivation output:
     //
     //   join -t$'\t' -1 2 -2 2 \
@@ -10103,6 +10118,7 @@ mod tests {
     //   | awk -F'\t' '{print $2"\t"$1"\t"$3}' | sort -k1,1n \
     //   | awk -F'\t' '{printf "    //   %-4s %-74s %s\n", $1, $2, $3}'
     //
+    //   228  testSenderShutdownWithPendingTransactions                                  bC+AP+ET+mAP
     //   249  testEndTxnNotSentIfIncompleteBatches                                       bC+tCP+AP+ET+mAP
     //   304  testHasOngoingTransactionSuccessfulAbort                                   bA+tCP+AP+ET+mAP
     //   328  testHasOngoingTransactionSuccessfulCommit                                  bC+tCP+AP+ET+mAP
@@ -10119,6 +10135,7 @@ mod tests {
     //   571  testIsSendToPartitionAllowedWithInFlightPartitionAddAfterFatalError        AP+mAP
     //   586  testIsSendToPartitionAllowedWithAddedPartitionAfterAbortableError          AP+mAP
     //   602  testIsSendToPartitionAllowedWithAddedPartitionAfterFatalError              AP+mAP
+    //   881  testBasicTransaction                                                       bC+sOT+tCP+AP+AO+TOC+ET+mAP
     //   934  testTransactionManagerEnablesV2                                            bC+tCP+TV2+AP+ET+mAP
     //   984  testTransactionV2AddPartitionAndOffsets                                    bC+sOT+tCP+TOC+ET+mAP
     //   1034 testTransactionManagerDisablesV2                                           TV2+TOC
@@ -10130,12 +10147,22 @@ mod tests {
     //   1366 testTransactionalIdAuthorizationFailureInInitProducerId                    aAE
     //   1381 testGroupAuthorizationFailureInFindCoordinator                             sOT+AO+aAE
     //   1406 testGroupAuthorizationFailureInTxnOffsetCommit                             sOT+AO+TOC+aAE
+    //   1435 testFatalErrorWhenProduceResponseWithInvalidPidMapping                     mAP
     //   1451 testTransactionalIdAuthorizationFailureInAddOffsetsToTxn                   sOT+AO+aFE
     //   1471 testInvalidTxnStateFailureInAddOffsetsToTxn                                sOT+AO+aFE
     //   1491 testTransactionalIdAuthorizationFailureInTxnOffsetCommit                   sOT+AO+TOC+aFE
+    //   1516 testTopicAuthorizationFailureInAddPartitions                               tCP+AP+aAE+mAP
+    //   1553 testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight             bC+AP+mAP
+    //   1602 testRecoveryFromAbortableErrorTransactionNotStarted                        bC+bA+tCP+AP+ET+mAP
+    //   1648 testRetryAbortTransactionAfterTimeout                                      bC+bA+tCP+AP+ET+mAP
+    //   1680 testRetryCommitTransactionAfterTimeout                                     bC+bA+tCP+AP+ET+mAP
     //   1714 testRetryInitTransactionsAfterTimeout                                      bC+bA
+    //   1746 testRecoveryFromAbortableErrorTransactionStarted                           bC+bA+tCP+AP+ET+mAP
+    //   1799 testRecoveryFromAbortableErrorProduceRequestInRetry                        bC+bA+tCP+AP+ET+mAP
     //   1863 testTransactionalIdAuthorizationFailureInAddPartitions                     AP+aFE+mAP
     //   1879 testInvalidTxnStateInAddPartitions                                         AP+aFE+mAP
+    //   1895 testFlushPendingPartitionsOnCommit                                         bC+tCP+AP+ET+mAP
+    //   1932 testMultipleAddPartitionsPerForOneProduce                                  tCP+AP+mAP
     //   1979 testRetriableErrors                                                        bC+tCP+AP+TOC+ET+mAP
     //   2028 testProducerFencedExceptionInInitProducerId                                vPF+vPFI
     //   2033 testInvalidProducerEpochConvertToProducerFencedInInitProducerId            vPF+vPFI
@@ -10143,42 +10170,6 @@ mod tests {
     //   2062 testInvalidProducerEpochConvertToProducerFencedInAddPartitionToTxn         AP+vPF
     //   2081 testProducerFencedInAddOffSetsToTxn                                        AO+vPF
     //   2086 testInvalidProducerEpochConvertToProducerFencedInAddOffSetsToTxn           AO+vPF
-    //   2355 testFindCoordinatorAllowedInAbortableErrorState                            AP+mAP
-    //   2473 testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit                  TOC
-    //   2478 testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit                     TOC
-    //   2483 testHandlingOfNetworkExceptionOnTxnOffsetCommit                            TOC
-    //   2523 testHandlingOfProducerFencedErrorOnTxnOffsetCommit                         TOC
-    //   2528 testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit     TOC
-    //   2533 testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit                   TOC
-    //   2538 testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit            TOC
-    //   2588 shouldNotSendAbortTxnRequestWhenOnlyAddPartitionsRequestFailed             bA+AP+mAP
-    //   2605 shouldNotSendAbortTxnRequestWhenOnlyAddOffsetsRequestFailed                bA+sOT+AO
-    //   2624 shouldFailAbortIfAddOffsetsFailsWithFatalError                             bA+sOT+AO
-    //   3159 testMaybeResolveSequencesTransactionalProducer                             tCP+TV2+AP+wTB+mAP
-    //   3547 testBumpTransactionalEpochOnRecoverableAddPartitionRequestError            bA+AP+mAP
-    //   3819 testBackgroundInvalidStateTransitionIsFatal                                bC+bA+sOT
-    //   3841 testForegroundInvalidStateTransitionIsRecoverable                          bC+bA+tCP+AP+ET+mAP
-    //   3872 testTransactionAbortableExceptionInInitProducerId                          aAE
-    //   3887 testTransactionAbortableExceptionInAddPartitions                           AP+aAE+mAP
-    //   3903 testTransactionAbortableExceptionInFindCoordinator                         sOT+AO+aAE
-    //   3950 testTransactionAbortableExceptionInAddOffsetsToTxn                         sOT+AO+aAE
-    //   3970 testTransactionAbortableExceptionInTxnOffsetCommit                         sOT+AO+TOC+aAE
-    //
-    // GROUP B, OWED (47) — the same listing with `$4=="OWED"`. Every row is `ACC`,
-    // which is the empty join above restated as data:
-    //
-    //   228  testSenderShutdownWithPendingTransactions                                  bC+AP+ET+mAP
-    //   881  testBasicTransaction                                                       bC+sOT+tCP+AP+AO+TOC+ET+mAP
-    //   1435 testFatalErrorWhenProduceResponseWithInvalidPidMapping                     mAP
-    //   1516 testTopicAuthorizationFailureInAddPartitions                               tCP+AP+aAE+mAP
-    //   1553 testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight             bC+AP+mAP
-    //   1602 testRecoveryFromAbortableErrorTransactionNotStarted                        bC+bA+tCP+AP+ET+mAP
-    //   1648 testRetryAbortTransactionAfterTimeout                                      bC+bA+tCP+AP+ET+mAP
-    //   1680 testRetryCommitTransactionAfterTimeout                                     bC+bA+tCP+AP+ET+mAP
-    //   1746 testRecoveryFromAbortableErrorTransactionStarted                           bC+bA+tCP+AP+ET+mAP
-    //   1799 testRecoveryFromAbortableErrorProduceRequestInRetry                        bC+bA+tCP+AP+ET+mAP
-    //   1895 testFlushPendingPartitionsOnCommit                                         bC+tCP+AP+ET+mAP
-    //   1932 testMultipleAddPartitionsPerForOneProduce                                  tCP+AP+mAP
     //   2125 testInvalidProducerEpochConvertToProducerFencedInEndTxn                    bC+bA+sOT+AP+ET+mAP
     //   2155 testInvalidProducerEpochFromProduce                                        bA+AP+ET+mAP
     //   2189 testDisallowCommitOnProduceFailure                                         bC+bA+AP+ET+mAP
@@ -10186,11 +10177,22 @@ mod tests {
     //   2240 testAbortableErrorWhileAbortInProgress                                     bA+AP+ET+mAP
     //   2270 testCommitTransactionWithUnsentProduceRequest                              bC+AP+ET+mAP
     //   2313 testCommitTransactionWithInFlightProduceRequest                            bC+AP+ET+mAP
+    //   2355 testFindCoordinatorAllowedInAbortableErrorState                            AP+mAP
     //   2377 testCancelUnsentAddPartitionsAndProduceOnAbort                             bA+ET+mAP
     //   2398 testAbortResendsAddPartitionErrorIfRetried                                 bA+AP+ET+mAP
     //   2424 testAbortResendsProduceRequestIfRetried                                    bA+AP+ET+mAP
     //   2452 testHandlingOfUnknownTopicPartitionErrorOnAddPartitions                    tCP+AP+mAP
+    //   2473 testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit                  TOC
+    //   2478 testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit                     TOC
+    //   2483 testHandlingOfNetworkExceptionOnTxnOffsetCommit                            TOC
+    //   2523 testHandlingOfProducerFencedErrorOnTxnOffsetCommit                         TOC
+    //   2528 testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit     TOC
+    //   2533 testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit                   TOC
+    //   2538 testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit            TOC
     //   2574 shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed            tCP+AP+mAP
+    //   2588 shouldNotSendAbortTxnRequestWhenOnlyAddPartitionsRequestFailed             bA+AP+mAP
+    //   2605 shouldNotSendAbortTxnRequestWhenOnlyAddOffsetsRequestFailed                bA+sOT+AO
+    //   2624 shouldFailAbortIfAddOffsetsFailsWithFatalError                             bA+sOT+AO
     //   2643 testSendOffsetsWithGroupMetadata                                           TOC+pGM
     //   2666 testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled      TOC+aFE+pGM
     //   2712 testNoDrainWhenPartitionsPending                                           mAP
@@ -10201,6 +10203,7 @@ mod tests {
     //   2870 testTransitionToAbortableErrorOnMultipleBatchExpiry                        tCP+AP+mAP
     //   2924 testDropCommitOnBatchExpiry                                                bC+bA+tCP+AP+ET+mAP
     //   2979 testTransitionToFatalErrorWhenRetriedBatchIsExpired                        bC+tCP+AP+mAP
+    //   3159 testMaybeResolveSequencesTransactionalProducer                             tCP+TV2+AP+wTB+mAP
     //   3191 testEpochUpdateAfterBumpFromEndTxnResponseInV2                             bA+ET+mAP
     //   3218 testProducerIdAndEpochUpdateAfterOverflowFromEndTxnResponseInV2            bC+ET+mAP
     //   3269 testAbortTransactionAndReuseSequenceNumberOnError                          bA+tCP+AP+ET+mAP
@@ -10208,12 +10211,23 @@ mod tests {
     //   3395 testBumpTransactionalEpochOnAbortableError                                 bA+tCP+AP+ET+mAP
     //   3441 testBumpTransactionalEpochOnUnknownProducerIdError                         bA+tCP+AP+ET+mAP
     //   3488 testBumpTransactionalEpochOnTimeout                                        bA+tCP+AP+ET+mAP
+    //   3547 testBumpTransactionalEpochOnRecoverableAddPartitionRequestError            bA+AP+mAP
     //   3567 testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError              bA+sOT+AP+AO+ET+mAP
     //   3695 testRetryAbortTransaction                                                  vCAR
     //   3700 testRetryCommitTransaction                                                 vCAR
     //   3705 testRetryAbortTransactionAfterCommitTimeout                                vCAR
     //   3710 testRetryCommitTransactionAfterAbortTimeout                                vCAR
+    //   3819 testBackgroundInvalidStateTransitionIsFatal                                bC+bA+sOT
+    //   3841 testForegroundInvalidStateTransitionIsRecoverable                          bC+bA+tCP+AP+ET+mAP
+    //   3872 testTransactionAbortableExceptionInInitProducerId                          aAE
+    //   3887 testTransactionAbortableExceptionInAddPartitions                           AP+aAE+mAP
+    //   3903 testTransactionAbortableExceptionInFindCoordinator                         sOT+AO+aAE
     //   3925 testTransactionAbortableExceptionInEndTxn                                  bC+AP+ET+aAE+mAP
+    //   3950 testTransactionAbortableExceptionInAddOffsetsToTxn                         sOT+AO+aAE
+    //   3970 testTransactionAbortableExceptionInTxnOffsetCommit                         sOT+AO+TOC+aAE
+    //
+    // GROUP B, OWED — **empty.** The same listing with `$4=="OWED"` prints nothing; the
+    // one-line check is above. Before Phase 8 this section held 47 rows.
     //
     // The whole of group B as a histogram over the blocking identifiers (a method
     // may be blocked by several) — kept from the Phase-5a block because it is the

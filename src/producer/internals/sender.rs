@@ -7607,7 +7607,10 @@ mod tests {
     // = 55 entries, of which 2 are outside the 53 and carried anyway (each says so where
     // it appears). 55 − 2 = 53, so every in-scope method is placed exactly once and
     // nothing else is owed. Phase 5a moved three entries between groups and added none;
-    // Phase 6 added the one the old program could not see.
+    // Phase 6 added the one the old program could not see. **Phase 8 changed no group's
+    // membership** — only the disposition of entries inside the transactional group — so
+    // this arithmetic is unchanged by it, which is itself the check that Phase 8 did not
+    // quietly drop or invent an entry.
     //
     // Line numbers are the `public void` declaration line throughout, here and in the
     // `Translated from` header of every test above, whose ranges run declaration line to
@@ -7619,7 +7622,11 @@ mod tests {
     //     `sed -n "${line}p"` contains `name(` — **55 pairs, 0 mismatches**.
     //   - Rustdoc headers: resolve each ``Translated from `SenderTest.<name>` `` to the
     //     Java declaration and its closing `    }` and compare **both** ends —
-    //     **41 headers, 0 mismatches**.
+    //     **52 headers, 0 mismatches** as of Phase 8 (41 before it). Re-running it is not
+    //     ceremony: it caught two of Phase 8's own ranges off by one at the *end*
+    //     (`testUnresolvedSequencesAreNotFatal`, `testAwaitPendingRecordsBeforeCommittingTransaction`),
+    //     both because the method's body is wrapped in a `try (Metrics m = ..)` whose
+    //     `        }` precedes the real `    }`. Since corrected.
     //
     // Two properties the header sweep needs, each learned by a sweep that lacked it:
     //
@@ -7718,13 +7725,15 @@ mod tests {
     //     surface — `MockClient::poll_timeouts`, standing in for Java's
     //     `verify(client, times(2)).poll(eq(RETRY_BACKOFF_MS), anyLong())` spy.
     //
-    // TRANSACTIONAL (16) — **5 translated in Phase 6, 11 still owed.** Every marker the
-    // derivation below finds for this group is `beginTransaction`, `beginCommit`,
-    // `beginAbort`, `maybeAddPartition`, `AddPartitionsToTxn`, `EndTxn` or
+    // TRANSACTIONAL (16) — **15 translated (5 in Phase 6, 10 in Phase 8), 1 blocked.**
+    // Every marker the derivation below finds for this group is `beginTransaction`,
+    // `beginCommit`, `beginAbort`, `maybeAddPartition`, `AddPartitionsToTxn`, `EndTxn` or
     // `mock(TransactionManager`, and Phase 5b translated all of that surface: not one
     // entry names `commitTransaction` / `abortTransaction`, the public-`KafkaProducer`
-    // methods Phase 6 owns. So the group is *owed*, not blocked — with the two
-    // exceptions named below, which cite missing surface.
+    // methods Phase 6 owns. So the group was *owed*, not blocked — and Phase 8's outcome
+    // bore that out: of the two entries that had cited missing surface, one turned out to
+    // have its surface already present (see `testSenderShouldCloseWhenTransactionManagerInErrorState`
+    // below) and only `testTransactionalSplitBatchAndSend` is genuinely blocked.
     //
     // Phase 6 built the harness they need (`begin_transaction_with_partition`,
     // `add_partitions_to_txn_response`, `end_txn_response`, `assert_pending_end_txn`)
@@ -7748,39 +7757,73 @@ mod tests {
     //   2966 testTransactionAbortedExceptionOnAbortWithoutError
     //          -> test_transaction_aborted_exception_on_abort_without_error
     //
-    // STILL OWED (11), each with what it needs — **owner: Phase 8**, whose §Phase-8
-    // scope is the `TransactionManagerTest` parity sweep and the broker integration
-    // tests, and which therefore already owns the neighbouring 47 (below). Two of the
-    // eleven are blocked on named missing surface rather than merely unwritten:
+    // TRANSLATED IN PHASE 8 (10) — the "STILL OWED (11)" list this block carried until
+    // Phase 8, minus the one still blocked. Each was owed rather than blocked: what they
+    // needed was the produce/response driver and, for two of them, a linger-configured
+    // context, all of which Phase 8 built (`sender_test_transactional_context`,
+    // `run_init_transactions_with`, `add_partition_to_txn`, `respond_to_produce`,
+    // `respond_to_end_txn`).
     //
-    //   1534 testUnresolvedSequencesAreNotFatal — owed. Drives an unresolved-sequence
-    //     recovery over a transactional manager; needs the produce/response driver, not
-    //     new production surface.
-    //   1820 testTransactionalUnknownProducerHandlingWhenRetentionLimitReached — owed,
-    //     same driver.
+    //   1534 testUnresolvedSequencesAreNotFatal
+    //          -> test_unresolved_sequences_are_not_fatal
+    //   1820 testTransactionalUnknownProducerHandlingWhenRetentionLimitReached
+    //          -> test_transactional_unknown_producer_handling_when_retention_limit_reached
+    //          Translated, then `#[ignore]`d on **PLAN §9.25** — a defect it surfaced, not
+    //          a gap in the translation. It is the only test in the tree that reaches the
+    //          *transactional* log-truncation branch of `TransactionManager::can_retry`,
+    //          and `Sender::can_retry` hands that branch an empty batch pool. Counted as
+    //          translated here because it is: the body is complete and the assertion that
+    //          fails is a production assertion, which is precisely why it is left in place
+    //          as the reproducer (the §9.18 precedent).
+    //   2771 testRecordsFlushedImmediatelyOnTransactionCompletion
+    //          -> test_records_flushed_immediately_on_transaction_completion
+    //          Needed the linger-configured context Java gets from
+    //          `setupWithTransactionState(txnManager, lingerMs)`; `linger_ms` is now a
+    //          field on `SenderTestTimeouts`.
+    //   2829 testAwaitPendingRecordsBeforeCommittingTransaction
+    //          -> test_await_pending_records_before_committing_transaction
+    //   3051 testTransactionShouldTransitionToAbortableForSenderAPI
+    //          -> test_transaction_should_transition_to_abortable_for_sender_api_coordinator_load_in_progress
+    //          -> test_transaction_should_transition_to_abortable_for_sender_api_invalid_txn_state
+    //          One Java `@ParameterizedTest` over
+    //          `@EnumSource(names = {"COORDINATOR_LOAD_IN_PROGRESS", "INVALID_TXN_STATE"})`,
+    //          split into two Rust tests over a shared body so a failure names its case.
+    //   3126 testReceiveFailedBatchTwiceWithTransactions
+    //          -> test_receive_failed_batch_twice_with_transactions
+    //          Needed `MockClient::disconnect_by_id_with_late_responses`, i.e. Java's
+    //          `disconnect(node, allowLateResponses = true)` (`MockClient.java:200-218`),
+    //          which this port had not translated. Without it the late response the test's
+    //          name is about cannot be delivered at all.
+    //   3176 testInvalidTxnStateIsAnAbortableError
+    //          -> test_invalid_txn_state_is_an_abortable_error
+    //   3215 testTransactionAbortableExceptionIsAnAbortableError
+    //          -> test_transaction_abortable_exception_is_an_abortable_error
+    //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort
+    //          -> test_abortable_error_is_converted_to_fatal_error_during_abort
+    //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
+    //          -> test_sender_should_close_when_transaction_manager_in_error_state
+    //          **This entry was listed as "blocked on named missing surface" and was not.**
+    //          It is the one entry Java gives `mock(TransactionManager.class)` (Java 3403),
+    //          stubbing `hasOngoingTransaction() -> true` with `beginAbort()` throwing. The
+    //          old note offered two routes — a `#[cfg(test)]` hook that fails `begin_abort`
+    //          on demand, or "a state the real machine can be forced into where
+    //          `hasOngoingTransaction()` holds and `beginAbort()` is an invalid transition".
+    //          The second route already existed *and was already exercised by a test in this
+    //          file*, under a Rust-only name; all that was missing was the Java name and
+    //          Java's `verify(transactionManager, times(1)).close()`, for which
+    //          `TransactionManager::close_call_count` is now `#[cfg(test)]`-gated. The lesson
+    //          is the one §9.19 keeps relearning: a "blocked on missing surface" note is a
+    //          claim with a shelf life, and the cheapest way to test it is to look for the
+    //          surface rather than to re-read the note.
+    //
+    // STILL BLOCKED (1):
+    //
     //   2385 testTransactionalSplitBatchAndSend — **blocked on PLAN §9.18**: it drives a
-    //     `MESSAGE_TOO_LARGE` split, which panics because `ProducerBatch::records()`
-    //     moves the built buffer out. Same blocker as `testIdempotentSplitBatchAndSend`
-    //     below; reproducer `test_too_large_batches_are_safely_removed`.
-    //   2771 testRecordsFlushedImmediatelyOnTransactionCompletion — owed. Needs a
-    //     linger-configured context (`setupWithTransactionState(txnManager, lingerMs)`)
-    //     plus the produce driver.
-    //   2829 testAwaitPendingRecordsBeforeCommittingTransaction — owed, same context.
-    //   3051 testTransactionShouldTransitionToAbortableForSenderAPI — owed.
-    //   3126 testReceiveFailedBatchTwiceWithTransactions — owed.
-    //   3176 testInvalidTxnStateIsAnAbortableError — owed.
-    //   3215 testTransactionAbortableExceptionIsAnAbortableError — owed.
-    //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort — owed.
-    //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState — **blocked on
-    //     missing surface**: it is the one entry given `mock(TransactionManager.class)`
-    //     (Java 3403) and stubs `hasOngoingTransaction()` -> true with `beginAbort()`
-    //     throwing, to drive `Sender::run`'s abort loop into its force-close arm.
-    //     `TransactionManager` is a concrete struct here, so there is nothing to stub;
-    //     it needs either a `#[cfg(test)]` hook that makes `begin_abort` fail on demand
-    //     or a state the real machine can be forced into where `hasOngoingTransaction()`
-    //     holds and `beginAbort()` is an invalid transition. Adding such a hook is a
-    //     `TransactionManager` change and belongs with Phase 8's sweep of that class,
-    //     not with a Sender phase.
+    //     `MESSAGE_TOO_LARGE` split, which panics because `ProducerBatch::records()` moves
+    //     the built buffer out. Same blocker as `testIdempotentSplitBatchAndSend` below.
+    //     Re-verified in Phase 8 rather than assumed: running the reproducer
+    //     `test_too_large_batches_are_safely_removed` with `--ignored` still panics with
+    //     `build() called but no records built` at `memory_records_builder.rs:298`.
     //
     // The blocking identifiers are derived, not asserted, by the same technique the
     // `TransactionManagerTest` accounting uses (see PHASE-5B TEST ACCOUNTING in
@@ -7919,25 +7962,25 @@ mod tests {
     // test_unsupported_find_coordinator. Counting them here would break the entry
     // arithmetic below, which is over `SenderTest.java` alone.
     //
-    // FORTY-SEVEN `TransactionManagerTest` METHODS ARE OWED HERE TOO, for the same
-    // reason the STILL OWED group above is: their Java bodies drive the accumulator or
-    // the `Sender`. Named, not counted — the group's header carries its own count, and an
-    // earlier revision of this sentence said "the 15 above", which matched no group in
-    // the block even before Phase 6 renumbered the transactional group 15 → 16 (the
-    // transactional group was 15 then, but its owed subset was already 11). Critic 46
-    // pass 3: a count restatement can hide in a **cross-reference to a group's size**,
-    // not only in a headline repeat, which is why the sweep that removed the other four
-    // did not find it.
+    // FORTY-SEVEN `TransactionManagerTest` METHODS WERE OWED HERE TOO, for the same
+    // reason the transactional group above was: their Java bodies drive the accumulator or
+    // the `Sender`. **Phase 8 landed all of them, in this file.** Named, not counted — the
+    // group's header carries its own count, and an earlier revision of this sentence said
+    // "the 15 above", which matched no group in the block even before Phase 6 renumbered
+    // the transactional group 15 → 16 (the transactional group was 15 then, but its owed
+    // subset was already 11). Critic 46 pass 3: a count restatement can hide in a
+    // **cross-reference to a group's size**, not only in a headline repeat, which is why
+    // the sweep that removed the other four did not find it.
     //
-    // They are enumerated, with the mechanical check that none of them is
+    // They are enumerated, with the mechanical check that none of them was
     // manager-only, in the PHASE-5B TEST ACCOUNTING block in `transaction_manager.rs`
     // — that block is authoritative for the count and the list; this note exists so a
-    // reader of *this* file knows the harness they need is the one above.
-    // **Owner: Phase 8**, whose §Phase-8 scope reads "Close out any
-    // `TransactionManagerTest` method not landed in Phases 3/5, so the full 140 are
-    // accounted for". Phase 6 has to build the end-to-end transactional harness first
-    // (see the group above), so the two are ordered, not independent. They are **not**
-    // counted in the entry arithmetic below, which is over `SenderTest.java` alone.
+    // reader of *this* file knows the harness they use is the one above, and that they
+    // live here rather than beside their siblings. Phase 6 had to build the end-to-end
+    // transactional harness first (see the group above), so the two were ordered, not
+    // independent. They are **not** counted in the entry arithmetic below, which is over
+    // `SenderTest.java` alone — so a reader who counts `Translated from` headers in this
+    // file will find more than 55, and that is why.
     //
     // BLOCKED ON NAMED MISSING SURFACE (3) — each cites what is absent, per the Phase-3
     // standard. These three are the *idempotent / non-transactional* blocked entries;
@@ -7963,8 +8006,12 @@ mod tests {
     //     point is a `MESSAGE_TOO_LARGE` split. Missing surface: the split panics — PLAN
     //     §9.18, with `test_too_large_batches_are_safely_removed` as the reproducer.
     //
-    // PLAN §9.19 carries the same three blocked entries; as of Phase 6 it also carries
-    // the two named in the transactional group, for a total of five blocked across both.
+    // PLAN §9.19 carries the same three blocked entries. Phase 6 added two more from the
+    // transactional group; Phase 8 resolved one of those two
+    // (`testSenderShouldCloseWhenTransactionManagerInErrorState`), so **four** are blocked
+    // across both groups, all four on PLAN §9.18 except
+    // `testSenderShouldRetryWithBackoffOnRetriableError`, which is on the injected-clock
+    // gap.
     //
     // =====================================================================
     // Transactional `SenderTest` methods (Milestone 11, Phase 6)
@@ -11887,7 +11934,7 @@ mod tests {
         )
     }
 
-    /// Translated from `SenderTest.testUnresolvedSequencesAreNotFatal` (Java 1534-1571).
+    /// Translated from `SenderTest.testUnresolvedSequencesAreNotFatal` (Java 1534-1572).
     #[tokio::test]
     async fn test_unresolved_sequences_are_not_fatal() {
         let mut ctx = sender_test_transactional_context("testUnresolvedSeq", 100, 0, i32::MAX, 3);
@@ -12077,7 +12124,7 @@ mod tests {
     }
 
     /// Translated from `SenderTest.testAwaitPendingRecordsBeforeCommittingTransaction`
-    /// (Java 2829-2870).
+    /// (Java 2829-2871).
     #[tokio::test]
     async fn test_await_pending_records_before_committing_transaction() {
         use crate::producer::internals::producer_test_utils::run_until;

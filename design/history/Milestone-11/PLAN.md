@@ -2291,6 +2291,61 @@ threes; a renamed test invisible without a rename map); the
 The 10 absent-with-owner methods the Phase-7 accounting names are tracked in
 §9.23 (opened by the Actor); all block zero of the 55 tests.
 
+### 9.25 `Sender::can_retry` hands the transactional log-truncation branch an empty batch pool
+
+**Status:** open. Found in Phase 8 while translating
+`SenderTest.testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`
+(Java 1820-1881). **Not a Phase 8 defect** — it predates the phase; `Sender::can_retry`
+has passed `&mut []` since Phase 4.
+
+`TransactionManager.canRetry` (`TransactionManager.java:1015-1060`) has an
+`UNKNOWN_PRODUCER_ID` arm that, when the broker's `logStartOffset` has moved past our
+last acked offset, concludes the producer state was lost to retention. For a
+**transactional** producer it then rewrites the partition's in-flight sequences from zero
+(`:1042-1050` → `TxnPartitionEntry.startSequencesAtBeginning`) and retries, so the
+transaction need not be aborted. For an idempotent producer it bumps the epoch instead.
+
+`Sender::can_retry` (`sender.rs`) calls that method with an **empty** batch pool. Per
+rules §7, `start_sequences_at_beginning` errors when a tracked in-flight batch is not
+supplied, so the rewrite does not happen: `last_acked_sequence` is never cleared and the
+sequence counter is never restarted. The error is swallowed by the per-response
+error handling on the produce path (Phase 4's deliberate per-response try/catch), so
+nothing surfaces — the producer simply carries the stale sequence state into the retry.
+
+**The comment at the call site asserted the branch was unreachable, and that is how it
+survived.** It read: "`batches` is empty: it supplies the partition's in-flight batches
+for the transactional log-truncation rewrite, which the idempotent path never reaches".
+The premise is inverted — it is the *transactional* path that reaches that arm; the
+idempotent path takes `requestIdempotentEpochBumpForPartition` beside it. The comment is
+corrected in place and now cites this section.
+
+Reachability: exactly one test in the tree drives it, and it did not exist until Phase 8.
+`testAbortTransactionAndResetSequenceNumberOnUnknownProducerId` looks similar but answers
+with `logStartOffset = 0` against a last acked offset of 0, so `0 < 0` is false and it
+takes the fail-the-batch path into `handleFailedBatch` instead.
+
+**Reproducer:** `sender.rs`'s
+`test_transactional_unknown_producer_handling_when_retention_limit_reached`, left in place
+and `#[ignore]`d with this section cited — the same treatment §9.18 gives its own.
+
+**Why it was not fixed in Phase 8.** The pool must contain the failing batch, because
+`canRetry` runs *before* any `removeInFlightBatch` and the batch is therefore still
+tracked — unlike at `handleFailedBatch`, which removes it first and so legitimately has
+`pool ⊃ tracked` in the other direction (rules §7). But `TransactionManager::can_retry`
+takes the failing batch as `&ProducerBatch` and the pool as `&mut [&mut ProducerBatch]`,
+so putting the same batch in both aliases. Fixing it means changing that signature and
+threading a three-way pool (accumulator deques + `Sender::in_flight_batches` + the batch
+in hand) through `complete_batch` on the produce-response path — a send/receive-path
+change needing its own DoD §10 allocation audit, which is the same reason §9.18 keeps the
+split fix out of a transactions phase.
+
+**Fix direction:** have `can_retry` take the pool only, with the failing batch inside it,
+and identify it by its ordering key (rules §6) rather than by a separate reference. That
+removes the aliasing without a second traversal. `Sender::complete_batch` is already
+`&mut self`, and `RecordAccumulator::with_in_flight_batch_pool` already assembles both
+owners correctly for `bump_idempotent_epoch_and_reset_id_if_needed` — so the pieces exist;
+what is missing is the signature change and its audit.
+
 ---
 
 ## 10. Recorded translation deviations
