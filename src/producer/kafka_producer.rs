@@ -57,6 +57,7 @@ use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
+use crate::producer::internals::PendingRequests;
 use crate::producer::internals::ProducerMetadata;
 use crate::producer::internals::Sender;
 use crate::producer::internals::TransactionManager;
@@ -123,6 +124,22 @@ pub struct KafkaProducer<K, V> {
     /// struct cannot reach it any other way. No guard is ever held across an
     /// `.await` (rules §4).
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+    /// The queue of transactional requests waiting for the [`Sender`] to send them.
+    ///
+    /// Translated from `TransactionManager.pendingRequests`
+    /// (`TransactionManager.java:121`). It lives outside the manager and is shared
+    /// with the `Sender` — see [`Sender::pending_requests`] for the full rationale
+    /// and for the lock order (`pending_requests` → `transaction_manager`) every
+    /// site below observes.
+    ///
+    /// Java's four transactional entry points on this class
+    /// (`initTransactions` `:653`, `sendOffsetsToTransaction` `:818`,
+    /// `commitTransaction` `:741`, `abortTransaction` `:784`) all enqueue into it
+    /// from the application thread, which is why the producer needs a handle at
+    /// all.
+    ///
+    /// [`Sender::pending_requests`]: crate::producer::internals::Sender
+    pending_requests: Arc<Mutex<PendingRequests>>,
     /// The compression type for records.
     compression_type: CompressionType,
     /// The maximum time to block on send/partitionsFor.
@@ -168,6 +185,8 @@ impl<K, V> KafkaProducer<K, V> {
     /// * `time_provider` - Provider of current wall-clock time
     /// * `transaction_manager` - The shared transaction state object, or `None`
     ///   when idempotence is disabled
+    /// * `pending_requests` - The transactional request queue this producer shares
+    ///   with the [`Sender`]
     // `TransactionManager` is `pub(crate)` per CLAUDE.md §2; see the note on
     // [`Self::with_client`] for why this constructor stays nominally `pub`.
     #[allow(private_interfaces)]
@@ -184,6 +203,7 @@ impl<K, V> KafkaProducer<K, V> {
         sender_handle: Option<JoinHandle<()>>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+        pending_requests: Arc<Mutex<PendingRequests>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         Self {
@@ -195,6 +215,7 @@ impl<K, V> KafkaProducer<K, V> {
             accumulator,
             metadata,
             transaction_manager,
+            pending_requests,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
@@ -390,6 +411,7 @@ impl<K, V> KafkaProducer<K, V> {
             client,
             time_provider,
             transaction_manager,
+            Arc::new(Mutex::new(PendingRequests::new())),
         ))
     }
 
@@ -470,6 +492,7 @@ impl<K, V> KafkaProducer<K, V> {
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+        pending_requests: Arc<Mutex<PendingRequests>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
@@ -494,6 +517,7 @@ impl<K, V> KafkaProducer<K, V> {
             Arc::clone(&force_close),
             Arc::clone(&time_provider),
             transaction_manager.clone(),
+            Arc::clone(&pending_requests),
             log_context.clone(),
         );
 
@@ -515,6 +539,7 @@ impl<K, V> KafkaProducer<K, V> {
             accumulator,
             metadata,
             transaction_manager,
+            pending_requests,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
@@ -1300,6 +1325,7 @@ mod tests {
             None,
             default_time_provider(),
             None,
+            Arc::new(Mutex::new(PendingRequests::new())),
         )
     }
 
@@ -2183,6 +2209,7 @@ mod tests {
                 None,
                 default_time_provider(),
                 transaction_manager,
+                Arc::new(Mutex::new(PendingRequests::new())),
             );
             let cluster = metadata.fetch();
 

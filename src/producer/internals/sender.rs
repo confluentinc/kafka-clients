@@ -262,14 +262,40 @@ pub struct Sender<C: KafkaClient> {
     /// The queue of transactional requests waiting to be sent.
     ///
     /// Translated from `TransactionManager.pendingRequests`
-    /// (`TransactionManager.java:121`), which lives **here** rather than behind
-    /// [`Self::transaction_manager`] because Java touches it from the Sender
-    /// thread only and mutates it through the *unsynchronized*
-    /// `lookupCoordinator(TxnRequestHandler)` (`TransactionManager.java:969`) that
-    /// `Sender.java:522` calls directly. See
-    /// `.claude/rules/producer-transactions.md` §2 and the
-    /// [`PendingRequests`] docs.
-    pending_requests: PendingRequests,
+    /// (`TransactionManager.java:121`), which lives **outside**
+    /// [`Self::transaction_manager`] because Java mutates it through the
+    /// *unsynchronized* `lookupCoordinator(TxnRequestHandler)`
+    /// (`TransactionManager.java:969`) that `Sender.java:522` calls directly. See
+    /// `.claude/rules/producer-transactions.md` §2 and the [`PendingRequests`]
+    /// docs.
+    ///
+    /// # Why it is shared rather than Sender-confined
+    ///
+    /// Rules §2 additionally calls it "the Sender task's own unshared state". That
+    /// held while the only callers were Sender-side, but it is **not** true of the
+    /// class as Java writes it: `KafkaProducer.initTransactions` (`:653`),
+    /// `commitTransaction` (`:741`), `abortTransaction` (`:784`) and
+    /// `sendOffsetsToTransaction` (`:818`) all run on the *application* thread and
+    /// all reach `enqueueRequest` — through `initializeTransactions`
+    /// (`TransactionManager.java:299`), `beginCommit` (`:353`), `beginAbort`
+    /// (`:361`) and `sendOffsetsToTransaction` (`:404`), every one of them
+    /// `synchronized`. So the queue is written from both threads in Java, and an
+    /// `Arc<Mutex<..>>` shared with [`KafkaProducer`] is what makes those four
+    /// public methods expressible. Java's own unsynchronized writer is safe for a
+    /// different reason (only the Sender calls `lookupCoordinator`), and taking
+    /// this lock there costs nothing.
+    ///
+    /// # Lock order: **`pending_requests` → `transaction_manager`**
+    ///
+    /// Every site that needs both acquires this one **first**. Rust evaluates a
+    /// method receiver before its arguments, so
+    /// `manager.lock().unwrap().m(&mut self.pending_requests.lock().unwrap())`
+    /// would invert the order — bind this guard to a local before locking the
+    /// manager. Combined with rules §3's deque → manager rule the full order is
+    /// deque → `pending_requests` → manager.
+    ///
+    /// [`KafkaProducer`]: crate::producer::KafkaProducer
+    pending_requests: Arc<Mutex<PendingRequests>>,
     /// The coordinators this Sender has discovered.
     ///
     /// Translated from `TransactionManager.transactionCoordinator`
@@ -360,6 +386,7 @@ impl<C: KafkaClient> Sender<C> {
         force_close: Arc<AtomicBool>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+        pending_requests: Arc<Mutex<PendingRequests>>,
         log_context: LogContext,
     ) -> Self {
         Self {
@@ -375,7 +402,7 @@ impl<C: KafkaClient> Sender<C> {
             running,
             force_close,
             transaction_manager,
-            pending_requests: PendingRequests::new(),
+            pending_requests,
             coordinators: CoordinatorNodes::new(),
             in_flight_request_correlation_id: NO_INFLIGHT_REQUEST_CORRELATION_ID,
             pending_transactional_response: None,
@@ -401,7 +428,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Translated from `TransactionManager.hasPendingRequests()`
     /// (`TransactionManager.java:1005`).
     pub fn has_pending_requests(&self) -> bool {
-        !self.pending_requests.is_empty()
+        !self.pending_requests.lock().unwrap().is_empty()
     }
 
     /// The coordinator of the given type, or `None` if it has not been discovered.
@@ -483,14 +510,16 @@ impl<C: KafkaClient> Sender<C> {
             // Java 1413-1415: rediscover the coordinator before retrying, so the
             // retry does not go straight back to a broker that just dropped us.
             {
+                // `pending_requests` before the manager, per its field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
                 let manager = transaction_manager.lock().unwrap();
                 if manager.needs_coordinator(&handler) {
-                    manager.lookup_coordinator_for(&mut self.coordinators, &mut self.pending_requests, &handler)?;
+                    manager.lookup_coordinator_for(&mut self.coordinators, &mut pending_requests, &handler)?;
                 }
                 // Java's `reenqueue()` (1394) takes the manager monitor for the two
                 // statements `isRetry = true; enqueueRequest(this)`, so `retry` is
                 // called under the lock here too.
-                manager.retry(&mut self.pending_requests, handler);
+                manager.retry(&mut pending_requests, handler);
             }
             return Ok(());
         }
@@ -507,11 +536,13 @@ impl<C: KafkaClient> Sender<C> {
                     handler
                 );
                 // Java 1421-1423: this and only this runs under the monitor.
+                // `pending_requests` before the manager, per its field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
                 transaction_manager.lock().unwrap().handle_response(
                     handler,
                     response_body,
                     &mut self.coordinators,
-                    &mut self.pending_requests,
+                    &mut pending_requests,
                 )
             },
             None => {
@@ -599,11 +630,9 @@ impl<C: KafkaClient> Sender<C> {
                 // valid transition, and always supplies an error. Logged rather than
                 // unwrapped so an unreachable failure cannot panic the task
                 // (CLAUDE.md §10.1).
-                if let Err(error) = transaction_manager
-                    .lock()
-                    .unwrap()
-                    .close(&mut self.pending_requests, Caller::Sender)
-                {
+                // `pending_requests` before the manager, per its field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                if let Err(error) = transaction_manager.lock().unwrap().close(&mut pending_requests, Caller::Sender) {
                     kafka_error!(
                         self.log_context,
                         "Error while aborting incomplete transactional requests: {}",
@@ -696,10 +725,12 @@ impl<C: KafkaClient> Sender<C> {
         match &self.transaction_manager {
             Some(transaction_manager) => {
                 let transaction_manager = Arc::clone(transaction_manager);
+                // `pending_requests` before the manager, per its field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
                 transaction_manager
                     .lock()
                     .unwrap()
-                    .begin_abort(&mut self.pending_requests, Caller::Sender)
+                    .begin_abort(&mut pending_requests, Caller::Sender)
                     .map(|_result| ())
             },
             // Unreachable: the enclosing loop is gated on `has_ongoing_transaction`.
@@ -753,11 +784,14 @@ impl<C: KafkaClient> Sender<C> {
     /// `transactionManager.authenticationFailed(e)` (`Sender.java:339`).
     fn authentication_failed(&mut self, error: &KafkaError) -> Result<(), KafkaError> {
         match self.transaction_manager.clone() {
-            Some(transaction_manager) => transaction_manager.lock().unwrap().authentication_failed(
-                &mut self.pending_requests,
-                error,
-                Caller::Sender,
-            ),
+            Some(transaction_manager) => {
+                // `pending_requests` before the manager, per its field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .authentication_failed(&mut pending_requests, error, Caller::Sender)
+            },
             // Unreachable: only the transaction block raises this error.
             None => Ok(()),
         }
@@ -1006,12 +1040,16 @@ impl<C: KafkaClient> Sender<C> {
         // `SaslAuthenticationFailed`: the cause here is a cluster or transactional-id
         // authorization failure and nothing about it is SASL.
         let authentication_error = KafkaError::fatal(Errors::UnknownServerError, error.message());
-        transaction_manager.lock().unwrap().fail_pending_requests(
-            &mut self.pending_requests,
-            &authentication_error,
-            Caller::Sender,
-        )?;
-        // The guard from the statement above is released at the `;`, so the deque
+        {
+            // `pending_requests` before the manager, per its field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
+            transaction_manager.lock().unwrap().fail_pending_requests(
+                &mut pending_requests,
+                &authentication_error,
+                Caller::Sender,
+            )?;
+        }
+        // Both guards from the block above are released at its `}`, so the deque
         // locks this takes are still acquired with no manager lock held (rules §3).
         self.maybe_abort_batches(error);
         // Java 356 passes the **raw** exception here, not the
@@ -1064,22 +1102,26 @@ impl<C: KafkaClient> Sender<C> {
 
         if partitions.is_empty() {
             let mut pool = InFlightBatchPool::new();
+            // `pending_requests` before the manager, per its field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
             return transaction_manager
                 .lock()
                 .unwrap()
-                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut self.pending_requests, Caller::Sender);
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending_requests, Caller::Sender);
         }
 
         let accumulator = Arc::clone(&self.accumulator);
-        let pending_requests = &mut self.pending_requests;
+        let pending_requests = Arc::clone(&self.pending_requests);
         accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
             // Deque locks are held by `with_in_flight_batch_pool` for the duration of
-            // this closure, so taking the manager lock here is the deque → manager
-            // order rules §3 mandates.
+            // this closure, so taking the two locks here is the full
+            // deque → `pending_requests` → manager order rules §3 and the
+            // `pending_requests` field docs mandate.
+            let mut pending_requests = pending_requests.lock().unwrap();
             transaction_manager
                 .lock()
                 .unwrap()
-                .bump_idempotent_epoch_and_reset_id_if_needed(pool, pending_requests, Caller::Sender)
+                .bump_idempotent_epoch_and_reset_id_if_needed(pool, &mut pending_requests, Caller::Sender)
         })
     }
 
@@ -1124,14 +1166,18 @@ impl<C: KafkaClient> Sender<C> {
         // `Sender.run`'s catch-and-log, which is what `TransactionPhaseError::Other`
         // reaches here.
         let has_incomplete = self.accumulator.has_incomplete();
-        let next_request_handler = match transaction_manager
-            .lock()
-            .unwrap()
-            .next_request(&mut self.pending_requests, has_incomplete)
-            .map_err(TransactionPhaseError::Other)?
-        {
-            Some(handler) => handler,
-            None => return Ok(false),
+        let next_request_handler = {
+            // `pending_requests` before the manager, per its field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
+            match transaction_manager
+                .lock()
+                .unwrap()
+                .next_request(&mut pending_requests, has_incomplete)
+                .map_err(TransactionPhaseError::Other)?
+            {
+                Some(handler) => handler,
+                None => return Ok(false),
+            }
         };
 
         // Java 479-482. `coordinatorType()` is null for a non-transactional
@@ -1168,10 +1214,14 @@ impl<C: KafkaClient> Sender<C> {
                 self.log_context,
                 "No nodes available to send requests, will poll and retry when until a node is ready."
             );
-            transaction_manager
-                .lock()
-                .unwrap()
-                .retry(&mut self.pending_requests, next_request_handler);
+            {
+                // `pending_requests` before the manager, per its field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .retry(&mut pending_requests, next_request_handler);
+            }
             let now = (self.time_provider)();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
@@ -1275,11 +1325,12 @@ impl<C: KafkaClient> Sender<C> {
         };
         let needs_coordinator = transaction_manager.lock().unwrap().needs_coordinator(&next_request_handler);
         if needs_coordinator {
-            // Java 522.
+            // Java 522. `pending_requests` before the manager, per its field docs.
+            let mut pending_requests = self.pending_requests.lock().unwrap();
             transaction_manager
                 .lock()
                 .unwrap()
-                .lookup_coordinator_for(&mut self.coordinators, &mut self.pending_requests, &next_request_handler)
+                .lookup_coordinator_for(&mut self.coordinators, &mut pending_requests, &next_request_handler)
                 .map_err(TransactionPhaseError::Other)?;
         } else {
             // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
@@ -1288,10 +1339,12 @@ impl<C: KafkaClient> Sender<C> {
             self.metadata.request_update(false);
         }
 
+        // `pending_requests` before the manager, per its field docs.
+        let mut pending_requests = self.pending_requests.lock().unwrap();
         transaction_manager
             .lock()
             .unwrap()
-            .retry(&mut self.pending_requests, next_request_handler);
+            .retry(&mut pending_requests, next_request_handler);
         Ok(())
     }
 
@@ -2564,6 +2617,7 @@ mod tests {
                 force_close,
                 time_provider,
                 transaction_manager.clone(),
+                Arc::new(Mutex::new(PendingRequests::new())),
                 LogContext::empty(),
             );
 
@@ -2616,6 +2670,35 @@ mod tests {
                     .as_ref()
                     .expect("this context was built with a transaction manager"),
             )
+        }
+
+        /// The transactional request queue this `Sender` shares with its producer.
+        fn pending_requests(&self) -> Arc<Mutex<PendingRequests>> {
+            Arc::clone(&self.sender.pending_requests)
+        }
+
+        /// `transactionManager.initializeTransactions(false)`, with both guards
+        /// taken in the mandated `pending_requests` → `TransactionManager` order
+        /// (see [`Sender::pending_requests`]).
+        fn initialize_transactions(&self) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+            let pending_requests = self.pending_requests();
+            let mut pending_requests = pending_requests.lock().unwrap();
+            self.transaction_manager()
+                .lock()
+                .unwrap()
+                .initialize_transactions(false, &mut pending_requests)
+        }
+
+        /// `transactionManager.nextRequest(hasIncompleteBatches)`, with both guards
+        /// taken in the mandated order.
+        fn next_request(&self, has_incomplete_batches: bool) -> Option<TxnRequestHandler> {
+            let pending_requests = self.pending_requests();
+            let mut pending_requests = pending_requests.lock().unwrap();
+            self.transaction_manager()
+                .lock()
+                .unwrap()
+                .next_request(&mut pending_requests, has_incomplete_batches)
+                .expect("next_request does not fail on this path")
         }
 
         /// Append a record to the accumulator for the given partition.
@@ -3711,6 +3794,7 @@ mod tests {
             force_close,
             time_provider,
             None,
+            Arc::new(Mutex::new(PendingRequests::new())),
             LogContext::empty(),
         );
 
@@ -3866,14 +3950,17 @@ mod tests {
     fn pending_init_producer_id_handler(ctx: &mut SenderTestContext) -> TxnRequestHandler {
         let transaction_manager = ctx.transaction_manager();
         let mut pool = InFlightBatchPool::new();
-        let mut manager = transaction_manager.lock().unwrap();
-        manager
-            .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut ctx.sender.pending_requests, Caller::Sender)
-            .expect("the initial InitProducerId is enqueued");
-        manager
-            .next_request(&mut ctx.sender.pending_requests, false)
-            .expect("next_request does not fail on this path")
-            .expect("an InitProducerId request is pending")
+        let pending_requests = ctx.pending_requests();
+        {
+            // `pending_requests` before the manager, per its field docs.
+            let mut pending_requests = pending_requests.lock().unwrap();
+            transaction_manager
+                .lock()
+                .unwrap()
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending_requests, Caller::Sender)
+                .expect("the initial InitProducerId is enqueued");
+        }
+        ctx.next_request(false).expect("an InitProducerId request is pending")
     }
 
     /// Builds an `InitProducerId` `ClientResponse` with the given correlation id.
@@ -3949,12 +4036,7 @@ mod tests {
             !ctx.sender.has_in_flight_request(),
             "the in-flight correlation id is cleared before the retry (Java 1410)"
         );
-        let requeued = transaction_manager
-            .lock()
-            .unwrap()
-            .next_request(&mut ctx.sender.pending_requests, false)
-            .expect("next_request does not fail on this path")
-            .expect("re-enqueued");
+        let requeued = ctx.next_request(false).expect("re-enqueued");
         assert!(requeued.is_retry());
     }
 
@@ -4019,10 +4101,7 @@ mod tests {
     async fn run_init_transactions(ctx: &mut SenderTestContext) -> Arc<TransactionalRequestResult> {
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         let result = ctx
-            .transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         // Iteration 1: the coordinator is unknown, so only a FindCoordinator is
@@ -4089,10 +4168,7 @@ mod tests {
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         let init_pid_result = ctx
-            .transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         ctx.sender.run_once().await.expect("run_once");
@@ -4151,10 +4227,7 @@ mod tests {
     async fn test_disconnect_and_retry() {
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
-        ctx.transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+        ctx.initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         // Iteration 1 enqueues the FindCoordinator; iteration 2 sends it and is
@@ -4192,10 +4265,7 @@ mod tests {
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         let init_pid_result = ctx
-            .transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         ctx.sender.run_once().await.expect("run_once");
@@ -4253,10 +4323,7 @@ mod tests {
     async fn test_unsupported_init_transactions() {
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
-        ctx.transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+        ctx.initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         ctx.sender.run_once().await.expect("run_once");
@@ -4325,10 +4392,7 @@ mod tests {
         );
 
         let result = ctx
-            .transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         // Iteration 1 enqueues the FindCoordinator; iteration 2 finds no node for it
@@ -4405,10 +4469,7 @@ mod tests {
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         let result = ctx
-            .transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         let transactional_polls = |ctx: &SenderTestContext| {
@@ -4498,10 +4559,7 @@ mod tests {
         ctx.time.set_auto_tick(10);
 
         let result = ctx
-            .transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         // Iteration 1: the coordinator is unknown, so a FindCoordinator is enqueued.
@@ -4616,10 +4674,7 @@ mod tests {
     #[tokio::test]
     async fn test_unsupported_find_coordinator() {
         let mut ctx = SenderTestContext::transactional();
-        ctx.transaction_manager()
-            .lock()
-            .unwrap()
-            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+        ctx.initialize_transactions()
             .expect("initTransactions is valid from UNINITIALIZED");
 
         ctx.sender.run_once().await.expect("run_once");
