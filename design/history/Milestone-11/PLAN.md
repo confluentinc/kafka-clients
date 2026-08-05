@@ -423,6 +423,29 @@ split at plan time into 5a (state machine + `FindCoordinator` +
 `InitProducerId` epoch bump) and 5b (AddPartitions / AddOffsets /
 TxnOffsetCommit / EndTxn + TV2 + 2PC).
 
+> **Split invoked, 2026-08-05 (Manager).** Evidence: Phase 4 closed at *smaller*
+> scope only after four Critic passes, ~26 commits and one Actor watchdog stall,
+> and this phase's own text expects test volume to exceed implementation volume.
+> Execution order:
+>
+> - **5a** — all nine states reachable with the full transition surface; `Priority`
+>   + the priority-ordered pending-request queue (`BinaryHeap` + insertion-sequence
+>   tiebreaker); `PendingStateTransition` + `handle_cached_transaction_request_result`
+>   + `throw_if_pending_state` (rules §5 is the binding contract here);
+>   `initialize_transactions`, `begin_transaction`, `reset_transaction_state`; the
+>   error machine; `FindCoordinatorHandler` + coordinator state (per §6.5, rules §2:
+>   Sender-owned); the transactional `InitProducerId`/epoch-bump path; the
+>   `TransactionManagerTest` subset reachable with that surface.
+> - **5b** — `AddPartitionsToTxnHandler`, `AddOffsetsToTxnHandler`,
+>   `TxnOffsetCommitHandler`, `EndTxnHandler`; the entry points that construct them
+>   (`begin_commit`, `begin_abort`, `begin_completing_transaction`,
+>   `send_offsets_to_transaction`, `maybe_add_partition` transactional arm); TV2;
+>   2PC; the remaining tests.
+>
+> Where an item straddles the boundary, it lands with its handler and the Actor
+> records the placement. Both halves run under N=45 with sequential Actor/Critic
+> loops, each closing only on a zero-finding pass.
+
 ---
 
 ### Phase 6 (N=46) — Public producer API + Sender transactional loop
