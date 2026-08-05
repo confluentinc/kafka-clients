@@ -1,6 +1,6 @@
 ---
 name: review-m11-phase6
-description: M11 Phase 6 (public producer txn API + Sender txn loop) — 7→4 findings, 0 behavioural ever; splitter blind spots, rotated citations, unpinned prod fix, and a Critic false fact the Actor caught
+description: M11 Phase 6 (public producer txn API + Sender txn loop) — 7→4→1, 0 behavioural ever; splitter blind spots, count cross-references, unpinned prod fix, and a Critic false fact the Actor caught
 metadata:
   type: project
 ---
@@ -53,6 +53,47 @@ closure after `block_on(..)` returns, so the `JoinHandle` cannot resolve until t
 completes — a guarantee. Had it been a detached task, the same prose would have been a
 race. Always locate the hook relative to the joined future before crediting or faulting
 such a doc.
+
+## P3.1 A count-removal sweep must include cross-references, not just restatements
+
+Pass 3's single finding: fix 2 deleted every restatement of the moved counts, but
+`sender.rs:7817` said "for the same reason **the 15 above** are" — a *cross-reference* to a
+group whose header now reads `(16)` two hundred lines up (and whose owed subset was always
+11, so 15 matched nothing even before). Grep shape that finds these:
+`grep -nE "the (one|two|…|[0-9]+) (above|below)"` over the block, plus `(N) —` group
+headers. Restatement sweeps naturally target the headline number; the referring phrase a
+few hundred lines away survives.
+
+## P3.2 Honour a pre-committed non-finding rather than re-litigating at a new threshold
+
+Pass 1 recorded "`(Java A-B)` header ranges carry ±1-3 lines of slop; the bar for filing is
+that a citation points at a *different method*" — recorded explicitly so it would not
+consume a fix cycle. Pass 3's sweep found 3 of 24 headers off by −1, −2, −5, the last
+starting on a `}` inside the previous method's body. Tempting to file the −5. I did not:
+each range still brackets its own method, and moving the bar from −3 to −5 on the closing
+pass would be arbitrary. **Disclose it as a checked non-finding with the reasoning** — that
+keeps the record complete without manufacturing, and stops the next pass rediscovering it.
+
+## P3.3 A "must not disagree" invariant is the right shape when the bad form appears in refutations
+
+The Actor's shipped check is `grep -n <token> PLAN.md` "must not return two sections that
+disagree" — deliberately *not* a zero-hit rule, because the false form legitimately appears
+inside the text refuting it, so a zero-hit rule could only be satisfied by deleting the
+refutation. Semantic invariant + exact command is honest and discriminating; judge such a
+check by whether it is violated in the case that matters, not by whether it is mechanical.
+
+## P3.4 Two grep traps I hit this pass
+
+- **BWK awk (macOS) does not support `\b`.** `awk '/\b52\b/{...}'` printed **nothing** over
+  a file with eight matches. Empty output from a pattern you expect to hit is the tell —
+  re-run with `grep -n` before concluding "no mentions". Same family as the pass-5a `delete`
+  trap.
+- **Single-line patterns miss method chains split across lines.** `grep -n
+  "field\.\(insert\|extend\)"` found nothing for a feeder whose `.extend(..)` sat on the
+  line *after* the field. Grep the bare field name and enumerate every hit; that is also
+  what turns a two-feeder claim into an *exhaustiveness* check, which is what such an
+  isolation argument actually needs (removals like `.clear()` / `.retain()` cannot make a
+  union non-empty — classify each writer, don't just count them).
 
 ## P2.5 Two sibling accounting blocks can disagree about what a line number means
 

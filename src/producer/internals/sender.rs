@@ -4553,7 +4553,7 @@ mod tests {
         result.await_result().await.expect("initTransactions succeeded");
     }
 
-    /// Translated from `SenderTest.testNodeNotReady` (Java 689-711). Java's javadoc:
+    /// Translated from `SenderTest.testNodeNotReady` (Java 689-712). Java's javadoc:
     /// *"Tests the code path where the target node to send FindCoordinator or
     /// InitProducerId is not ready."*
     ///
@@ -7540,13 +7540,25 @@ mod tests {
     // Phase 6 added the one the old program could not see.
     //
     // Line numbers are the `public void` declaration line throughout, here and in the
-    // `Translated from` header of every test above. Checking those headers requires
+    // `Translated from` header of every test above, whose ranges run declaration line to
+    // the method's closing `    }`.
+    //
+    // Both halves of that convention are now swept mechanically rather than asserted.
+    // For the entry citations in this block: extract each `` `name` (line) `` pair and
+    // check `sed -n "${line}p"` contains `name(` — 55 pairs, 0 mismatches. For the
+    // rustdoc headers: resolve each `Translated from `SenderTest.<name>`` to the Java
+    // declaration and its closing brace and compare both ends — 40 headers, 0
+    // mismatches. The header sweep found **five** non-conforming ranges that a
+    // start-only check does not: four introduced by Phase 6's own shutdown group
+    // (starting on `@Test`, on a blank line, and twice on the *previous* method's
+    // closing brace) and one pre-existing end-off-by-one on `testNodeNotReady`. All are
+    // corrected. Checking those headers requires
     // comparing each method *name* against its range, not just rewriting the range for a
     // given name: Critic 44 issue 10 was a header that cited a sibling method's range
     // entirely, and it also escaped the first sweep because its range is followed by a
     // clause inside the same parentheses rather than closing them.
     //
-    // TRANSLATED IN PHASE 4 (33 entries — 32 of the 52, plus one out-of-scope):
+    // TRANSLATED IN PHASE 4 (33 entries — 32 in scope, plus one out-of-scope):
     //   `testInitProducerIdRequest` (620),
     //   `testIdempotentInitProducerIdWithMaxInFlightOne` (664),
     //   `testClusterAuthorizationExceptionInInitProducerIdRequest` (715),
@@ -7579,7 +7591,7 @@ mod tests {
     //   `testRetryWhenProducerIdChanges` (2306),
     //   `testBumpEpochWhenOutOfOrderSequenceReceived` (2341),
     //   `testTooLargeBatchesAreSafelyRemoved` (3004) — `#[ignore]`d on PLAN §9.18.
-    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) — **outside the 52**:
+    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) — **out of scope**:
     //     both the accumulator and the `Sender` are built with `transactionManager = null`
     //     (Java 3321, 3324), so it is neither idempotent nor transactional. Translated anyway,
     //     as the only end-to-end cover for the leader-change backoff skip.
@@ -7810,11 +7822,19 @@ mod tests {
     // test_transactional_init_producer_id_is_routed_to_the_coordinator,
     // test_lookup_coordinator_on_disconnect_after_send, test_disconnect_and_retry,
     // test_lookup_coordinator_on_disconnect_before_send, test_unsupported_init_transactions,
-    // test_unsupported_find_coordinator. Counting them here would break the 52-arithmetic
-    // below, which is over `SenderTest.java` alone.
+    // test_unsupported_find_coordinator. Counting them here would break the entry
+    // arithmetic below, which is over `SenderTest.java` alone.
     //
     // FORTY-SEVEN `TransactionManagerTest` METHODS ARE OWED HERE TOO, for the same
-    // reason the 15 above are: their Java bodies drive the accumulator or the `Sender`.
+    // reason the STILL OWED group above is: their Java bodies drive the accumulator or
+    // the `Sender`. Named, not counted — the group's header carries its own count, and an
+    // earlier revision of this sentence said "the 15 above", which matched no group in
+    // the block even before Phase 6 renumbered the transactional group 15 → 16 (the
+    // transactional group was 15 then, but its owed subset was already 11). Critic 46
+    // pass 3: a count restatement can hide in a **cross-reference to a group's size**,
+    // not only in a headline repeat, which is why the sweep that removed the other four
+    // did not find it.
+    //
     // They are enumerated, with the mechanical check that none of them is
     // manager-only, in the PHASE-5B TEST ACCOUNTING block in `transaction_manager.rs`
     // — that block is authoritative for the count and the list; this note exists so a
@@ -7823,13 +7843,13 @@ mod tests {
     // `TransactionManagerTest` method not landed in Phases 3/5, so the full 140 are
     // accounted for". Phase 6 has to build the end-to-end transactional harness first
     // (see the group above), so the two are ordered, not independent. They are **not**
-    // counted in the 52-arithmetic below, which is over `SenderTest.java` alone.
+    // counted in the entry arithmetic below, which is over `SenderTest.java` alone.
     //
     // BLOCKED ON NAMED MISSING SURFACE (3) — each cites what is absent, per the Phase-3
     // standard. These three are the *idempotent / non-transactional* blocked entries;
     // the transactional group above names two more of its own
     // (`testTransactionalSplitBatchAndSend`, `testSenderShouldCloseWhenTransactionManagerInErrorState`)
-    // and they are counted there, not here, so the 52-arithmetic below is unaffected:
+    // and they are counted there, not here, so the entry arithmetic below is unaffected:
     //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104) — asserts
     //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between retries.
     //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Fn() -> i64>` with no
@@ -7839,7 +7859,7 @@ mod tests {
     //     constructor change across the producer and belongs with the Phase-6 review of
     //     `maybeSendAndPollTransactionalRequest`'s two sleeps
     //     (`.claude/rules/producer-transactions.md` §4).
-    //   `testNoBufferReuseWhenBatchExpires` (3605) — **outside the 52** (it uses no
+    //   `testNoBufferReuseWhenBatchExpires` (3605) — **out of scope** (it uses no
     //     transaction manager), listed here because the same §9.18 gap blocks it. Asserts
     //     `assertSame(buffer.array(), batch.records().buffer().array())` — pooled buffer
     //     identity across the send. Missing surface: `BufferPool` does accounting only and
@@ -8012,7 +8032,7 @@ mod tests {
     }
 
     /// Translated from `SenderTest.testTransactionalRequestsSentOnShutdown`
-    /// (Java 2736-2767).
+    /// (Java 2737-2768).
     ///
     /// `initiateClose` then `beginCommit`: the `EndTxn` was enqueued *after* the run
     /// loop was told to stop, so only `Sender.run`'s drain loop (`Sender.java:257-265`,
@@ -8051,7 +8071,7 @@ mod tests {
     }
 
     /// Translated from `SenderTest.testIncompleteTransactionAbortOnShutdown`
-    /// (Java 2896-2925).
+    /// (Java 2898-2928).
     ///
     /// No commit or abort is requested; `Sender.run`'s third loop
     /// (`Sender.java:266-285`) notices the ongoing transaction and aborts it itself.
@@ -8082,7 +8102,7 @@ mod tests {
     }
 
     /// Translated from `SenderTest.testForceShutdownWithIncompleteTransaction`
-    /// (Java 2927-2957).
+    /// (Java 2932-2963).
     ///
     /// The commit is requested and then the Sender is force-closed, so the `EndTxn` is
     /// never sent and `TransactionManager.close` fails the pending request.
@@ -8112,7 +8132,7 @@ mod tests {
 
     /// Translated from
     /// `SenderTest.testTransactionAbortedExceptionOnAbortWithoutError`
-    /// (Java 2963-2988).
+    /// (Java 2966-2988).
     ///
     /// A record is appended and the transaction aborted before it can be drained, so
     /// `maybeSendAndPollTransactionalRequest`'s `isAborting()` arm

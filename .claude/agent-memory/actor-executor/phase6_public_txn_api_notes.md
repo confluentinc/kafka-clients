@@ -89,3 +89,20 @@ the 15", which its own phase then falsified by adding a sixteenth (Critic 46 pas
 issue 2). **Do not copy a derived count into a note; cite where it is derived.** Two
 suggested rule amendments are recorded in PLAN §10.9 (rules §2's `pendingRequests`
 classification; CLAUDE.md §9.6.6's timer-starvation pitfall).
+
+**Two sweep lessons, both learned by failing them in this phase's review loop.** Changing
+a derived count is never a one-site edit, and "I swept for it" is only as good as the
+shapes the sweep enumerated:
+
+  - *A correction has to be swept too.* I refused to propagate a false fact into the
+    section where it was disputed and then restated it in the section a reader hits first.
+    Grep the claim, not the section you are editing.
+  - *Restatements hide in cross-references, not only in headline repeats.* Sweeping for
+    the numbers themselves (`27|28|15|16`) found four sites and missed a fifth phrased as
+    "for the same reason **the 15 above** are" — a reference to a *group's size*, which
+    matched no group even before the renumber. Also sweep `the <N> above|below`, `(N)`
+    group headers, and `<N>-arithmetic`-style labels.
+
+The durable fix for both is the same and is now applied throughout: **cite where a number
+is derived instead of restating it.** A cross-reference that names the group ("the STILL
+OWED group above") cannot go stale; one that states its size can.

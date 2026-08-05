@@ -727,3 +727,173 @@ does not recur. Finding 1 above is the same false fact still live in §9.21.
 **DoD spot-checks:** 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split
 panic); `cargo xtask format-check` and `cargo xtask lint` both clean; working tree carries
 only my own memory correction.
+
+---
+
+# Critic 46 — resolved (pass 3)
+
+The single pass-3 finding is fixed, together with both items the Critic disclosed as
+checked-but-not-filed. Verification is in the Actor's report.
+
+Scope note: the Critic's disclosure named **three** non-conforming `Translated from`
+headers out of 24 checked, on a start-line criterion. Sweeping all 40 such headers against
+*both* ends found **five** — a fourth Phase-6 start-offender
+(`testTransactionAbortedExceptionOnAbortWithoutError`, starting on the previous method's
+closing brace) and one pre-existing end-off-by-one on `testNodeNotReady`. All five are
+corrected, and both sweeps (40 headers, 55 entry citations) now report 0 mismatches and are
+recorded in the block's convention paragraph so they are re-runnable.
+
+Original review follows verbatim.
+
+---
+
+# Critic 46 — Milestone 11 Phase 6, pass 3
+
+Reviewed `9ab8ce2`. All four pass-2 fixes are correct, and every shipped check I re-ran
+reproduces exactly. **1 finding** — a fifth count restatement that survived fix 2's sweep,
+in the authoritative block itself. Loop: 7 → 4 → 1.
+
+Two things I checked and am **not** filing are disclosed at the end, so the next pass does
+not re-derive them and so nothing is silently softened.
+
+---
+
+## Issue: "the 15 above" refers to a group that no longer exists — the fifth restatement
+- **File**: `src/producer/internals/sender.rs:7817`
+- **Severity**: Record Defect
+- **Description**: Fix 2 gave every count a single home by deleting restatements. One
+  survived, inside the `SenderTest.java` accounting block that is itself the authority:
+
+  ```
+  // FORTY-SEVEN `TransactionManagerTest` METHODS ARE OWED HERE TOO, for the same
+  // reason the 15 above are: their Java bodies drive the accumulator or the `Sender`.
+  ```
+
+  There is no group of 15 in the block. The two candidate referents are the `STILL OWED`
+  group, whose header reads **(11)** (`:7645`), and the `TRANSACTIONAL` group, whose header
+  reads **(16)** (`:7615`). Since the sentence is about being *owed* ("ARE OWED HERE TOO,
+  for the same reason the 15 above **are**"), the intended referent is the owed group — so
+  the number should be 11, and 15 matched neither group even before this phase: pre-fix the
+  transactional group was 15 but its owed subset was already 11.
+
+  Provenance: introduced by `dc5182a` (Phase 5b's accounting close), when 15 was at least
+  the transactional group's size. Fix 1 renumbered that group 15 → 16 and this
+  cross-reference was not updated — so it is stale precisely as of the commits under
+  review, and it is the same defect class as pass-2 issue 2, surviving the sweep that
+  issue prompted. It is also the only numeric group cross-reference in the block (swept
+  `7485-7870` for `the <N> above|below` and `(N) —` forms; every other number is a group
+  header carrying its own authoritative count, and those three are correct).
+- **Expected**: "the 11 above", or — consistent with fix 2's own strategy — name the group
+  without restating its size, since the header two hundred lines up is the authority.
+- **Actual**: `the 15 above`, matching no group in the block.
+
+---
+
+# What pass 3 verified
+
+**Fix 1 — §9.21 corrected, and the shipped check does discriminate.** The bullet now states
+the corrected fact (`:80` creates `prepareTxnSensor`, `:124` *does* declare
+`recordPrepareTxn`, which has zero callers tree-wide against `recordInit`'s three) and names
+§10.9 deviation 2 as the authority rather than re-arguing it. The six `recordPrepareTxn`
+mentions in PLAN agree: the false form now appears only inside text that marks it false
+(`:2160` "the false supporting fact §10.9 deviation 2 refutes") or inside §10.9's own
+refutation (`:2904`) and its pasted grep (`:2909-2910`).
+
+On the coordinator's specific question — the passing condition is *"must not return two
+sections that disagree"*, not "must return zero hits of the false form". That is the right
+formulation: a zero-hit rule would fail on the legitimate refutations, so it would have to
+be either ignored or satisfied by deleting the refutation. As stated, the invariant is
+violated in exactly the case that matters (a section asserting the false form as fact) and
+satisfied in the case that is fine (a section quoting it to refute it). It is a
+human-judgment invariant rather than a mechanical assertion — a reader must read the hits
+and compare — but the bullet claims no more than that ("which is checkable"), and it names
+the exact command. It would have caught the pass-2 defect: §9.21 asserting X while §10.9
+said not-X is precisely two sections disagreeing. And the recorded lesson is the right one
+— the sweep, not the fact ("refusing to propagate a bad claim into the section where the
+dispute was argued, while restating it in the section a reader hits first, is no refusal at
+all").
+
+**Fix 2 — restatements removed; four flagged sites clean, one missed (above).** Every
+number surviving in §Phase-6 and §9.21 is now explicitly historical and points at the
+authority: the spec line says *"This line said 'the 27' until Phase 6 derived the set
+mechanically and found 28 — see the Status note"*; the status paragraph asserts only
+"every … method is accounted for" and then states plainly that the counts live in the two
+deriving blocks, with the drift itself recorded as the reason. §9.21's bullet is now scoped
+exactly as pass 2 asked — *"**What Phase 5 handed forward was 15, not 18**"*, past tense
+about the hand-forward — and it no longer restates the group's current size or split
+("this bullet deliberately no longer restates them, so it cannot drift again"). The Actor's
+memory note now reads "most of the transactional `SenderTest` group" with no number. I
+swept both PLAN sections for live count restatements (`27|28|15|16|18|22|23`); every hit is
+inside a historical clause.
+
+**Fix 3 — the reason is stated, the parity clause is corrected, and the isolation argument
+holds by grep.** The rustdoc now carries a dedicated "The one Java assertion not carried
+across" section naming `assertEquals(future, producer.send(record))` (Java `:2439` —
+verified exact) and `expectAppend` (`:2445` — verified exact), the accumulator/partitioner
+stubs it depends on, why a real `RecordAccumulator` makes the identity comparison
+unrepresentable, and what survives of its intent via `!future.is_done()`. The overstated
+clause is explicitly retracted: *"It is **not** stronger for carrying the right partition …
+that clause is parity, not superiority."*
+
+I verified both feeder claims and, more importantly, their **exhaustiveness** — that is
+what the argument needs. `is_partition_pending_add` (`:2600-2603`) reads
+`new_partitions_in_transaction ∪ pending_partitions_in_transaction`. Enumerating every
+mention of both fields: `new_partitions_in_transaction.insert` has exactly one call site,
+`:4519`, inside `pub(crate) fn maybe_add_partition` (`:4487`); `pending_partitions_in_transaction`
+is written in only three places — `:1243` (ctor), `:3459-3460`
+`.extend(new_partitions_in_transaction.iter().cloned())` inside
+`fn add_partitions_to_transaction_handler` (`:3458`), and two *removals*, `:2122` `.clear()`
+and `:4035` `.retain(|p| !errors.contains_key(p))`. Removals cannot make the union
+non-empty, so non-emptiness transits through `maybe_add_partition` and nothing else. The
+argument is sound as stated. (My own first grep for feeder 2 returned nothing because the
+`.extend` sits on the line after the field — a single-line pattern misses it.)
+
+**Fix 4 — 507 → 508 at all three sites plus the rustdoc, and the sweep reproduces.** I
+implemented the citation sweep independently over the accounting block: **55 distinct
+(name, line) entry citations, 55 distinct names, 0 mismatches** — `sed -n "${line}p"`
+contains `name(` for every one. The claim is exact.
+
+**Derivation spot-check.** I re-ran the shipped scope program verbatim from the block:
+`java.txt` = **53** lines, `rust.txt` = **55**, `comm -23` **empty**, `comm -13` exactly
+`testNoBufferReuseWhenBatchExpires` and `testProducerBatchRetriesWhenPartitionLeaderChanges`
+— both documented in place as outside the in-scope set (`:7582`, `:7842`) — and 55 − 2 = 53.
+The block's stated scope decomposition (52 methods construct a `TransactionManager` + 1
+mocks one = 53) is correct. My independent annotation-keyed derivation agrees, and my
+17-name marker heuristic reconciles to the block's 16 plus
+`testTooLargeBatchesAreSafelyRemoved`, accounted for in the blocked-on-missing-surface
+group and translated at `:7314`.
+
+**DoD spot-checks:** 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split
+panic); `cargo xtask format-check` and `cargo xtask lint` clean.
+
+---
+
+# Checked and deliberately not filed
+
+**1. Three `Translated from` rustdoc headers start above the declaration line.** Of 24
+`SenderTest` headers, exactly three cite a line other than the declaration:
+`testTransactionalRequestsSentOnShutdown` 2736 vs 2737 (−1, the `@Test` line),
+`testIncompleteTransactionAbortOnShutdown` 2896 vs 2898 (−2, the annotations), and
+`testForceShutdownWithIncompleteTransaction` 2927 vs 2932 (−5, a `}` inside the *previous*
+method's body). The block's convention sentence does extend to headers ("here and in the
+`Translated from` header of every test above"), so these are non-conforming, and all three
+were introduced by Phase 6's shutdown-group commit.
+
+Not filed because I ruled this class out in pass 1 in writing, on a stated bar — a header
+is a locator, and the bar for filing is that it points at a *different method* (Critic 44
+issue 10 was a header citing a sibling's range entirely). None of these three does: each
+range still brackets its own method, and a reader landing on `@Test` or a blank line sees
+the declaration immediately below. I recorded that non-finding specifically so it would not
+consume a fix cycle, and reversing it on pass 3 to draw a new line at −5 rather than −3
+would be arbitrary. Fixing them is cheap if the Actor is touching the file anyway; it is
+not a reason to hold the phase open.
+
+**2. "the 52-arithmetic" is a stale label for an arithmetic that totals 53.** The phrase
+appears three times (`:7813`, `:7826`, `:7832`) naming the paragraph at `:7536-7538`, which
+reads "55 − 2 = 53". Not filed because no computation is wrong and no conclusion depends on
+the number: each use asserts only that some out-of-file group is "not counted in" that
+arithmetic, which is true whatever its total. "32 of the 52" (`:7549`) and "outside the 52"
+(`:7582`, `:7842`) are likewise true under the block's own stated 52 + 1 = 53 decomposition,
+though `:7537` says "outside the 53" about the same two entries, so the phrasing is
+internally inconsistent. This is nomenclature residue that leads a reader to no wrong fact
+— unlike the finding above, where the number matches no group at all.
