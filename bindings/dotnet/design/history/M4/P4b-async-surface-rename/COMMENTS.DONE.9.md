@@ -86,6 +86,71 @@ CLAUDE.md §8.4).
   `SubscribeWithCallback_...` / `PollWithCallback_...` so the test names still
   name the method under test. Public-test method names dropped the suffix to
   `Poll_...` / `Subscribe_...` etc. No assertion changed.
+- **D9.4 — doc-sync addendum: drop-`Async`-suffix decided binding-wide (producer
+  too); two stale rule docs brought into sync.** This is a **doc-only** follow-up
+  (no code, no `.cs`, no ABI) closing the two rule docs that still described the
+  pre-P4b async surface. The human **approved dropping the `Async` suffix
+  binding-wide** — so the producer sketch/rule are mirrored to the consumer's new
+  shape, not just the consumer's own docs.
+  - **Decision — the sync/async distinction is carried by the interface/class,
+    not the method name.** `IAsyncProducer`/`IAsyncConsumer` are the async
+    surfaces; the deferred **sync** mirror is `IProducer`/`IConsumer` (a later
+    milestone). Method names **mirror Java** — no `Async` suffix (`Send`, `Poll`,
+    `Commit`, `Subscribe`, `Seek`, `Position`, `Close`; still `Task`-returning).
+    This matches `bindings/CLAUDE.md §2.2` (mirror Java names, adapt only casing)
+    and the Python sibling. Supersedes the old "`Async` suffix on `Task`-returning
+    methods" rule.
+  - **`bindings/dotnet/CLAUDE.md`** (idiom-map RULE + the two sketches):
+    - *Consumer sketch* (§3): `IConsumer`→`IAsyncConsumer` (now
+      `: IConsumerCommon, IAsyncDisposable, IDisposable`); **new**
+      `IConsumerCommon { void Wakeup(); ConsumerGroupMetadata GroupMetadata(); }`
+      carrying the two non-blocking members; `KafkaConsumer`→`AsyncKafkaConsumer`,
+      `MockConsumer`→`AsyncMockConsumer`; methods dropped the suffix
+      (`PollAsync`→`Poll`, `SubscribeAsync`→`Subscribe`,
+      `UnsubscribeAsync`→`Unsubscribe`, `SeekAsync`→`Seek`, `CommitAsync`→`Commit`,
+      `PositionAsync`→`Position`, `CloseAsync`→`Close`); the "// blocking-in-Java …
+      → async (Async suffix, §4)" comment dropped the "Async suffix" clause; added
+      a one-line note that a sync `IConsumer` is the deferred mirror. The
+      clipped-ABI paragraph's `CommittedAsync`→`Committed`, `SubscribeAsync`→`Subscribe`.
+    - *Producer sketch* (§3, mirrored): `IProducer`→`IAsyncProducer`;
+      `SendAsync`/`FlushAsync`/`CloseAsync`→`Send`/`Flush`/`Close` (still `Task`);
+      `KafkaProducer`/`MockProducer` now `: IAsyncProducer`; added the same
+      deferred sync-`IProducer` note. (Producer is design-only — a doc change.)
+    - *Idiom-map RULE* (the table + §4 decisions + the Sync-vs-async note): rewrote
+      the rows so they **no longer require** the `Async` suffix — the distinction
+      is the interface. Fixed the line-34 flow example (`producer.SendAsync`→`Send`),
+      the "blocks/returns `Future`/callback" row, the "method send/flush/poll" row
+      (`SendAsync`/`PollAsync`→`Send`/`Poll`), the `wakeup` row
+      (`PollAsync`/`CommitAsync`→`Poll`/`Commit`), the Disposal row
+      (`CloseAsync(TimeSpan)`→`Close`, noting the consumer's timed close is
+      deferred), the §4 **Async naming** + **Interface naming** rows, the three
+      Sync-vs-async signal rows, the `commitSync`/`commitAsync` pair note
+      (`CommitAsync()`→`Commit()`), and the §6.3 "Naming across layers" line.
+  - **`bindings/dotnet/.claude/rules/ffi-marshalling.md`** (mechanical, .NET-only
+    name fixes to the **internal bridge** references): the consumer interop-flow
+    diagrams / bridge descriptions and the concurrent-op example used the old
+    public-async names for what is now the internal bridge — `PollAsync`→
+    `PollWithCallback` (§B1 diagram, §B7 flow diagram + Rule + Tests), and the
+    concurrent-op example `PollAsync`/`CommitAsync`/`SubscribeAsync`/`SeekAsync`→
+    `PollWithCallback`/`CommitWithCallback`/`SubscribeWithCallback`/`SeekWithCallback`
+    (§B5; `CommitWithCallback` used illustratively — commit is not built yet).
+  - **Keep-list — deliberately NOT renamed** (verified intact by grep):
+    - **C-ABI names:** `Consumer_poll_async`, `Consumer_close_async`,
+      `commit_async`, `commit_sync_async`, `send_async`, any `*_async` FFI fn /
+      `_callback_t` — fixed C-ABI identifiers (they mirror the ABI's own suffix,
+      not our public naming).
+    - **BCL:** `DisposeAsync` / `IAsyncDisposable` — framework contract, unchanged.
+    - **CKD anti-example:** the "Do NOT build … (`ProduceAsync`, …)" line — names
+      CKD's shape as what NOT to copy; kept verbatim.
+    - **Java references:** every "per real `KafkaConsumer`" / Java `Consumer` /
+      `Producer` / Java-impl `AsyncKafkaConsumer` mention — Java's reference client,
+      not our .NET types; untouched.
+  - **Scope guardrails honored:** only the two doc files changed (no `.cs`, no
+    `consumer-threading.md`, no root `CLAUDE.md`, no `STATUS.md`); edits surgical
+    (naming + the idiom-map rule wording only). The producer `SendAsync`
+    references in `ffi-marshalling.md` §A1/§A7 were **out of this addendum's
+    enumerated scope** (that scope covered only the consumer bridge references +
+    the concurrent-op example) and were left unchanged.
 
 ## Guardrails — both respected (verified)
 
@@ -125,3 +190,5 @@ CLAUDE.md §8.4).
 2. `dotnet(M4/P4b): rename internal NativeConsumer bridge methods …Async → …WithCallback`.
 3. `dotnet(M4/P4b): rename test references to the renamed public + internal surface`.
 4. `dotnet(M4/P4b): STATUS + closed record (M4/P4b async-surface rename); N=9` (docs).
+5. `dotnet(M4/P4b): doc-sync — drop Async suffix binding-wide in ffi-marshalling.md + CLAUDE.md idiom map/sketches`
+   (D9.4 — doc-only; the two rule docs + this closed record; no code).

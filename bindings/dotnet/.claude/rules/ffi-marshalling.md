@@ -692,7 +692,7 @@ dispatcher thread.
    .NET (managed)                    │ C ABI │       Rust core (native, per consumer)
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     PollAsync → *_async(…, cb) ─────│──────►│     consumer bg task (ConsumerNetworkThread):
+     PollWithCallback → *_async(…, cb) ─│──────►│     consumer bg task (ConsumerNetworkThread):
        returns Task (core guards)    │       │       NetworkClient + ONE async Selector
    (NO .NET pump, NO managed guard)  │       │       ↕ multiplexes ALL brokers (event-driven)
      ◄── cb fires here (→ TCS) ──────│◄──────│     callback-dispatcher thread (1, native):
@@ -1024,8 +1024,9 @@ shapes: **wakeup** and **concurrent use**.
   - **Concurrent use** (the consumer is single-owner / one-operation-in-flight;
     serialized by the **Rust core's** guard, not a managed one — M3/P2) splits by
     method, and the split is enforced **core-side**, not by a managed pre-check: a
-    concurrent **async op** (`PollAsync` / `CommitAsync` / `SubscribeAsync` /
-    `SeekAsync`) is rejected by the core **inline** (it fires the completion callback
+    concurrent **async op** (`PollWithCallback` / `CommitWithCallback` /
+    `SubscribeWithCallback` / `SeekWithCallback`) is rejected by the core **inline**
+    (it fires the completion callback
     on the caller thread with a `ConcurrentModification` error), which the bridge
     surfaces as a **faulted `Task`** carrying a **`KafkaException`** — *not* a
     managed synchronous throw. A concurrent sync **state read** (`Assignment` /
@@ -1162,7 +1163,7 @@ serialized by the **Rust core's** guard — **no managed guard** (M3/P2). Bridge
 ```
 Caller thread                       Core: runtime worker ──▶ dispatcher thread (1/consumer)
 ─────────────                       ────────────────────────────────────────────────────
-PollAsync():                        worker task: poll(timeout).await   ← runs the op
+PollWithCallback():                 worker task: poll(timeout).await   ← runs the op
   tcs = new TaskCompletionSource                 build (records | error)
   ud  = GCHandle.Alloc(tcs)  (§B6)                enqueue completion ──┐
   Consumer_poll_async(…, cb, ud) ─► (core guard serializes ops)       ▼
@@ -1174,7 +1175,7 @@ PollAsync():                        worker task: poll(timeout).await   ← runs 
 
 **Rule:**
 
-  - `PollAsync` (etc.) makes a `TaskCompletionSource`, `GCHandle.Alloc`s it as
+  - `PollWithCallback` (etc.) makes a `TaskCompletionSource`, `GCHandle.Alloc`s it as
     `user_data` (§B6), submits the `*_async` op with a kept-alive Cdecl callback,
     and returns `tcs.Task` immediately — no blocked thread.
   - The callback fires on a **dedicated callback-dispatcher thread** — the core
@@ -1240,7 +1241,7 @@ window).
 
 **Tests required:**
 
-  - `PollAsync` resolves with records / faults with `KafkaException` (mock
+  - `PollWithCallback` resolves with records / faults with `KafkaException` (mock
     `set_poll_error`); the result/error handle + `GCHandle` are freed exactly once.
   - `wakeup()` during an in-flight `poll` cancels/faults the `Task` **once**, then
     the consumer is reusable (§B5); a `CancellationToken` cancel →
