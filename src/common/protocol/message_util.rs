@@ -57,6 +57,23 @@ pub fn to_byte_buffer_accessor(message: &mut impl Message, version: i16) -> io::
     Ok(bytes)
 }
 
+/// Serializes a message prefixed with its 2-byte (big-endian) version.
+///
+/// Corresponds to `MessageUtil.toVersionPrefixedByteBuffer`. The returned
+/// buffer holds the version `short` followed by the message body, positioned at
+/// the beginning for reading.
+pub fn to_version_prefixed_byte_buffer(version: i16, message: &mut impl Message) -> io::Result<ByteBufferAccessor> {
+    use super::Writable;
+
+    let mut cache = ObjectSerializationCache::new();
+    let message_size = message.size(&mut cache, version)?;
+    let mut bytes = ByteBufferAccessor::new(2 + message_size as usize);
+    bytes.write_short(version)?;
+    message.write(&mut bytes, &cache, version)?;
+    bytes.set_position(0)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
