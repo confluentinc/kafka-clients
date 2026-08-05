@@ -65,7 +65,6 @@ org.apache.kafka.common.protocol.types.Type
 org.apache.kafka.common.record.AbstractLegacyRecordBatch
 org.apache.kafka.common.record.AbstractRecordBatch
 org.apache.kafka.common.record.ByteBufferLogInputStream
-org.apache.kafka.common.record.ControlRecordType
 org.apache.kafka.common.record.ControlRecordUtils
 org.apache.kafka.common.record.EndTransactionMarker
 org.apache.kafka.common.record.FileLogInputStream
@@ -453,5 +452,4 @@ org.apache.kafka.common.errors.ProducerFencedException
 org.apache.kafka.common.errors.TransactionAbortableException
 org.apache.kafka.common.errors.UnknownProducerIdException
 org.apache.kafka.common.utils.CopyOnWriteMap
-org.apache.kafka.clients.producer.internals.TransactionManager
 org.apache.kafka.common.errors.RecordTooLargeException

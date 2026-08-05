@@ -5,7 +5,11 @@ It is intended to be updated after each manager agent loop completes a milestone
 
 **Last updated:** 2026-08-03
 **Status:** Milestones 1-10 complete; Milestone 11 (producer idempotence and
-transactions) in progress.
+transactions) in its last phase — the `TransactionManager` closure, the
+transactional `Sender` loop, the public producer transaction API and
+`MockProducer`'s transactional surface are translated, with `TransactionManagerTest`
+fully covered and broker integration tests for commit visibility, abort discard,
+epoch bump and consume-transform-produce.
 
 > **⚠ Scope of this document.** The architecture described below — network stack,
 > protocol framework, request/response layer, security, code generation — is

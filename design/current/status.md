@@ -1,24 +1,36 @@
 # Current Status: Milestones 1-10 complete; Milestone 11 in progress
 
-**Last verified:** 2026-08-03
+**Last verified:** 2026-08-06 (Milestone 11 Phase 8)
 
 | | |
 |---|---|
 | Complete | Milestones 1-10 (see `design/history/MILESTONES.md`) |
-| In progress | Milestone 11 — producer idempotence and transactions |
-| Source | 252 files, ~146 000 lines under `src/` |
-| Tests | ~2 264 passing (lib + protocol/message + consumer + producer suites) |
+| In progress | Milestone 11 — producer idempotence and transactions (Phase 8, the last phase) |
+| Source | 263 files, ~176 000 lines under `src/` |
+| Tests | ~2 666 passing (lib + protocol/message + consumer + producer suites), 2 `#[ignore]`d |
 | Java base | Apache Kafka 4.2.0 (`kafka/` submodule at `a18251b`) |
 
 Breakdown by area:
 
 | Area | Files | Lines |
 |---|---|---|
-| `src/common/` | 139 | 43 934 |
-| `src/consumer/` | 64 | 64 450 |
-| `src/producer/` | 21 | 15 894 |
-| `src/ffi/` | 4 | 7 743 |
-| root client layer (`src/*.rs`) | 22 | 14 025 |
+| `src/common/` | 148 | 47 627 |
+| `src/consumer/` | 64 | 64 516 |
+| `src/producer/` | 23 | 42 099 |
+| `src/ffi/` | 4 | 7 757 |
+| root client layer (`src/*.rs`) | 22 | 14 242 |
+
+`src/producer/` roughly tripled over Milestone 11 (15 894 → 42 099 lines): the
+`TransactionManager` and its dependency closure, the transactional `Sender` loop
+and public producer API, plus the translated `TransactionManagerTest` and
+`SenderTest` suites, which are the larger half.
+
+The two `#[ignore]`d tests are reproducers for open defects, not gaps in
+translation — `test_too_large_batches_are_safely_removed` (PLAN §9.18, the
+split-on-`MESSAGE_TOO_LARGE` panic) and
+`test_transactional_unknown_producer_handling_when_retention_limit_reached`
+(PLAN §9.25, an empty batch pool on the transactional log-truncation retry). Both
+are in `design/history/Milestone-11/PLAN.md` §9 with a fix direction.
 
 Plus 197 wire-protocol message types generated at build time from the official
 JSON definitions.

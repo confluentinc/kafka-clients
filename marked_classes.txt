@@ -37,6 +37,7 @@ org.apache.kafka.clients.producer.internals.ProducerBatch
 org.apache.kafka.clients.producer.internals.ProducerMetadata
 org.apache.kafka.clients.producer.internals.RecordAccumulator
 org.apache.kafka.clients.producer.internals.Sender
+org.apache.kafka.clients.producer.internals.TransactionManager
 org.apache.kafka.clients.producer.internals.TransactionalRequestResult
 org.apache.kafka.clients.producer.internals.TxnPartitionEntry
 org.apache.kafka.clients.producer.internals.TxnPartitionMap
@@ -560,6 +561,7 @@ org.apache.kafka.common.protocol.types.Schema
 org.apache.kafka.common.record.AbstractRecords
 org.apache.kafka.common.record.CompressionRatioEstimator
 org.apache.kafka.common.record.CompressionType
+org.apache.kafka.common.record.ControlRecordType
 org.apache.kafka.common.record.DefaultRecord
 org.apache.kafka.common.record.DefaultRecordBatch
 org.apache.kafka.common.record.MemoryRecords

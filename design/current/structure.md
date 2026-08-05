@@ -20,7 +20,7 @@ src/
 │   ├── fetch_session_handler.rs
 │   └── ...                     # 22 files, ~14 000 lines
 │
-├── common/                 # org.apache.kafka.common — 139 files, ~43 900 lines
+├── common/                 # org.apache.kafka.common — 148 files, ~47 600 lines
 │   ├── protocol/               # Readable/Writable, Message, varint, ApiKeys, Errors
 │   ├── requests/               # Request/response wrappers + dispatch enums
 │   ├── network/                # Selector, KafkaChannel, TransportLayer,
@@ -35,18 +35,20 @@ src/
 │   ├── kafka_future.rs, uuid.rs, cluster.rs, node.rs, topic_partition.rs
 │   └── ...
 │
-├── producer/               # org.apache.kafka.clients.producer — 21 files, ~15 900 lines
-│   ├── kafka_producer.rs       # KafkaProducer
-│   ├── mock_producer.rs        # MockProducer
+├── producer/               # org.apache.kafka.clients.producer — 23 files, ~42 100 lines
+│   ├── kafka_producer.rs       # KafkaProducer, incl. the transaction API
+│   ├── mock_producer.rs        # MockProducer, incl. its transactional surface
 │   ├── producer_trait.rs       # Producer trait (native async fn in trait)
 │   ├── producer_config.rs, producer_record.rs, record_metadata.rs, callback.rs
 │   └── internals/              # pub(crate)
-│       ├── record_accumulator.rs   # Batching, per-partition deques
-│       ├── sender.rs               # Drain loop, in-flight batches
+│       ├── record_accumulator.rs   # Batching, per-partition deques, sequence assignment
+│       ├── sender.rs               # Drain loop, in-flight batches, transactional loop
 │       ├── producer_batch.rs, buffer_pool.rs, built_in_partitioner.rs
+│       ├── transaction_manager.rs            # Milestone 11 — idempotence + txn state machine
 │       ├── transactional_request_result.rs   # Milestone 11
 │       ├── txn_partition_entry.rs            # Milestone 11
-│       └── txn_partition_map.rs              # Milestone 11
+│       ├── txn_partition_map.rs              # Milestone 11
+│       └── producer_test_utils.rs            # Milestone 11, #[cfg(test)] — ProducerTestUtils
 │
 ├── consumer/              # org.apache.kafka.clients.consumer — 64 files, ~64 500 lines
 │   │                     # Largest module. KIP-848 protocol only (see
