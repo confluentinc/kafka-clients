@@ -2167,6 +2167,33 @@ recorded here because §9.21 is the natural entry point for "what did Phase 5 ow
     `grep -n recordPrepareTxn design/history/Milestone-11/PLAN.md` must not return two
     sections that disagree.
 
+### 9.22 Critic review of Phase 6
+
+**Status:** DONE — **closed 2026-08-05 on a clean fifth pass** (7→4→1→1→0).
+Archived at `design/history/Milestone-11/Phase-6/COMMENTS.DONE.46.md`.
+
+Thirteen findings, all real, **none behavioural in production code** — the third
+consecutive phase with the translation right on arrival. Three corrections ran
+*against* the review chain and were upheld: the Actor refused PLAN's
+`prepare_transaction` instruction (no such method in Java 4.2; the §Phase-6 spec
+carries the strikethrough and §10.9 deviation 2 the evidence), the Actor disputed a
+Critic supporting fact (`recordPrepareTxn` exists — zero callers is the correct
+fact), and the Manager's 18-vs-15 alarm was its own premise error.
+
+Real fixes beyond translation: `close(timeout)`'s lost join (CLAUDE.md §9.4),
+`PendingRequests` → `Arc<Mutex<..>>` (second rules-§2 correction; Java's own access
+races with no happens-before), the tokio timer-starvation hazard (filed for
+CLAUDE.md §9.6 via process), and `MockClient::advance_time_during_poll`.
+
+Lesson minted: a paragraph documenting an escape shape is a ready-made adversarial
+input for any checker in the same file; and complementary sweep blind spots
+(start-only vs paren-requiring) are the case for diffing implementations, not just
+results.
+
+Standing rule-update suggestions accumulated for the process: rules §2 on
+`pendingRequests` and on `coordinatorSupportsBumpingEpoch` (§10.9, §9.21), the DoD
+§3 executed-commands clause, and CLAUDE.md §9.6's timer-starvation pitfall.
+
 ---
 
 ## 10. Recorded translation deviations

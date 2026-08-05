@@ -1,9 +1,27 @@
 ---
 name: review-m11-phase6
-description: M11 Phase 6 (public producer txn API + Sender txn loop) — 7→4→1→1, 0 behavioural ever; splitter/sweep blind spots (mine twice), count cross-references, unpinned prod fix
+description: M11 Phase 6 (public producer txn API + Sender txn loop) — CLOSED 7→4→1→1→0, 0 behavioural ever; sweep blind spots (mine twice), count cross-references, unpinned prod fix
 metadata:
   type: project
 ---
+
+**CLOSED on a clean fifth pass (`9a470b6`).** 13 findings over 4 review passes, **none
+behavioural in production code** — every one was a record, an accounting denominator, or a
+missing test. That is the third consecutive M11 phase where the production translation was
+right on arrival and the defects lived in the self-auditing artifacts.
+
+**The transferable lesson of the phase (the Actor's framing, and it is correct): a paragraph
+documenting an escape shape is a ready-made adversarial input for any checker written in the
+same file.** The block's own prose explained that Critic 44 issue 10 escaped a sweep
+"because its range is followed by a clause inside the same parentheses rather than closing
+them" — and three sentences above, its own header sweep reported 40 for a population of 41,
+having inherited exactly that blind spot. Test a new checker against the escape shapes its
+neighbours document *first*.
+
+Corollary worth keeping: my start-only criterion and the Actor's paren-requiring regex were
+**complementary** — mine hid the end-off-by-one its both-ends check found; its hid the 41st
+header my wrap-tolerant enumeration found. Neither sweep alone sufficed. Run both
+implementations, not just both results.
 
 **Pass 2 (`8c4cace`, all 7 fixes): 4 findings, all records — and the Actor corrected a
 false supporting fact of *mine*.** Three of the four were created by the fix commit
