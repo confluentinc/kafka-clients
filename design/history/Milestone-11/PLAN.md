@@ -2029,6 +2029,37 @@ Verified at closure: `make verify-sandbox` exit 0 over `374ca12`; `producer_perf
 p99 13-15 ms across six serial runs against the 70 ms budget (no send-path latency
 regression); all eleven DoD clauses pass.
 
+### 9.21 Critic review of Phase 5 (5a + 5b)
+
+**Status:** DONE — both halves **closed 2026-08-05 on clean passes** (5a: 7→2→0,
+5b: 4→1→0). Archived at `design/history/Milestone-11/Phase-5/COMMENTS.DONE.45.md`.
+
+| Half | Findings | Character | Fixes |
+|---|---|---|---|
+| 5a pass 1 | 7 | records/accounting (5) + test fidelity (2); §2 deviation adjudicated in the Actor's favour | `65aa5a9` `d56be1a` `ffbd1ad` |
+| 5a pass 2 | 2 | records | `a5918b3` |
+| 5a pass 3 | **0** | closes 5a | — |
+| 5b pass 1 | 4 | **1 behavioural** (`begin_abort` hardcoded `Caller::App` — rules §1's named anti-pattern, wrong for its only live caller) + 3 records | `cc2bd48` `9b73389` |
+| 5b pass 2 | 1 | a test justification citing an impossible reachability | `bbbf0ee` |
+| 5b pass 3 | **0** | closes 5b and Phase 5 | — |
+
+All 14 findings real and conceded; no false positives. Production code clean after
+each half's first pass — the defect surface has moved into the self-auditing records,
+and the archive header lists the countermeasures now standard in both accounting
+blocks (byte-identical regeneration, extraction guards, no bare numbers,
+error-direction proofs, justifications checked as claims).
+
+**Two standing rule-update suggestions** from this loop await the process:
+amend rules §2 / PLAN §6.5 to reclassify `coordinatorSupportsBumpingEpoch` as shared
+(the Critic proved every Java read holds the monitor while the sole write does not),
+and add a DoD §3 clause requiring shipped verification commands to be executed once
+with real output pasted (three instances this milestone of a check that did not do
+what its prose claimed).
+
+Handed forward: 47 `TransactionManagerTest` methods to Phase 8 (join-proven to need
+accumulator/Sender surface), 18 transactional `SenderTest` rows to Phase 6
+(rationale-expired evidence), `prepare_transaction`'s public surface to Phase 6.
+
 ---
 
 ## 10. Recorded translation deviations

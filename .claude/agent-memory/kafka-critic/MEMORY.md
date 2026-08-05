@@ -66,3 +66,5 @@
 - [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean on pass 6; heading-reorder containment, warning-block anchors, per-member verification, lock mechanics
 - [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED in 4 passes (3/3/1/0). Reachability entries-vs-exits; audit *replacement* justifications; unit-reachable ≠ phase-reachable; non-blocking follow-ups need their own heading
 - [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim
+- [M11 Phase 5a txn state machine](review_m11_phase5a.md) — CLOSED 7→2→0, all findings were records. Extract+run shipped derivations (guard the extraction); deleting a guard voids every skip citing it; falsify rules §2
+- [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→1→0, closes Phase 5. Caller both-reachable grep per entry point; builder snapshots defeat "retry carries only X"; state reachability = grep the writers' Caller
