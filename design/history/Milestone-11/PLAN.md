@@ -587,6 +587,38 @@ the standing pre-serialized-bytes design decision. Deviations are recorded in
 - Final DoD closure: `make verify`, `design/current/` refresh,
   `marked_classes.txt` / `remaining_classes.txt` updates.
 
+**Status: delivered.** What landed, and the three places the spec's expectations were
+wrong:
+
+  - **All 140 `TransactionManagerTest` methods are translated**, not
+    "accounted for": 33 group A + 107 group B, with the OWED set empty. The
+    accounting block in `transaction_manager.rs` carries the re-run derivation
+    (`A-OWED=0  B-HAVE=107  B-OWED=0`). The 47 landed in `sender.rs`, beside the six
+    group-A entries already there, because Java's `TransactionManagerTest` builds its own
+    accumulator + `Sender` + `MockClient` and every one of those bodies drives them.
+  - **The `SenderTest` hand-off closed too**, which the spec did not ask for but §9.19
+    had assigned here: 10 of the 11 translated, 1 still blocked on §9.18 (re-verified by
+    running the reproducer, not assumed). One of the two entries that had cited "missing
+    surface" turned out to have its surface already present and already exercised — see
+    the lesson in the accounting block.
+  - **Two harness gaps in `MockClient` had to be filled first**, both real Java surface
+    this port had skipped: `RequestMatcher` support on `prepareResponse` / `respond`
+    (every `TransactionManagerTest` helper puts its assertions *inside* a matcher, so a
+    port without them silently drops that coverage) and
+    `disconnect(node, allowLateResponses)`.
+  - **Two defects surfaced, one fixed and one filed.** The abort integration test failed
+    on its first run and exposed a *consumer* defect with a false rarity justification —
+    fixed, with the lesson, at §9.27. The transactional `SenderTest` group exposed
+    §9.25, an empty batch pool on the log-truncation retry, which is filed rather than
+    fixed for the reason §9.18 gives for its own gap.
+  - **`make verify` cannot complete on this machine and CI is the gate for it.** Verified
+    directly rather than repeated: `bindings/python/_confluentkafka.c` includes
+    `<threads.h>`, and compiling a two-line probe against this Apple SDK gives
+    `fatal error: 'threads.h' file not found`. So `make build-python` → `test-python` →
+    `verify` cannot run here. The local gate is `make verify-sandbox`
+    (`build-rust build-c format-check lint test-integration test-c`), which is what every
+    Phase-8 commit was gated on.
+
 ---
 
 ## 4. `marked_classes.txt` / `remaining_classes.txt` deltas

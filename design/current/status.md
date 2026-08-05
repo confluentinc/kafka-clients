@@ -7,7 +7,7 @@
 | Complete | Milestones 1-10 (see `design/history/MILESTONES.md`) |
 | In progress | Milestone 11 — producer idempotence and transactions (Phase 8, the last phase) |
 | Source | 263 files, ~176 000 lines under `src/` |
-| Tests | ~2 666 passing (lib + protocol/message + consumer + producer suites), 2 `#[ignore]`d |
+| Tests | ~2 666 passing (lib + protocol/message + consumer + producer suites), 3 `#[ignore]`d |
 | Java base | Apache Kafka 4.2.0 (`kafka/` submodule at `a18251b`) |
 
 Breakdown by area:
@@ -25,12 +25,21 @@ Breakdown by area:
 and public producer API, plus the translated `TransactionManagerTest` and
 `SenderTest` suites, which are the larger half.
 
-The two `#[ignore]`d tests are reproducers for open defects, not gaps in
-translation — `test_too_large_batches_are_safely_removed` (PLAN §9.18, the
-split-on-`MESSAGE_TOO_LARGE` panic) and
-`test_transactional_unknown_producer_handling_when_retention_limit_reached`
-(PLAN §9.25, an empty batch pool on the transactional log-truncation retry). Both
-are in `design/history/Milestone-11/PLAN.md` §9 with a fix direction.
+All three `#[ignore]`d tests are reproducers for open defects, not gaps in
+translation, and each is tracked in `design/history/Milestone-11/PLAN.md` §9 with a
+fix direction:
+
+  - `test_too_large_batches_are_safely_removed` — §9.18, the
+    split-on-`MESSAGE_TOO_LARGE` panic on the write path.
+  - `test_transactional_unknown_producer_handling_when_retention_limit_reached` —
+    §9.25, an empty batch pool on the transactional log-truncation retry.
+  - `test_init_producer_id_request_versions` — §9.1, the code generator omitting
+    Java's non-default-at-unsupported-version guard. Systemic across all 197
+    generated message types, so it predates Milestone 11.
+
+(Separately, the integration suite `#[ignore]`s 10 tests that need harness
+capabilities the pooled cluster does not expose, such as shutting down a broker;
+each says so at its definition.)
 
 Plus 197 wire-protocol message types generated at build time from the official
 JSON definitions.
