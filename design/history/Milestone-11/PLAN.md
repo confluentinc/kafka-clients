@@ -2367,3 +2367,160 @@ Each is documented at its call site as well.
     `ProducerBatch::finalize_split_batches` skipped Java's
     `assignProducerStateToBatches` (`ProducerBatch.java:392`), without which
     `splitAndReenqueue` cannot track an idempotent sub-batch at all.
+
+### 10.7 Phase 5a deviations (`TransactionManager`, transactional state machine)
+
+Each is documented at its call site as well.
+
+1. **`coordinatorSupportsBumpingEpoch` is a `TransactionManager` field, not
+   Sender-owned.** Rules §2 and §6.5 above list it with `transactionCoordinator`,
+   `consumerGroupCoordinator` and `inFlightRequestCorrelationId` as state "touched
+   exclusively by the Sender thread" and therefore belonging on the Sender. That
+   premise is true of the other three and **false of this one**: Java reads it on the
+   *application* thread on every failed send, through `KafkaProducer.doSend`'s
+   `catch (ApiException e)` (`KafkaProducer.java:1066`) →
+   `maybeTransitionToErrorState` (`:781`) → `needToTriggerEpochBumpFromClient`
+   (`:1310`). That call site already exists in Rust, at `kafka_producer.rs:775`, so a
+   Sender-confined field could not serve it.
+
+   Both halves of §2's objection to the shared mutex also fail here. Every reader is
+   a `TransactionManager` method whose caller already holds the guard for other
+   reasons, so no lock is added; and the only writer, `handle_coordinator_ready`,
+   must hold the guard regardless because Java's version reads `apiVersions`
+   (`:1104`), a manager field. It runs once per coordinator connection.
+
+   The coordinator **nodes** do go to the Sender as §2 requires — `Sender.java:481`
+   is their only reader, and both writers (`lookupCoordinator` `:1191` and
+   `FindCoordinatorHandler.handleResponse` `:1693`) are unsynchronized.
+
+2. **`CoordinatorNodes`**, a `pub(crate)` struct on `Sender` holding the two
+   `Option<Node>` slots, with Java's `coordinator(CoordinatorType)` (`:958`)
+   attached. Same justification family as `PendingRequests` and `InFlightBatchPool`
+   (deviations 10.5§3, 10.6§2): it is the §2 Sender-owned state that manager methods
+   receive from its owner. A struct rather than two parameters because both of Java's
+   writers `switch` on a `CoordinatorType` to pick *which* slot to write, so the two
+   cannot arrive separately. Adds no concept Java lacks (DoD §7).
+
+   Java's `CoordinatorType` has a `SHARE` variant, so all three `default:` arms
+   (`:962` "Received an invalid coordinator type: ", `:1199` "Invalid coordinator
+   type: ", `:1702` "Group coordinator lookup failed: Unexpected coordinator type in
+   response") are reachable and are translated separately — the three messages
+   differ. `coordinator_type_name` is a free function because Java interpolates
+   `CoordinatorType.name()` (uppercase) where Rust's `Debug` would print `Share`.
+
+3. **`PendingRequests` becomes a struct with an insertion-sequence tiebreaker.**
+   Java's `PriorityQueue` (`:224`) is a min-heap and is *unstable* for equal
+   priorities; Rust's `BinaryHeap` is a max-heap. `QueuedRequest::cmp` inverts the
+   comparison and adds the tiebreaker, making ties FIFO so tests can assert on them
+   (§Phase-5 recommends this). A strict refinement: any order Java may produce for
+   equal keys is admissible. The priority is snapshotted at insertion rather than
+   read back off the handler — `InitProducerIdHandler.priority()` (`:1477`) is
+   dynamic, and rules §6 forbids keying an ordered collection on a field read through
+   the element even where that field happens to be immutable.
+
+4. **`maybeAddPartition`'s transactional arm is split across 5a and 5b.** The
+   task's boundary places the whole arm in 5b, but the tests that pin its two state
+   guards (`testFailIfNotReadyForSend*` / `testNotReadyForSend*`) are named as 5a's
+   and those guards depend on nothing 5b owns. So the three branches that are pure
+   state validation — `!hasProducerId()` (`:442`), `currentState != IN_TRANSACTION`
+   (`:445`) and the already-added short-circuit (`:452`) — are translated, and the
+   Transaction V2 arm (`:448`) and the `newPartitionsInTransaction` registration
+   (`:456`) return `UnsupportedVersion` naming 5b. Deferring the registration is what
+   keeps that set empty, and so keeps `nextRequest`'s first statement (`:895`) and
+   `isSendToPartitionAllowed`'s set lookup consistent in 5a.
+
+5. **`initializeTransactions`'s two package-private overloads are renamed**, Rust
+   having no overloading: `initializeTransactions(ProducerIdAndEpoch)` (`:291`) →
+   `initialize_transactions_with_producer_id_and_epoch`, and
+   `initializeTransactions(ProducerIdAndEpoch, boolean)` (`:299`) →
+   `initialize_transactions_internal`. Same treatment and same reason as
+   `producer_id_and_epoch_for_partition` (deviation 10.5§4). The public
+   `initializeTransactions(boolean)` (`:295`) keeps its name.
+
+6. **`handleCachedTransactionRequestResult`'s `Supplier` becomes
+   `FnOnce(&mut Self) -> Result<Arc<TransactionalRequestResult>, KafkaError>`.**
+   Java's supplier closes over `TransactionManager.this`; a Rust closure cannot
+   capture `self` while `self` is borrowed by the method, so the manager is passed
+   in. `Result` because Java's suppliers throw — `initializeTransactions`'s calls
+   `transitionTo` (`:308`) and `beginCommit`'s calls `maybeFailWithError` (`:354`) —
+   and when they do, `pendingTransition` is left unset exactly as in Java.
+
+7. **`FindCoordinatorHandler.handleResponse` diverges on an *empty* coordinator
+   list.** Java's `coordinators.size() != 1` branch calls `fatalError(..)` and then
+   **falls through** to `coordinators.get(0)` (`:1685-1689`); `fatalError` does not
+   rethrow and `FATAL_ERROR` is an unconditionally valid target, so for a
+   two-coordinator response Java records the fatal error *and* installs one of them
+   and calls `result.done()`. That is preserved. For an empty list Java would raise
+   `IndexOutOfBoundsException`; Rust must not panic (CLAUDE.md §10.1) and returns the
+   fatal error instead — an error either way, with the same state left behind.
+
+8. **`coordinatorData.key() == null` becomes `.is_empty()`.** The Rust message spec
+   defaults a nullable string without an explicit `"default": "null"` to the empty
+   string (CLAUDE.md §2), and `FindCoordinatorResponse::coordinators` synthesises
+   exactly that key for a v≤3 response — so the empty key *is* the null case Java
+   tests for at `:1691`.
+
+9. **`TxnRequestHandler::request_builder()` becomes
+   `clone_request_builder() -> Box<dyn RequestBuilder>`** now that two builder types
+   exist, with `init_producer_id_request_data()` /
+   `find_coordinator_request_data()` for the `&self` reads that used it, and
+   `api_key()` so `Sender.java:490`'s log statement need not box a builder. Java
+   hands the builder itself to `newClientRequest`, keeping the handler's reference
+   for a retry; this crate only accepts `Box<dyn RequestBuilder>` there, so it is
+   cloned — once per transactional request, never per record or per batch.
+   `is_find_coordinator()` replaces Java's
+   `requestHandler instanceof FindCoordinatorHandler` (`:1176`).
+
+10. **`isSendToPartitionAllowed` and `TransactionManager::new` no longer return
+    `Result`.** The first because its transactional arm is now translated rather than
+    deferred, the second because Phase 3's MILESTONE-11 GUARD is gone. Five call
+    sites drop an `.expect`. `KafkaProducer::from_config` keeps its own guard on
+    `transactional.id` until Phase 6 (§7.1), so the only way to build a transactional
+    manager today is directly.
+
+11. **`resetTransactionState` hardcodes `Caller::Sender`** (rules §1's "called only
+    from the Sender task" clause): both Java call sites are Sender-side —
+    `nextRequest`'s "EndTxn for a transaction that never started" branch (`:923`) and
+    `EndTxnHandler.handleResponse` (`:1767`). Both are Phase 5b, so the method has no
+    caller yet; it is translated now because it is the only writer that clears the
+    per-transaction sets and `preparedTxnState`, and splitting it from the state
+    machine would mean writing it twice. `prepared_txn_state` is likewise
+    write-only until 5b adds `preparedTransactionState()` (`:1976`).
+
+12. **The Rust `do_init_transactions` / `run_init_transactions` test helpers omit
+    Java's `maybeUpdateTransactionV2Enabled(true)`** (`TransactionManagerTest.java:4360`).
+    Behaviour-neutral for every Phase-5a test: no in-scope method builds a
+    Transaction V2 manager, `transaction.version` is finalized at level 1 in the
+    fixture so `isTransactionV2Enabled` stays false, and `onInitialization = true`
+    suppresses the call's only side effect (`:500-501`). The claim ships with its
+    check, in the PHASE-5A TEST ACCOUNTING block in `transaction_manager.rs`.
+
+13. **`TransactionalRequestResult` derives `Debug`**, so `expect_err` on a
+    `Result<Arc<TransactionalRequestResult>, KafkaError>` compiles. No behaviour
+    change; Java's class has no `toString` either, and the derived form is only ever
+    read from a test failure message.
+
+Not deviations, recorded because a reviewer may read them as such:
+
+  - `keepPreparedTxn` reaches only the two `log.info` statements
+    (`:309`, `:312`). Java's `initializeTransactions` does **not** put it on the
+    request — the `InitProducerIdRequestData` at `:316-320` sets `transactionalId`,
+    `transactionTimeoutMs`, `producerId` and `producerEpoch` only — and
+    `setKeepPreparedTxn` appears nowhere in `clients/src` in Apache Kafka 4.2. So
+    `builder.data.keepPreparedTxn()`, the condition guarding the two-phase-commit
+    response arm at `:1501`, is always false on that path in Java too, and the Rust
+    arm's `UnsupportedVersion` guard is unreachable for Java's own reason rather than
+    a translation gap.
+  - Three of the nine `State` variants are still not *enterable*:
+    `PREPARED_TRANSACTION`, `COMMITTING_TRANSACTION` and `ABORTING_TRANSACTION`, each
+    blocked on a Phase-5b entry point (`prepareTransaction` / the `keepPreparedTxn`
+    response arm, `beginCommit`, `beginAbort`) rather than on transition logic. The
+    full 9×9 table has been translated since Phase 3.
+  - `isInitializing` (`:1090`) has no caller in either the Java client or its tests.
+    Translated because it is part of the class (DoD §2).
+  - `nextRequest`'s two transaction-only branches (`:895`, `:913`) stay comments
+    rather than explicit failures, unlike the arms named in deviation 4: neither is
+    reachable in 5a — nothing can populate `newPartitionsInTransaction`, and
+    `isEndTxn()` is false for both 5a handler kinds — so an `UnsupportedVersion`
+    return there would be dead code, and `nextRequest` would have to grow a `Result`
+    for it.

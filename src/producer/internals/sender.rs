@@ -4092,6 +4092,143 @@ mod tests {
         assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
     }
 
+    /// Translated from `testDisconnectAndRetry` (Java 1080-1091): a disconnected
+    /// `FindCoordinator` response leaves the coordinator unknown and the request is
+    /// retried, without a nested lookup — `FindCoordinatorHandler.coordinatorType()`
+    /// is null (Java 1671), so `needsCoordinator()` is false at
+    /// `TransactionManager.java:1413`.
+    #[tokio::test]
+    async fn test_disconnect_and_retry() {
+        let mut ctx = SenderTestContext::transactional();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        // Iteration 1 enqueues the FindCoordinator; iteration 2 sends it and is
+        // disconnected.
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender
+            .client_mut()
+            .prepare_response_disconnected(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node), true);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(
+            ctx.sender
+                .coordinator(CoordinatorType::Transaction)
+                .expect("valid type")
+                .is_none(),
+            "a disconnected lookup must not install a coordinator"
+        );
+        assert!(!ctx.transaction_manager().lock().unwrap().has_error());
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node)
+        );
+    }
+
+    /// Translated from `testLookupCoordinatorOnDisconnectBeforeSend`
+    /// (Java 1292-1321): a coordinator that is unreachable *before* the
+    /// `InitProducerId` goes out drives `awaitNodeReady` to `false`
+    /// (`Sender.java:485-488`), and `maybeFindCoordinatorAndRetry` then forgets it.
+    #[tokio::test]
+    async fn test_lookup_coordinator_on_disconnect_before_send() {
+        let mut ctx = SenderTestContext::transactional();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        let init_pid_result = ctx
+            .transaction_manager()
+            .lock()
+            .unwrap()
+            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node)
+        );
+
+        // Java: `client.disconnect(..); client.backoff(node, 100)`. The backoff is
+        // what makes `awaitReady` give up rather than reconnect inside the same
+        // iteration; `set_unreachable` does both in one call.
+        ctx.sender.client_mut().set_unreachable(&node, 100);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(
+            ctx.sender
+                .coordinator(CoordinatorType::Transaction)
+                .expect("valid type")
+                .is_none(),
+            "an unready coordinator must be forgotten so it can be rediscovered"
+        );
+        assert!(!init_pid_result.is_completed());
+        assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
+
+        // Java: `time.sleep(110)` — wait out the backoff, then rediscover and succeed.
+        ctx.time.sleep(110);
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node)
+        );
+        assert!(!init_pid_result.is_completed());
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 13131, 1));
+        ctx.sender.run_once().await.expect("run_once");
+        init_pid_result.await_result().await.expect("the retry succeeds");
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert_eq!(manager.producer_id_and_epoch().producer_id, 13131);
+        assert_eq!(manager.producer_id_and_epoch().epoch, 1);
+    }
+
+    /// Translated from `testUnsupportedInitTransactions` (Java 1117-1134): a version
+    /// mismatch on the `InitProducerId`, once the coordinator is known, is fatal
+    /// (`TransactionManager.java:1417-1418`).
+    #[tokio::test]
+    async fn test_unsupported_init_transactions() {
+        let mut ctx = SenderTestContext::transactional();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .initialize_transactions(false, &mut ctx.sender.pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        ctx.sender.run_once().await.expect("run_once");
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!ctx.transaction_manager().lock().unwrap().has_error());
+
+        ctx.sender.client_mut().prepare_unsupported_version_response();
+        ctx.sender.run_once().await.expect("run_once");
+
+        let manager = ctx.transaction_manager();
+        let manager = manager.lock().unwrap();
+        assert!(manager.has_fatal_error());
+        assert_eq!(
+            manager.last_error().expect("recorded").error(),
+            Errors::UnsupportedVersion,
+            "Java asserts an UnsupportedVersionException"
+        );
+    }
+
     /// Translated from `testUnsupportedFindCoordinator` (Java 1100-1115): a version
     /// mismatch on the `FindCoordinator` is fatal
     /// (`TransactionManager.java:1417-1418`).
