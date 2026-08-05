@@ -1915,6 +1915,7 @@ mod tests {
             .expect("the initial InitProducerId is enqueued");
         let handler = manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request is pending");
         let mut data = InitProducerIdResponseData::new();
         data.set_error_code(Errors::None.code())

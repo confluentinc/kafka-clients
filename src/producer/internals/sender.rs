@@ -679,9 +679,23 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// `transactionManager.beginAbort()` (`Sender.java:273`).
-    fn begin_abort(&self) -> Result<(), KafkaError> {
+    ///
+    /// The returned [`TransactionalRequestResult`] is discarded, exactly as Java
+    /// discards the return value here: the shutdown loop's next `runOnce` sends the
+    /// `EndTxn` the call enqueued, and the loop's own `hasOngoingTransaction`
+    /// condition — not the result — is what observes completion.
+    ///
+    /// [`TransactionalRequestResult`]: crate::producer::internals::TransactionalRequestResult
+    fn begin_abort(&mut self) -> Result<(), KafkaError> {
         match &self.transaction_manager {
-            Some(transaction_manager) => transaction_manager.lock().unwrap().begin_abort(),
+            Some(transaction_manager) => {
+                let transaction_manager = Arc::clone(transaction_manager);
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .begin_abort(&mut self.pending_requests)
+                    .map(|_result| ())
+            },
             // Unreachable: the enclosing loop is gated on `has_ongoing_transaction`.
             None => Ok(()),
         }
@@ -1098,12 +1112,17 @@ impl<C: KafkaClient> Sender<C> {
             self.accumulator.abort_undrained_batches(reason);
         }
 
-        // Java 472-474.
+        // Java 472-474. `nextRequest` can throw through `resetTransactionState`'s
+        // `transitionTo` on the "EndTxn for a transaction that never started" path
+        // (`TransactionManager.java:923`); Java lets that escape `runOnce` to
+        // `Sender.run`'s catch-and-log, which is what `TransactionPhaseError::Other`
+        // reaches here.
         let has_incomplete = self.accumulator.has_incomplete();
         let next_request_handler = match transaction_manager
             .lock()
             .unwrap()
             .next_request(&mut self.pending_requests, has_incomplete)
+            .map_err(TransactionPhaseError::Other)?
         {
             Some(handler) => handler,
             None => return Ok(false),
@@ -3847,6 +3866,7 @@ mod tests {
             .expect("the initial InitProducerId is enqueued");
         manager
             .next_request(&mut ctx.sender.pending_requests, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request is pending")
     }
 
@@ -3927,6 +3947,7 @@ mod tests {
             .lock()
             .unwrap()
             .next_request(&mut ctx.sender.pending_requests, false)
+            .expect("next_request does not fail on this path")
             .expect("re-enqueued");
         assert!(requeued.is_retry());
     }

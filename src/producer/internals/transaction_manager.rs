@@ -32,11 +32,12 @@ use crate::common::record::RecordBatch;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::requests::{
-    AddPartitionsToTxnRequestBuilder, ConcreteResponse, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder,
-    PartitionResponse, RequestBuilder, V3_AND_BELOW_TXN_ID,
+    AddPartitionsToTxnRequestBuilder, ConcreteResponse, EndTxnRequestBuilder, FindCoordinatorRequestBuilder,
+    InitProducerIdRequestBuilder, PartitionResponse, RequestBuilder, TransactionResult, V3_AND_BELOW_TXN_ID,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{KafkaError, Node, TopicPartition};
+use crate::end_txn_request_data::EndTxnRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::producer::internals::{
@@ -562,6 +563,11 @@ pub(crate) enum TxnRequestHandlerKind {
         /// The request being sent.
         builder: FindCoordinatorRequestBuilder,
     },
+    /// `EndTxnHandler` (Java 1723-1794).
+    EndTxn {
+        /// The request being sent.
+        builder: EndTxnRequestBuilder,
+    },
     /// `AddPartitionsToTxnHandler` (Java 1541-1649).
     AddPartitionsToTxn {
         /// The request being sent.
@@ -638,6 +644,7 @@ impl TxnRequestHandler {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => Box::new(builder.clone()),
             TxnRequestHandlerKind::FindCoordinator { builder } => Box::new(builder.clone()),
             TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => Box::new(builder.clone()),
+            TxnRequestHandlerKind::EndTxn { builder } => Box::new(builder.clone()),
         }
     }
 
@@ -651,6 +658,7 @@ impl TxnRequestHandler {
             TxnRequestHandlerKind::InitProducerId { .. } => &ApiKeys::INIT_PRODUCER_ID,
             TxnRequestHandlerKind::FindCoordinator { .. } => &ApiKeys::FIND_COORDINATOR,
             TxnRequestHandlerKind::AddPartitionsToTxn { .. } => &ApiKeys::ADD_PARTITIONS_TO_TXN,
+            TxnRequestHandlerKind::EndTxn { .. } => &ApiKeys::END_TXN,
         }
     }
 
@@ -682,6 +690,14 @@ impl TxnRequestHandler {
         }
     }
 
+    /// The `EndTxn` request data, or `None` for another request kind.
+    pub(crate) fn end_txn_request_data(&self) -> Option<&EndTxnRequestData> {
+        match &self.kind {
+            TxnRequestHandlerKind::EndTxn { builder } => Some(builder.data()),
+            _ => None,
+        }
+    }
+
     /// The priority of this request.
     ///
     /// Corresponds to the abstract `priority()` (Java 1458). Note
@@ -700,6 +716,9 @@ impl TxnRequestHandler {
             TxnRequestHandlerKind::FindCoordinator { .. } => Priority::FindCoordinator,
             // Java 1556.
             TxnRequestHandlerKind::AddPartitionsToTxn { .. } => Priority::AddPartitionsOrOffsets,
+            // Java 1739: the EndTxn request must always go last, unless we are
+            // bumping the epoch as part of ending the transaction.
+            TxnRequestHandlerKind::EndTxn { .. } => Priority::EndTxn,
         }
     }
 
@@ -712,6 +731,7 @@ impl TxnRequestHandler {
             TxnRequestHandlerKind::InitProducerId { .. }
             | TxnRequestHandlerKind::FindCoordinator { .. }
             | TxnRequestHandlerKind::AddPartitionsToTxn { .. } => false,
+            TxnRequestHandlerKind::EndTxn { .. } => true,
         }
     }
 
@@ -786,6 +806,7 @@ impl fmt::Debug for TxnRequestHandler {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => write!(f, "{builder:?}"),
             TxnRequestHandlerKind::FindCoordinator { builder } => write!(f, "{builder:?}"),
             TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => write!(f, "{builder:?}"),
+            TxnRequestHandlerKind::EndTxn { builder } => write!(f, "{builder:?}"),
         }
     }
 }
@@ -1301,6 +1322,146 @@ impl TransactionManager {
         self.transition_to(State::InTransaction, None, Caller::App)
     }
 
+    /// Begins committing the transaction, returning the handle the application
+    /// awaits.
+    ///
+    /// Translated from `beginCommit()` (Java 353). Both transitions are
+    /// application-side: Java reaches this from `KafkaProducer.commitTransaction`
+    /// only (rules §1).
+    ///
+    /// # Not blocking here
+    ///
+    /// Java's caller blocks on `result.await(maxBlockTimeMs, ..)`
+    /// (`KafkaProducer.java:742`); this returns the
+    /// [`TransactionalRequestResult`] and Phase 6's
+    /// `KafkaProducer::commit_transaction` awaits it, because the caller holds the
+    /// shared mutex and rules §4 forbids holding it across an `.await`.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalState`] on a non-transactional producer, when a
+    /// *different* operation's result is still unacknowledged, when the manager is
+    /// in an error state (`maybeFailWithError`), or when
+    /// `→ COMMITTING_TRANSACTION` is not a valid transition — which is what rejects
+    /// a commit outside a transaction.
+    pub(crate) fn begin_commit(
+        &mut self,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        self.handle_cached_transaction_request_result(
+            |manager| {
+                manager.maybe_fail_with_error()?;
+                manager.transition_to(State::CommittingTransaction, None, Caller::App)?;
+                manager.begin_completing_transaction(TransactionResult::Commit, pending_requests)
+            },
+            State::CommittingTransaction,
+            "commitTransaction",
+        )
+    }
+
+    /// Begins aborting the transaction, returning the handle the application awaits.
+    ///
+    /// Translated from `beginAbort()` (Java 361).
+    ///
+    /// `Sender.run`'s shutdown loop calls this at `Sender.java:273` inside a
+    /// `try`/`catch` that force-closes the producer if it throws (`:274-278`); for a
+    /// *non*-transactional producer the `ensureTransactional()` guard inside
+    /// [`Self::handle_cached_transaction_request_result`] is what throws.
+    ///
+    /// Note `maybeFailWithError` is **skipped** when the manager is already in
+    /// [`State::AbortableError`] (Java 363-364) — that is the whole point of an
+    /// abortable error, and it is why `assertAbortableError` can abort after a
+    /// failed commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::begin_commit`], with `→ ABORTING_TRANSACTION` as the transition.
+    pub(crate) fn begin_abort(
+        &mut self,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        self.handle_cached_transaction_request_result(
+            |manager| {
+                if manager.current_state != State::AbortableError {
+                    manager.maybe_fail_with_error()?;
+                }
+                manager.transition_to(State::AbortingTransaction, None, Caller::App)?;
+
+                // We're aborting the transaction, so there should be no need to add new partitions
+                manager.new_partitions_in_transaction.clear();
+                manager.begin_completing_transaction(TransactionResult::Abort, pending_requests)
+            },
+            State::AbortingTransaction,
+            "abortTransaction",
+        )
+    }
+
+    /// Enqueues the `EndTxn` that completes the transaction, plus any
+    /// `AddPartitionsToTxn` still owed, and re-reads the Transaction V2 feature.
+    ///
+    /// Translated from
+    /// `beginCompletingTransaction(TransactionResult)` (Java 373).
+    ///
+    /// # The three orderings Java's own comment calls out
+    ///
+    /// `maybeUpdateTransactionV2Enabled(false)` sits **between** building the
+    /// `EndTxnRequest.Builder` and enqueueing the handler (Java 386), and Java
+    /// explains why: the builder must capture the version the transaction *started*
+    /// with, while the `clientSideEpochBumpRequired` the read may set has to be
+    /// visible to the check below — and doing the read after the handler is enqueued
+    /// would race the `EndTxn`'s completion.
+    ///
+    /// # Errors
+    ///
+    /// Only through the `clientSideEpochBumpRequired` tail, which re-enters
+    /// [`Self::initialize_transactions_with_producer_id_and_epoch`]; that path's own
+    /// `maybeFailWithError` can reject.
+    fn begin_completing_transaction(
+        &mut self,
+        transaction_result: TransactionResult,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        if !self.new_partitions_in_transaction.is_empty() {
+            let handler = self.add_partitions_to_transaction_handler();
+            self.enqueue_request(pending_requests, handler);
+        }
+
+        let mut request_data = EndTxnRequestData::new();
+        request_data
+            // `ensureTransactional()` has already run, so the id is present; Java
+            // would interpolate a null as the text "null".
+            .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
+            .set_producer_id(self.producer_id_and_epoch.producer_id)
+            .set_producer_epoch(self.producer_id_and_epoch.epoch)
+            .set_committed(transaction_result.id());
+        let builder = EndTxnRequestBuilder::new(request_data, self.is_transaction_v2_enabled);
+
+        // Maybe update the transaction version here before we enqueue the EndTxn request so there are no races with
+        // completion of the EndTxn request. Since this method may update clientSideEpochBumpRequired, we want to update
+        // before the check below, but we also want to call it after the EndTxnRequest.Builder so we complete the
+        // transaction with the same version as it started.
+        self.maybe_update_transaction_v2_enabled(false);
+
+        let handler = TxnRequestHandler::new(
+            // Java: `super("EndTxn(" + builder.data.committed() + ")")` (Java 1726),
+            // which interpolates a Java `boolean`.
+            &format!("EndTxn({})", transaction_result.id()),
+            self.retry_backoff_ms,
+            TxnRequestHandlerKind::EndTxn { builder },
+        );
+        let result = Arc::clone(handler.result());
+        self.enqueue_request(pending_requests, handler);
+
+        // If an epoch bump is required for recovery, initialize the transaction after completing the EndTxn request.
+        // If we are upgrading to TV2 transactions on the next transaction, also bump the epoch.
+        if self.client_side_epoch_bump_required {
+            let producer_id_and_epoch = self.producer_id_and_epoch;
+            return self.initialize_transactions_with_producer_id_and_epoch(producer_id_and_epoch, pending_requests);
+        }
+
+        Ok(result)
+    }
+
     // -- Identity and configuration ----------------------------------------
 
     /// The configured transactional id, or `None` for an idempotent producer.
@@ -1480,37 +1641,6 @@ impl TransactionManager {
     ///     `IllegalStateException` that produces.
     pub(crate) fn has_ongoing_transaction(&self) -> bool {
         self.current_state == State::InTransaction || self.is_completing() || self.has_abortable_error()
-    }
-
-    /// Begins aborting the transaction.
-    ///
-    /// Translated from `beginAbort()` (Java 361), whose body is wrapped in
-    /// `handleCachedTransactionRequestResult(.., "abortTransaction")` and so begins
-    /// with `ensureTransactional()` (Java 1266).
-    ///
-    /// Phase 4 needs it because `Sender.run`'s shutdown loop calls it at
-    /// `Sender.java:273`, inside a `try`/`catch` that force-closes the producer if
-    /// it throws (`:274-278`). For a *non*-transactional producer the
-    /// `ensureTransactional()` guard is what throws, so translating that guard is
-    /// what makes the shutdown path behave as Java's does.
-    ///
-    /// The rest of the body — `transitionTo(ABORTING_TRANSACTION)`,
-    /// `beginCompletingTransaction`, the `EndTxn` handler — is **Phase 5b**, which
-    /// the `9faf0a0` amendment to PLAN §Phase-5 assigns it verbatim among "the entry
-    /// points that construct them". It is now *reachable*, because Phase 5a removed
-    /// Phase 3's guard on constructing the manager with a transactional id, which is
-    /// exactly why the tail returns [`Errors::UnsupportedVersion`] rather than being
-    /// dead code (CLAUDE.md §5).
-    ///
-    /// # Errors
-    ///
-    /// [`KafkaError::IllegalState`] on a non-transactional producer, with Java's
-    /// message; [`Errors::UnsupportedVersion`] on a transactional one, until 5b.
-    pub(crate) fn begin_abort(&mut self) -> Result<(), KafkaError> {
-        self.ensure_transactional()?;
-        Err(KafkaError::unsupported_version(
-            "Aborting a transaction is not yet implemented in this client (Milestone 11, Phase 5b).",
-        ))
     }
 
     /// The current state. Visible for testing, as Java's package-private field
@@ -2858,37 +2988,78 @@ impl TransactionManager {
     ///
     /// Translated from `nextRequest(boolean)` (Java 894).
     ///
-    /// Java's `isEndTxn && !transactionStarted` branch (Java 913-925) is Phase 5b's,
-    /// and lands with [`TxnRequestHandler::is_end_txn`]'s only `true` case.
+    /// # Errors
+    ///
+    /// Java's method returns `TxnRequestHandler` and can only *throw* through
+    /// `resetTransactionState`'s `transitionTo`, on the "EndTxn for a transaction
+    /// that never started" path (Java 923). `Result` carries that, so the outer
+    /// `Option` keeps meaning "nothing to send" rather than doubling as an error
+    /// channel.
     pub(crate) fn next_request(
         &mut self,
         pending_requests: &mut PendingRequests,
         has_incomplete_batches: bool,
-    ) -> Option<TxnRequestHandler> {
+    ) -> Result<Option<TxnRequestHandler>, KafkaError> {
         if !self.new_partitions_in_transaction.is_empty() {
             let handler = self.add_partitions_to_transaction_handler();
             self.enqueue_request(pending_requests, handler);
         }
 
-        let next_request_handler = pending_requests.peek()?;
+        let Some(next_request_handler) = pending_requests.peek() else {
+            return Ok(None);
+        };
 
         // Do not send the EndTxn until all batches have been flushed
         if next_request_handler.is_end_txn() && has_incomplete_batches {
-            return None;
+            return Ok(None);
         }
 
-        let next_request_handler = pending_requests.poll()?;
+        let Some(next_request_handler) = pending_requests.poll() else {
+            return Ok(None);
+        };
         if self.maybe_terminate_request_with_error(&next_request_handler) {
             kafka_trace!(
                 self.log_context,
                 "Not sending transactional request {:?} because we are in an error state",
                 next_request_handler
             );
-            return None;
+            return Ok(None);
         }
 
-        kafka_trace!(self.log_context, "Request {:?} dequeued for sending", next_request_handler);
-        Some(next_request_handler)
+        // Java 913-925: an EndTxn for a transaction nothing was ever added to needs
+        // no round trip. Java rebinds `nextRequestHandler` from a second
+        // `pendingRequests.poll()`, which may be null — hence the `Option` below.
+        let mut next_request_handler = Some(next_request_handler);
+        if let Some(handler) = next_request_handler.as_ref().filter(|handler| handler.is_end_txn())
+            && !self.transaction_started
+        {
+            handler.result.done();
+            if self.current_state != State::FatalError {
+                if self.is_transaction_v2_enabled {
+                    kafka_debug!(
+                        self.log_context,
+                        "Not sending EndTxn for completed transaction since no send or sendOffsetsToTransaction were \
+                         triggered"
+                    );
+                } else {
+                    kafka_debug!(
+                        self.log_context,
+                        "Not sending EndTxn for completed transaction since no partitions or offsets were \
+                         successfully added"
+                    );
+                }
+                // Java calls this from the Sender thread here (`Sender.java:472` →
+                // `nextRequest`), which rules §1's "called only from the Sender task"
+                // clause is why `reset_transaction_state` hardcodes `Caller::Sender`.
+                self.reset_transaction_state()?;
+            }
+            next_request_handler = pending_requests.poll();
+        }
+
+        if let Some(handler) = next_request_handler.as_ref() {
+            kafka_trace!(self.log_context, "Request {:?} dequeued for sending", handler);
+        }
+        Ok(next_request_handler)
     }
 
     // `hasPendingRequests()` (Java 1005) is `Sender::has_pending_requests`: its
@@ -3126,7 +3297,9 @@ impl TransactionManager {
             },
             TxnRequestHandlerKind::FindCoordinator { .. } => None,
             // The base implementation (Java 1434).
-            TxnRequestHandlerKind::AddPartitionsToTxn { .. } => Some(CoordinatorType::Transaction),
+            TxnRequestHandlerKind::AddPartitionsToTxn { .. } | TxnRequestHandlerKind::EndTxn { .. } => {
+                Some(CoordinatorType::Transaction)
+            },
         }
     }
 
@@ -3139,9 +3312,9 @@ impl TransactionManager {
     pub(crate) fn coordinator_key(&self, handler: &TxnRequestHandler) -> Option<&str> {
         match handler.kind {
             // The base implementation (Java 1438).
-            TxnRequestHandlerKind::InitProducerId { .. } | TxnRequestHandlerKind::AddPartitionsToTxn { .. } => {
-                self.transactional_id()
-            },
+            TxnRequestHandlerKind::InitProducerId { .. }
+            | TxnRequestHandlerKind::AddPartitionsToTxn { .. }
+            | TxnRequestHandlerKind::EndTxn { .. } => self.transactional_id(),
             TxnRequestHandlerKind::FindCoordinator { .. } => None,
         }
     }
@@ -3196,6 +3369,9 @@ impl TransactionManager {
             },
             TxnRequestHandlerKind::AddPartitionsToTxn { .. } => {
                 self.handle_add_partitions_to_txn_response(handler, response, coordinators, pending_requests)
+            },
+            TxnRequestHandlerKind::EndTxn { .. } => {
+                self.handle_end_txn_response(handler, response, coordinators, pending_requests)
             },
         }
     }
@@ -3565,6 +3741,113 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Handles an `EndTxn` response.
+    ///
+    /// Translated from `EndTxnHandler.handleResponse(AbstractResponse)` (Java 1747).
+    ///
+    /// # The `isAbort` arm must precede the plain `TRANSACTION_ABORTABLE` arm
+    ///
+    /// Both arms test the same wire code (Java 1783 and 1787). Java's comment on the
+    /// first: when aborting a transaction we must convert `TRANSACTION_ABORTABLE`
+    /// errors to a `KafkaException`, because if an abort operation itself encounters
+    /// an abortable error, retrying the abort would create a cycle — so it is treated
+    /// as fatal at the application layer to ensure the transaction can be cleanly
+    /// terminated. Swapping the two arms would make an abort retry itself forever.
+    fn handle_end_txn_response(
+        &mut self,
+        handler: TxnRequestHandler,
+        response: &ConcreteResponse,
+        coordinators: &mut CoordinatorNodes,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<(), KafkaError> {
+        let TxnRequestHandlerKind::EndTxn { builder } = &handler.kind else {
+            return Err(KafkaError::illegal_state(
+                "handle_end_txn_response called for another request kind",
+            ));
+        };
+        let ConcreteResponse::EndTxn(end_txn_response) = response else {
+            // Java casts unconditionally; a mismatch would be a
+            // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
+            return Err(KafkaError::illegal_state(format!(
+                "Expected an EndTxn response for an EndTxn request, got {response}"
+            )));
+        };
+        let is_abort = !builder.data().committed;
+        let error = end_txn_response.error();
+
+        if error == Errors::None {
+            // For End Txn version 5+, the broker includes the producerId and producerEpoch in the EndTxnResponse.
+            // For versions lower than 5, the producer Id and epoch are set to -1 by default.
+            // When Transaction Version 2 is enabled, the end txn request 5+ is used,
+            // it mandates bumping the epoch after every transaction.
+            // If the epoch overflows, a new producerId is returned with epoch set to 0.
+            // Note, we still may see EndTxn TV1 (< 5) responses when the producer has upgraded to TV2 due to the
+            // upgrade occurring at the end of beginCompletingTransaction. The next transaction started should be TV2.
+            //
+            // Java spells the sentinel as the literal `-1`; it is
+            // `RecordBatch.NO_PRODUCER_ID`, and the constant is used so the two stay
+            // in step.
+            if end_txn_response.data().producer_id != RecordBatch::NO_PRODUCER_ID {
+                let producer_id_and_epoch = ProducerIdAndEpoch::new(
+                    end_txn_response.data().producer_id,
+                    end_txn_response.data().producer_epoch,
+                );
+                self.set_producer_id_and_epoch(producer_id_and_epoch);
+                self.reset_sequence_numbers();
+            }
+            self.reset_transaction_state()?;
+            handler.result.done();
+            return Ok(());
+        }
+        if error == Errors::CoordinatorNotAvailable || error == Errors::NotCoordinator {
+            let transactional_id = self.transactional_id().unwrap_or_default().to_string();
+            self.lookup_coordinator(coordinators, pending_requests, CoordinatorType::Transaction, &transactional_id)?;
+            self.retry(pending_requests, handler);
+            return Ok(());
+        }
+        if error.is_retriable() {
+            self.retry(pending_requests, handler);
+            return Ok(());
+        }
+        if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
+            // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
+            // just treat it the same as PRODUCE_FENCED.
+            return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+        }
+        if error == Errors::TransactionalIdAuthorizationFailed
+            || error == Errors::InvalidTxnState
+            || error == Errors::InvalidProducerIdMapping
+        {
+            return self.fatal_error(&handler, KafkaError::new(error));
+        }
+        if error == Errors::UnknownProducerId {
+            return self.abortable_error_if_possible(&handler, KafkaError::new(error));
+        }
+        if is_abort && error == Errors::TransactionAbortable {
+            // Java: new KafkaException("Failed to abort transaction", error.exception()).
+            // A bare KafkaException carries no wire code, which this crate spells as
+            // `Errors::UnknownServerError`; `KafkaError` has no cause chain, so the
+            // cause is reproduced in the message tail instead.
+            return self.fatal_error(
+                &handler,
+                KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!("Failed to abort transaction: {}", error.message()),
+                ),
+            );
+        }
+        if error == Errors::TransactionAbortable {
+            return self.abortable_error(&handler, KafkaError::new(error));
+        }
+        self.fatal_error(
+            &handler,
+            KafkaError::with_message(
+                Errors::UnknownServerError,
+                format!("Unhandled error in EndTxnResponse: {}", error.message()),
+            ),
+        )
+    }
+
     /// Restores `handler`'s backoff to the manager's configured value.
     ///
     /// Java's `AddPartitionsToTxnHandler.handleResponse` opens with
@@ -3812,8 +4095,10 @@ mod tests {
     use crate::common::record::TimestampType;
     use crate::common::record::memory_records::MemoryRecords;
     use crate::common::requests::{
-        AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, FindCoordinatorResponse, InitProducerIdResponse,
+        AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse, FindCoordinatorResponse,
+        InitProducerIdResponse,
     };
+    use crate::end_txn_response_data::EndTxnResponseData;
     use crate::init_producer_id_response_data::InitProducerIdResponseData;
     use crate::producer::internals::sender::is_authorization_error_handled_by_sender;
 
@@ -4112,6 +4397,7 @@ mod tests {
     ) -> Result<(), KafkaError> {
         let handler = manager
             .next_request(pending_requests, false)
+            .expect("next_request does not fail on this path")
             .expect("an AddPartitionsToTxn request must be pending");
         let data = handler
             .add_partitions_to_txn_request_data()
@@ -4128,6 +4414,64 @@ mod tests {
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
         let response = add_partitions_to_txn_response(&error_map);
         manager.handle_response(handler, &response, coordinators, pending_requests)
+    }
+
+    /// Dequeues the pending `EndTxn`, checks the outgoing request the way Java's
+    /// `endTxnMatcher` (Java 4262) does, and feeds back a response carrying `error`.
+    ///
+    /// Combines the two-overload `prepareEndTxnResponse` family (Java 4184, 4224)
+    /// with the `runUntil` that lets `Sender` send it. `response_producer_id` /
+    /// `response_epoch` are what Java's seven-argument overload puts on the response
+    /// only when the negotiated version is v5+; passing
+    /// [`RecordBatch::NO_PRODUCER_ID`] reproduces the four-argument overload, which
+    /// asserts the version is below 5.
+    fn run_end_txn(
+        manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
+        result: TransactionResult,
+        error: Errors,
+        response_producer_id: i64,
+        response_epoch: i16,
+    ) -> Result<(), KafkaError> {
+        let mut coordinators = CoordinatorNodes::new();
+        let handler = manager
+            .next_request(pending_requests, false)
+            .expect("next_request does not fail on this path")
+            .expect("an EndTxn request must be pending");
+        assert!(handler.is_end_txn(), "the EndTxn must be at the head of the queue");
+        let data = handler.end_txn_request_data().expect("an EndTxn handler");
+        assert_eq!(data.transactional_id, TRANSACTIONAL_ID);
+        assert_eq!(data.producer_id, manager.producer_id_and_epoch().producer_id);
+        assert_eq!(data.producer_epoch, manager.producer_id_and_epoch().epoch);
+        assert_eq!(TransactionResult::for_id(data.committed), result);
+
+        let mut data = EndTxnResponseData::new();
+        data.set_error_code(error.code())
+            .set_throttle_time_ms(0)
+            .set_producer_id(response_producer_id)
+            .set_producer_epoch(response_epoch);
+        let response = ConcreteResponse::EndTxn(EndTxnResponse::new(data));
+        manager.handle_response(handler, &response, &mut coordinators, pending_requests)
+    }
+
+    /// [`run_end_txn`] with the pre-v5 response shape: no producer id or epoch, so
+    /// the handler's epoch-absorption arm (Java 1760) is not taken.
+    ///
+    /// Mirrors the four-argument `prepareEndTxnResponse` (Java 4184).
+    fn run_end_txn_v4(
+        manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
+        result: TransactionResult,
+        error: Errors,
+    ) -> Result<(), KafkaError> {
+        run_end_txn(
+            manager,
+            pending_requests,
+            result,
+            error,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+        )
     }
 
     /// Acquires a producer id for an idempotent producer.
@@ -4151,6 +4495,7 @@ mod tests {
             .expect("enqueueing the initial InitProducerId succeeds");
         let handler = manager
             .next_request(pending_requests, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request must be pending");
         // Java's helper asserts the same thing on the outgoing request.
         assert!(
@@ -4194,6 +4539,7 @@ mod tests {
             .expect("initTransactions is valid from UNINITIALIZED");
         let handler = manager
             .next_request(pending_requests, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request must be pending");
         let request_data = handler.init_producer_id_request_data().expect("an InitProducerId handler");
         assert_eq!(
@@ -4615,6 +4961,7 @@ mod tests {
                 .expect("the initial InitProducerId is enqueued");
             let handler = manager
                 .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
                 .expect("an InitProducerId request is pending");
             let result = Arc::clone(handler.result());
 
@@ -4667,6 +5014,7 @@ mod tests {
                 .expect("the initial InitProducerId is enqueued");
             let handler = manager
                 .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
                 .expect("an InitProducerId request is pending");
             complete_init_producer_id(&mut manager, &mut pending, handler, error_code, -1, -1)
                 .expect("the error is handled");
@@ -4717,6 +5065,7 @@ mod tests {
             assert_eq!(manager.current_state(), State::Initializing);
             let handler = manager
                 .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
                 .expect("a fresh InitProducerId is pending");
             complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH)
                 .expect("the retry succeeds");
@@ -4890,6 +5239,7 @@ mod tests {
                 .expect("the initial InitProducerId is enqueued");
             let handler = manager
                 .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
                 .expect("an InitProducerId request is pending");
             let result = Arc::clone(handler.result());
 
@@ -4918,6 +5268,7 @@ mod tests {
             .expect("the initial InitProducerId is enqueued");
         let handler = manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request is pending");
         let result = Arc::clone(handler.result());
 
@@ -4927,7 +5278,10 @@ mod tests {
         assert!(!result.is_completed(), "a retried request must not complete");
         assert!(!manager.has_error());
         assert!(!pending.is_empty());
-        let handler = manager.next_request(&mut pending, false).expect("the request was re-enqueued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the request was re-enqueued");
         assert!(handler.is_retry());
         // Java also clears the in-flight correlation id here (Java 1410), but that
         // now happens in `Sender::on_transactional_response` before the response
@@ -4948,6 +5302,7 @@ mod tests {
             .expect("the initial InitProducerId is enqueued");
         let handler = manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request is pending");
 
         complete_init_producer_id(&mut manager, &mut pending, handler, Errors::InvalidRequest, -1, -1)
@@ -4984,6 +5339,7 @@ mod tests {
             .expect("the initial InitProducerId is enqueued");
         let handler = manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request is pending");
         assert_eq!(
             manager.coordinator_type(&handler),
@@ -5010,7 +5366,10 @@ mod tests {
 
         assert!(!pending.is_empty());
         assert!(
-            manager.next_request(&mut pending, false).is_none(),
+            manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .is_none(),
             "the request is terminated, not returned"
         );
         assert!(pending.is_empty());
@@ -5224,6 +5583,162 @@ mod tests {
         );
     }
 
+    /// Translated from `testEndTxnNotSentIfIncompleteBatches` (Java 248-260).
+    ///
+    /// `nextRequest(true)` — incomplete batches outstanding — must withhold the
+    /// `EndTxn` (Java 902-903); `nextRequest(false)` releases it.
+    #[tokio::test]
+    async fn test_end_txn_not_sent_if_incomplete_batches() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        manager.maybe_add_partition(&tp0()).expect("a new partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(tp0(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&tp0()));
+
+        manager
+            .begin_commit(&mut pending)
+            .expect("IN_TRANSACTION -> COMMITTING is valid");
+        assert!(
+            manager
+                .next_request(&mut pending, true)
+                .expect("next_request does not fail on this path")
+                .is_none()
+        );
+        assert!(
+            manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .expect("the EndTxn is released once the batches are flushed")
+                .is_end_txn()
+        );
+    }
+
+    /// Translated from `testHasOngoingTransactionSuccessfulCommit` (Java 327-350).
+    #[tokio::test]
+    async fn test_has_ongoing_transaction_successful_commit() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        assert!(!manager.has_ongoing_transaction());
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(!manager.has_ongoing_transaction());
+
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_ongoing_transaction());
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&partition));
+
+        manager
+            .begin_commit(&mut pending)
+            .expect("IN_TRANSACTION -> COMMITTING is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Commit, Errors::None)
+            .expect("a successful EndTxn response is handled");
+        assert!(!manager.has_ongoing_transaction());
+    }
+
+    /// Translated from `testHasOngoingTransactionSuccessfulAbort` (Java 303-325).
+    #[tokio::test]
+    async fn test_has_ongoing_transaction_successful_abort() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        assert!(!manager.has_ongoing_transaction());
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(!manager.has_ongoing_transaction());
+
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_ongoing_transaction());
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&partition));
+
+        manager.begin_abort(&mut pending).expect("IN_TRANSACTION -> ABORTING is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Abort, Errors::None)
+            .expect("a successful EndTxn response is handled");
+        assert!(!manager.has_ongoing_transaction());
+    }
+
+    /// Translated from `testHasOngoingTransactionAbortableError` (Java 351-377).
+    #[tokio::test]
+    async fn test_has_ongoing_transaction_abortable_error() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        assert!(!manager.has_ongoing_transaction());
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(!manager.has_ongoing_transaction());
+
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_ongoing_transaction());
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&partition));
+
+        manager
+            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        // `beginAbort` skips `maybeFailWithError` in ABORTABLE_ERROR (Java 363).
+        manager.begin_abort(&mut pending).expect("ABORTABLE_ERROR -> ABORTING is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Abort, Errors::None)
+            .expect("a successful EndTxn response is handled");
+        assert!(!manager.has_ongoing_transaction());
+    }
+
+    /// Translated from `testHasOngoingTransactionFatalError` (Java 378-397).
+    #[tokio::test]
+    async fn test_has_ongoing_transaction_fatal_error() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        assert!(!manager.has_ongoing_transaction());
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(!manager.has_ongoing_transaction());
+
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(manager.has_ongoing_transaction());
+
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        assert!(manager.has_ongoing_transaction());
+
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        assert!(manager.transaction_contains_partition(&partition));
+
+        manager
+            .transition_to_fatal_error(kafka_exception(), Caller::App)
+            .expect("FATAL_ERROR is always a valid target");
+        assert!(!manager.has_ongoing_transaction());
+    }
+
     /// Translated from `testMaybeAddPartitionToTransaction` (Java 399-422).
     #[tokio::test]
     async fn test_maybe_add_partition_to_transaction() {
@@ -5303,7 +5818,10 @@ mod tests {
         )
         .expect("a CONCURRENT_TRANSACTIONS response re-enqueues the request");
 
-        let handler = manager.next_request(&mut pending, false).expect("the retry must be pending");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the retry must be pending");
         assert_eq!(handler.retry_backoff_ms(), ADD_PARTITIONS_RETRY_BACKOFF_MS);
     }
 
@@ -5336,7 +5854,10 @@ mod tests {
         )
         .expect("a COORDINATOR_NOT_AVAILABLE response looks the coordinator up again");
 
-        let handler = manager.next_request(&mut pending, false).expect("the retry must be pending");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the retry must be pending");
         assert_eq!(handler.retry_backoff_ms(), DEFAULT_RETRY_BACKOFF_MS);
     }
 
@@ -5377,7 +5898,10 @@ mod tests {
         run_add_partitions_to_txn(&mut manager, &mut pending, &[(other_partition, Errors::ConcurrentTransactions)])
             .expect("a CONCURRENT_TRANSACTIONS response re-enqueues the request");
 
-        let handler = manager.next_request(&mut pending, false).expect("the retry must be pending");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the retry must be pending");
         assert_eq!(handler.retry_backoff_ms(), DEFAULT_RETRY_BACKOFF_MS);
     }
 
@@ -5452,6 +5976,7 @@ mod tests {
 
         let handler = manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request must be pending");
         complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH)
             .expect("a successful InitProducerId response is handled");
@@ -5595,6 +6120,7 @@ mod tests {
         // Consume the queued request, as the Sender does before sending it.
         manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("an InitProducerId request must be pending");
         assert!(pending.is_empty());
 
@@ -5815,7 +6341,10 @@ mod tests {
         assert!(manager.is_initializing());
         assert!(!manager.is_ready());
 
-        let handler = manager.next_request(&mut pending, false).expect("queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("queued");
         complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH)
             .expect("a successful InitProducerId response is handled");
         assert!(manager.is_ready());
@@ -5883,7 +6412,10 @@ mod tests {
         );
 
         // The FindCoordinator must come out first even though it was enqueued last.
-        let handler = manager.next_request(&mut pending, false).expect("two are queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("two are queued");
         assert_eq!(handler.priority(), Priority::FindCoordinator);
         let request_data = handler.find_coordinator_request_data().expect("a FindCoordinator handler");
         assert_eq!(request_data.key_type, CoordinatorType::Transaction.id());
@@ -5907,6 +6439,7 @@ mod tests {
         assert_eq!(
             manager
                 .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
                 .expect("the InitProducerId is still queued")
                 .priority(),
             Priority::InitProducerId
@@ -5931,7 +6464,10 @@ mod tests {
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
             .expect("TRANSACTION is a valid coordinator type");
 
-        let handler = manager.next_request(&mut pending, false).expect("queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("queued");
         let find_coordinator_result = Arc::clone(handler.result());
         assert!(Errors::CoordinatorNotAvailable.is_retriable());
         complete_find_coordinator(
@@ -5950,7 +6486,10 @@ mod tests {
             "a re-enqueued request must not complete"
         );
         assert!(!manager.has_error());
-        let retried = manager.next_request(&mut pending, false).expect("re-enqueued");
+        let retried = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("re-enqueued");
         assert_eq!(retried.priority(), Priority::FindCoordinator);
         assert!(retried.is_retry());
 
@@ -5979,7 +6518,10 @@ mod tests {
             "a TRANSACTION lookup must not populate the GROUP slot"
         );
 
-        let handler = manager.next_request(&mut pending, false).expect("the InitProducerId is queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the InitProducerId is queued");
         complete_init_producer_id_with_coordinators(
             &mut manager,
             &mut coordinators,
@@ -6008,7 +6550,10 @@ mod tests {
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
             .expect("TRANSACTION is a valid coordinator type");
 
-        let handler = manager.next_request(&mut pending, false).expect("queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("queued");
         let find_coordinator_result = Arc::clone(handler.result());
         complete_find_coordinator(
             &mut manager,
@@ -6091,7 +6636,10 @@ mod tests {
         manager
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Group, CONSUMER_GROUP_ID)
             .expect("GROUP is a valid coordinator type");
-        let handler = manager.next_request(&mut pending, false).expect("queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("queued");
         let result = Arc::clone(handler.result());
         complete_find_coordinator(
             &mut manager,
@@ -6118,7 +6666,10 @@ mod tests {
         manager
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
             .expect("TRANSACTION is a valid coordinator type");
-        let handler = manager.next_request(&mut pending, false).expect("queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("queued");
         complete_find_coordinator(
             &mut manager,
             &mut coordinators,
@@ -6139,7 +6690,10 @@ mod tests {
         manager
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
             .expect("TRANSACTION is a valid coordinator type");
-        let handler = manager.next_request(&mut pending, false).expect("queued");
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("queued");
         let unexpected = Errors::InvalidRequest;
         assert!(!unexpected.is_retriable());
         complete_find_coordinator(
@@ -6180,7 +6734,10 @@ mod tests {
                 .set(CoordinatorType::Transaction, broker_node())
                 .expect("TRANSACTION is a valid coordinator type");
 
-            let handler = manager.next_request(&mut pending, false).expect("queued");
+            let handler = manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .expect("queued");
             complete_init_producer_id_with_coordinators(
                 &mut manager,
                 &mut coordinators,
@@ -6207,10 +6764,17 @@ mod tests {
                 "both the FindCoordinator and the retried InitProducerId are queued"
             );
             assert_eq!(
-                manager.next_request(&mut pending, false).expect("queued").priority(),
+                manager
+                    .next_request(&mut pending, false)
+                    .expect("next_request does not fail on this path")
+                    .expect("queued")
+                    .priority(),
                 Priority::FindCoordinator
             );
-            let retried = manager.next_request(&mut pending, false).expect("queued");
+            let retried = manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .expect("queued");
             assert_eq!(retried.priority(), Priority::InitProducerId);
             assert!(retried.is_retry());
         }
@@ -6240,13 +6804,17 @@ mod tests {
 
         let handler = manager
             .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
             .expect("a FindCoordinator is not terminated in ABORTABLE_ERROR");
         assert_eq!(handler.priority(), Priority::FindCoordinator);
         assert!(!handler.result().is_completed());
 
         // The queued InitProducerId, by contrast, is failed and withheld.
         assert!(
-            manager.next_request(&mut pending, false).is_none(),
+            manager
+                .next_request(&mut pending, false)
+                .expect("next_request does not fail on this path")
+                .is_none(),
             "any other request is terminated while in an error state"
         );
         assert!(init_pid_result.is_completed());
