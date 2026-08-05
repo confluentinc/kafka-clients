@@ -55,6 +55,7 @@ use crate::common::KafkaError;
 /// - Java's `InterruptException` path has no Rust analogue: there is no task
 ///   interruption to translate, so the `InterruptedException` catch block is
 ///   intentionally absent.
+#[derive(Debug)]
 pub(crate) struct TransactionalRequestResult {
     /// Replaces Java's `CountDownLatch(1)`. Note `notify_waiters()` does not
     /// store a permit, so awaiting must check `completed` first — see

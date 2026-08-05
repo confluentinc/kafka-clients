@@ -1084,9 +1084,8 @@ impl RecordAccumulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`TransactionManager::is_send_to_partition_allowed`] and
-    /// [`TransactionManager::first_in_flight_sequence`]. Java's equivalent
-    /// exceptions escape `drain` to `Sender.run`'s catch-and-log.
+    /// Propagates [`TransactionManager::first_in_flight_sequence`]. Java's
+    /// equivalent exception escapes `drain` to `Sender.run`'s catch-and-log.
     fn should_stop_drain_batches_for_partition(
         &self,
         first: &ProducerBatch,
@@ -1097,7 +1096,7 @@ impl RecordAccumulator {
         };
         let mut manager = transaction_manager.lock().unwrap();
 
-        if !manager.is_send_to_partition_allowed(tp)? {
+        if !manager.is_send_to_partition_allowed(tp) {
             return Ok(true);
         }
 
@@ -1907,8 +1906,7 @@ mod tests {
             100,
             Arc::new(crate::ApiVersions::new()),
             false,
-        )
-        .expect("an idempotent manager is constructible");
+        );
 
         let mut pool = InFlightBatchPool::new();
         let mut pending = PendingRequests::new();
@@ -3731,8 +3729,8 @@ mod tests {
     // `TransactionManager` — `testRecordsDrainedWhenTransactionCompleting`
     // (Java 976-1019) — and it is **not** translatable here: it stubs
     // `isCompleting()` to `true` with Mockito, and `COMMITTING_TRANSACTION` /
-    // `ABORTING_TRANSACTION` are unreachable without a transactional id, which
-    // `TransactionManager::new` still refuses (Phase 5). The
+    // `ABORTING_TRANSACTION` are unreachable without `beginCommit` / `beginAbort`,
+    // which are Phase 5b. The
     // `transaction_completing` term it exercises *is* translated, in
     // `RecordAccumulator::ready`. The test belongs to Phase 6, with the public
     // `commit_transaction` / `abort_transaction` API that can reach the state.
@@ -3801,17 +3799,14 @@ mod tests {
     #[tokio::test]
     async fn test_drain_stops_while_the_producer_id_is_invalid() {
         // A manager that has *not* completed its InitProducerId.
-        let transaction_manager = Arc::new(Mutex::new(
-            TransactionManager::new(
-                LogContext::empty(),
-                None,
-                60_000,
-                100,
-                Arc::new(crate::ApiVersions::new()),
-                false,
-            )
-            .expect("an idempotent manager is constructible"),
-        ));
+        let transaction_manager = Arc::new(Mutex::new(TransactionManager::new(
+            LogContext::empty(),
+            None,
+            60_000,
+            100,
+            Arc::new(crate::ApiVersions::new()),
+            false,
+        )));
         assert!(!transaction_manager.lock().unwrap().has_producer_id());
 
         let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));

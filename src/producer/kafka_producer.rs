@@ -403,12 +403,10 @@ impl<K, V> KafkaProducer<K, V> {
     /// so `AbstractConfig` does not warn about it, which has no Rust analogue —
     /// `ProducerConfig` parses every key eagerly.
     ///
-    /// # Errors
-    ///
-    /// Propagates [`TransactionManager::new`]'s error. Its only failure mode is
-    /// the Phase-5 MILESTONE-11 GUARD on a `transactional_id`, which
-    /// [`Self::from_config`] has already rejected with a clearer message, so this
-    /// is unreachable today.
+    /// Returns `Ok(None)` when idempotence is disabled, mirroring Java's null
+    /// `transactionManager`. The `Result` is kept because
+    /// [`Self::from_config`]'s own guard on `transactional.id` (PLAN §7.1) is the
+    /// error this function's callers must still be able to surface.
     fn configure_transaction_state(
         config: &ProducerConfig,
         api_versions: &Arc<ApiVersions>,
@@ -425,7 +423,7 @@ impl<K, V> KafkaProducer<K, V> {
             config.retry_backoff_ms,
             Arc::clone(api_versions),
             config.two_phase_commit_enable,
-        )?;
+        );
 
         if transaction_manager.is_transactional() {
             kafka_info!(log_context, "Instantiated a transactional producer.");
@@ -2154,8 +2152,7 @@ mod tests {
                     100,
                     Arc::new(ApiVersions::new()),
                     false,
-                )
-                .expect("an idempotent manager is constructible");
+                );
                 Some(Arc::new(Mutex::new(manager)))
             } else {
                 None

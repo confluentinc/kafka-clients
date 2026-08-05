@@ -417,7 +417,7 @@ pub(crate) enum TxnRequestHandlerKind {
 pub(crate) struct TxnRequestHandler {
     /// The handle the application awaits.
     ///
-    /// `Arc` because `handle_cached_transaction_request_result` (Phase 5) must
+    /// `Arc` because [`TransactionManager::handle_cached_transaction_request_result`] must
     /// hand the *same* result object to both the caller and the
     /// pending-transition slot — see
     /// `.claude/rules/producer-transactions.md` §5.
@@ -427,7 +427,7 @@ pub(crate) struct TxnRequestHandler {
     /// How long to back off before retrying this request.
     ///
     /// A field rather than a read-through to the manager because
-    /// `AddPartitionsToTxnHandler` (Phase 5) overrides it per instance
+    /// `AddPartitionsToTxnHandler` (Phase 5b) overrides it per instance
     /// (Java 1543).
     retry_backoff_ms: i64,
     /// The request-specific state.
@@ -488,7 +488,7 @@ impl TxnRequestHandler {
     /// Whether this is an `EndTxn` request.
     ///
     /// Corresponds to `isEndTxn()` (Java 1450), whose base implementation
-    /// returns `false`; only `EndTxnHandler` (Phase 5) overrides it.
+    /// returns `false`; only `EndTxnHandler` (Phase 5b) overrides it.
     pub(crate) fn is_end_txn(&self) -> bool {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { .. } => false,
@@ -550,6 +550,29 @@ impl fmt::Debug for TxnRequestHandler {
     }
 }
 
+/// A transactional operation whose result the caller has not yet acknowledged.
+///
+/// Translated from the private static nested class `PendingStateTransition`
+/// (Java 1953-1967).
+///
+/// The `result` is an `Arc<TransactionalRequestResult>` because
+/// [`TransactionManager::handle_cached_transaction_request_result`] must hand the
+/// **same** result object to both the caller and this slot — that identity is the
+/// whole point of the mechanism, and it is what
+/// `.claude/rules/producer-transactions.md` §5 means by "return the same result
+/// object". Java gets it for free from reference semantics.
+struct PendingStateTransition {
+    result: Arc<TransactionalRequestResult>,
+    state: State,
+    operation: String,
+}
+
+impl PendingStateTransition {
+    fn new(result: Arc<TransactionalRequestResult>, state: State, operation: &str) -> Self {
+        Self { result, state, operation: operation.to_string() }
+    }
+}
+
 /// A class which maintains state for transactions. Also keeps the state necessary to ensure idempotent production.
 ///
 /// Translated from
@@ -557,10 +580,28 @@ impl fmt::Debug for TxnRequestHandler {
 ///
 /// # Scope
 ///
-/// This is the idempotence slice (Milestone 11 Phase 3). The transactional state
-/// machine, the remaining five request handlers, the priority queue, KIP-890
-/// Transaction V2 and KIP-939 two-phase commit arrive in Phase 5. Construction
-/// with a `transactional_id` is refused until then — see [`Self::new`].
+/// Milestone 11 Phase 3 landed the idempotence slice; Phase 4 integrated it with
+/// the send path; **Phase 5a** adds the transactional state machine: the
+/// priority-ordered pending-request queue, the pending-state-transition
+/// machinery, `initializeTransactions` / `beginTransaction` /
+/// `resetTransactionState`, the abortable-versus-fatal error machine,
+/// `FindCoordinatorHandler` and the coordinator-routed `InitProducerId` path.
+///
+/// Phase 5b adds the four remaining request handlers
+/// (`AddPartitionsToTxn`, `AddOffsetsToTxn`, `TxnOffsetCommit`, `EndTxn`), the
+/// entry points that construct them (`beginCommit`, `beginAbort`,
+/// `beginCompletingTransaction`, `sendOffsetsToTransaction`,
+/// `maybeAddPartition`'s registration branch), KIP-890 Transaction V2 and KIP-939
+/// two-phase commit. Every deferred arm returns
+/// [`Errors::UnsupportedVersion`] naming Phase 5b rather than silently taking
+/// another branch (CLAUDE.md §5).
+///
+/// Three of the nine [`State`] variants are therefore not yet *enterable*:
+/// `PREPARED_TRANSACTION` (needs `prepareTransaction` / the `keepPreparedTxn`
+/// response arm), `COMMITTING_TRANSACTION` (needs `beginCommit`) and
+/// `ABORTING_TRANSACTION` (needs `beginAbort`) — each blocked on a Phase-5b
+/// entry point, not on transition logic. The full 9×9 table has been translated
+/// since Phase 3; see [`State::is_transition_valid`].
 ///
 /// # Lock topology
 ///
@@ -633,6 +674,27 @@ pub(crate) struct TransactionManager {
     // partitions will have the sequences of their in-flight batches rewritten
     partitions_to_rewrite_sequences: HashSet<TopicPartition>,
 
+    /// Partitions added to the transaction locally but not yet sent in an
+    /// `AddPartitionsToTxn` request (Java 122).
+    ///
+    /// Always empty in Phase 5a: the only writer is `maybeAddPartition`'s
+    /// registration branch (Java 458), which lands with
+    /// `AddPartitionsToTxnHandler` in Phase 5b — see [`Self::maybe_add_partition`].
+    new_partitions_in_transaction: HashSet<TopicPartition>,
+    /// Partitions whose `AddPartitionsToTxn` request is in flight (Java 123).
+    /// Written only by `addPartitionsToTransactionHandler` (Java 1315), Phase 5b.
+    pending_partitions_in_transaction: HashSet<TopicPartition>,
+    /// Partitions the broker has confirmed as part of the transaction (Java 124).
+    /// Written only by `AddPartitionsToTxnHandler.handleResponse` and
+    /// `maybeAddPartition`'s Transaction V2 arm, both Phase 5b.
+    partitions_in_transaction: HashSet<TopicPartition>,
+    /// The operation whose [`TransactionalRequestResult`] the caller has not yet
+    /// acknowledged (Java 125).
+    ///
+    /// See [`Self::handle_cached_transaction_request_result`] for the semantics;
+    /// `.claude/rules/producer-transactions.md` §5 is the binding contract.
+    pending_transition: Option<PendingStateTransition>,
+
     // NOTE (rules §2): Java's `pendingRequests` (Java 121) and
     // `inFlightRequestCorrelationId` (136) are deliberately absent here. They are
     // fields on `Sender`, and the manager methods that touch them take them as
@@ -643,32 +705,81 @@ pub(crate) struct TransactionManager {
     // error for the first AddPartitionsRequest in a transaction.
     retry_backoff_ms: i64,
 
+    /// Whether anything has been added to the current transaction, so an `EndTxn`
+    /// would have work to do (Java 143).
+    ///
+    /// Always `false` in Phase 5a: every writer (Java 420, 451, 1629, 1831) is a
+    /// Transaction V2 arm or a Phase-5b handler. [`Self::reset_transaction_state`]
+    /// clears it, which is why the field is here rather than in 5b.
+    transaction_started: bool,
+
     current_state: State,
     last_error: Option<KafkaError>,
     producer_id_and_epoch: ProducerIdAndEpoch,
     client_side_epoch_bump_required: bool,
-    /// Always `false` in Phase 3: only `maybeUpdateTransactionV2Enabled`
-    /// (Java 492, Phase 5) sets it, and that method is transactional. Kept as a
-    /// field so [`Self::set_producer_id_and_epoch`]'s log-level fork
-    /// (Java 605) can be translated verbatim rather than approximated.
+    /// Always `false` in Phase 5a: only `maybeUpdateTransactionV2Enabled`
+    /// (Java 492, Phase 5b) sets it, and that method needs KIP-890 feature
+    /// discovery. Kept as a field so [`Self::set_producer_id_and_epoch`]'s
+    /// log-level fork (Java 605) and the three predicates that read it
+    /// ([`Self::need_to_trigger_epoch_bump_from_client`],
+    /// [`Self::can_handle_abortable_error`], [`Self::maybe_add_partition`]) can be
+    /// translated verbatim rather than approximated.
     is_transaction_v2_enabled: bool,
     enable_2pc: bool,
+    /// Whether the transaction coordinator's `InitProducerId` version supports a
+    /// client-triggered epoch bump (Java 139).
+    ///
+    /// # Why this is not Sender-owned like the coordinator nodes
+    ///
+    /// `.claude/rules/producer-transactions.md` §2 and PLAN §6.5 list this field
+    /// with `transactionCoordinator` / `consumerGroupCoordinator` /
+    /// `inFlightRequestCorrelationId` as state that is "touched exclusively by the
+    /// Sender thread" and must therefore live on the `Sender`. That premise is
+    /// true of the other three and **false of this one**: Java reads it from the
+    /// *application* thread on every failed send, through
+    /// `KafkaProducer.doSend`'s `catch (ApiException e)`
+    /// (`KafkaProducer.java:1066`) → [`Self::maybe_transition_to_error_state`]
+    /// (`:781`) → [`Self::need_to_trigger_epoch_bump_from_client`] (`:1310`). That
+    /// call site already exists here, at `kafka_producer.rs:775`, so a
+    /// Sender-confined field could not serve it.
+    ///
+    /// Keeping it behind the shared mutex costs nothing, which is the other half
+    /// of the argument. §2's objection to the mutex is that it would be "slower
+    /// and less faithful", and neither applies:
+    ///
+    ///   - Every reader is a `TransactionManager` method whose caller already
+    ///     holds the guard for other reasons, so no lock is added.
+    ///   - Its only writer, [`Self::handle_coordinator_ready`], must hold the
+    ///     guard regardless: Java's version reads `apiVersions` (Java 1104), a
+    ///     manager field. It runs once per coordinator connection.
+    ///
+    /// Recorded as a deviation in PLAN §10.7. The coordinator *nodes* do live on
+    /// the `Sender` as §2 requires — `Sender.java:481` is their only reader.
+    coordinator_supports_bumping_epoch: bool,
+    /// The producer id and epoch of the transaction prepared for a two-phase
+    /// commit (Java 148).
+    ///
+    /// Write-only in Phase 5a. Its writers (`prepareTransaction` Java 342,
+    /// `InitProducerIdHandler`'s `keepPreparedTxn` arm Java 1507) and its reader
+    /// (`preparedTransactionState()` Java 1976) are all KIP-939, Phase 5b; the
+    /// field is here because [`Self::reset_transaction_state`] clears it.
+    prepared_txn_state: ProducerIdAndEpoch,
 }
 
 impl TransactionManager {
     /// Creates a transaction manager.
     ///
-    /// # Errors
+    /// Translated from `TransactionManager(LogContext, String, int, long,
+    /// ApiVersions, boolean)` (Java 208).
     ///
-    /// MILESTONE-11 GUARD: returns [`Errors::UnsupportedVersion`] when
-    /// `transactional_id` is `Some`. Java's constructor accepts it, but this
-    /// phase translates only the idempotence slice, so every transactional
-    /// entry point and the transactional arm of the five internally-forked
-    /// methods (`maybeTransitionToErrorState`, `handleFailedBatch`,
-    /// `maybeResolveSequences`, `nextRequest`, `canRetry`) are absent. Refusing
-    /// construction makes those paths unreachable instead of silently taking the
-    /// idempotent branch, which CLAUDE.md §5 requires. It mirrors the guard
-    /// already in `KafkaProducer::from_config` (PLAN §7.1); Phase 5 removes it.
+    /// Phase 3's MILESTONE-11 GUARD, which refused a `transactional_id` so that
+    /// the untranslated transactional arms stayed unreachable, is gone: Phase 5a
+    /// implements the transactional state machine, and the arms it still defers
+    /// (Transaction V2, two-phase commit, and the four Phase-5b request handlers)
+    /// each fail loudly with [`Errors::UnsupportedVersion`] naming Phase 5b, per
+    /// CLAUDE.md §5. `KafkaProducer::from_config` keeps its own guard on
+    /// `transactional.id` until Phase 6 wires the public API (PLAN §7.1), so the
+    /// only way to build a transactional manager today is directly.
     pub(crate) fn new(
         log_context: LogContext,
         transactional_id: Option<String>,
@@ -676,15 +787,8 @@ impl TransactionManager {
         retry_backoff_ms: i64,
         api_versions: Arc<ApiVersions>,
         enable_2pc: bool,
-    ) -> Result<Self, KafkaError> {
-        if transactional_id.is_some() {
-            return Err(KafkaError::unsupported_version(
-                "The transactional producer is not yet implemented in this client \
-                 (Milestone 11, Phase 5); construct the TransactionManager without a \
-                 transactional id.",
-            ));
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             txn_partition_map: TxnPartitionMap::new(log_context.clone()),
             log_context,
             transactional_id,
@@ -692,14 +796,172 @@ impl TransactionManager {
             api_versions,
             partitions_with_unresolved_sequences: HashMap::new(),
             partitions_to_rewrite_sequences: HashSet::new(),
+            new_partitions_in_transaction: HashSet::new(),
+            pending_partitions_in_transaction: HashSet::new(),
+            partitions_in_transaction: HashSet::new(),
+            pending_transition: None,
             retry_backoff_ms,
+            transaction_started: false,
             current_state: State::Uninitialized,
             last_error: None,
             producer_id_and_epoch: ProducerIdAndEpoch::NONE,
             client_side_epoch_bump_required: false,
             is_transaction_v2_enabled: false,
             enable_2pc,
-        })
+            coordinator_supports_bumping_epoch: false,
+            prepared_txn_state: ProducerIdAndEpoch::NONE,
+        }
+    }
+
+    // -- Transactional entry points ----------------------------------------
+
+    /// Acquires or bumps the producer id for a transactional producer, returning
+    /// the handle the application awaits.
+    ///
+    /// Translated from `initializeTransactions(boolean keepPreparedTxn)`
+    /// (Java 295), the public overload `KafkaProducer.initTransactions` calls.
+    ///
+    /// # Not blocking here
+    ///
+    /// Java's caller blocks on `result.await(maxBlockTimeMs, ..)`
+    /// (`KafkaProducer.java:654`). This returns the [`TransactionalRequestResult`]
+    /// instead, and Phase 6's `KafkaProducer::init_transactions` awaits it — the
+    /// manager must not await anything, because the caller holds the shared mutex
+    /// and rules §4 forbids holding it across an `.await`.
+    ///
+    /// # Errors
+    ///
+    /// - [`KafkaError::IllegalState`] on a non-transactional producer
+    ///   (`ensureTransactional`), when the manager is already in an error state
+    ///   (`maybeFailWithError`), when a *different* operation's result is still
+    ///   unacknowledged, or when `UNINITIALIZED → INITIALIZING` is not a valid
+    ///   transition — which is what rejects a second `initTransactions` after the
+    ///   first has been acknowledged (`testInitializeTransactionsTwiceRaisesError`).
+    pub(crate) fn initialize_transactions(
+        &mut self,
+        keep_prepared_txn: bool,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        self.initialize_transactions_internal(ProducerIdAndEpoch::NONE, keep_prepared_txn, pending_requests)
+    }
+
+    /// Bumps the epoch of an existing producer id as part of ending a
+    /// transaction.
+    ///
+    /// Translated from the package-private overload
+    /// `initializeTransactions(ProducerIdAndEpoch)` (Java 291), whose only Java
+    /// caller is `beginCompletingTransaction` (`:1200`) when
+    /// `clientSideEpochBumpRequired` holds — Phase 5b. Renamed because Rust has no
+    /// overloading, the same treatment
+    /// [`Self::producer_id_and_epoch_for_partition`] gets (PLAN §10.5
+    /// deviation 4).
+    ///
+    /// Passing a valid id and epoch is what makes this an *epoch bump*: the
+    /// request carries them, no `INITIALIZING` transition happens here (the
+    /// `EndTxn` response drives it), and the handler sorts at
+    /// [`Priority::EpochBump`].
+    pub(crate) fn initialize_transactions_with_producer_id_and_epoch(
+        &mut self,
+        producer_id_and_epoch: ProducerIdAndEpoch,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        self.initialize_transactions_internal(producer_id_and_epoch, false, pending_requests)
+    }
+
+    /// Translated from the package-private
+    /// `initializeTransactions(ProducerIdAndEpoch, boolean)` (Java 299), which
+    /// both public overloads delegate to.
+    ///
+    /// # `keep_prepared_txn` reaches only the log statement
+    ///
+    /// Java uses the flag for two `log.info` lines (`:309`, `:312`) and **does not
+    /// put it on the request**: the `InitProducerIdRequestData` built at `:316-320`
+    /// sets `transactionalId`, `transactionTimeoutMs`, `producerId` and
+    /// `producerEpoch` only, and `setKeepPreparedTxn` appears nowhere in
+    /// `clients/src` in Apache Kafka 4.2. So `builder.data.keepPreparedTxn()`, the
+    /// condition guarding the two-phase-commit response arm at `:1501`, is always
+    /// `false` on this path. Translated as-is rather than "fixed": the arm's
+    /// [`Errors::UnsupportedVersion`] guard in
+    /// [`Self::handle_init_producer_id_response`] is therefore unreachable from
+    /// here in Rust exactly as it is in Java.
+    fn initialize_transactions_internal(
+        &mut self,
+        producer_id_and_epoch: ProducerIdAndEpoch,
+        keep_prepared_txn: bool,
+        pending_requests: &mut PendingRequests,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        self.maybe_fail_with_error()?;
+
+        let is_epoch_bump = producer_id_and_epoch != ProducerIdAndEpoch::NONE;
+        self.handle_cached_transaction_request_result(
+            |manager| {
+                // If this is an epoch bump, we will transition the state as part of handling the EndTxnRequest
+                if !is_epoch_bump {
+                    // Java reaches this from `KafkaProducer.initTransactions` only,
+                    // so the transition is application-side (rules §1).
+                    manager.transition_to(State::Initializing, None, Caller::App)?;
+                    kafka_info!(
+                        manager.log_context,
+                        "Invoking InitProducerId for the first time in order to acquire a producer ID"
+                    );
+                    if keep_prepared_txn {
+                        kafka_info!(
+                            manager.log_context,
+                            "Invoking InitProducerId with keepPreparedTxn set to true for 2PC transactions"
+                        );
+                    }
+                } else {
+                    kafka_info!(
+                        manager.log_context,
+                        "Invoking InitProducerId with current producer ID and epoch {} in order to bump the epoch",
+                        producer_id_and_epoch
+                    );
+                }
+
+                let mut request_data = InitProducerIdRequestData::new();
+                request_data
+                    .set_transactional_id(manager.transactional_id.clone())
+                    .set_transaction_timeout_ms(manager.transaction_timeout_ms)
+                    .set_producer_id(producer_id_and_epoch.producer_id)
+                    .set_producer_epoch(producer_id_and_epoch.epoch);
+
+                let handler = TxnRequestHandler::new(
+                    "InitProducerId",
+                    manager.retry_backoff_ms,
+                    TxnRequestHandlerKind::InitProducerId {
+                        builder: InitProducerIdRequestBuilder::new(request_data),
+                        is_epoch_bump,
+                    },
+                );
+                let result = Arc::clone(handler.result());
+                manager.enqueue_request(pending_requests, handler);
+                Ok(result)
+            },
+            State::Initializing,
+            "initTransactions",
+        )
+    }
+
+    /// Starts a transaction.
+    ///
+    /// Translated from `beginTransaction()` (Java 330). Stays synchronous: Java's
+    /// body is four calls and no wait (PLAN §Phase-6 makes the same point).
+    ///
+    /// Reached from `KafkaProducer.beginTransaction` only, so the transition is
+    /// application-side (rules §1).
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalState`] on a non-transactional producer, while another
+    /// operation's result is unacknowledged, or when the manager is in an error
+    /// state; and from `READY → IN_TRANSACTION` being the table's only arm into
+    /// [`State::InTransaction`], which is what rejects `beginTransaction` before
+    /// `initTransactions` completes.
+    pub(crate) fn begin_transaction(&mut self) -> Result<(), KafkaError> {
+        self.ensure_transactional()?;
+        self.throw_if_pending_state("beginTransaction")?;
+        self.maybe_fail_with_error()?;
+        self.transition_to(State::InTransaction, None, Caller::App)
     }
 
     // -- Identity and configuration ----------------------------------------
@@ -735,8 +997,8 @@ impl TransactionManager {
     /// The configured transaction timeout.
     ///
     /// Java reads the field directly from `initializeTransactions` (Java 319);
-    /// there is no accessor. Exposed here so the field has a reader before
-    /// Phase 5 adds that method.
+    /// there is no accessor. Kept because it is the only reader outside the
+    /// module, and `SenderTest`'s harness asserts on it.
     pub(crate) fn transaction_timeout_ms(&self) -> i32 {
         self.transaction_timeout_ms
     }
@@ -897,12 +1159,15 @@ impl TransactionManager {
     /// from the application task.
     pub(crate) fn transition_to_fatal_error(&mut self, error: KafkaError, caller: Caller) -> Result<(), KafkaError> {
         kafka_info!(self.log_context, "Transiting to fatal error state due to {}", error);
-        self.transition_to(State::FatalError, Some(error), caller)
-        // Java also fails `pendingTransition` here (Java 545-547).
-        // `pendingTransition` is only ever set by
-        // `handleCachedTransactionRequestResult` (Java 1281), which begins with
-        // `ensureTransactional()`, so it is always null for an idempotent
-        // producer. Phase 5 adds the field and this branch together.
+        self.transition_to(State::FatalError, Some(error.clone()), caller)?;
+
+        // Java 545-547. [`State::FatalError`] is an unconditionally valid target,
+        // so `transition_to` above cannot fail and this always runs — matching
+        // Java, where the two statements are sequential.
+        if let Some(pending) = self.pending_transition.as_ref() {
+            pending.result.fail(error);
+        }
+        Ok(())
     }
 
     /// Moves to [`State::AbortableError`].
@@ -937,6 +1202,99 @@ impl TransactionManager {
         self.transition_to(State::AbortableError, Some(error), caller)
     }
 
+    /// Moves to [`State::AbortableError`] when the coordinator can recover from
+    /// one, and to [`State::FatalError`] when it cannot.
+    ///
+    /// Translated from
+    /// `transitionToAbortableErrorOrFatalError(RuntimeException, RuntimeException)`
+    /// (Java 557), whose only caller is [`Self::maybe_resolve_sequences`]'s
+    /// transactional arm (Java 870).
+    ///
+    /// Recovering from an abortable error requires an epoch bump. If the
+    /// coordinator supports a client-triggered one, request it and take the
+    /// abortable path; if Transaction V2 handles it server-side, take the
+    /// abortable path without requesting anything; otherwise there is no way back
+    /// and the error is fatal.
+    fn transition_to_abortable_error_or_fatal_error(
+        &mut self,
+        abortable_error: KafkaError,
+        fatal_error: KafkaError,
+        caller: Caller,
+    ) -> Result<(), KafkaError> {
+        if self.can_handle_abortable_error() {
+            if self.need_to_trigger_epoch_bump_from_client() {
+                self.client_side_epoch_bump_required = true;
+            }
+            self.transition_to_abortable_error(abortable_error, caller)
+        } else {
+            self.transition_to_fatal_error(fatal_error, caller)
+        }
+    }
+
+    /// Determines if an epoch bump can be triggered manually based on the api versions.
+    ///
+    /// Translated from `needToTriggerEpochBumpFromClient()` (Java 1309).
+    ///
+    /// **NOTE:** This method should only be used for transactional producers. For
+    /// non-transactional producers epoch bumping is always allowed.
+    ///
+    /// 1. **Client-Triggered Epoch Bump**: if the coordinator supports epoch
+    ///    bumping (`initProducerIdVersion.maxVersion() >= 3`), client-triggered
+    ///    epoch bumping is allowed, returns true.
+    ///    `clientSideEpochBumpRequired` must be set to true in this case.
+    /// 2. **No Epoch Bump Allowed**: if the coordinator does not support epoch
+    ///    bumping, returns false.
+    /// 3. **Server-Triggered Only**: when Transaction V2 is enabled, epoch bumping
+    ///    is handled automatically by the server in `EndTxn`, so manual epoch
+    ///    bumping is not required, returns false.
+    pub(crate) fn need_to_trigger_epoch_bump_from_client(&self) -> bool {
+        self.coordinator_supports_bumping_epoch && !self.is_transaction_v2_enabled
+    }
+
+    /// Determines if the coordinator can handle an abortable error.
+    ///
+    /// Translated from `canHandleAbortableError()` (Java 1326).
+    ///
+    /// Recovering from an abortable error requires an epoch bump which can be
+    /// triggered by the client or automatically taken care of at the end of every
+    /// transaction (Transaction V2). Use
+    /// [`Self::need_to_trigger_epoch_bump_from_client`] to check whether the epoch
+    /// bump needs to be triggered manually.
+    ///
+    /// **NOTE:** This method should only be used for transactional producers.
+    /// There is no concept of abortable errors for idempotent producers.
+    fn can_handle_abortable_error(&self) -> bool {
+        self.coordinator_supports_bumping_epoch || self.is_transaction_v2_enabled
+    }
+
+    /// Clears the per-transaction state once a transaction has completed.
+    ///
+    /// Translated from `resetTransactionState()` (Java 1330).
+    ///
+    /// Both Java call sites run on the Sender thread — `nextRequest`'s
+    /// "EndTxn for a transaction that never started" branch (Java 923) and
+    /// `EndTxnHandler.handleResponse` (Java 1767) — so [`Caller::Sender`] is
+    /// hardcoded per rules §1 rather than taken as a parameter. Both are Phase 5b,
+    /// which is why this method has no caller yet; it is translated now because it
+    /// is the only writer that clears the per-transaction sets and
+    /// `prepared_txn_state`, and splitting it from the state machine would mean
+    /// writing it twice.
+    fn reset_transaction_state(&mut self) -> Result<(), KafkaError> {
+        if self.client_side_epoch_bump_required {
+            self.transition_to(State::Initializing, None, Caller::Sender)?;
+        } else {
+            self.transition_to(State::Ready, None, Caller::Sender)?;
+        }
+        self.last_error = None;
+        self.client_side_epoch_bump_required = false;
+        self.transaction_started = false;
+        self.new_partitions_in_transaction.clear();
+        self.pending_partitions_in_transaction.clear();
+        self.partitions_in_transaction.clear();
+        self.prepared_txn_state = ProducerIdAndEpoch::NONE;
+        Ok(())
+    }
+
     /// Moves back to [`State::Uninitialized`], clearing [`Self::last_error`], so
     /// a fresh `InitProducerId` can be requested.
     ///
@@ -956,15 +1314,23 @@ impl TransactionManager {
     /// UNINITIALIZED so that the user doesn't need to instantiate the producer
     /// again."
     ///
-    /// Takes no error argument. Java passes the exception solely to
-    /// `pendingTransition.result.fail(..)` (Java 759), and `pendingTransition` is
-    /// only ever set by `handleCachedTransactionRequestResult` (Java 1281), which
-    /// begins with `ensureTransactional()` — so it is always null for an
-    /// idempotent producer. Phase 5 adds the field and the parameter together,
-    /// the same treatment [`Self::maybe_resolve_sequences`] gets for its
-    /// [`Caller`].
-    pub(crate) fn transition_to_uninitialized(&mut self, caller: Caller) -> Result<(), KafkaError> {
+    /// `error` reaches only `pendingTransition.result.fail(..)` (Java 759), so it
+    /// has no consumer for an idempotent producer — `pendingTransition` is set
+    /// only by [`Self::handle_cached_transaction_request_result`], which begins
+    /// with `ensureTransactional()`. Phase 3 therefore omitted the parameter and
+    /// Phase 5a adds it back together with the field, as PLAN §10.5 deviation 8
+    /// said it would.
+    ///
+    /// `Sender.shouldHandleAuthorizationError` passes the **raw** exception here
+    /// (`Sender.java:356`), not the `new AuthenticationException(exception)`
+    /// wrapper it hands to [`Self::fail_pending_requests`] one line earlier
+    /// (`:354`). Preserved.
+    pub(crate) fn transition_to_uninitialized(&mut self, error: &KafkaError, caller: Caller) -> Result<(), KafkaError> {
         self.transition_to(State::Uninitialized, None, caller)?;
+        // Java 758-760.
+        if let Some(pending) = self.pending_transition.as_ref() {
+            pending.result.fail(error.clone());
+        }
         // Redundant — `transition_to` already clears `last_error` on a
         // non-error target — but Java assigns it explicitly (Java 761), so the
         // assignment is kept rather than silently relied upon.
@@ -1055,8 +1421,10 @@ impl TransactionManager {
     /// lines above the call (`Sender.java:288-289`): "fail all the incomplete
     /// transactional requests and batches and *wake up the threads waiting on the
     /// futures*". Those threads are `KafkaProducer.initTransactions` &c. blocked in
-    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`) — a path that
-    /// only exists once `initializeTransactions` does, in Phase 5/6.
+    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`). Phase 5a
+    /// makes half of that real — [`Self::initialize_transactions`] now hands out a
+    /// result and this method's `pendingTransition` branch fails it — and Phase 6
+    /// adds the `KafkaProducer` method that awaits it.
     ///
     /// Nothing awaits an idempotent `InitProducerId` result, so there is no
     /// hanging future to prevent here: the handler is built inside
@@ -1089,9 +1457,14 @@ impl TransactionManager {
             handler.fail(shutdown_error.clone());
             self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
         }
-        // Java also fails `pendingTransition` here (Java 953-955); see
-        // [`Self::transition_to_fatal_error`] for why that field arrives in
-        // Phase 5.
+        // Java 953-955. Note this runs even when the queue is empty, so a
+        // transactional caller blocked in `initTransactions` is woken by a force
+        // close with no request outstanding — which is the point of the method
+        // (`Sender.java:288-289`). Reached independently of the loop above, since
+        // `transitionToFatalError` fails the *same* slot per iteration.
+        if let Some(pending) = self.pending_transition.as_ref() {
+            pending.result.fail(shutdown_error);
+        }
         Ok(())
     }
 
@@ -1151,6 +1524,91 @@ impl TransactionManager {
 
         self.current_state = target;
         Ok(())
+    }
+
+    /// Rejects an operation while a previous one's result is still
+    /// unacknowledged.
+    ///
+    /// Translated from `throwIfPendingState(String)` (Java 1249).
+    ///
+    /// Takes `&mut self` because Java clears `pendingTransition` here: an
+    /// *acknowledged* result means the previous operation is genuinely finished,
+    /// so the slot is released and the new operation proceeds. An unacknowledged
+    /// one means the caller's `await` timed out and must be retried — the *same*
+    /// operation, not a different one — so anything else is rejected. That
+    /// `isAcked()` key, rather than `isCompleted()`, is what
+    /// `.claude/rules/producer-transactions.md` §5 exists to protect: a completed
+    /// but never-awaited `commitTransaction` must still be retryable.
+    fn throw_if_pending_state(&mut self, operation: &str) -> Result<(), KafkaError> {
+        if let Some(pending) = self.pending_transition.as_ref() {
+            if pending.result.is_acked() {
+                self.pending_transition = None;
+            } else {
+                return Err(KafkaError::illegal_state(format!(
+                    "Cannot attempt operation `{operation}` because the previous call to `{}` timed out and must \
+                     be retried",
+                    pending.operation
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs `supplier` unless an equivalent operation is already pending, in
+    /// which case its existing result is handed back.
+    ///
+    /// Translated from
+    /// `handleCachedTransactionRequestResult(Supplier<TransactionalRequestResult>, State, String)`
+    /// (Java 1261).
+    ///
+    /// The three outcomes, keyed on [`TransactionalRequestResult::is_acked`] and
+    /// **not** `is_completed` (`.claude/rules/producer-transactions.md` §5):
+    ///
+    ///   1. The pending result has been acknowledged — the previous operation is
+    ///      finished, so the slot is released and `supplier` runs.
+    ///   2. It has not, and `next_state` differs — the caller's `await` timed out
+    ///      and a *different* operation is being attempted. Rejected with
+    ///      [`KafkaError::IllegalState`]; the pending operation stays retryable.
+    ///   3. It has not, and `next_state` matches — the caller is retrying the same
+    ///      operation. The **same** `Arc` is returned, so a `commitTransaction`
+    ///      that already completed is not sent twice.
+    ///
+    /// # Why the supplier takes `&mut Self`
+    ///
+    /// Java's `Supplier` closes over `TransactionManager.this`. A Rust closure
+    /// cannot capture `self` while `self` is borrowed by this method, so the
+    /// manager is passed in as an argument instead. It returns `Result` because
+    /// Java's suppliers can throw: `initializeTransactions`'s calls `transitionTo`
+    /// (`:308`) and `beginCommit`'s calls `maybeFailWithError` (`:354`). When it
+    /// does, `pendingTransition` is left unset, exactly as in Java.
+    fn handle_cached_transaction_request_result<F>(
+        &mut self,
+        supplier: F,
+        next_state: State,
+        operation: &str,
+    ) -> Result<Arc<TransactionalRequestResult>, KafkaError>
+    where
+        F: FnOnce(&mut Self) -> Result<Arc<TransactionalRequestResult>, KafkaError>,
+    {
+        self.ensure_transactional()?;
+
+        if let Some(pending) = self.pending_transition.as_ref() {
+            if pending.result.is_acked() {
+                self.pending_transition = None;
+            } else if next_state != pending.state {
+                return Err(KafkaError::illegal_state(format!(
+                    "Cannot attempt operation `{operation}` because the previous call to `{}` timed out and must \
+                     be retried",
+                    pending.operation
+                )));
+            } else {
+                return Ok(Arc::clone(&pending.result));
+            }
+        }
+
+        let result = supplier(self)?;
+        self.pending_transition = Some(PendingStateTransition::new(Arc::clone(&result), next_state, operation));
+        Ok(result)
     }
 
     /// Rejects a transactional operation on a non-transactional producer.
@@ -1244,15 +1702,30 @@ impl TransactionManager {
             return self.transition_to_fatal_error(error.clone(), caller);
         }
         if self.is_transactional() {
-            // Java 771-785 converts retriable and InvalidTxnState errors into a
-            // TransactionAbortableException, may request a client-side epoch
-            // bump, and transitions to the abortable error state. All three need
-            // Phase 5 state (`needToTriggerEpochBumpFromClient`, `isCompleting`).
-            // Unreachable while `new` refuses a transactional id.
-            return Err(KafkaError::unsupported_version(
-                "The transactional error path is not yet implemented in this client \
-                 (Milestone 11, Phase 5).",
-            ));
+            // RetriableExceptions from the Sender thread are converted to Abortable errors
+            // because they indicate that the transaction cannot be completed after all retry attempts.
+            // This conversion ensures the application layer treats these errors as abortable,
+            // preventing duplicate message delivery.
+            //
+            // Java tests `instanceof RetriableException || instanceof
+            // InvalidTxnStateException`. `InvalidTxnStateException` is **not** a
+            // `RetriableException`, so both tests are needed. The `TransactionAbortableException`
+            // Java builds chains the original as its cause; `KafkaError` has no cause chain
+            // (PLAN §10.5 deviation 5), so the message is reproduced exactly and the original
+            // stays reachable through the caller's own value.
+            let error = if error.is_retriable() || error.error() == Errors::InvalidTxnState {
+                KafkaError::with_message(
+                    Errors::TransactionAbortable,
+                    "Transaction Request was aborted after exhausting retries.",
+                )
+            } else {
+                error.clone()
+            };
+
+            if self.need_to_trigger_epoch_bump_from_client() && !self.is_completing() {
+                self.client_side_epoch_bump_required = true;
+            }
+            return self.transition_to_abortable_error(error, caller);
         }
         Ok(())
     }
@@ -1262,24 +1735,51 @@ impl TransactionManager {
     /// Translated from `isSendToPartitionAllowed(TopicPartition)` (Java 466),
     /// called from `RecordAccumulator.shouldStopDrainBatchesForPartition`
     /// (`RecordAccumulator.java:818`) — which Phase 4 translates, hence this method
-    /// arriving now rather than with the rest of the transactional entry points.
+    /// arriving before the rest of the transactional entry points.
     ///
-    /// # Errors
-    ///
-    /// The transactional arm needs `partitionsInTransaction` (Phase 5) and is
-    /// unreachable while [`Self::new`] refuses a transactional id: Java's
-    /// `!isTransactional()` short-circuits before the set is read.
-    pub(crate) fn is_send_to_partition_allowed(&self, topic_partition: &TopicPartition) -> Result<bool, KafkaError> {
+    /// Phase 5a completes the transactional arm. `partitions_in_transaction` is
+    /// necessarily empty until Phase 5b adds `AddPartitionsToTxnHandler`, so a
+    /// transactional producer is refused every partition — which is Java's own
+    /// answer for an empty set, and is consistent, because
+    /// [`Self::maybe_add_partition`] refuses to register one in the first place.
+    pub(crate) fn is_send_to_partition_allowed(&self, topic_partition: &TopicPartition) -> bool {
         if self.has_fatal_error() {
-            return Ok(false);
+            return false;
         }
-        if !self.is_transactional() {
-            return Ok(true);
-        }
-        Err(KafkaError::unsupported_version(format!(
-            "Checking whether {topic_partition} is part of the ongoing transaction is not yet implemented in \
-             this client (Milestone 11, Phase 5)."
-        )))
+        !self.is_transactional() || self.partitions_in_transaction.contains(topic_partition)
+    }
+
+    /// Whether any partition still needs adding to the transaction.
+    ///
+    /// Corresponds to `hasPartitionsToAdd()` (Java 514).
+    pub(crate) fn has_partitions_to_add(&self) -> bool {
+        !self.new_partitions_in_transaction.is_empty() || !self.pending_partitions_in_transaction.is_empty()
+    }
+
+    /// Whether `partition` has been added to the transaction locally but not yet
+    /// confirmed by the coordinator.
+    ///
+    /// Corresponds to `isPartitionPendingAdd(TopicPartition)` (Java 571).
+    pub(crate) fn is_partition_pending_add(&self, partition: &TopicPartition) -> bool {
+        self.new_partitions_in_transaction.contains(partition)
+            || self.pending_partitions_in_transaction.contains(partition)
+    }
+
+    /// Whether the coordinator has confirmed `topic_partition` as part of the
+    /// transaction.
+    ///
+    /// Corresponds to `transactionContainsPartition(TopicPartition)` (Java 993).
+    pub(crate) fn transaction_contains_partition(&self, topic_partition: &TopicPartition) -> bool {
+        self.partitions_in_transaction.contains(topic_partition)
+    }
+
+    /// Whether a transactional producer's `InitProducerId` is still outstanding.
+    ///
+    /// Corresponds to `isInitializing()` (Java 1090). Java has no caller for it in
+    /// either the client or its tests; translated because it is part of the class
+    /// (`definition-of-done.md` §2).
+    pub(crate) fn is_initializing(&self) -> bool {
+        self.is_transactional() && self.current_state == State::Initializing
     }
 
     // -- Producer id lifecycle ---------------------------------------------
@@ -1825,10 +2325,11 @@ impl TransactionManager {
     /// Translated from `maybeResolveSequences()` (Java 850). Called once per
     /// `Sender.runOnce` (`Sender.java:313`).
     ///
-    /// Takes no [`Caller`]: the idempotent arm performs no state transition, it
-    /// only requests an epoch bump. Phase 5's transactional arm transitions and
-    /// will need the parameter.
-    pub(crate) fn maybe_resolve_sequences(&mut self) -> Result<(), KafkaError> {
+    /// Takes a [`Caller`] as of Phase 5a: the idempotent arm performs no state
+    /// transition, but the transactional arm reaches
+    /// [`Self::transition_to_abortable_error_or_fatal_error`] and so needs it
+    /// (PLAN §10.5 deviation 6 said this phase would add it).
+    pub(crate) fn maybe_resolve_sequences(&mut self, caller: Caller) -> Result<(), KafkaError> {
         // Java removes through the key-set iterator. Collected here because the
         // loop body needs `&mut self`; each partition is handled independently,
         // so `HashMap` iteration order is not observable.
@@ -1849,16 +2350,25 @@ impl TransactionManager {
 
             // We would enter this branch if all in flight batches were ultimately expired in the producer.
             if self.is_transactional() {
-                // Java 862-870 bumps the epoch if the coordinator supports it and
-                // otherwise moves to a fatal error, via
-                // `transitionToAbortableErrorOrFatalError`. That needs Phase 5
-                // state (`coordinatorSupportsBumpingEpoch`,
-                // `isTransactionV2Enabled`). Unreachable while `new` refuses a
-                // transactional id.
-                return Err(KafkaError::unsupported_version(format!(
-                    "Resolving unresolved sequences for partition {topic_partition} on a transactional producer is \
-                     not yet implemented in this client (Milestone 11, Phase 5)."
-                )));
+                // For the transactional producer, we bump the epoch if possible, otherwise we transition to a
+                // fatal error.
+                //
+                // Java's two `new KafkaException(..)` instances carry no wire code,
+                // which this crate spells as `Errors::UnknownServerError` (the same
+                // convention `maybe_fail_with_error` and `close` use).
+                const UNACKED_MESSAGES_ERR: &str = "The client hasn't received acknowledgment for some previously \
+                                                    sent messages and can no longer retry them. ";
+                let abortable_error = KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!("{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."),
+                );
+                let fatal_error = KafkaError::with_message(
+                    Errors::UnknownServerError,
+                    format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."),
+                );
+                self.transition_to_abortable_error_or_fatal_error(abortable_error, fatal_error, caller)?;
+                self.partitions_with_unresolved_sequences.remove(&topic_partition);
+                continue;
             }
             // For the idempotent producer, bump the epoch
             kafka_info!(
@@ -1918,8 +2428,11 @@ impl TransactionManager {
     /// `newPartitionsInTransaction` is non-empty, and its `isEndTxn` branch
     /// short-circuits an `EndTxn` for a transaction that never started. Both are
     /// transaction-only, and [`TxnRequestHandler::is_end_txn`] is `false` for
-    /// every handler this phase can build, so neither is reachable; Phase 5 adds
-    /// them with the handlers they need.
+    /// every handler Phase 5a can build, so neither is reachable; Phase 5b adds
+    /// them with the handlers they need — `addPartitionsToTransactionHandler`
+    /// (Java 1313) for the first and `EndTxnHandler` for the second. What keeps
+    /// `new_partitions_in_transaction` empty is
+    /// [`Self::maybe_add_partition`]'s deferred registration arm.
     pub(crate) fn next_request(
         &mut self,
         pending_requests: &mut PendingRequests,
@@ -2032,7 +2545,7 @@ impl TransactionManager {
     /// The key identifying the coordinator `handler` must be routed to.
     ///
     /// Corresponds to `coordinatorKey()` (Java 1438). The base implementation
-    /// returns the transactional id; only `TxnOffsetCommitHandler` (Phase 5)
+    /// returns the transactional id; only `TxnOffsetCommitHandler` (Phase 5b)
     /// overrides it.
     pub(crate) fn coordinator_key(&self, handler: &TxnRequestHandler) -> Option<&str> {
         match handler.kind {
@@ -2119,12 +2632,14 @@ impl TransactionManager {
                 && init_producer_id_response.data().ongoing_txn_producer_id != RecordBatch::NO_PRODUCER_ID
             {
                 // Java 1504-1510 moves to PREPARED_TRANSACTION and records
-                // `preparedTxnState`. `keepPreparedTxn` can only be set by
-                // `initializeTransactions`, which is transactional, so this is
-                // unreachable while `new` refuses a transactional id. Phase 5
-                // adds the state field.
+                // `preparedTxnState`. Still unreachable, and for Java's own
+                // reason rather than a translation gap: nothing in Apache Kafka
+                // 4.2's `clients/src` calls `setKeepPreparedTxn`, so
+                // `builder.data.keepPreparedTxn()` is always false — see
+                // [`Self::initialize_transactions_internal`]. Phase 5b lands the
+                // KIP-939 surface that would set it.
                 return Err(KafkaError::unsupported_version(
-                    "Two-phase commit is not yet implemented in this client (Milestone 11, Phase 5).",
+                    "Two-phase commit is not yet implemented in this client (Milestone 11, Phase 5b).",
                 ));
             }
             self.transition_to(State::Ready, None, Caller::Sender)?;
@@ -2183,22 +2698,61 @@ impl TransactionManager {
     ///
     /// Translated from `maybeAddPartition(TopicPartition)` (Java 437).
     ///
-    /// Java's second statement is `throwIfPendingState("send")` (Java 439),
-    /// which inspects `pendingTransition`. That field is only ever set by
-    /// `handleCachedTransactionRequestResult` (Java 1281), which starts with
-    /// `ensureTransactional()`, so it is always null for an idempotent producer
-    /// and the call can do nothing. Phase 5 adds the field and the call
-    /// together.
+    /// # Where Phase 5a stops
+    ///
+    /// The transactional arm is an ordered `if / else if` chain (Java 441-459).
+    /// Phase 5a translates the three branches that need no request handler — the
+    /// two state guards and the already-added short-circuit — because they are
+    /// pure state validation and are what the `testFailIfNotReadyForSend*` /
+    /// `testNotReadyForSend*` family asserts on. The last two branches belong with
+    /// `AddPartitionsToTxnHandler` in Phase 5b and fail loudly (CLAUDE.md §5):
+    ///
+    ///   - the Transaction V2 arm (Java 448-451), which registers the partition
+    ///     directly because TV2 sends no `AddPartitionsToTxn`. Unreachable until
+    ///     Phase 5b adds `maybeUpdateTransactionV2Enabled`, the only writer of
+    ///     `is_transaction_v2_enabled`; kept in position so the chain's order is
+    ///     the Java one.
+    ///   - the registration arm (Java 456-458), which populates
+    ///     `new_partitions_in_transaction` for `addPartitionsToTransactionHandler`
+    ///     (Java 1313) to drain. Deferring it is what keeps that set empty, and so
+    ///     keeps `nextRequest`'s first statement and
+    ///     [`Self::is_send_to_partition_allowed`]'s set lookup consistent in 5a.
+    ///
+    /// The split is recorded in PLAN §10.7: the task's boundary places
+    /// `maybe_add_partition`'s transactional arm in 5b, but the tests that pin its
+    /// state guards are named as 5a's, and those guards depend on nothing 5b owns.
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), KafkaError> {
         self.maybe_fail_with_error()?;
+        self.throw_if_pending_state("send")?;
 
         if self.is_transactional() {
-            // Java 441-459 validates the transaction state and registers the
-            // partition. Unreachable while `new` refuses a transactional id.
-            return Err(KafkaError::unsupported_version(format!(
-                "Adding partition {topic_partition} to a transaction is not yet implemented in this client \
-                 (Milestone 11, Phase 5)."
-            )));
+            if !self.has_producer_id() {
+                return Err(KafkaError::illegal_state(format!(
+                    "Cannot add partition {topic_partition} to transaction before completing a call to \
+                     initTransactions"
+                )));
+            } else if self.current_state != State::InTransaction {
+                // Java's message has two spaces before the state; reproduced so
+                // message assertions keep matching (Java 447).
+                return Err(KafkaError::illegal_state(format!(
+                    "Cannot add partition {topic_partition} to transaction while in state  {}",
+                    self.current_state
+                )));
+            } else if self.is_transaction_v2_enabled {
+                return Err(KafkaError::unsupported_version(format!(
+                    "Adding partition {topic_partition} to a Transaction V2 transaction is not yet implemented in \
+                     this client (Milestone 11, Phase 5b)."
+                )));
+            } else if self.transaction_contains_partition(topic_partition)
+                || self.is_partition_pending_add(topic_partition)
+            {
+                return Ok(());
+            } else {
+                return Err(KafkaError::unsupported_version(format!(
+                    "Adding partition {topic_partition} to a transaction is not yet implemented in this client \
+                     (Milestone 11, Phase 5b)."
+                )));
+            }
         }
         Ok(())
     }
@@ -2313,6 +2867,8 @@ pub(crate) fn is_out_of_order_sequence(code: Errors) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::NodeApiVersions;
     use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
@@ -2325,6 +2881,7 @@ mod tests {
     use crate::producer::internals::sender::is_authorization_error_handled_by_sender;
 
     // Constants mirroring `TransactionManagerTest`'s fields (Java 125-155).
+    const TRANSACTIONAL_ID: &str = "foobar";
     const TRANSACTION_TIMEOUT_MS: i32 = 1121;
     const DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
     const TOPIC: &str = "test";
@@ -2356,21 +2913,36 @@ mod tests {
     /// Builds an idempotent (non-transactional) manager.
     ///
     /// Mirrors `initializeTransactionManager(Optional.empty(), transactionV2Enabled)`
-    /// (Java 174-221), including the `ApiVersions` contents, so the
-    /// `transactionV2Enabled` parameterisation is reproduced faithfully.
+    /// (Java 174-221).
+    fn idempotent_manager(transaction_v2_enabled: bool) -> TransactionManager {
+        manager_with_transactional_id(None, transaction_v2_enabled)
+    }
+
+    /// Builds a transactional manager, mirroring
+    /// `initializeTransactionManager(Optional.of(transactionalId), transactionV2Enabled)`
+    /// — which is what `setup()` (Java 163) calls.
+    fn transactional_manager(transaction_v2_enabled: bool) -> TransactionManager {
+        manager_with_transactional_id(Some(TRANSACTIONAL_ID.to_string()), transaction_v2_enabled)
+    }
+
+    /// Mirrors `initializeTransactionManager` (Java 174-221), including the
+    /// `ApiVersions` contents, so the `transactionV2Enabled` parameterisation is
+    /// reproduced faithfully.
     ///
-    /// # `transaction_v2_enabled` is not observable in this phase
+    /// # `transaction_v2_enabled` is still not observable in Phase 5a
     ///
     /// Java threads the flag only into `apiVersions`, and the manager reads
-    /// `apiVersions` from exactly two methods — `handleCoordinatorReady`
-    /// (Java 1104) and `maybeUpdateTransactionV2Enabled` (Java 493) — both of
-    /// which are Phase 5. `isTransactionV2Enabled` therefore stays `false` in
-    /// both iterations, and its only Phase-3 reader
-    /// ([`TransactionManager::set_producer_id_and_epoch`], Java 605) is
-    /// short-circuited by `!isTransactional()` anyway. So both parameterisations
-    /// execute identical code here. The loops are kept regardless: they cost
-    /// nothing and will start discriminating in Phase 5.
-    fn idempotent_manager(transaction_v2_enabled: bool) -> TransactionManager {
+    /// `apiVersions` from exactly two methods:
+    /// [`TransactionManager::handle_coordinator_ready`] (Java 1104), which looks at
+    /// the `INIT_PRODUCER_ID` version and not at features, and
+    /// `maybeUpdateTransactionV2Enabled` (Java 493), which is Phase 5b and is the
+    /// only writer of `is_transaction_v2_enabled`. So the flag stays `false` in
+    /// both iterations and both parameterisations execute identical code. The
+    /// loops are kept: they cost nothing and start discriminating in Phase 5b.
+    fn manager_with_transactional_id(
+        transactional_id: Option<String>,
+        transaction_v2_enabled: bool,
+    ) -> TransactionManager {
         fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
             let mut version = ApiVersion::new();
             version.set_api_key(api_key.id());
@@ -2420,13 +2992,12 @@ mod tests {
 
         TransactionManager::new(
             LogContext::empty(),
-            None,
+            transactional_id,
             TRANSACTION_TIMEOUT_MS,
             DEFAULT_RETRY_BACKOFF_MS,
             api_versions,
             false,
         )
-        .expect("an idempotent manager is constructible")
     }
 
     /// A single-record batch, mirroring `batchWithValue` (Java 840).
@@ -2533,6 +3104,52 @@ mod tests {
         assert!(manager.has_producer_id());
     }
 
+    /// Drives a transactional producer from `UNINITIALIZED` to `READY`, leaving
+    /// the `initTransactions` result **acknowledged** so subsequent operations are
+    /// not rejected by `throwIfPendingState`.
+    ///
+    /// Mirrors `doInitTransactions(long, short)` (Java 4348). Java's helper also
+    /// drives a `FindCoordinator` round trip, because it spins `Sender.runOnce`
+    /// and the Sender has no coordinator yet. `initializeTransactions` itself
+    /// enqueues **only** the `InitProducerId` (Java 323) — the `FindCoordinator`
+    /// comes from `Sender.maybeFindCoordinatorAndRetry` (`Sender.java:522`) — so a
+    /// manager-level drive legitimately has no such step. The coordinator round
+    /// trip is covered where it belongs, in `sender.rs`.
+    ///
+    /// Java's `result.await()` blocks the test thread; here it is an `.await`,
+    /// which is why every test using this helper is a `#[tokio::test]`. The result
+    /// is already completed by `handle_response`, so the await returns without
+    /// yielding — and it is the real awaiting method, the only thing allowed to set
+    /// `is_acked` (rules §5).
+    async fn do_init_transactions(
+        manager: &mut TransactionManager,
+        pending_requests: &mut PendingRequests,
+        producer_id: i64,
+        epoch: i16,
+    ) -> Arc<TransactionalRequestResult> {
+        let result = manager
+            .initialize_transactions(false, pending_requests)
+            .expect("initTransactions is valid from UNINITIALIZED");
+        let mut handler = manager
+            .next_request(pending_requests, false)
+            .expect("an InitProducerId request must be pending");
+        assert_eq!(
+            handler.request_builder().data().transactional_id.as_deref(),
+            Some(TRANSACTIONAL_ID),
+            "a transactional producer must send its transactional id"
+        );
+        assert_eq!(handler.request_builder().data().transaction_timeout_ms, TRANSACTION_TIMEOUT_MS);
+        complete_init_producer_id(manager, pending_requests, handler, Errors::None, producer_id, epoch)
+            .expect("a successful InitProducerId response is handled");
+        assert!(manager.has_producer_id());
+
+        // Java: `result.await(); assertTrue(result.isSuccessful()); assertTrue(result.isAcked());`
+        assert!(result.is_successful());
+        result.await_result().await.expect("initTransactions succeeded");
+        assert!(result.is_acked());
+        result
+    }
+
     /// Drives the manager entry points of `Sender.runOnce`'s
     /// `transactionManager != null` block (`Sender.java:311-335`) in `runOnce`'s
     /// order and behind `runOnce`'s guards, and reports which of the four exits
@@ -2607,7 +3224,9 @@ mod tests {
         in_flight_request_correlation_id: i32,
     ) -> SenderPhaseOutcome {
         // Sender.java:313
-        manager.maybe_resolve_sequences().expect("resolving sequences succeeds");
+        manager
+            .maybe_resolve_sequences(Caller::Sender)
+            .expect("resolving sequences succeeds");
 
         // Sender.java:315
         let last_error = manager.last_error().cloned();
@@ -2636,7 +3255,7 @@ mod tests {
                 )
                 .expect("failing pending requests succeeds");
             manager
-                .transition_to_uninitialized(Caller::Sender)
+                .transition_to_uninitialized(&error, Caller::Sender)
                 .expect("ABORTABLE_ERROR -> UNINITIALIZED is a valid transition");
             return SenderPhaseOutcome::RecoveredFromAuthorizationError;
         }
@@ -2678,24 +3297,32 @@ mod tests {
     // Rust-side unit tests for the pieces Java covers only indirectly.
     // ---------------------------------------------------------------------
 
-    /// The MILESTONE-11 GUARD: Phase 3 refuses a transactional id so the
-    /// untranslated transactional arms cannot be reached.
-    #[test]
-    fn test_transactional_id_is_refused_until_phase_5() {
-        let result = TransactionManager::new(
-            LogContext::empty(),
-            Some("foobar".to_string()),
-            TRANSACTION_TIMEOUT_MS,
-            DEFAULT_RETRY_BACKOFF_MS,
-            Arc::new(ApiVersions::new()),
-            false,
-        );
-        let Err(error) = result else {
-            panic!("a transactional manager is not constructible yet");
-        };
+    /// Phase 3's MILESTONE-11 GUARD is gone: a transactional manager is
+    /// constructible, and the arms Phase 5b still owes fail loudly with
+    /// [`Errors::UnsupportedVersion`] instead (CLAUDE.md §5).
+    ///
+    /// Pins the guard's *replacement*, so removing it cannot silently turn a
+    /// deferred transactional path into a wrong-branch success. The two arms
+    /// asserted here are the ones an application can reach first: registering a
+    /// partition in a live transaction, and the `AddPartitionsToTxn` that would
+    /// carry it.
+    #[tokio::test]
+    async fn test_transactional_manager_is_constructible_and_defers_phase_5b_arms() {
+        let mut manager = transactional_manager(false);
+        assert!(manager.is_transactional());
+        assert_eq!(manager.transactional_id(), Some(TRANSACTIONAL_ID));
+        assert_eq!(manager.current_state(), State::Uninitialized);
+
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        let error = manager
+            .maybe_add_partition(&tp0())
+            .expect_err("registering a new partition needs AddPartitionsToTxn (Phase 5b)");
         assert_eq!(error.error(), Errors::UnsupportedVersion);
         assert!(
-            error.message().contains("Milestone 11, Phase 5"),
+            error.message().contains("Milestone 11, Phase 5b"),
             "unexpected message: {}",
             error.message()
         );
@@ -3356,6 +3983,494 @@ mod tests {
         }
     }
 
+    /// Translated from `testFailIfNotReadyForSendNoProducerId` (Java 262-265).
+    ///
+    /// Also covers `testNotReadyForSendBeforeInitTransactions` (Java 505-508),
+    /// whose body is character-identical. Java carries both; one Rust test covers
+    /// the pair rather than duplicating it (`definition-of-done.md` §6), and the
+    /// accounting records the pairing.
+    #[test]
+    fn test_fail_if_not_ready_for_send_no_producer_id() {
+        let mut manager = transactional_manager(false);
+        let error = manager
+            .maybe_add_partition(&tp0())
+            .expect_err("a transactional producer must call initTransactions first");
+        assert_eq!(
+            error.message(),
+            format!(
+                "Cannot add partition {} to transaction before completing a call to initTransactions",
+                tp0()
+            )
+        );
+        assert!(matches!(error, KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `testFailIfNotReadyForSendNoOngoingTransaction`
+    /// (Java 282-286), which is character-identical to
+    /// `testNotReadyForSendBeforeBeginTransaction` (Java 510-514).
+    #[tokio::test]
+    async fn test_fail_if_not_ready_for_send_no_ongoing_transaction() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+
+        let error = manager.maybe_add_partition(&tp0()).expect_err("no transaction is in progress");
+        // Java's message has two spaces before the state.
+        assert_eq!(
+            error.message(),
+            format!("Cannot add partition {} to transaction while in state  READY", tp0())
+        );
+        assert!(matches!(error, KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `testFailIfNotReadyForSendAfterAbortableError`
+    /// (Java 288-295), which is character-identical to
+    /// `testNotReadyForSendAfterAbortableError` (Java 516-523).
+    #[tokio::test]
+    async fn test_fail_if_not_ready_for_send_after_abortable_error() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        manager
+            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+
+        let error = manager
+            .maybe_add_partition(&tp0())
+            .expect_err("an abortable error fails the send");
+        assert_eq!(
+            error.message(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+    }
+
+    /// Translated from `testFailIfNotReadyForSendAfterFatalError`
+    /// (Java 296-302), which is character-identical to
+    /// `testNotReadyForSendAfterFatalError` (Java 524-530).
+    #[tokio::test]
+    async fn test_fail_if_not_ready_for_send_after_fatal_error() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager
+            .transition_to_fatal_error(kafka_exception(), Caller::App)
+            .expect("FATAL_ERROR is always a valid target");
+
+        let error = manager.maybe_add_partition(&tp0()).expect_err("a fatal error fails the send");
+        assert_eq!(
+            error.message(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+    }
+
+    /// Translated from `testIsSendToPartitionAllowedWithPartitionNotAdded`
+    /// (Java 616-621).
+    #[tokio::test]
+    async fn test_is_send_to_partition_allowed_with_partition_not_added() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(!manager.is_send_to_partition_allowed(&tp0()));
+    }
+
+    /// Translated from `testInitializeTransactionsTwiceRaisesError`
+    /// (Java 1093-1098).
+    ///
+    /// The second call is rejected by the transition table, not by the
+    /// pending-transition slot: `do_init_transactions` acknowledges the first
+    /// result, so `handleCachedTransactionRequestResult` clears the slot and runs
+    /// the supplier, whose `READY → INITIALIZING` is not a valid arm (Java 168).
+    #[tokio::test]
+    async fn test_initialize_transactions_twice_raises_error() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.has_producer_id());
+
+        let error = manager
+            .initialize_transactions(false, &mut pending)
+            .expect_err("initTransactions may not run twice");
+        assert!(matches!(error, KafkaError::IllegalState(_)));
+        assert_eq!(
+            error.message(),
+            format!(
+                "TransactionalId {TRANSACTIONAL_ID}: Invalid transition attempted from state READY to state INITIALIZING"
+            )
+        );
+        // The failed supplier must not have installed a pending transition, and
+        // the application-side transition must not have poisoned the state.
+        assert_eq!(manager.current_state(), State::Ready);
+        assert!(!manager.has_error());
+    }
+
+    /// Translated from `testRetryInitTransactionsAfterTimeout` (Java 1713-1744),
+    /// minus the three assertions that need Phase 5b's `beginAbort` / `beginCommit`
+    /// — recorded in the accounting block as a named 5b tail.
+    ///
+    /// This is the core of `.claude/rules/producer-transactions.md` §5: an
+    /// `initTransactions` whose caller timed out before acknowledging the result
+    /// must (a) block every *other* operation, (b) hand back the **same** result
+    /// object when retried, and (c) release the slot once acknowledged.
+    #[tokio::test]
+    async fn test_retry_init_transactions_after_timeout() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        let result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        // Java: `assertThrows(TimeoutException.class, () -> result.await(0, MILLISECONDS))`.
+        let timeout = result
+            .await_result_timeout(Duration::from_millis(0))
+            .await
+            .expect_err("nothing has answered the InitProducerId yet");
+        assert!(
+            matches!(timeout, KafkaError::Timeout(_)),
+            "Java raises TimeoutException: {timeout:?}"
+        );
+        assert!(!result.is_acked());
+
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("an InitProducerId request must be pending");
+        complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH)
+            .expect("a successful InitProducerId response is handled");
+        assert!(manager.has_producer_id());
+        assert!(result.is_successful());
+        assert!(!result.is_acked(), "completing does not acknowledge — only awaiting does");
+
+        // At this point, the InitProducerId call has returned, but the user has yet
+        // to complete the call to `initTransactions`. Other transitions should be
+        // rejected until they do.
+        let expected = format!(
+            "Cannot attempt operation `{}` because the previous call to `initTransactions` timed out and must be \
+             retried",
+            "beginTransaction"
+        );
+        assert_eq!(
+            manager
+                .begin_transaction()
+                .expect_err("beginTransaction is blocked by the unacknowledged result")
+                .message(),
+            expected
+        );
+        assert_eq!(
+            manager
+                .maybe_add_partition(&tp0())
+                .expect_err("send is blocked by the unacknowledged result")
+                .message(),
+            expected.replace("`beginTransaction`", "`send`")
+        );
+
+        // Java: `assertSame(result, transactionManager.initializeTransactions(false))`.
+        let retried = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("retrying the same operation is allowed");
+        assert!(
+            Arc::ptr_eq(&result, &retried),
+            "the same result object must come back, or the InitProducerId would be sent twice"
+        );
+        assert!(pending.is_empty(), "the retry must not enqueue a second InitProducerId");
+
+        result.await_result().await.expect("initTransactions succeeded");
+        assert!(result.is_acked());
+
+        // Once acknowledged the slot is released, so a *new* initTransactions is
+        // rejected by the transition table instead.
+        let error = manager
+            .initialize_transactions(false, &mut pending)
+            .expect_err("initTransactions may not run twice");
+        assert_eq!(
+            error.message(),
+            format!(
+                "TransactionalId {TRANSACTIONAL_ID}: Invalid transition attempted from state READY to state INITIALIZING"
+            )
+        );
+
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(manager.has_ongoing_transaction());
+    }
+
+    /// A *different* operation attempted while a result is unacknowledged is
+    /// rejected with Java's message (Java 1272-1274), and the pending operation
+    /// stays retryable.
+    ///
+    /// `initTransactions` is the only Phase-5a operation that installs a slot, so
+    /// the "different operation" is driven through
+    /// [`TransactionManager::throw_if_pending_state`] — the same rejection Java
+    /// produces from `beginTransaction` (Java 332) and `send` (Java 439). The
+    /// `nextState != pendingTransition.state` arm of
+    /// `handleCachedTransactionRequestResult` itself needs a second
+    /// result-returning entry point (`beginCommit` / `beginAbort` /
+    /// `sendOffsetsToTransaction`), all Phase 5b.
+    #[tokio::test]
+    async fn test_pending_transition_blocks_other_operations_and_stays_retryable() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+
+        for _ in 0..2 {
+            let error = manager
+                .begin_transaction()
+                .expect_err("an unacknowledged result blocks other operations");
+            assert_eq!(
+                error.message(),
+                "Cannot attempt operation `beginTransaction` because the previous call to `initTransactions` timed \
+                 out and must be retried"
+            );
+            assert!(matches!(error, KafkaError::IllegalState(_)));
+        }
+        // Rejecting must not disturb the state machine or the pending result.
+        assert_eq!(manager.current_state(), State::Initializing);
+        assert!(!result.is_completed());
+        assert!(Arc::ptr_eq(
+            &result,
+            &manager
+                .initialize_transactions(false, &mut pending)
+                .expect("the same operation is still retryable")
+        ));
+    }
+
+    /// [`TransactionManager::transition_to_fatal_error`] fails the pending
+    /// transition's result (Java 545-547), so a caller blocked in
+    /// `initTransactions` is woken with the error rather than hanging.
+    #[tokio::test]
+    async fn test_fatal_error_fails_the_pending_transition() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+        assert!(!result.is_completed());
+
+        manager
+            .transition_to_fatal_error(
+                KafkaError::with_message(Errors::InvalidProducerIdMapping, "pid mapping is gone"),
+                Caller::Sender,
+            )
+            .expect("FATAL_ERROR is always a valid target");
+
+        assert!(result.is_completed());
+        let error = result.await_result().await.expect_err("the pending operation failed");
+        assert_eq!(error.error(), Errors::InvalidProducerIdMapping);
+        assert_eq!(error.message(), "pid mapping is gone");
+    }
+
+    /// [`TransactionManager::close`] fails the pending transition even when the
+    /// request queue is empty (Java 953-955).
+    ///
+    /// This is the behaviour PLAN §10.5's `close` note said was Phase-6
+    /// transactional payoff: `Sender.java:288-289`'s "wake up the threads waiting
+    /// on the futures". With an empty queue the loop body never runs, so only this
+    /// branch can complete the result.
+    #[tokio::test]
+    async fn test_close_fails_the_pending_transition_with_an_empty_queue() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+        // Consume the queued request, as the Sender does before sending it.
+        manager
+            .next_request(&mut pending, false)
+            .expect("an InitProducerId request must be pending");
+        assert!(pending.is_empty());
+
+        manager
+            .close(&mut pending, Caller::Sender)
+            .expect("FATAL_ERROR is always a valid target");
+
+        assert!(result.is_completed(), "an empty queue must not leave the caller hanging");
+        let error = result.await_result().await.expect_err("the pending operation failed");
+        assert_eq!(error.message(), "The producer closed forcefully");
+        assert!(
+            !manager.has_fatal_error(),
+            "with an empty queue Java performs no transition — only the pending result is failed"
+        );
+    }
+
+    /// [`TransactionManager::transition_to_uninitialized`] fails the pending
+    /// transition with the raw error (Java 758-760), which is the argument PLAN
+    /// §10.5 deviation 8 said Phase 5 would add.
+    #[tokio::test]
+    async fn test_transition_to_uninitialized_fails_the_pending_transition() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        let result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+        manager
+            .transition_to_abortable_error(KafkaError::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
+            .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
+
+        let authorization_error = KafkaError::new(Errors::ClusterAuthorizationFailed);
+        manager
+            .transition_to_uninitialized(&authorization_error, Caller::Sender)
+            .expect("ABORTABLE_ERROR -> UNINITIALIZED is valid");
+
+        assert_eq!(manager.current_state(), State::Uninitialized);
+        assert!(manager.last_error().is_none(), "Java clears lastError at :761");
+        let error = result.await_result().await.expect_err("the pending operation failed");
+        assert_eq!(error.error(), Errors::ClusterAuthorizationFailed);
+    }
+
+    /// Translated from `testBackgroundInvalidStateTransitionIsFatal`
+    /// (Java 3818-3838), minus the three follow-up calls that need Phase 5b
+    /// (`beginAbort`, `beginCommit`, `sendOffsetsToTransaction`).
+    ///
+    /// Java forces the poison with
+    /// `setShouldPoisonStateOnInvalidTransitionOverride(true)` on a test subclass;
+    /// rules §1 replaces the whole mechanism with an explicit [`Caller`], so
+    /// passing [`Caller::Sender`] *is* the override.
+    #[tokio::test]
+    async fn test_background_invalid_state_transition_is_fatal() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_transactional());
+
+        // Intentionally perform an operation that will cause an invalid state transition. The detection of this
+        // will result in a poisoning of the transaction manager for all subsequent transactional operations since
+        // it was performed in the background.
+        //
+        // `handleFailedBatch` → `maybeTransitionToErrorState` converts the bare
+        // `KafkaException` to `TRANSACTION_ABORTABLE` and attempts
+        // `READY → ABORTABLE_ERROR`, which the table forbids (Java 180).
+        let batch = batch_with_value(&tp0(), "test");
+        let error = manager
+            .handle_failed_batch(&batch, &kafka_exception(), false, &mut [], Caller::Sender)
+            .expect_err("READY -> ABORTABLE_ERROR is not a valid transition");
+        assert!(matches!(error, KafkaError::IllegalState(_)));
+        assert!(manager.has_fatal_error());
+
+        // Validate that these operations fail after the invalid state transition attempt above.
+        for message in [
+            manager.begin_transaction().expect_err("poisoned").message(),
+            manager.maybe_add_partition(&tp0()).expect_err("poisoned").message(),
+            manager
+                .initialize_transactions(false, &mut pending)
+                .expect_err("poisoned")
+                .message(),
+        ] {
+            assert_eq!(
+                message,
+                format!(
+                    "Producer with transactionalId '{TRANSACTIONAL_ID}' and (producerId={PRODUCER_ID}, epoch={EPOCH}) cannot execute transactional method because of previous invalid state transition attempt"
+                )
+            );
+        }
+    }
+
+    /// [`TransactionManager::maybe_transition_to_error_state`]'s transactional arm
+    /// (Java 770-785): a retriable error and an `INVALID_TXN_STATE` both become
+    /// `TRANSACTION_ABORTABLE`, anything else is passed through unchanged, and the
+    /// five fatal classes bypass the arm entirely.
+    #[tokio::test]
+    async fn test_maybe_transition_to_error_state_transactional_arm() {
+        // Retriable and InvalidTxnState are rewritten (Java 774-777).
+        for original in [
+            KafkaError::new(Errors::NotLeaderOrFollower),
+            KafkaError::new(Errors::InvalidTxnState),
+            timeout_exception(),
+        ] {
+            assert!(
+                original.is_retriable() || original.error() == Errors::InvalidTxnState,
+                "the fixture must exercise the rewrite arm"
+            );
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+            manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+            manager
+                .maybe_transition_to_error_state(&original, Caller::App)
+                .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+            assert!(manager.has_abortable_error());
+            let last_error = manager.last_error().expect("recorded");
+            assert_eq!(last_error.error(), Errors::TransactionAbortable);
+            assert_eq!(
+                last_error.message(),
+                "Transaction Request was aborted after exhausting retries."
+            );
+        }
+
+        // A non-retriable, non-InvalidTxnState error is carried through as-is
+        // (Java 780-784 with the `if` at 774 not taken).
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        let original = KafkaError::with_message(Errors::RecordListTooLarge, "too big");
+        assert!(!original.is_retriable());
+        manager
+            .maybe_transition_to_error_state(&original, Caller::App)
+            .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        assert_eq!(manager.last_error().expect("recorded").error(), Errors::RecordListTooLarge);
+        assert_eq!(manager.last_error().expect("recorded").message(), "too big");
+
+        // The five classes tested before `isTransactional()` are fatal for a
+        // transactional producer too (Java 765-770).
+        for code in [
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::ProducerFenced,
+            Errors::UnsupportedVersion,
+            Errors::InvalidProducerIdMapping,
+        ] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+            manager
+                .maybe_transition_to_error_state(&KafkaError::new(code), Caller::App)
+                .expect("FATAL_ERROR is always a valid target");
+            assert!(manager.has_fatal_error(), "{code} must be fatal");
+        }
+    }
+
+    /// [`TransactionManager::reset_transaction_state`] (Java 1330) clears the
+    /// per-transaction state, and picks `INITIALIZING` over `READY` exactly when a
+    /// client-side epoch bump is pending.
+    ///
+    /// Both Java call sites are Phase 5b, so this drives the method directly.
+    #[tokio::test]
+    async fn test_reset_transaction_state() {
+        for epoch_bump_required in [false, true] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+            manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+            if epoch_bump_required {
+                manager.request_idempotent_epoch_bump_for_partition(&tp0());
+                assert!(manager.client_side_epoch_bump_required());
+            }
+            // Reach a state `resetTransactionState`'s targets are valid from:
+            // Java always calls it while completing an EndTxn.
+            manager
+                .transition_to(State::CommittingTransaction, None, Caller::Sender)
+                .expect("IN_TRANSACTION -> COMMITTING_TRANSACTION is valid");
+
+            manager.reset_transaction_state().expect("both targets are valid");
+
+            assert_eq!(
+                manager.current_state(),
+                if epoch_bump_required {
+                    State::Initializing
+                } else {
+                    State::Ready
+                }
+            );
+            assert!(manager.last_error().is_none());
+            assert!(!manager.client_side_epoch_bump_required());
+            assert!(!manager.has_partitions_to_add());
+            assert!(!manager.transaction_contains_partition(&tp0()));
+        }
+    }
+
     /// Translated from `testDefaultSequenceNumber` (Java 623-630).
     #[test]
     fn test_default_sequence_number() {
@@ -3638,7 +4753,7 @@ mod tests {
 
             // Marking sequence numbers unresolved without inflight requests is basically a no-op.
             manager.mark_sequence_unresolved(&b1);
-            manager.maybe_resolve_sequences().expect("resolving succeeds");
+            manager.maybe_resolve_sequences(Caller::Sender).expect("resolving succeeds");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
             assert!(!manager.has_unresolved_sequences());
 
@@ -3653,7 +4768,7 @@ mod tests {
 
             // We only had one inflight batch, so we should be able to clear the unresolved status
             // and bump the epoch
-            manager.maybe_resolve_sequences().expect("resolving succeeds");
+            manager.maybe_resolve_sequences(Caller::Sender).expect("resolving succeeds");
             assert!(!manager.has_unresolved_sequences());
 
             // Java reaches the bump through `runUntil(.. epoch == 6)`.
@@ -3711,7 +4826,7 @@ mod tests {
             manager
                 .handle_completed_batch(&b3, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
                 .expect("the completion is recorded");
-            manager.maybe_resolve_sequences().expect("resolving succeeds");
+            manager.maybe_resolve_sequences(Caller::Sender).expect("resolving succeeds");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
             assert!(!manager.has_unresolved_sequences());
             assert_eq!(manager.sequence_number(&tp0), 3);

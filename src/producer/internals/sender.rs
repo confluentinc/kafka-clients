@@ -888,7 +888,7 @@ impl<C: KafkaClient> Sender<C> {
         transaction_manager
             .lock()
             .unwrap()
-            .maybe_resolve_sequences()
+            .maybe_resolve_sequences(Caller::Sender)
             .map_err(TransactionPhaseError::Other)?;
 
         // Sender.java:315-318 — read `lastError` and the error state together, so
@@ -964,7 +964,13 @@ impl<C: KafkaClient> Sender<C> {
         // The guard from the statement above is released at the `;`, so the deque
         // locks this takes are still acquired with no manager lock held (rules §3).
         self.maybe_abort_batches(error);
-        transaction_manager.lock().unwrap().transition_to_uninitialized(Caller::Sender)
+        // Java 356 passes the **raw** exception here, not the
+        // `new AuthenticationException(exception)` wrapper handed to
+        // `failPendingRequests` at :354.
+        transaction_manager
+            .lock()
+            .unwrap()
+            .transition_to_uninitialized(error, Caller::Sender)
     }
 
     /// `transactionManager.bumpIdempotentEpochAndResetIdIfNeeded()`
@@ -2252,17 +2258,14 @@ mod tests {
     /// `maybeUpdateTransactionV2Enabled` (Java 493), both transactional and both
     /// Phase 5 — so an empty instance is sufficient here.
     fn idempotent_transaction_manager() -> Arc<Mutex<TransactionManager>> {
-        Arc::new(Mutex::new(
-            TransactionManager::new(
-                LogContext::empty(),
-                None,
-                TRANSACTION_TIMEOUT_MS,
-                RETRY_BACKOFF_MS,
-                Arc::new(crate::ApiVersions::new()),
-                false,
-            )
-            .expect("an idempotent manager is constructible"),
-        ))
+        Arc::new(Mutex::new(TransactionManager::new(
+            LogContext::empty(),
+            None,
+            TRANSACTION_TIMEOUT_MS,
+            RETRY_BACKOFF_MS,
+            Arc::new(crate::ApiVersions::new()),
+            false,
+        )))
     }
 
     /// The timing knobs a `SenderTest`-style context can override, matching the ones
