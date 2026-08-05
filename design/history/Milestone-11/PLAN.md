@@ -2346,6 +2346,72 @@ removes the aliasing without a second traversal. `Sender::complete_batch` is alr
 owners correctly for `bump_idempotent_epoch_and_reset_id_if_needed` — so the pieces exist;
 what is missing is the signature change and its audit.
 
+### 9.26 Three `FetchRequestManagerTest` abort-marker tests are now owed, not blocked
+
+**Status:** open, and **reclassified** by Phase 8. Owner: the consumer's own test-parity
+work, not a producer-transactions phase.
+
+`testMultipleAbortMarkers` (`FetchRequestManagerTest.java:2443`),
+`testReadCommittedAbortMarkerWithNoData` (`:2492`) and
+`testReadCommittedWithCommittedAndAbortedTransactions` (`:2367`) were skipped from
+Phase 7a onward on a *production* blocker: a READ_COMMITTED control batch from an
+already-aborted producer id returned `KafkaError::unsupported_version`, because
+`ControlRecordType` was untranslated and COMMIT could not be told from ABORT.
+
+Phase 8 removed that blocker while fixing the defect its integration test surfaced (see
+below): `common/record/control_record_type.rs` translates the class and
+`CompletedFetch::contains_abort_marker` implements Java's branch. So these three are no
+longer blocked — what they now need is a **test fixture**, a batch builder that emits a
+real control batch whose first record's key is a marker.
+`fetch_request_manager.rs`'s `build_batch_full` does not, and neither does
+`fetch_collector.rs`'s fixture, which is why two further tests there still use plain data
+batches and say so.
+
+Also owed with them: `test_consumer_position_updated_when_skipping_aborted_transactions`
+omits Java's trailing ABORT marker and asserts a position of 2 rather than 3. The contract
+it tests is unaffected, but the literal is now an unnecessary deviation.
+
+**Not done in Phase 8** because it is consumer test parity across two files with a new
+fixture builder, and Phase 8's scope is `TransactionManagerTest` plus the producer's broker
+integration. The marker path is not uncovered in the meantime: it has broker-level cover in
+`tests/integration/producer_transactions_test.rs`
+(`test_aborted_transaction_records_are_discarded`), which is stronger evidence than the
+unit fixture would be, since it reads a marker a real broker wrote.
+
+### 9.27 `containsAbortMarker` was deferred on a false rarity claim — fixed in Phase 8
+
+**Status:** DONE, fixed in Phase 8. Recorded because the *reason* it survived four phases
+is the reusable lesson, not the code.
+
+Phase 7a deferred Java's `containsAbortMarker` branch and had `CompletedFetch` return
+`KafkaError::unsupported_version` on any READ_COMMITTED control batch whose producer id was
+in the aborted set. That is a correct application of CLAUDE.md §5 — fail explicitly rather
+than silently mis-deliver — and the module docstring justified the deferral like this:
+
+> This is conservative; production readers will hit it only if their producers reuse
+> producer IDs after an abort, which is rare.
+
+**The claim is false.** A producer id is assigned once per producer incarnation and is
+stable across its transactions, so a producer that aborts one transaction and commits the
+next reuses it *by construction*. Every `read_committed` consumer of a partition where any
+transaction aborted and a later one committed hit the bail, and worse, it surfaced as an
+`UnsupportedVersion` error rather than as missing data — so it would have read as a broker
+compatibility problem.
+
+Phase 8's `test_aborted_transaction_records_are_discarded` failed on exactly this on its
+first run, which is what exposed it. The fix is the faithful translation:
+`ControlRecordType` (`common/record/control_record_type.rs`, its own file per CLAUDE.md §2,
+with `InvalidRecordError` for Java's `InvalidRecordException`) plus
+`CompletedFetch::contains_abort_marker`, in Java's order — the ABORT marker clears the
+producer id *before* `isBatchAborted` is consulted (`CompletedFetch.java:210-218`).
+
+**The lesson:** the deferral note asserted a frequency for a *client* behaviour without
+checking what the client does. A rarity claim used to justify a deferral is a factual claim
+about a code path and should be checked the same way any other claim is — here, one look at
+where `producerId` is assigned would have settled it. The scope of the resulting integration
+gap is the tell: no test anywhere reached the branch, in either the producer or the consumer
+suite, for four phases.
+
 ---
 
 ## 10. Recorded translation deviations
