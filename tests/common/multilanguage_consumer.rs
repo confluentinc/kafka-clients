@@ -696,8 +696,11 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
     )
 }
 
+/// Records bucketed by topic-partition, in the shape `ConsumerRecords::new` takes.
+type RecordsByPartition = IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>>;
+
 fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecords<Vec<u8>, Vec<u8>> {
-    let mut by_partition: IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>> = IndexMap::new();
+    let mut by_partition: RecordsByPartition = IndexMap::new();
     for proto_rec in list.records {
         let tp = TopicPartition::new(proto_rec.topic.clone(), proto_rec.partition);
         by_partition.entry(tp).or_default().push(consumer_record_from_proto(proto_rec));
@@ -706,10 +709,10 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
     // multilanguage tests assert on the records, not next_offsets()).
     let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
     for (tp, recs) in &by_partition {
-        if let Some(last) = recs.last() {
-            if let Ok(oam) = OffsetAndMetadata::new(last.offset() + 1) {
-                next_offsets.insert(tp.clone(), oam);
-            }
+        if let Some(last) = recs.last()
+            && let Ok(oam) = OffsetAndMetadata::new(last.offset() + 1)
+        {
+            next_offsets.insert(tp.clone(), oam);
         }
     }
     ConsumerRecords::new(by_partition, next_offsets)

@@ -135,22 +135,30 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 fn lint() -> anyhow::Result<()> {
     println!("🔍 Running clippy lints...");
 
-    // Lint main crate
-    run_command("cargo", &["clippy", "--all-targets", "--", "-D", "warnings"])?;
-
-    // Lint generator crate
-    run_command(
-        "cargo",
+    // Two passes over the whole workspace are needed to cover every module:
+    //
+    // - Default features: catches code behind `#[cfg(not(feature = ...))]`, and
+    //   imports that are only unused when a feature is off.
+    // - `--all-features`: `src/ffi/*` is gated behind `ffi`, and the integration
+    //   tests behind `integration-tests` / `multilanguage-tests`. Without this
+    //   pass those modules are compiled out and silently never linted.
+    //
+    // `--workspace` covers every member (including `generator`), so no
+    // per-crate pass is needed.
+    for pass in [
+        &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
         &[
             "clippy",
-            "--manifest-path",
-            "generator/Cargo.toml",
+            "--workspace",
             "--all-targets",
+            "--all-features",
             "--",
             "-D",
             "warnings",
-        ],
-    )?;
+        ][..],
+    ] {
+        run_command("cargo", pass)?;
+    }
 
     println!("✅ No lint issues found!");
     Ok(())
@@ -159,11 +167,13 @@ fn lint() -> anyhow::Result<()> {
 fn lint_fix() -> anyhow::Result<()> {
     println!("🔧 Running clippy with automatic fixes...");
 
-    // Fix main crate
-    run_command(
-        "cargo",
+    // Same two passes as `lint()` — see the comment there for why both are
+    // needed. Fixing only the default-feature pass would leave `src/ffi/*` and
+    // the integration tests untouched.
+    for pass in [
         &[
             "clippy",
+            "--workspace",
             "--all-targets",
             "--fix",
             "--allow-dirty",
@@ -171,25 +181,22 @@ fn lint_fix() -> anyhow::Result<()> {
             "--",
             "-D",
             "warnings",
-        ],
-    )?;
-
-    // Fix generator crate
-    run_command(
-        "cargo",
+        ][..],
         &[
             "clippy",
-            "--manifest-path",
-            "generator/Cargo.toml",
+            "--workspace",
             "--all-targets",
+            "--all-features",
             "--fix",
             "--allow-dirty",
             "--allow-staged",
             "--",
             "-D",
             "warnings",
-        ],
-    )?;
+        ][..],
+    ] {
+        run_command("cargo", pass)?;
+    }
 
     println!("✅ Lint fixes applied!");
     Ok(())

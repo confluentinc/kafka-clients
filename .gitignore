@@ -9,6 +9,7 @@ tools/java-perf-test/bin/
 *.md.lock
 *.pyc
 bin
+build
 venv
 COMMENTS\.[0-9]*\.md
 COMMENTS\.TBR\.[0-9]*\.md
