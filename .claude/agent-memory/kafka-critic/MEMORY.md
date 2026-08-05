@@ -69,3 +69,4 @@
 - [M11 Phase 5a txn state machine](review_m11_phase5a.md) — CLOSED 7→2→0, all findings were records. Extract+run shipped derivations (guard the extraction); deleting a guard voids every skip citing it; falsify rules §2
 - [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→1→0, closes Phase 5. Caller both-reachable grep per entry point; builder snapshots defeat "retry carries only X"; state reachability = grep the writers' Caller
 - [M11 Phase 6 public txn API](review_m11_phase6.md) — CLOSED 7→4→1→1→0, 0 behavioural. A documented escape shape is adversarial input for the next checker; sweep blind spots incl. two of mine
+- [M11 Phase 7 MockProducer txn](review_m11_phase7.md) — CLOSED 4→0. Artifacts agreeing on "three" can name different threes; normalisation diffs need every swap + a rename map

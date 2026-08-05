@@ -2233,8 +2233,6 @@ Standing rule-update suggestions accumulated for the process: rules §2 on
 `pendingRequests` and on `coordinatorSupportsBumpingEpoch` (§10.9, §9.21), the DoD
 §3 executed-commands clause, and CLAUDE.md §9.6's timer-starvation pitfall.
 
----
-
 ### 9.23 `MockProducer`'s telemetry and metrics surface is untranslated, because the trait is
 
 **Status:** open. Found in Phase 7 by its method accounting, which is in
@@ -2267,6 +2265,33 @@ would need them, and they are not in Phases 1-8.
 **Fix:** add the four `Producer`-trait methods (`KafkaProducer` first, since it owns
 the real `ClientTelemetryReporter`), then the five mock knobs, then translate the
 `KafkaProducerTest` telemetry group. Sizeable, and orthogonal to transactions.
+
+### 9.24 Critic review of Phase 7
+
+**Status:** DONE — **closed 2026-08-06 on a clean second pass** (4→0), the
+milestone's fastest. Archived at
+`design/history/Milestone-11/Phase-7/COMMENTS.DONE.47.md`.
+
+Four findings, all records; zero behavioural defects in production code — the fourth
+consecutive clean-on-arrival phase. All 22 entry points verified
+statement-by-statement against `MockProducer.java` in pass 1.
+
+Delivered: the mock's full transactional surface with Java's staging semantics, 43
+of 44 named tests (the 44th proven not-applicable — its NPE fires before the mock is
+entered), two pre-existing `Completion::complete` defects fixed (missing -1-filled
+error metadata; completion-before-callback), a published C doc contract corrected
+per-path after the fix falsified it, and a known reentrancy divergence honestly
+recorded in §10.10 (callback re-entering the mock deadlocks where Java's reentrant
+monitor allows it).
+
+Lessons: membership-never-count (two lists agreeing on "3" while naming different
+threes; a renamed test invisible without a rename map); the
+`cargo:rerun-if-changed` footgun keeping the generated C header fresh.
+
+The 10 absent-with-owner methods the Phase-7 accounting names are tracked in
+§9.23 (opened by the Actor); all block zero of the 55 tests.
+
+---
 
 ## 10. Recorded translation deviations
 
