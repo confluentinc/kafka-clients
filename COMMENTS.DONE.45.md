@@ -554,3 +554,68 @@ touch the rules:
   root, on the interpreter available in this environment, and its real output pasted beside the
   claim. A derivation whose stated exclusions are not exercised by the code, or that scores a
   production claim against a `#[cfg(test)]` item, does not count as a check."*
+
+---
+
+# Critic 45 — pass 2 resolved
+
+**2 findings, 2 conceded, 0 disputed.** Both records, neither behavioural. Pass 2
+verified all seven pass-1 fixes genuinely fixed (both derivations re-run from the
+shipped text, byte-identical regeneration; the `else`-arm mutation claim proved by
+site analysis without mutating; the zero-production-diff claim confirmed per-file;
+the timing departure adjudicated acceptable-and-better-than-Java; the
+`is_completed()` probe ruled to strictly dominate Java's `assertThrows`), and
+withdrew one of its own preliminary flags after running my version of the histogram
+sort.
+
+| Issue | Class | Fix |
+|---|---|---|
+| 1 | new `SenderTest` derivation used `for (k in hard)` — the non-determinism the same commit set repaired next door | `a5918b3` |
+| 2 | `test_node_not_ready` claimed Java 689-711 but dropped 708-709 | `a5918b3` |
+
+## Issue 1 — my own rule, broken one file over
+
+The rule I wrote while fixing pass-1 issue 5 says to walk `MARKERS` in declaration
+order *because* unspecified order matters when output is pasted. The `SenderTest`
+derivation added in the same change did neither. The Critic demonstrated the paste
+was hash-ordered (entry 1534 printed positions 8, 7, 1) rather than asserting it.
+One-line fix, re-pasted in declaration order.
+
+Two subsidiary points answered rather than left open:
+
+  - **Splitter hazard: checked.** The guard here is shaped differently from the
+    sibling's because `SenderTest` declares tests both `public` and `private`, so
+    `private void` helpers must be able to *start* a block. Verified rather than
+    argued: recomputing every block's marker set from a body delimited by its
+    closing `    }` line agrees with the splitter on **all 100 blocks**.
+  - **No `ABBREV` table, deliberately.** It exists next door because 107 rows had to
+    fit the column limit; 18 rows can carry full marker names, which is worth more
+    than cross-block comparability.
+
+## Issue 2 — translated, not documented
+
+The Critic offered either resolution and explicitly disclaimed a coverage hole. I
+translated Java 708-709, because on my own stated standard a "minus a named tail"
+entry is for a tail whose *surface is missing* (Phase 5b) — and nothing was missing
+here: `MockClient::throttle` already existed and `poll_delay_ms` already honoured
+`throttled_until_ms`. A note would have been a deferral with no blocker, which is
+the shape pass-1 issue 3 was about. No new infrastructure was built.
+
+Making it pass surfaced a precondition worth pinning: one `run_once` too many after
+clearing the delay sends the `InitProducerId` early, so the throttle has nothing
+queued to block and `maybeSendAndPollTransactionalRequest` returns at
+`Sender.java:460-463` without consulting the coordinator. Java is in the same state
+at its `assertNotNull`, so the fix is one `run_once` plus explicit
+queued/not-in-flight assertions.
+
+Both halves mutation-checked against the assertion that names each: deleting the
+`else` arm's `metadata.request_update(false)`; and making `lookup_coordinator` stop
+forgetting the TRANSACTION node.
+
+## Process note recorded against myself
+
+My first verification of the issue-1 re-paste reported `IDENTICAL` from a `diff` of
+two *empty* files — the `sed` extraction had silently dropped the program's last
+line. This is the same class as the defect being fixed. The check now asserts the
+extracted program has balanced braces and that both sides are non-empty before
+diffing, and that guard is what made the second attempt trustworthy.
