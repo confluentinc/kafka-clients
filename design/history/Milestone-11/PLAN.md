@@ -543,9 +543,10 @@ The 44th, `shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction`
 (`MockProducerTest.java:430`), joins `shouldThrowClassCastException` as the second
 NOT APPLICABLE entry — and **not** for missing surface. Its
 `NullPointerException` is not thrown by the mock at all: it comes from evaluating
-`new ConsumerGroupMetadata(null)` inside the lambda, i.e.
-`ConsumerGroupMetadata.java:41`'s `Objects.requireNonNull(groupId, ..)`, before
-`sendOffsetsToTransaction` is entered — and with `Collections.emptyMap()` for the
+`new ConsumerGroupMetadata(null)` inside the lambda — the one-arg constructor at
+`ConsumerGroupMetadata.java:52`, delegating to the four-arg one declared at `:38`,
+whose first statement is `Objects.requireNonNull(groupId, "group.id can't be null")`
+at `:42` — before `sendOffsetsToTransaction` is entered — and with `Collections.emptyMap()` for the
 offsets there is no other reachable throw. Rust's
 `ConsumerGroupMetadata::new(impl Into<String>)` cannot receive null, so there is
 nothing to implement (§10.10 deviation 4). The empty-offsets path it incidentally
@@ -557,9 +558,16 @@ addition: beyond type erasure, the Rust mock holds no serializers to mis-apply.
 
 Two pre-existing defects in `Completion::complete` were fixed here (the error-path
 callback got no metadata where Java passes a −1-filled `RecordMetadata`, and
-`result.done()` preceded the callback instead of following it), and three landed
-translations that were weaker than their Java originals were brought up to them
-(`testMetadataOnException`, and the two closed-producer message assertions). Ten
+`result.done()` preceded the callback instead of following it), and **four** landed
+translations that were weaker than their Java originals were brought up to them:
+`testManualCompletion` (107, Java compares the cause at 122; the translation asserted
+a bare `is_err()`), `testMetadataOnException` (724, dropped all four values Java
+checks at 727-731), and `shouldThrowOnSendIfProducerIsClosed` (624) /
+`shouldThrowOnFlushProducerIfProducerIsClosed` (673), which matched their message
+with `contains` rather than equality. The set is re-derived from the diff in the
+in-file accounting block, which also records why the number is the wrong thing to
+carry: the first two artifacts to state it both said "three" and named a *different*
+three, and no count-level check can see that. Ten
 `MockProducer.java` methods remain absent — the telemetry / metrics pair, tracked
 as §9.23, blocking **zero** of the 55 tests — plus `partition`, whose absence is
 the standing pre-serialized-bytes design decision. Deviations are recorded in
@@ -3147,12 +3155,43 @@ Each is documented at its call site as well.
    crate-wide and out of scope; preserving the code was the more valuable half,
    since it is what the test checks.
 
+   Separately, the `Completion::complete` fix (error path now passes Java 578's
+   −1-filled `RecordMetadata` alongside the error) makes the mock's C-surface
+   behaviour match `KafkaProducer`'s `ApiException` path, where it previously
+   differed. It also falsified one sentence in a *published* C contract:
+   `kafka_producer_Producer_send_async`'s doc claimed "the other argument is null",
+   which was already false for `KafkaProducer`'s path before this phase and is now
+   false for the mock's too. Java is itself inconsistent across its three callback
+   sites — `ProducerBatch.java:315` passes null metadata, `KafkaProducer.java:1060`
+   and `MockProducer.java:578` do not — and each Rust site mirrors its own
+   counterpart faithfully, so the doc was the thing that was wrong. Corrected to
+   state the per-path truth and that the caller must free *every* non-null handle,
+   in `src/ffi/producer.rs` and hence in the cbindgen-generated
+   `target/include/confluent_kafka.h`.
+
 2. **`flush()` moved to the inner type.** Java's `flush()` is `synchronized` and is
    called from the equally `synchronized` `commitTransaction` (`:214`) and
    `abortTransaction` (`:240`). A Java monitor is reentrant; `std::sync::Mutex` is
    not, so the body lives on `MockProducerInner` and runs with the caller's guard
    already held, with `Producer::flush` as the acquiring entry point. Same for
-   `completeNext` / `errorNext`. No behavioural change: the mock's critical sections
+   `completeNext` / `errorNext`. No behavioural change on the paths the refactor
+   touches: every public method now locks exactly once, and the four moved inner
+   methods never lock, so no call sequence that worked before can deadlock now.
+
+   **One residual divergence this does not remove, and is not trying to.** The user
+   callback fired from `Completion::complete` runs *with the guard held*, so a
+   callback that re-enters the mock (`producer.flushed()`, `producer.history()`)
+   deadlocks where Java's reentrant monitor would allow it. That predates Phase 7 —
+   both `send_with_callback` under `auto_complete` and `error_next` already fired
+   callbacks under the guard — no Java test exercises it, and the obvious fix
+   (release before the callback) would trade away the atomicity Java's `synchronized`
+   guarantees, which is worse. Recorded rather than fixed.
+
+   An earlier revision of this entry justified the refactor with "no `.await`, so
+   nothing is held across a suspend point (CLAUDE.md §9.6.2)". That is true but
+   answers the *async-runtime* hazard, not the *reentrancy* hazard this deviation is
+   about; the two are independent, and only the second is why the body moved. Still
+   worth stating on its own, so: the mock's critical sections
    contain no `.await`, so nothing is held across a suspend point (CLAUDE.md §9.6.2).
 
 3. **`uncommittedOffsets()` returns a snapshot, not the live map.** Java hands back
@@ -3169,7 +3208,9 @@ Each is documented at its call site as well.
    (`MockProducerTest.java:430`) is one of the two NOT APPLICABLE entries in the
    test accounting block — and note the `NullPointerException` it asserts is not
    even raised by the mock: it comes from `new ConsumerGroupMetadata(null)` in the
-   lambda, i.e. `ConsumerGroupMetadata.java:41`.
+   lambda — the one-arg constructor at `ConsumerGroupMetadata.java:52`, delegating to
+   the four-arg one declared at `:38`, whose `Objects.requireNonNull(groupId, ..)` is
+   at `:42`.
 
 5. **`ConsumerGroupOffsets` type alias.** Spells Java's `Map<String,
    Map<TopicPartition, OffsetAndMetadata>>` (`:63`, `:68`) once instead of four

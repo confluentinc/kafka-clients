@@ -57,7 +57,17 @@ visible as a `let _ = topic_partition;` — an unused-binding suppression is a
 good smell for "a field was dropped from a translation".
 
 **Also:** a derivation that classifies Java names cannot see a test that is
-present but *weakened*. Three were (`testManualCompletion` asserting only
-`is_err()`, two closed-producer tests using `contains` on the message) and one
-still is (`test_partitioner`, no `Partitioner` on the Rust mock). Prose has to
-name them; the count never will.
+present but *weakened*. **Four** were — `testManualCompletion` (bare `is_err()`
+where Java compares the cause), `testMetadataOnException` (dropped all four
+values Java checks), and both closed-producer tests (`contains` instead of exact
+message) — and one still is (`test_partitioner`, no `Partitioner` on the Rust
+mock). Prose has to name them; the count never will.
+
+**And the lesson that cost a Critic finding: record such a set by membership,
+never by count.** I wrote "three" in four artifacts and named *two different
+threes* — the in-file block and PLAN dropped `testManualCompletion`, the commit
+message and this note dropped `testMetadataOnException` — because each was
+written beside the commit that made its own subset visible. Two lists that agree
+on `3` look consistent to every count-level check; only a membership diff sees
+it. This is the cross-reference cousin of Phase 6's complementary-sweep lesson:
+re-derive the set from the diff at fix time, and write the names everywhere.

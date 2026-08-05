@@ -1262,10 +1262,19 @@ mod tests {
 
     /// Translated from `MockProducerTest.testMetadataOnException` (Java 724).
     ///
-    /// Java asserts on the metadata handed to the send callback. A panic inside
-    /// the callback would be swallowed by the mock, so the four values are
-    /// captured and asserted afterwards rather than in the closure — otherwise a
-    /// callback that never fires, or fires with no metadata, would pass silently.
+    /// Java asserts on the metadata handed to the send callback, inline in the
+    /// callback body (Java 727-731). The four values are captured here and asserted
+    /// *after* `error_next` returns instead, because an assertion that only ever
+    /// runs inside the callback cannot fail when the callback **never runs** — Java
+    /// has that hole too, and `assertNotNull(md)` at 727 does not close it. Capturing
+    /// outside makes "never fired" a failure, so this form is strictly stronger.
+    ///
+    /// A panic *is* propagated on this path — `error_next` → `Completion::complete`
+    /// → `cb(..)` is synchronous with no `catch_unwind`, and the closure's own
+    /// `expect` below relies on that. (Java's producer does swallow callback
+    /// exceptions, but in `ProducerBatch.completeFutureAndFireCallbacks`
+    /// (`ProducerBatch.java:318-320`), not in `MockProducer.Completion.complete`,
+    /// which has no try/catch.)
     #[tokio::test]
     async fn test_metadata_on_exception() {
         let producer = build_mock_producer(false);
@@ -2487,10 +2496,11 @@ mod tests {
     //   NOT APPLICABLE — `MockProducerTest.shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction`
     //     (Java 430). Despite the name, the `NullPointerException` it asserts does
     //     not come from `sendOffsetsToTransaction`: it comes from evaluating
-    //     `new ConsumerGroupMetadata(null)` in the lambda, i.e. from
-    //     `ConsumerGroupMetadata.java:41`'s
-    //     `Objects.requireNonNull(groupId, "group.id can't be null")`, before the
-    //     mock is entered at all. With `Collections.emptyMap()` for the offsets
+    //     `new ConsumerGroupMetadata(null)` in the lambda — the one-arg constructor
+    //     at `ConsumerGroupMetadata.java:52`, delegating to the four-arg one
+    //     declared at `:38`, whose first statement is
+    //     `Objects.requireNonNull(groupId, "group.id can't be null")` at `:42` —
+    //     before the mock is entered at all. With `Collections.emptyMap()` for the offsets
     //     there is no other reachable throw — `sendOffsetsToTransaction` would
     //     return at `MockProducer.java:195`. Rust's
     //     `ConsumerGroupMetadata::new(impl Into<String>)` cannot receive null, and
@@ -2513,14 +2523,31 @@ mod tests {
     // What the derivation cannot see, and where each is pinned instead:
     //
     //   - A test present but weakened. `test_partitioner` (Java 86) is the one
-    //     such case: Java drives a `RoundRobinPartitioner` and asserts it picks
-    //     partition 0, while the Rust mock has no partitioner, so the translation
-    //     asserts an explicit `record.partition()` is honoured instead. Its own
-    //     rustdoc says so. Three others were weakened and are no longer:
-    //     `testMetadataOnException` (724) asserted only that the future failed,
-    //     `shouldThrowOnSendIfProducerIsClosed` (624) and
-    //     `shouldThrowOnFlushProducerIfProducerIsClosed` (673) matched their
-    //     message with `contains`; all three now assert Java's exact values.
+    //     such case remaining: Java drives a `RoundRobinPartitioner` and asserts it
+    //     picks partition 0, while the Rust mock has no partitioner, so the
+    //     translation asserts an explicit `record.partition()` is honoured instead.
+    //     Its own rustdoc says so.
+    //
+    //     **Four** others were weakened and are no longer. Naming all four matters
+    //     more than the number: the two artifacts that first recorded this each
+    //     said "three" and each named a *different* three, because each was written
+    //     beside the commit that made its own subset visible. A count-level check
+    //     finds nothing wrong with two lists that agree on `3`; only membership
+    //     does. So the set is re-derived from the diff rather than from either
+    //     list — normalise away this phase's two mechanical swaps
+    //     (`MockProducer::with_auto_complete(x)` → `build_mock_producer(x)`, and
+    //     `make_record("topic", "keyN", "valueN")` → `recordN()`), then compare
+    //     every pre-Phase-7 test body at `82aa2da` against its current form. Six
+    //     bodies differ before that normalisation and exactly these four after:
+    //
+    //       `testManualCompletion` (107) — Java compares the cause at 122; the
+    //         translation asserted a bare `is_err()`. Now `assert_eq!("blah", ..)`.
+    //       `testMetadataOnException` (724) — asserted only that the future failed,
+    //         dropping all four values Java checks at 727-731. Now asserts them.
+    //       `shouldThrowOnSendIfProducerIsClosed` (624) and
+    //         `shouldThrowOnFlushProducerIfProducerIsClosed` (673) — matched their
+    //         message with `contains`. Now `assert_illegal_state`, i.e. variant plus
+    //         exact message.
     //   - A test that passes with the bug reintroduced. Twelve mutations of the
     //     Phase-7 surface were each applied and each failed the suite; the commit
     //     that landed them lists them.
