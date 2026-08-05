@@ -1,6 +1,6 @@
 ---
 name: review-m11-phase6
-description: M11 Phase 6 (public producer txn API + Sender txn loop) — 7→4→1, 0 behavioural ever; splitter blind spots, count cross-references, unpinned prod fix, and a Critic false fact the Actor caught
+description: M11 Phase 6 (public producer txn API + Sender txn loop) — 7→4→1→1, 0 behavioural ever; splitter/sweep blind spots (mine twice), count cross-references, unpinned prod fix
 metadata:
   type: project
 ---
@@ -64,15 +64,55 @@ group whose header now reads `(16)` two hundred lines up (and whose owed subset 
 headers. Restatement sweeps naturally target the headline number; the referring phrase a
 few hundred lines away survives.
 
+## P4.1 My own sweep was wrap-blind and start-only — the second self-inflicted classifier gap
+
+Pass 3 I disclosed "3 of 24 rustdoc headers are off" and used the ratio to argue the
+deviation was an isolated outlier. Both halves were wrong, and the Actor caught it:
+
+- **Wrap-blind population.** My regex needed ``Translated from `SenderTest.<name>` `` on one
+  line. **17 of 41** headers wrap — "Translated from" ends the line, the backticked name
+  starts the next — so my denominator was 24 against a true 41.
+- **Start-only criterion.** I compared only the range's first number to the declaration,
+  never the second to the closing `    }`, so a pre-existing end-off-by-one
+  (`testNodeNotReady` 711 vs 712) was structurally invisible.
+
+**Durable fix, for any sweep over doc comments:** join a window of following `///` lines
+before matching (never match a doc field on a single line), and check *every* field the
+convention constrains, not the first one. And never quote a ratio from a population you have
+not separately verified — "3 of 24" was the argument, and the 24 was the defect.
+
+Second time this phase I committed the defect I was reviewing for (see §6 for the first).
+Both were confident denominators from classifiers that could not see a shape — the exact
+thing pass 1 filed against the Actor. Before asserting any "N of M", ask what M would miss.
+
+## P4.2 A range regex requiring the closing paren silently drops annotated ranges
+
+Pass 4's finding: the block claimed "40 headers, 0 mismatches" over 41. Cause pinned by
+running both forms — `\(Java \d+-\d+\)` (closing paren required) matches exactly **40**; the
+41st reads `(Java 715-735 — the produce-request variant is at Java 2159-2179)`, a clause
+*inside* the parens. Use `\(Java (\d+)\s*[-–]\s*(\d+)` with no trailing `\)`.
+
+Worth remembering because the block's own prose, three sentences below the count, describes
+this very escape ("its range is followed by a clause inside the same parentheses rather than
+closing them"). When a paragraph documents a sweep-escape shape, test the sweep *against
+that shape* — the documented hazard is the likeliest live one, and an off-by-one denominator
+is its fingerprint.
+
 ## P3.2 Honour a pre-committed non-finding rather than re-litigating at a new threshold
 
 Pass 1 recorded "`(Java A-B)` header ranges carry ±1-3 lines of slop; the bar for filing is
 that a citation points at a *different method*" — recorded explicitly so it would not
-consume a fix cycle. Pass 3's sweep found 3 of 24 headers off by −1, −2, −5, the last
-starting on a `}` inside the previous method's body. Tempting to file the −5. I did not:
-each range still brackets its own method, and moving the bar from −3 to −5 on the closing
-pass would be arbitrary. **Disclose it as a checked non-finding with the reasoning** — that
-keeps the record complete without manufacturing, and stops the next pass rediscovering it.
+consume a fix cycle. Pass 3's sweep found headers off by −1, −2, −5, the last starting on a
+`}` inside the previous method's body. Tempting to file the −5. I did not: each range still
+brackets its own method, and moving the bar from −3 to −5 on the closing pass would be
+arbitrary. **Disclose it as a checked non-finding with the reasoning** — that keeps the
+record complete without manufacturing, and stops the next pass rediscovering it.
+
+The judgement held up; the *arithmetic* I attached to it did not. I reported it as "3 of 24",
+and it was really 5 of 41 (P4.1) — so the "isolated outlier" ratio I leaned on was not
+evidence, even though the decision not to file was still right on its own bar. Keep the bar,
+drop the ratio: argue such a call from the *kind* of deviation, not from a proportion of a
+population you have not verified.
 
 ## P3.3 A "must not disagree" invariant is the right shape when the bad form appears in refutations
 

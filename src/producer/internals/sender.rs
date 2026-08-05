@@ -7544,19 +7544,43 @@ mod tests {
     // the method's closing `    }`.
     //
     // Both halves of that convention are now swept mechanically rather than asserted.
-    // For the entry citations in this block: extract each `` `name` (line) `` pair and
-    // check `sed -n "${line}p"` contains `name(` — 55 pairs, 0 mismatches. For the
-    // rustdoc headers: resolve each `Translated from `SenderTest.<name>`` to the Java
-    // declaration and its closing brace and compare both ends — 40 headers, 0
-    // mismatches. The header sweep found **five** non-conforming ranges that a
-    // start-only check does not: four introduced by Phase 6's own shutdown group
-    // (starting on `@Test`, on a blank line, and twice on the *previous* method's
-    // closing brace) and one pre-existing end-off-by-one on `testNodeNotReady`. All are
-    // corrected. Checking those headers requires
-    // comparing each method *name* against its range, not just rewriting the range for a
-    // given name: Critic 44 issue 10 was a header that cited a sibling method's range
-    // entirely, and it also escaped the first sweep because its range is followed by a
-    // clause inside the same parentheses rather than closing them.
+    //
+    //   - Entry citations in this block: extract each `` `name` (line) `` pair and check
+    //     `sed -n "${line}p"` contains `name(` — **55 pairs, 0 mismatches**.
+    //   - Rustdoc headers: resolve each ``Translated from `SenderTest.<name>` `` to the
+    //     Java declaration and its closing `    }` and compare **both** ends —
+    //     **41 headers, 0 mismatches**.
+    //
+    // Two properties the header sweep needs, each learned by a sweep that lacked it:
+    //
+    //   - **Wrap-tolerant.** "Translated from" often ends the line with the backticked
+    //     name on the next, so the pattern must join the contiguous `///` block rather
+    //     than read one line. A single-line pattern sees 24 of the 41 and any ratio
+    //     quoted from that population is meaningless.
+    //   - **Paren-tolerant.** The range pattern must not require the closing paren:
+    //     `\(Java\s+(\d+)\s*[-–]\s*(\d+)` and no more. `\(Java` still anchors on the
+    //     opening paren, so a second bare "Java A-B" later in the same clause cannot be
+    //     mistaken for the range.
+    //
+    // That second property is the one this paragraph got wrong, and the way it got it
+    // wrong is worth more than the count. Checking these headers requires comparing each
+    // method *name* against its range, not just rewriting the range for a given name:
+    // Critic 44 issue 10 was a header citing a sibling method's range entirely, and it
+    // escaped the first sweep **because its range is followed by a clause inside the same
+    // parentheses rather than closing them**. An earlier revision of this paragraph
+    // reported "40 headers" — because the sweep it describes required that closing paren,
+    // and so could not see the single header of exactly that shape
+    // (`testClusterAuthorizationExceptionInInitProducerIdRequest`, whose header reads
+    // `(Java 715-735 — the produce-request variant is at Java 2159-2179)`). **The checker
+    // had inherited the blind spot the checked text warns about, three sentences below its
+    // own count** (Critic 46 pass 4). Nothing was masked — that header conforms, 715 and
+    // 735 verified — but 40 was the one number here a reviewer re-running the sweep could
+    // not reproduce.
+    //
+    // Checking both ends rather than only the start is what found the **five**
+    // non-conforming ranges since corrected: four from Phase 6's own shutdown group
+    // (starting on `@Test`, on a blank line, and twice on the *previous* method's closing
+    // brace) and one pre-existing end-off-by-one on `testNodeNotReady`.
     //
     // TRANSLATED IN PHASE 4 (33 entries — 32 in scope, plus one out-of-scope):
     //   `testInitProducerIdRequest` (620),

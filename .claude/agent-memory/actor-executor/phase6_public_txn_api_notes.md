@@ -90,7 +90,7 @@ issue 2). **Do not copy a derived count into a note; cite where it is derived.**
 suggested rule amendments are recorded in PLAN §10.9 (rules §2's `pendingRequests`
 classification; CLAUDE.md §9.6.6's timer-starvation pitfall).
 
-**Two sweep lessons, both learned by failing them in this phase's review loop.** Changing
+**Three sweep lessons, each learned by failing it in this phase's review loop.** Changing
 a derived count is never a one-site edit, and "I swept for it" is only as good as the
 shapes the sweep enumerated:
 
@@ -102,6 +102,22 @@ shapes the sweep enumerated:
     "for the same reason **the 15 above** are" — a reference to a *group's size*, which
     matched no group even before the renumber. Also sweep `the <N> above|below`, `(N)`
     group headers, and `<N>-arithmetic`-style labels.
+  - *The checker inherits the blind spot the checked text warns about.* I wrote a header
+    sweep whose range regex required a closing paren, reported "40 headers", and three
+    sentences below that count the same paragraph explains that Critic 44 issue 10 escaped
+    an earlier sweep **because its range is followed by a clause inside the same
+    parentheses rather than closing them**. Exactly one header has that shape, and my
+    sweep could not see it — the population was 41. When a paragraph documents an escape
+    shape, the first thing to test the new checker against is that shape; the warning is a
+    ready-made adversarial input sitting in the same file.
+
+Concretely, for any sweep over rustdoc/comment text: make it **wrap-tolerant** (join the
+contiguous `///` block — "Translated from" routinely ends a line with the name on the next,
+and a single-line pattern saw 24 of 41 here), **paren-tolerant** (never require the closing
+delimiter after the payload), and have it check **every field the convention constrains**
+(a start-only range check makes end errors structurally invisible — two of the five real
+defects were end-only or found only by checking ends). Then paste the pattern *and* run it
+literally as written, so the shipped recipe reproduces the shipped number.
 
 The durable fix for both is the same and is now applied throughout: **cite where a number
 is derived instead of restating it.** A cross-reference that names the group ("the STILL

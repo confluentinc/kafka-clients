@@ -897,3 +897,147 @@ arithmetic, which is true whatever its total. "32 of the 52" (`:7549`) and "outs
 though `:7537` says "outside the 53" about the same two entries, so the phrasing is
 internally inconsistent. This is nomenclature residue that leads a reader to no wrong fact
 — unlike the finding above, where the number matches no group at all.
+
+---
+
+# Critic 46 — resolved (pass 4)
+
+The single pass-4 finding is fixed: the header sweep's denominator was 40 for a population
+of 41, because its range regex required the closing paren and exactly one header
+(`testClusterAuthorizationExceptionInInitProducerIdRequest`, `sender.rs:6584`) carries a
+clause inside those parens. Reproduced both ways before fixing — the old pattern sees 40,
+the paren-tolerant one sees 41 — and the block's stated pattern, run literally as written,
+now yields 41 with 0 mismatches on both ends.
+
+The recursion is recorded at the site rather than only the count: the paragraph that
+reported 40 explains, three sentences below, that Critic 44 issue 10 escaped an earlier
+sweep *for that exact shape*. Agent memory gains it as a third sweep-failure class — the
+checker inheriting the blind spot the checked text warns about — beside the two from passes
+2 and 3, with the concrete requirements (wrap-tolerant, paren-tolerant, every constrained
+field) stated once.
+
+The Critic's own second post-mortem is noted and its correction of my pass-3 report
+accepted: its 24-header population and start-only criterion are why its disclosure read "3
+of 24" rather than five of forty-one.
+
+Original review follows verbatim.
+
+---
+
+# Critic 46 — Milestone 11 Phase 6, pass 4
+
+Reviewed `1e55ca8`. The pass-3 finding and both disclosed items are fixed, all five header
+rows are correct line-by-line against Java, and every shipped derivation reproduces.
+**1 finding** — the header sweep's own denominator, off by one, for the exact reason its
+prose warns about. Loop: 7 → 4 → 1 → 1.
+
+**The Actor's correction of my pass-3 disclosure is right, and worse than it said about my
+work** — see "My pass-3 disclosure was undercounted" below.
+
+---
+
+## Issue: the header sweep reports 40 headers where the block contains 41
+- **File**: `src/producer/internals/sender.rs:7550-7551`
+- **Severity**: Record Defect
+- **Description**: The convention paragraph states the sweep as a derived result:
+
+  > For the rustdoc headers: resolve each `Translated from `SenderTest.<name>`` to the Java
+  > declaration and its closing brace and compare both ends — **40 headers, 0 mismatches**.
+
+  There are **41** such headers. I enumerated them wrap-tolerantly (the name and/or range
+  may sit on a following `///` line) and resolved every one against the Java declaration
+  and its closing `    }`: 41 headers, 41 distinct names, no duplicates, all inside
+  `#[cfg(test)]` (which opens at `:2376`; the earliest header is `:4398`), every name
+  present in `SenderTest.java` — and **0 mismatches on both ends**. So the *conclusion* is
+  sound and holds for all 41; only the denominator is understated.
+
+  **The mechanism is pinned, and it is the one the same paragraph names three sentences
+  later.** A range regex that requires a closing paren immediately after the numbers —
+  `\(Java \d+\s*-\s*\d+\)` — matches exactly **40** of the 41. The single header it cannot
+  see is `:6584`:
+
+  ```
+  /// Translated from
+  /// `SenderTest.testClusterAuthorizationExceptionInInitProducerIdRequest`
+  /// (Java 715-735 — the produce-request variant is at Java 2159-2179): a cluster
+  ```
+
+  Its range is followed by a clause *inside* the same parentheses. The paragraph at
+  `:7556-7559` says of Critic 44 issue 10: "it also escaped the first sweep because its
+  range is followed by a clause inside the same parentheses rather than closing them." The
+  sweep that reports 40 has precisely that blind spot, and the count is its fingerprint.
+
+  Nothing is masked: I verified `:6584` conforms — declaration at `SenderTest.java:715`,
+  closing `    }` at `:735`, header `(Java 715-735)`. This is bookkeeping, not a hidden
+  defect. I am filing it because it is the same class the phase has been closing for three
+  passes — a stated derived count that disagrees with the artifact, produced by a
+  classifier that cannot see one shape — and because it is the one number in this block a
+  future reviewer re-running the sweep will fail to reproduce.
+- **Expected**: 41, from a range regex that does not require the closing paren (e.g.
+  `\(Java (\d+)\s*[-–]\s*(\d+)`), which is also what makes the sweep immune to the shape
+  its own prose flags.
+- **Actual**: "40 headers, 0 mismatches" — true of 40 of the 41.
+
+---
+
+# My pass-3 disclosure was undercounted — the correction is right
+
+The Actor is right that the header item was five rows, not three, and my check was worse
+than the coordinator's summary suggests. Two defects in it:
+
+  1. **Start-only criterion.** I compared only the range's first number against the
+     declaration line, never the second against the closing brace. That is how the
+     pre-existing `testNodeNotReady` end-off-by-one (711 vs 712) was invisible to me.
+  2. **A single-line regex, so I saw 24 headers, not 41.** My pattern required
+     ``Translated from `SenderTest.<name>` `` on one line. **17** headers wrap — "Translated
+     from" ends the line and the backticked name begins the next — so my denominator was
+     24 when the population was 41. I then reported "of 24 headers, exactly three are off"
+     and used that ratio to argue the deviation was an isolated outlier.
+
+So my pass-3 disclosure was doubly wrong: wrong criterion and wrong population. It is the
+same failure I filed against the Actor in pass 1 (a classifier that cannot see a shape,
+reporting a confident denominator) — the second time this phase I have committed the defect
+I was reviewing for. The durable lesson, now in my memory file: **a sweep over doc comments
+must be wrap-tolerant and must check every field the convention constrains**, and a ratio
+quoted from an unverified population is not evidence.
+
+The Actor's stated reason for widening rather than fixing only the named three — that a
+partial sweep is what it was pulled up on last round — is the right instinct and it found
+two rows I had not.
+
+# What pass 4 verified
+
+**The pass-3 finding is fixed, and fixed by naming rather than renumbering.** `:7829` now
+reads "for the same reason **the STILL OWED group above** is", with "Named, not counted —
+the group's header carries its own count." The only surviving "the 15 above" is inside the
+retraction note at `:7831`, which quotes the old error and states accurately that 15
+matched no group even before the renumber ("the transactional group was 15 then, but its
+owed subset was already 11").
+
+**The five header rows, checked line-by-line against Java:**
+
+| header | now | Java declaration | Java closing `}` |
+|---|---|---|---|
+| `testNodeNotReady` (`:4556`) | 689-712 | 689 ✓ | 712 ✓ (711 is the last statement) |
+| `senderThreadShouldNotGetStuck…` (`:7955`) | 508-545 | 508 ✓ | 545 ✓ |
+| `testTransactionalRequestsSentOnShutdown` (`:8034`) | 2737-2768 | 2737 ✓ | 2768 ✓ |
+| `testIncompleteTransactionAbortOnShutdown` (`:8073`) | 2898-2928 | 2898 ✓ | 2928 ✓ |
+| `testForceShutdownWithIncompleteTransaction` (`:8104`) | 2932-2963 | 2932 ✓ | 2963 ✓ |
+
+All five conform, and my full 41-header sweep independently confirms every other range on
+both ends, so the closing-brace figures are not taken on trust.
+
+**The "52-arithmetic" labels are gone.** `grep -n "52-arithmetic\|of the 52\|outside the
+52"` returns nothing. The arithmetic paragraph reads "33 + 3 + 16 + 3 = 55 entries, of
+which 2 are outside the 53 … 55 − 2 = 53", and the group header is now "33 entries — 32 in
+scope, plus one out-of-scope" — no bare `52` anywhere.
+
+**Both sweeps and both derivations re-run.** Entry citations: **55** distinct (name, line)
+pairs, 55 distinct names, **0 mismatches** — `sed -n "${line}p"` contains `name(` for
+every one. Scope derivation, run verbatim from the block: `java` = **53**, `rust` = **55**,
+`comm -23` **empty**, `comm -13` exactly `testNoBufferReuseWhenBatchExpires` and
+`testProducerBatchRetriesWhenPartitionLeaderChanges`, both documented in place. Group
+arithmetic 33 + 3 + 16 + 3 = 55 and 55 − 2 = 53 both check. The `kafka_producer.rs`
+derivation prints **29** rows with awk exit 0.
+
+**DoD:** 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split panic).
