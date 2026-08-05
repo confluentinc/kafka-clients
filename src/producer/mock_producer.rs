@@ -976,6 +976,16 @@ mod tests {
         assert_eq!(message, error.message());
     }
 
+    /// Assert `result` failed the way Java's `ProducerFencedException` does.
+    ///
+    /// `MockProducer` raises it with exactly one message, from `verifyNotFenced`
+    /// (`MockProducer.java:256`) and from the fenced `send` (`:294`).
+    fn assert_producer_fenced<T>(result: Result<T, KafkaError>) {
+        let error = result.err().expect("expected a ProducerFenced error, got Ok");
+        assert_eq!(Errors::ProducerFenced, error.error(), "expected ProducerFenced, got {error}");
+        assert_eq!("MockProducer is fenced.", error.message());
+    }
+
     // -----------------------------------------------------------------------
     // Tests translated from MockProducerTest.java
     // -----------------------------------------------------------------------
@@ -1085,13 +1095,6 @@ mod tests {
     // list as it does. The list is replaced by the standard test-accounting block
     // once it is empty.
     //
-    //   - shouldThrowFenceProducerIfTransactionsNotInitialized
-    //   - shouldThrowOnBeginTransactionsIfProducerGotFenced
-    //   - shouldThrowOnSendIfProducerGotFenced
-    //   - shouldThrowOnSendOffsetsToTransactionByGroupIdIfProducerGotFenced
-    //   - shouldThrowOnSendOffsetsToTransactionByGroupMetadataIfProducerGotFenced
-    //   - shouldThrowOnCommitTransactionIfProducerGotFenced
-    //   - shouldThrowOnAbortTransactionIfProducerGotFenced
     //   - shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled
     //   - shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled
     //   - shouldDropMessagesOnAbortIfTransactionsAreEnabled
@@ -1106,14 +1109,6 @@ mod tests {
     //   - shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled
     //   - shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled
     //   - shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactionsAreEnabled
-    //   - shouldThrowOnInitTransactionIfProducerIsClosed
-    //   - shouldThrowOnBeginTransactionIfProducerIsClosed
-    //   - shouldThrowSendOffsetsToTransactionByGroupIdIfProducerIsClosed
-    //   - shouldThrowSendOffsetsToTransactionByGroupMetadataIfProducerIsClosed
-    //   - shouldThrowOnCommitTransactionIfProducerIsClosed
-    //   - shouldThrowOnAbortTransactionIfProducerIsClosed
-    //   - shouldThrowOnFenceProducerIfProducerIsClosed
-    //   - shouldNotThrowOnFlushProducerIfProducerIsFenced
     //
     // -----------------------------------------------------------------------
 
@@ -1409,6 +1404,200 @@ mod tests {
         assert!(!producer.transaction_in_flight());
         assert!(producer.transaction_aborted());
         assert!(!producer.transaction_committed());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fencing: every entry point after `fenceProducer()`
+    // -----------------------------------------------------------------------
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowFenceProducerIfTransactionsNotInitialized`
+    /// (Java 255).
+    #[test]
+    fn should_throw_fence_producer_if_transactions_not_initialized() {
+        let producer = build_mock_producer(true);
+        assert_illegal_state(
+            producer.fence_producer(),
+            "MockProducer hasn't been initialized for transactions.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnBeginTransactionsIfProducerGotFenced` (Java 261).
+    #[tokio::test]
+    async fn should_throw_on_begin_transactions_if_producer_got_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        assert_producer_fenced(producer.begin_transaction());
+    }
+
+    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerGotFenced`
+    /// (Java 269).
+    ///
+    /// Java calls `producer.send(null)`; the fenced check (`MockProducer.java:293`)
+    /// precedes any use of the record, and `ProducerRecord` is taken by value here,
+    /// so a real record makes the same point.
+    ///
+    /// Java throws `KafkaException` *wrapping* `ProducerFencedException` and
+    /// asserts on the cause. `KafkaError` has no cause chain, so the one value
+    /// carries both halves — the fenced code (what the cause assertion is for) and
+    /// the wrapper's message — and `assert_producer_fenced` checks both.
+    #[tokio::test]
+    async fn should_throw_on_send_if_producer_got_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        assert_producer_fenced(producer.send(record1()).await);
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionByGroupIdIfProducerGotFenced`
+    /// (Java 278).
+    ///
+    /// Java 278 and 286 have identical bodies: the group-id overload of
+    /// `sendOffsetsToTransaction` was removed, so both now call the
+    /// `ConsumerGroupMetadata` one. Both are translated anyway —
+    /// `definition-of-done.md` §3 does not allow skipping a Java test because a
+    /// sibling duplicates it.
+    #[tokio::test]
+    async fn should_throw_on_send_offsets_to_transaction_by_group_id_if_producer_got_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        assert_producer_fenced(
+            producer
+                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .await,
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionByGroupMetadataIfProducerGotFenced`
+    /// (Java 286) — the identical twin of Java 278, see the note there.
+    #[tokio::test]
+    async fn should_throw_on_send_offsets_to_transaction_by_group_metadata_if_producer_got_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        assert_producer_fenced(
+            producer
+                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .await,
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnCommitTransactionIfProducerGotFenced` (Java 294).
+    #[tokio::test]
+    async fn should_throw_on_commit_transaction_if_producer_got_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        assert_producer_fenced(producer.commit_transaction().await);
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnAbortTransactionIfProducerGotFenced` (Java 302).
+    #[tokio::test]
+    async fn should_throw_on_abort_transaction_if_producer_got_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        assert_producer_fenced(producer.abort_transaction().await);
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldNotThrowOnFlushProducerIfProducerIsFenced` (Java 680).
+    ///
+    /// The one entry point fencing does *not* close: Java's `flush()`
+    /// (`MockProducer.java:347`) omits `verifyNotFenced()`.
+    #[tokio::test]
+    async fn should_not_throw_on_flush_producer_if_producer_is_fenced() {
+        let producer = build_mock_producer(true);
+        producer.init_transactions().await.unwrap();
+        producer.fence_producer().unwrap();
+        producer.flush().await.expect("flush must not fail on a fenced producer");
+    }
+
+    // -----------------------------------------------------------------------
+    // Closed producer: every transactional entry point after `close()`
+    // -----------------------------------------------------------------------
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnInitTransactionIfProducerIsClosed` (Java 617).
+    #[tokio::test]
+    async fn should_throw_on_init_transaction_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(producer.init_transactions().await, "MockProducer is already closed.");
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnBeginTransactionIfProducerIsClosed` (Java 631).
+    #[tokio::test]
+    async fn should_throw_on_begin_transaction_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(producer.begin_transaction(), "MockProducer is already closed.");
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowSendOffsetsToTransactionByGroupIdIfProducerIsClosed`
+    /// (Java 638). Java 638 and 645 have identical bodies — see the note on
+    /// `should_throw_on_send_offsets_to_transaction_by_group_id_if_producer_got_fenced`.
+    #[tokio::test]
+    async fn should_throw_send_offsets_to_transaction_by_group_id_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(
+            producer
+                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .await,
+            "MockProducer is already closed.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowSendOffsetsToTransactionByGroupMetadataIfProducerIsClosed`
+    /// (Java 645) — the identical twin of Java 638.
+    #[tokio::test]
+    async fn should_throw_send_offsets_to_transaction_by_group_metadata_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(
+            producer
+                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .await,
+            "MockProducer is already closed.",
+        );
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnCommitTransactionIfProducerIsClosed` (Java 652).
+    #[tokio::test]
+    async fn should_throw_on_commit_transaction_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(producer.commit_transaction().await, "MockProducer is already closed.");
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnAbortTransactionIfProducerIsClosed` (Java 659).
+    #[tokio::test]
+    async fn should_throw_on_abort_transaction_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(producer.abort_transaction().await, "MockProducer is already closed.");
+    }
+
+    /// Translated from
+    /// `MockProducerTest.shouldThrowOnFenceProducerIfProducerIsClosed` (Java 666).
+    #[tokio::test]
+    async fn should_throw_on_fence_producer_if_producer_is_closed() {
+        let producer = build_mock_producer(true);
+        producer.close().await.unwrap();
+        assert_illegal_state(producer.fence_producer(), "MockProducer is already closed.");
     }
 
     // -----------------------------------------------------------------------
