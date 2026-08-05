@@ -4420,12 +4420,24 @@ mod tests {
     /// *"Tests the code path where the target node to send FindCoordinator or
     /// InitProducerId is not ready."*
     ///
-    /// The FindCoordinator half is the **only** cover for
-    /// [`Sender::maybe_find_coordinator_and_retry`]'s `else` arm (`Sender.java:523-527`:
-    /// `time.sleep(retryBackoffMs)` + `metadata.requestUpdate(false)`), which runs
-    /// exactly when the unsendable handler needs *no* coordinator. Every other test
-    /// that reaches that method carries an `InitProducerId` on a transactional manager,
-    /// so `needs_coordinator` is true and only the `if` arm runs.
+    /// Java's body has two halves and this translates both, because they exercise the
+    /// two *different* arms of [`Sender::maybe_find_coordinator_and_retry`]:
+    ///
+    ///   - **FindCoordinator target unready** (Java 702, `client.delayReady`) → the
+    ///     handler needs no coordinator of its own, so the `else` arm runs
+    ///     (`Sender.java:523-527`: `time.sleep(retryBackoffMs)` +
+    ///     `metadata.requestUpdate(false)`). This is the **only** cover for that arm:
+    ///     every other test reaching the method carries an `InitProducerId` on a
+    ///     transactional manager, so `needs_coordinator` is true and only the `if` arm
+    ///     runs.
+    ///   - **InitProducerId target unready** (Java 708, `client.throttle`) → the handler
+    ///     *does* need a coordinator, so the `if` arm forgets it and re-looks it up,
+    ///     which is why Java queues a second `prepareFindCoordinatorResponse` at `:709`.
+    ///     That production path is also reached by
+    ///     [`test_lookup_coordinator_on_disconnect_before_send`], through
+    ///     `set_unreachable` rather than throttling; translating it here anyway is what
+    ///     makes the "Java 689-711" claim above true, and it is the only exercise of
+    ///     `MockClient::throttle` on the transactional path.
     ///
     /// # Two deliberate departures from Java's timing, both to remove a coin flip
     ///
@@ -4445,7 +4457,9 @@ mod tests {
     ///      window whatever the read count — and the clock is then advanced explicitly,
     ///      the way [`test_lookup_coordinator_on_disconnect_before_send`] already does
     ///      for `set_unreachable`. The branch under test is reached identically; only
-    ///      the margin stops being accidental.
+    ///      the margin stops being accidental. The same substitution is applied to
+    ///      Java's `client.throttle(node, REQUEST_TIMEOUT + 20)` (`:708`), whose margin
+    ///      is the same two ticks for the same reason.
     ///
     /// [`test_lookup_coordinator_on_disconnect_before_send`]: fn@test_lookup_coordinator_on_disconnect_before_send
     #[tokio::test]
@@ -4493,8 +4507,50 @@ mod tests {
             "the else arm must call metadata.requestUpdate(false) (Sender.java:526)"
         );
 
-        // Clear the delay, then let the FindCoordinator and InitProducerId through.
+        // Clear the delay and let the FindCoordinator through (Java 704-706).
+        //
+        // Exactly one `run_once`: it sends the FindCoordinator and returns at
+        // `Sender.java:334`, so the `InitProducerId` is still *queued*. Java is in the
+        // same state at its `assertNotNull` — its two `runOnce` calls are the else-arm
+        // one and this one — and the second half depends on it, because a request
+        // already in flight would make `maybeSendAndPollTransactionalRequest` return at
+        // `:460-463` without ever consulting the coordinator.
         ctx.time.sleep(delay_ms);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(
+            ctx.sender
+                .coordinator(CoordinatorType::Transaction)
+                .expect("valid type")
+                .is_some(),
+            "Coordinator not found"
+        );
+        assert!(ctx.sender.has_pending_requests(), "the InitProducerId must still be queued");
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // Second half, Java 708-709: now the **InitProducerId**'s target is unready.
+        // Throttling the coordinator drives `awaitNodeReady` to `false` again, but this
+        // handler *does* need a coordinator, so `maybe_find_coordinator_and_retry` takes
+        // its `if` arm instead: the coordinator is forgotten and re-looked-up, which is
+        // why Java queues a second `prepareFindCoordinatorResponse` at `:709`.
+        let throttle_ms = i64::from(REQUEST_TIMEOUT) * 2;
+        ctx.sender.client_mut().throttle(&node, throttle_ms);
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, TRANSACTIONAL_ID, &node));
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(
+            ctx.sender
+                .coordinator(CoordinatorType::Transaction)
+                .expect("valid type")
+                .is_none(),
+            "an unready coordinator must be forgotten so the lookup can repeat (TransactionManager.java:1194)"
+        );
+        assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+
+        // Java 710-711: `prepareInitProducerResponse` then `waitForProducerId`, which
+        // spins up to five `runOnce` calls.
+        ctx.time.sleep(throttle_ms);
         ctx.sender
             .client_mut()
             .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, 0));
@@ -4509,7 +4565,7 @@ mod tests {
                 .coordinator(CoordinatorType::Transaction)
                 .expect("valid type")
                 .is_some(),
-            "Coordinator not found"
+            "the re-lookup must have installed the coordinator again"
         );
         {
             // Braced so the guard cannot reach the `.await` below — rules §4, which
@@ -7331,13 +7387,18 @@ mod tests {
     //     `testIdempotentInitProducerIdWithMaxInFlightOne` (664), already translated
     //     30 lines above it in the Java file; the delta is a transactional manager and
     //     one FindCoordinator round trip, both of which 5a supplies.
-    //   `testNodeNotReady` (689) → test_node_not_ready. The **only** cover for
-    //     `maybe_find_coordinator_and_retry`'s `else` arm (Java 523-527), which runs
-    //     only when the unsendable handler needs no coordinator of its own. Before this,
+    //   `testNodeNotReady` (689) → test_node_not_ready. Both halves of Java's body, so
+    //     both arms of `maybe_find_coordinator_and_retry`. The `else` arm (Java 523-527,
+    //     reached via `client.delayReady` at `:702`) has **no other** cover: before this,
     //     every test reaching that method carried an `InitProducerId` on a transactional
     //     manager, so only the `if` arm ran, and `MockClient::delay_ready` had zero
-    //     callers in the tree. Mutation-checked: removing the arm's
-    //     `metadata.request_update(false)` fails it.
+    //     callers in the tree. The `if` arm (via `client.throttle` at `:708`) is also
+    //     reached by `test_lookup_coordinator_on_disconnect_before_send` through
+    //     `set_unreachable`; translated here anyway so the "Java 689-711" claim is true,
+    //     and it is the only exercise of `MockClient::throttle` on the transactional
+    //     path. Both halves mutation-checked: removing the `else` arm's
+    //     `metadata.request_update(false)`, and making `lookup_coordinator` stop
+    //     forgetting the TRANSACTION node, each fail their own assertion.
     //   `testDoNotPollWhenNoRequestSent` (2991) → test_do_not_poll_when_no_request_sent.
     //     Its only blocker was `SenderTest.doInitTransactions` (Java 3923), which is
     //     `initializeTransactions` + FindCoordinator + InitProducerId and so is fully
@@ -7365,46 +7426,72 @@ mod tests {
     //          for (i = 1; i <= n; i++) if (index($0, m[i]) > 0) hard[m[i]] = 1 }
     //     END { if (name != "") emit() }
     //     function emit() { hits = ""
-    //       for (k in hard) hits = hits (hits == "" ? "" : "+") k
+    //       n = split(MARKERS, m, ",")
+    //       for (i = 1; i <= n; i++) if (m[i] in hard) hits = hits (hits == "" ? "" : "+") m[i]
     //       printf "%s\t%s\t%s\n", line, name, (hits == "" ? "-" : hits) }' "$S"
     //
     // `doInitTransactions` is deliberately **not** a marker: it is 5a surface, and
     // treating it as one is what kept `testDoNotPollWhenNoRequestSent` deferred.
     //
+    // Two properties this program shares with its sibling, for the reasons that block
+    // states — and one difference:
+    //
+    //   - `emit` walks `MARKERS` in **declaration order**, not `for (k in hard)`. The
+    //     first revision of this block used the hash-order form and pasted its output,
+    //     which is precisely the combination the sibling block forbids (Critic 45 pass 2
+    //     issue 1: the same commit set repaired it there and reintroduced it here).
+    //   - The block splitter has to stop collecting at a `private` member, or the
+    //     helpers sitting between two tests are absorbed into the earlier one. The guard
+    //     here is shaped differently from the sibling's — it must let `private void`
+    //     helpers *start* a block, since `SenderTest` declares tests both `public` and
+    //     `private` — so it was checked rather than assumed: recomputing every block's
+    //     marker set from a body delimited by its closing `    }` line instead agrees
+    //     with this splitter on **all 100 blocks**, the 18 accounted ones included.
+    //   - No `ABBREV` table, unlike the sibling. That table exists there because 107
+    //     rows had to fit inside the column limit; 18 rows can carry the marker names in
+    //     full, which is worth more than cross-block comparability.
+    //
     // Real output, run from the repo root on this environment's `awk version 20200816`
     // (exit 0), for the eighteen entries this group and the 5a group above cover — the
-    // three 5a ones print `-`, confirming they need no 5b surface:
+    // three 5a ones print `-`, confirming they need no 5b surface. Markers appear in
+    // `MARKERS` declaration order, so this transcript is reproducible on any awk:
     //
-    //   636  testInitProducerIdWithMaxInFlightOne   -
-    //   689  testNodeNotReady                       -
-    //   2991 testDoNotPollWhenNoRequestSent         -
-    //   1534 testUnresolvedSequencesAreNotFatal     AddPartitionsToTxn+maybeAddPartition+beginTransaction
+    //   636  testInitProducerIdWithMaxInFlightOne
+    //          -
+    //   689  testNodeNotReady
+    //          -
+    //   2991 testDoNotPollWhenNoRequestSent
+    //          -
+    //   1534 testUnresolvedSequencesAreNotFatal
+    //          beginTransaction+maybeAddPartition+AddPartitionsToTxn
     //   1820 testTransactionalUnknownProducerHandlingWhenRetentionLimitReached
-    //                                              AddPartitionsToTxn+maybeAddPartition+beginTransaction
-    //   2385 testTransactionalSplitBatchAndSend     AddPartitionsToTxn+maybeAddPartition+beginTransaction
+    //          beginTransaction+maybeAddPartition+AddPartitionsToTxn
+    //   2385 testTransactionalSplitBatchAndSend
+    //          beginTransaction+maybeAddPartition+AddPartitionsToTxn
     //   2737 testTransactionalRequestsSentOnShutdown
-    //                                              beginCommit+AddPartitionsToTxn+maybeAddPartition+EndTxn+beginTransaction
+    //          beginTransaction+beginCommit+maybeAddPartition+AddPartitionsToTxn+EndTxn
     //   2771 testRecordsFlushedImmediatelyOnTransactionCompletion
-    //                                              beginCommit+EndTxn+beginTransaction
+    //          beginTransaction+beginCommit+EndTxn
     //   2829 testAwaitPendingRecordsBeforeCommittingTransaction
-    //                                              beginCommit+EndTxn+beginTransaction
+    //          beginTransaction+beginCommit+EndTxn
     //   2898 testIncompleteTransactionAbortOnShutdown
-    //                                              AddPartitionsToTxn+maybeAddPartition+EndTxn+beginTransaction
+    //          beginTransaction+maybeAddPartition+AddPartitionsToTxn+EndTxn
     //   2932 testForceShutdownWithIncompleteTransaction
-    //                                              beginCommit+AddPartitionsToTxn+maybeAddPartition+beginTransaction
+    //          beginTransaction+beginCommit+maybeAddPartition+AddPartitionsToTxn
     //   2966 testTransactionAbortedExceptionOnAbortWithoutError
-    //                                              AddPartitionsToTxn+maybeAddPartition+beginAbort+beginTransaction
+    //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn
     //   3051 testTransactionShouldTransitionToAbortableForSenderAPI
-    //                                              beginCommit+AddPartitionsToTxn+maybeAddPartition+beginTransaction
+    //          beginTransaction+beginCommit+maybeAddPartition+AddPartitionsToTxn
     //   3126 testReceiveFailedBatchTwiceWithTransactions
-    //                                              AddPartitionsToTxn+maybeAddPartition+EndTxn+beginAbort+beginTransaction
-    //   3176 testInvalidTxnStateIsAnAbortableError  AddPartitionsToTxn+maybeAddPartition+EndTxn+beginAbort+beginTransaction
+    //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn+EndTxn
+    //   3176 testInvalidTxnStateIsAnAbortableError
+    //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn+EndTxn
     //   3215 testTransactionAbortableExceptionIsAnAbortableError
-    //                                              AddPartitionsToTxn+maybeAddPartition+EndTxn+beginAbort+beginTransaction
+    //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn+EndTxn
     //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort
-    //                                              beginCommit+EndTxn+beginAbort+beginTransaction
+    //          beginTransaction+beginCommit+beginAbort+EndTxn
     //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
-    //                                              mock(TransactionManager+beginAbort
+    //          beginAbort+mock(TransactionManager
     //
     // The 15, restated in prose so a reader need not run anything:
     //
