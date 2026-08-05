@@ -192,3 +192,29 @@ CLAUDE.md §8.4).
 4. `dotnet(M4/P4b): STATUS + closed record (M4/P4b async-surface rename); N=9` (docs).
 5. `dotnet(M4/P4b): doc-sync — drop Async suffix binding-wide in ffi-marshalling.md + CLAUDE.md idiom map/sketches`
    (D9.4 — doc-only; the two rule docs + this closed record; no code).
+
+---
+
+## Critic N=9 — review outcome (closed)
+
+**Rename review (`ceb532d..6af3454`): CLEAN, phase PASSES.** Independently verified —
+behavior diff empty (only identifier/file renames via `git mv` + the new
+`IConsumerCommon`; no logic changes); guardrail (a) the `NativeMethods` `EntryPoint`
+strings are the exact C-ABI names (untouched, eyeballed against the header);
+guardrail (b) the archived M4/P4a docs were not retro-edited (only current `STATUS.md`
+moved); no coverage lost (`[Fact]/[Theory]` 122→122, `Assert.*` 206→206, message
+assertions byte-identical — `"boom"`, `"café"`, `"seek offset must not be a negative
+number"`); interface shape correct (`IAsyncConsumer : IConsumerCommon,
+IAsyncDisposable, IDisposable`; `IConsumerCommon` = `Wakeup()`+`GroupMetadata()`; mock
+helpers inherent); D9.1 (interface+impl one commit) benign. Independent build 0/0
+across all six TFM legs; **20/20 serial test runs → 122 passed, 0 failed, 0 crashes**;
+`dotnet format` clean. No `COMMENTS.9.md` findings written.
+
+**Doc-sync addendum (D9.4, `1bc7772`): verified by the top-level session** (doc-only,
+no Critic pass). CLAUDE.md consumer + producer sketches updated to the un-suffixed
+two-interface naming; idiom-map rule rewritten to "no `Async` suffix — distinction
+carried by the interface/class"; keep-list intact (`DisposeAsync`, the CKD
+`ProduceAsync` anti-example, C-ABI `*_async` names).
+
+**Loop closed:** Actor N=9 (rename) → Critic N=9 (clean) → Actor N=9 (doc-sync
+addendum, top-level-verified). No outstanding review comments.
