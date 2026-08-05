@@ -522,7 +522,7 @@ async fn test_async_assign_and_commit_async_not_committed() {
     // asserts `committedOffset.get(tp)` is null; in the Rust map, no
     // entry exists for `tp` (since nothing was actually committed).
     assert!(
-        committed_offset.get(&tp).is_none(),
+        !committed_offset.contains_key(&tp),
         "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
         committed_offset.get(&tp)
     );
@@ -570,7 +570,7 @@ async fn test_async_assign_and_commit_sync_not_committed() {
         .await
         .expect("committed should succeed");
     assert!(
-        committed_offset.get(&tp).is_none(),
+        !committed_offset.contains_key(&tp),
         "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
         committed_offset.get(&tp)
     );
