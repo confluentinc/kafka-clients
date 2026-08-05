@@ -2484,8 +2484,11 @@ Each is documented at its call site as well.
     `EndTxnHandler.handleResponse` (`:1767`). Both are Phase 5b, so the method has no
     caller yet; it is translated now because it is the only writer that clears the
     per-transaction sets and `preparedTxnState`, and splitting it from the state
-    machine would mean writing it twice. `prepared_txn_state` is likewise
-    write-only until 5b adds `preparedTransactionState()` (`:1976`).
+    machine would mean writing it twice. `prepared_txn_state` stays
+    `ProducerIdAndEpoch::NONE` throughout Phase 5a, since both of its writers
+    (`prepareTransaction` `:342` and the `keepPreparedTxn` response arm `:1507`) are
+    KIP-939; `preparedTransactionState()` (`:1976`) is translated so the field has a
+    reader.
 
 12. **The Rust `do_init_transactions` / `run_init_transactions` test helpers omit
     Java's `maybeUpdateTransactionV2Enabled(true)`** (`TransactionManagerTest.java:4360`).

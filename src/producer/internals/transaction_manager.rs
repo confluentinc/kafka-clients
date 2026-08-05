@@ -747,6 +747,66 @@ impl PendingStateTransition {
     }
 }
 
+// =========================================================================
+// PHASE-5A METHOD ACCOUNTING (`definition-of-done.md` §2)
+//
+// `TransactionManager.java` declares 91 distinct method names at class level
+// (inner-class methods are indented eight spaces and are excluded; the
+// `TransactionManager` constructor has no return type and so is not counted).
+// After Phase 5a, 83 of the 91 have a Rust `fn`, here or on `Sender` — the four
+// that moved there are named in the "Lock topology" section below. Derivation:
+//
+//   python3 - <<'PY'
+//   import re
+//   J = ("kafka/clients/src/main/java/org/apache/kafka/clients/producer/"
+//        "internals/TransactionManager.java")
+//   decl = re.compile(r'^    (?:(?:public|private|protected|synchronized|static|'
+//                     r'final)\s+)*[A-Za-z_][A-Za-z0-9_<>,\.\[\]\s]*?\s+'
+//                     r'([a-zA-Z_][A-Za-z0-9_]*)\s*\(')
+//   names = set()
+//   for line in open(J):
+//       if any(k in line for k in ('class ', 'enum ', 'interface ')): continue
+//       m = decl.match(line)
+//       if m: names.add(m.group(1))
+//   snake = lambda n: re.sub(r'(?<!^)(?=[A-Z])', '_', n).lower().replace('2_p_c', '2pc')
+//   rust = "".join(open(f).read() for f in
+//                  ("src/producer/internals/transaction_manager.rs",
+//                   "src/producer/internals/sender.rs"))
+//   defs = set(re.findall(r'\bfn ([a-z_0-9]+)\s*[(<]', rust))
+//   print(len(names), sorted(n for n in names if snake(n) not in defs))
+//   PY
+//
+// It prints `91` and nine names. One of the nine, `is2PCEnabled`, is a
+// snake-conversion artefact: the crate spells it `is_2pc_enabled`, which the naive
+// conversion renders as `is2pc_enabled`. So 91 − 9 + 1 = **83** are present and
+// **8** have no `fn` at all.
+//
+// Phase 5b owes **nine**: those eight, plus `beginAbort`, which the derivation
+// cannot report because a partial translation still defines the `fn`. Each is owed
+// because it constructs or consumes one of the four request handlers 5b adds, or
+// needs a feature read 5b introduces:
+//
+//   `beginCommit` (353) and `beginCompletingTransaction` (373) — build the
+//     `EndTxnHandler`, and `beginCompletingTransaction` also drains
+//     `newPartitionsInTransaction` through `addPartitionsToTransactionHandler`.
+//   `beginAbort` (361) — present, but only as the `ensureTransactional()` guard
+//     `Sender.run`'s shutdown loop depends on (PLAN §10.6 deviation 10); its body
+//     is `beginCompletingTransaction`, so it counts as owed.
+//   `sendOffsetsToTransaction` (404) — builds `AddOffsetsToTxnHandler` or, under
+//     Transaction V2, `txnOffsetCommitHandler`.
+//   `addPartitionsToTransactionHandler` (1210) and `txnOffsetCommitHandler`
+//     (1221) — the two private handler factories.
+//   `hasPendingOffsetCommits` (1001) — reads `pendingTxnOffsetCommits`, whose only
+//     writer is `txnOffsetCommitHandler`. The field is not translated either.
+//   `maybeUpdateTransactionV2Enabled` (492) — KIP-890 feature discovery; needs
+//     `latestFinalizedFeaturesEpoch` and `ApiVersions.getFinalizedFeaturesInfo`.
+//   `prepareTransaction` (342) — KIP-939 two-phase commit.
+//
+// Arithmetic, read off the derivation rather than maintained beside it: 9 reported
+// − 1 artefact + 1 unreported (`beginAbort`) = 9 owed; 91 − 9 = 82 fully
+// translated, and `beginAbort`'s guard makes 83 that have a `fn`.
+// =========================================================================
+
 /// A class which maintains state for transactions. Also keeps the state necessary to ensure idempotent production.
 ///
 /// Translated from
@@ -934,10 +994,11 @@ pub(crate) struct TransactionManager {
     /// The producer id and epoch of the transaction prepared for a two-phase
     /// commit (Java 148).
     ///
-    /// Write-only in Phase 5a. Its writers (`prepareTransaction` Java 342,
-    /// `InitProducerIdHandler`'s `keepPreparedTxn` arm Java 1507) and its reader
-    /// (`preparedTransactionState()` Java 1976) are all KIP-939, Phase 5b; the
-    /// field is here because [`Self::reset_transaction_state`] clears it.
+    /// Always [`ProducerIdAndEpoch::NONE`] in Phase 5a: both writers
+    /// (`prepareTransaction` Java 342 and `InitProducerIdHandler`'s
+    /// `keepPreparedTxn` arm Java 1507) are KIP-939, Phase 5b. The field is here
+    /// because [`Self::reset_transaction_state`] clears it, and
+    /// [`Self::prepared_transaction_state`] reads it.
     prepared_txn_state: ProducerIdAndEpoch,
 }
 
@@ -1160,6 +1221,16 @@ impl TransactionManager {
     /// Corresponds to `isTransactional()` (Java 480).
     pub(crate) fn is_transactional(&self) -> bool {
         self.transactional_id.is_some()
+    }
+
+    /// Whether KIP-890 Transaction V2 is in use.
+    ///
+    /// Corresponds to `isTransactionV2Enabled()` (Java 506). Always `false` until
+    /// Phase 5b adds `maybeUpdateTransactionV2Enabled` (Java 492), the only writer
+    /// of the field; the accessor exists because `Sender.sendProduceRequest`
+    /// (`Sender.java:924-926`) reads it from outside this module in Phase 6.
+    pub(crate) fn is_transaction_v2_enabled(&self) -> bool {
+        self.is_transaction_v2_enabled
     }
 
     /// Whether two-phase commit is enabled (KIP-939).
@@ -1951,6 +2022,16 @@ impl TransactionManager {
         self.partitions_in_transaction.contains(topic_partition)
     }
 
+    /// Whether a transactional producer has a producer id and no transaction in
+    /// progress.
+    ///
+    /// Corresponds to `isReady()` (Java 1085). Java has no caller for it in either
+    /// the client or its tests; translated because it is part of the class
+    /// (`definition-of-done.md` §2).
+    pub(crate) fn is_ready(&self) -> bool {
+        self.is_transactional() && self.current_state == State::Ready
+    }
+
     /// Whether a transactional producer's `InitProducerId` is still outstanding.
     ///
     /// Corresponds to `isInitializing()` (Java 1090). Java has no caller for it in
@@ -1958,6 +2039,30 @@ impl TransactionManager {
     /// (`definition-of-done.md` §2).
     pub(crate) fn is_initializing(&self) -> bool {
         self.is_transactional() && self.current_state == State::Initializing
+    }
+
+    /// Check if the transaction is in the prepared state.
+    ///
+    /// Corresponds to `isPrepared()` (Java 1099). Always `false` in Phase 5a:
+    /// [`State::PreparedTransaction`] is not enterable until Phase 5b adds
+    /// `prepareTransaction` (Java 342) and the `keepPreparedTxn` response arm. A
+    /// pure state read, so it is translated with the rest of the predicates rather
+    /// than held back — the same treatment [`Self::is_completing`] and
+    /// [`Self::is_aborting`] got in Phase 3.
+    pub(crate) fn is_prepared(&self) -> bool {
+        self.current_state == State::PreparedTransaction
+    }
+
+    /// Returns a `ProducerIdAndEpoch` containing the producer ID and epoch of the
+    /// ongoing transaction. This is used when preparing a transaction for a
+    /// two-phase commit.
+    ///
+    /// Corresponds to `preparedTransactionState()` (Java 1976). Always
+    /// [`ProducerIdAndEpoch::NONE`] in Phase 5a, for the same reason as
+    /// [`Self::is_prepared`]; translated so
+    /// [`Self::reset_transaction_state`]'s write to the field has a reader.
+    pub(crate) fn prepared_transaction_state(&self) -> ProducerIdAndEpoch {
+        self.prepared_txn_state
     }
 
     // -- Producer id lifecycle ---------------------------------------------
@@ -4897,6 +5002,51 @@ mod tests {
             assert!(!manager.has_partitions_to_add());
             assert!(!manager.transaction_contains_partition(&tp0()));
         }
+    }
+
+    /// The four state predicates Java exposes but never calls
+    /// (`isReady` 1085, `isInitializing` 1090, `isPrepared` 1099,
+    /// `preparedTransactionState` 1976) and `isTransactionV2Enabled` (506).
+    ///
+    /// Translated per `definition-of-done.md` §2; pinned here so none can drift
+    /// into reading the wrong state, which is the only way a caller-less accessor
+    /// can go wrong.
+    #[tokio::test]
+    async fn test_state_predicates_java_declares_without_calling() {
+        // An idempotent producer answers `false` to all three transactional ones,
+        // because each is `isTransactional() && ..` or tests a state it cannot enter.
+        let manager = idempotent_manager(false);
+        assert!(!manager.is_ready());
+        assert!(!manager.is_initializing());
+        assert!(!manager.is_prepared());
+        assert!(!manager.is_transaction_v2_enabled());
+        assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
+
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        assert!(!manager.is_ready(), "UNINITIALIZED is not READY");
+        let result = manager
+            .initialize_transactions(false, &mut pending)
+            .expect("initTransactions is valid from UNINITIALIZED");
+        assert!(manager.is_initializing());
+        assert!(!manager.is_ready());
+
+        let handler = manager.next_request(&mut pending, false).expect("queued");
+        complete_init_producer_id(&mut manager, &mut pending, handler, Errors::None, PRODUCER_ID, EPOCH)
+            .expect("a successful InitProducerId response is handled");
+        assert!(manager.is_ready());
+        assert!(!manager.is_initializing());
+        assert!(!manager.is_prepared());
+
+        // `beginTransaction` needs the result acknowledged first
+        // (`throwIfPendingState`, Java 332).
+        result.await_result().await.expect("initTransactions succeeded");
+        // The predicates remain false through a transaction: PREPARED_TRANSACTION
+        // needs Phase 5b, and nothing in Phase 5a can turn Transaction V2 on.
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        assert!(!manager.is_ready());
+        assert!(!manager.is_prepared());
+        assert!(!manager.is_transaction_v2_enabled());
     }
 
     // ---------------------------------------------------------------------
