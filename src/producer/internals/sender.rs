@@ -753,7 +753,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Java's `runOnce` throws and `Sender.run` catches-and-logs; the Rust
     /// equivalent returns the error and [`Self::run_once_logging_errors`] logs it
     /// at the same point.
-    async fn run_once(&mut self) -> Result<(), KafkaError> {
+    pub(crate) async fn run_once(&mut self) -> Result<(), KafkaError> {
         if self.transaction_manager.is_some() {
             match self.run_transaction_phase().await {
                 // Java 322 / 326 / 334 — `runOnce` returns without producing.
