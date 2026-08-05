@@ -21,6 +21,10 @@ pub(crate) mod incomplete_batches;
 pub(crate) mod produce_request_result;
 pub(crate) mod producer_batch;
 pub(crate) mod producer_metadata;
+/// `ProducerTestUtils` is a test-only Java class, so its translation is compiled only
+/// for `cargo test`.
+#[cfg(test)]
+pub(crate) mod producer_test_utils;
 pub(crate) mod record_accumulator;
 pub(crate) mod sender;
 pub(crate) mod transaction_manager;

@@ -61,10 +61,12 @@ pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
 /// is in force.
 ///
 /// Java writes the string literal inline at `TransactionManager.java:499`; named
-/// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and
-/// its tests both need it, and CLAUDE.md §2 keeps a constant private to the file
-/// that defines it.
-const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
+/// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and the
+/// tests in this file and in `sender.rs` all need it. Per CLAUDE.md §2 it is
+/// exported only by this file — reached as
+/// `producer::internals::transaction_manager::TRANSACTION_VERSION_FEATURE`, never
+/// re-exported through the parent module.
+pub(crate) const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
 
 /// The `retryBackoffMs` an `AddPartitionsToTxn` retry uses after the first
 /// `CONCURRENT_TRANSACTIONS` error of a transaction.

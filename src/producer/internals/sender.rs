@@ -2383,8 +2383,10 @@ mod tests {
     use crate::common::record::RecordBatch;
     use crate::common::record::TimestampType;
     use crate::common::requests::ConcreteResponse;
+    use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
     use crate::common::utils::ProducerIdAndEpoch;
+    use crate::consumer::{ConsumerGroupMetadata, OffsetAndMetadata};
     use crate::mock_client::MockClient;
     use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
     use crate::producer::internals::BufferPool;
@@ -2392,6 +2394,7 @@ mod tests {
     use crate::producer::internals::PartitionerConfig;
     use crate::producer::internals::{Caller, InFlightBatchPool, TransactionalRequestResult};
     use std::sync::atomic::AtomicI64;
+    use std::time::Duration;
 
     // Constants matching Java's SenderTest
     const MAX_REQUEST_SIZE: i32 = 1024 * 1024;
@@ -2748,6 +2751,30 @@ mod tests {
                 .unwrap()
                 .next_request(&mut pending_requests, has_incomplete_batches)
                 .expect("next_request does not fail on this path")
+        }
+
+        /// The wire version the enqueued `EndTxn` will be sent at.
+        ///
+        /// Java reads `endTxnRequest.version()` from inside a `RequestMatcher`, i.e. at
+        /// send time. `EndTxnRequestBuilder::new(.., is_transaction_v2_enabled)` fixes the
+        /// bound when `beginCompletingTransaction` enqueues the handler
+        /// (`TransactionManager.java:1737`), so reading it off the queued handler gives
+        /// the same answer earlier — and reads the builder rather than restating the
+        /// V2-implies-v5 rule, so it cannot drift from it.
+        ///
+        /// # Panics
+        ///
+        /// If no `EndTxn` is queued, which would mean the caller prepared its response
+        /// before requesting the commit or abort.
+        fn end_txn_request_version(&self) -> i16 {
+            let pending_requests = self.pending_requests();
+            let pending_requests = pending_requests.lock().unwrap();
+            pending_requests
+                .iter()
+                .find(|handler| handler.is_end_txn())
+                .expect("an EndTxn must be enqueued before its response is prepared")
+                .clone_request_builder()
+                .latest_allowed_version()
         }
 
         /// Append a record to the accumulator for the given partition.
@@ -8183,6 +8210,972 @@ mod tests {
 
         let error = future.get().await.expect_err("the batch is aborted, not sent");
         assert_eq!(error.message(), "Failing batch since transaction was aborted");
+    }
+
+    // =====================================================================
+    // `TransactionManagerTest` methods driven through the accumulator and the `Sender`
+    // (Milestone 11, Phase 8)
+    //
+    // The 47 the PHASE-5B TEST ACCOUNTING block in `transaction_manager.rs` owed to
+    // this phase, plus the helpers they share. They land in this file because Java's
+    // `TransactionManagerTest` builds its own `RecordAccumulator` + `Sender` +
+    // `MockClient` (Java 209-224) and every one of these bodies drives them, while
+    // `transaction_manager.rs`'s test module has no client at all — it substitutes
+    // `run_manager_transaction_phase` for the Sender. Six `TransactionManagerTest`
+    // methods already live here for exactly that reason (group A of the accounting
+    // block names them, each with `→ sender.rs ..`), so this is the rest of one
+    // population rather than a new convention. The accounting block names the
+    // destination file for every entry, so nothing is harder to find.
+    // =====================================================================
+
+    /// `TransactionManagerTest.REQUEST_TIMEOUT` (Java 130). Distinct from
+    /// [`REQUEST_TIMEOUT`], which is `SenderTest`'s.
+    const TXN_MGR_REQUEST_TIMEOUT: i32 = 1000;
+    /// `deliveryTimeoutMs` in `initializeTransactionManager` (Java 217).
+    const TXN_MGR_DELIVERY_TIMEOUT_MS: i32 = 3000;
+    /// `TransactionManagerTest.DEFAULT_RETRY_BACKOFF_MS` (Java 131) — the manager's
+    /// backoff, which is *not* the `Sender`'s 50 (Java 224).
+    const TXN_MGR_DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
+    /// `consumerGroupId` (Java 144).
+    const CONSUMER_GROUP_ID: &str = "myConsumerGroup";
+    /// `memberId` (Java 145).
+    const MEMBER_ID: &str = "member";
+    /// `generationId` (Java 146).
+    const GENERATION_ID: i32 = 5;
+    /// `groupInstanceId` (Java 147).
+    const GROUP_INSTANCE_ID: &str = "instance";
+    /// `producerId` (Java 140).
+    const TXN_PRODUCER_ID: i64 = 13131;
+    /// `epoch` (Java 141).
+    const TXN_EPOCH: i16 = 1;
+
+    /// Builds the `TransactionManager` `TransactionManagerTest.initializeTransactionManager`
+    /// builds (Java 178-212), including the `ApiVersions` contents that carry the
+    /// `transactionV2Enabled` parameterisation.
+    ///
+    /// The `finalizedFeaturesEpoch` Java increments per call (Java 207) is always `0`
+    /// here: no test in this group calls the initializer twice, and the tests that do
+    /// re-publish features mid-run pass their own epoch.
+    fn txn_mgr_test_manager(transaction_v2_enabled: bool) -> Arc<Mutex<TransactionManager>> {
+        use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
+        use crate::common::protocol::ApiKeys;
+        use crate::producer::internals::transaction_manager::TRANSACTION_VERSION_FEATURE;
+
+        fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
+            let mut version = ApiVersion::new();
+            version.set_api_key(api_key.id());
+            version.set_min_version(0);
+            version.set_max_version(max_version);
+            version
+        }
+
+        let level: i16 = if transaction_v2_enabled { 2 } else { 1 };
+
+        let mut supported = SupportedFeatureKey::new();
+        supported.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        supported.set_max_version(level);
+        supported.set_min_version(0);
+
+        let mut finalized = FinalizedFeatureKey::new();
+        finalized.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        finalized.set_max_version_level(level);
+        finalized.set_min_version_level(level);
+
+        let api_versions = Arc::new(crate::ApiVersions::new());
+        api_versions.update(
+            "0",
+            crate::NodeApiVersions::new(
+                &[
+                    api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
+                    api_version(
+                        &ApiKeys::PRODUCE,
+                        if transaction_v2_enabled {
+                            ApiKeys::PRODUCE.latest_version()
+                        } else {
+                            11
+                        },
+                    ),
+                    api_version(
+                        &ApiKeys::TXN_OFFSET_COMMIT,
+                        if transaction_v2_enabled {
+                            ApiKeys::TXN_OFFSET_COMMIT.latest_version()
+                        } else {
+                            4
+                        },
+                    ),
+                ],
+                &[supported],
+                &[finalized],
+                0,
+            ),
+        );
+
+        Arc::new(Mutex::new(TransactionManager::new(
+            LogContext::empty(),
+            Some(TRANSACTIONAL_ID.to_string()),
+            TRANSACTION_TIMEOUT_MS,
+            TXN_MGR_DEFAULT_RETRY_BACKOFF_MS,
+            api_versions,
+            false,
+        )))
+    }
+
+    /// The context `TransactionManagerTest.initializeTransactionManager` leaves behind
+    /// (Java 213-224).
+    ///
+    /// Three knobs differ from [`SenderTestContext::transactional`] and all three are
+    /// load-bearing: `guaranteeMessageOrder` is **`true`** here (Java 219), the request
+    /// timeout is 1000 rather than 5000, and the delivery timeout is 3000 rather than
+    /// 1500. The manager's own retry backoff is 100 while the `Sender`'s is 50 — Java
+    /// passes `DEFAULT_RETRY_BACKOFF_MS` to the manager (Java 210) and the literal `50`
+    /// to the `Sender` (Java 224).
+    fn txn_mgr_test_context(transaction_v2_enabled: bool) -> SenderTestContext {
+        SenderTestContext::with_transaction_state(
+            true,
+            i32::MAX,
+            Some(txn_mgr_test_manager(transaction_v2_enabled)),
+            Some(SenderTestTimeouts {
+                request_timeout_ms: TXN_MGR_REQUEST_TIMEOUT,
+                delivery_timeout_ms: TXN_MGR_DELIVERY_TIMEOUT_MS,
+                // Java 216: `retryBackoffMs` and `retryBackoffMaxMs` are both 0L on the
+                // accumulator, so a re-enqueued batch is drainable on the next runOnce.
+                accumulator_retry_backoff_ms: 0,
+                sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+            }),
+        )
+    }
+
+    /// `TransactionManagerTest.produceResponse(tp, offset, error, throttleTimeMs)`
+    /// (Java 4322-4324), whose `logStartOffset` defaults to **10** — not to the `-1`
+    /// [`SenderTestContext::produce_response`] uses for the `SenderTest` group.
+    fn txn_produce_response(
+        ctx: &SenderTestContext,
+        tp: &TopicPartition,
+        offset: i64,
+        error: Errors,
+    ) -> ConcreteResponse {
+        ctx.produce_response_with_message(tp, offset, error, 0, 10, None)
+    }
+
+    /// `produceRequestMatcher(producerId, epoch, tp)` (Java 4109-4133).
+    fn produce_request_matcher(
+        producer_id: i64,
+        epoch: i16,
+        tp: &TopicPartition,
+    ) -> crate::mock_client::RequestMatcher {
+        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::requests::ConcreteRequest;
+
+        let tp = tp.clone();
+        Box::new(move |request| {
+            let ConcreteRequest::Produce(produce_request) = request else {
+                panic!("expected a produce request, got {request}");
+            };
+            let records = produce_request
+                .data()
+                .topic_data
+                .iter()
+                .find(|topic| topic.name == *tp.topic())
+                .expect("the request must carry this topic")
+                .partition_data
+                .iter()
+                .find(|partition| partition.index == tp.partition())
+                .expect("the request must carry this partition")
+                .records
+                .clone()
+                .expect("a produce request carries records");
+            let records = MemoryRecords::new(records);
+            let mut batches = records.batches();
+            let batch = batches.next().expect("one batch");
+            assert!(batches.next().is_none(), "a produce request carries one batch per partition");
+            assert!(batch.is_transactional(), "the batch must be transactional");
+            assert_eq!(batch.producer_id(), producer_id);
+            assert_eq!(batch.producer_epoch(), epoch);
+            assert_eq!(produce_request.transactional_id(), Some(TRANSACTIONAL_ID));
+            true
+        })
+    }
+
+    /// `prepareProduceResponse(error, producerId, producerEpoch, tp)` (Java 4105-4107).
+    fn prepare_produce_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        producer_id: i64,
+        producer_epoch: i16,
+        tp: &TopicPartition,
+    ) {
+        let response = txn_produce_response(ctx, tp, 0, error);
+        ctx.sender
+            .client_mut()
+            .prepare_response_with_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
+    }
+
+    /// `sendProduceResponse(error, producerId, producerEpoch, tp)` (Java 4097-4099):
+    /// answers a produce request that is already in flight.
+    fn send_produce_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        producer_id: i64,
+        producer_epoch: i16,
+        tp: &TopicPartition,
+    ) {
+        let response = txn_produce_response(ctx, tp, 0, error);
+        ctx.sender
+            .client_mut()
+            .respond_with_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
+    }
+
+    /// `getPartitionsFromV3Request(request)` (Java 4167-4169).
+    ///
+    /// Takes the request *data* rather than the request, so the call site does not have
+    /// to care whether its `let`-binding produced a value or a reference; Java's body is
+    /// `AddPartitionsToTxnRequest.getPartitions(request.data().v3AndBelowTopics())`
+    /// either way.
+    fn partitions_from_v3_request(
+        data: &crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData,
+    ) -> Vec<TopicPartition> {
+        use crate::common::requests::AddPartitionsToTxnRequest;
+        AddPartitionsToTxnRequest::get_partitions(&data.v3_and_below_topics)
+    }
+
+    /// `prepareAddPartitionsToTxn(Map<TopicPartition, Errors>)` (Java 4028-4036): the
+    /// matcher asserts the request's partition *set* equals the response's key set.
+    fn prepare_add_partitions_to_txn(ctx: &mut SenderTestContext, errors: &[(TopicPartition, Errors)]) {
+        use crate::common::requests::ConcreteRequest;
+
+        let expected: HashSet<TopicPartition> = errors.iter().map(|(tp, _)| tp.clone()).collect();
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+                panic!("expected an AddPartitionsToTxn request, got {request}");
+            };
+            let actual: HashSet<TopicPartition> = partitions_from_v3_request(request.data()).into_iter().collect();
+            assert_eq!(actual, expected);
+            true
+        });
+        ctx.sender
+            .client_mut()
+            .prepare_response_with_matcher(matcher, add_partitions_to_txn_response(errors));
+    }
+
+    /// `addPartitionsRequestMatcher(topicPartition, epoch, producerId)`
+    /// (Java 4155-4165). Unlike [`prepare_add_partitions_to_txn`]'s matcher this one
+    /// asserts the producer id / epoch / transactional id too, and compares the
+    /// partitions as an ordered `List`.
+    fn add_partitions_request_matcher(
+        tp: &TopicPartition,
+        epoch: i16,
+        producer_id: i64,
+    ) -> crate::mock_client::RequestMatcher {
+        use crate::common::requests::ConcreteRequest;
+
+        let tp = tp.clone();
+        Box::new(move |request| {
+            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+                panic!("expected an AddPartitionsToTxn request, got {request}");
+            };
+            assert_eq!(request.data().v3_and_below_producer_id, producer_id);
+            assert_eq!(request.data().v3_and_below_producer_epoch, epoch);
+            assert_eq!(partitions_from_v3_request(request.data()), vec![tp.clone()]);
+            assert_eq!(request.data().v3_and_below_transactional_id, TRANSACTIONAL_ID);
+            true
+        })
+    }
+
+    /// `prepareAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`
+    /// (Java 4135-4143).
+    fn prepare_add_partitions_to_txn_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        tp: &TopicPartition,
+        epoch: i16,
+        producer_id: i64,
+    ) {
+        let response = add_partitions_to_txn_response(&[(tp.clone(), error)]);
+        ctx.sender
+            .client_mut()
+            .prepare_response_with_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
+    }
+
+    /// `sendAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`
+    /// (Java 4145-4153).
+    fn send_add_partitions_to_txn_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        tp: &TopicPartition,
+        epoch: i16,
+        producer_id: i64,
+    ) {
+        let response = add_partitions_to_txn_response(&[(tp.clone(), error)]);
+        ctx.sender
+            .client_mut()
+            .respond_with_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
+    }
+
+    /// `endTxnMatcher(result, producerId, epoch)` (Java 4262-4271).
+    fn end_txn_matcher(result: TransactionResult, producer_id: i64, epoch: i16) -> crate::mock_client::RequestMatcher {
+        use crate::common::requests::ConcreteRequest;
+
+        Box::new(move |request| {
+            let ConcreteRequest::EndTxn(request) = request else {
+                panic!("expected an EndTxn request, got {request}");
+            };
+            assert_eq!(request.data().transactional_id, TRANSACTIONAL_ID);
+            assert_eq!(request.data().producer_id, producer_id);
+            assert_eq!(request.data().producer_epoch, epoch);
+            assert_eq!(request.result(), result);
+            true
+        })
+    }
+
+    /// `prepareEndTxnResponse(error, result, requestProducerId, requestProducerEpoch)`
+    /// (Java 4184-4222) — the Transaction-V1 form, which *fails* if the request went
+    /// out at v5 or above.
+    fn prepare_end_txn_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        result: TransactionResult,
+        request_producer_id: i64,
+        request_producer_epoch: i16,
+    ) {
+        use crate::common::requests::ConcreteRequest;
+
+        let inner = end_txn_matcher(result, request_producer_id, request_producer_epoch);
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            assert!(inner(request));
+            let ConcreteRequest::EndTxn(end_txn) = request else {
+                unreachable!()
+            };
+            assert!(
+                end_txn.version() < 5,
+                "ExpectedProducerId and ExpectedEpochId must be provided when transaction V2 \
+                 is enabled. Use the appropriate method."
+            );
+            true
+        });
+        ctx.sender
+            .client_mut()
+            .prepare_response_with_matcher(matcher, end_txn_response(error));
+    }
+
+    /// `prepareEndTxnResponse(error, result, requestProducerId, requestEpochId,
+    /// expectedProducerId, expectedEpochId, shouldDisconnect)` (Java 4224-4252) — the
+    /// Transaction-V2 form, which fills the response's producer id / epoch when the
+    /// request went out at v5 or above.
+    ///
+    /// Java mutates the shared `responseData` from inside the matcher, so the id and
+    /// epoch reach the response only when the version check passes. The `EndTxn`
+    /// version is fixed at request-build time and does not depend on the matcher, so
+    /// the same discrimination is made here by reading the version the manager will
+    /// use before queueing the response — which is checkable, unlike a closure that
+    /// mutates state a queued response already captured.
+    fn prepare_end_txn_response_v2(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        result: TransactionResult,
+        request: ProducerIdAndEpoch,
+        expected: ProducerIdAndEpoch,
+        should_disconnect: bool,
+    ) {
+        use crate::common::requests::EndTxnResponse;
+        use crate::end_txn_response_data::EndTxnResponseData;
+
+        let mut data = EndTxnResponseData::new();
+        data.set_error_code(error.code()).set_throttle_time_ms(0);
+        if ctx.end_txn_request_version() >= 5 {
+            data.set_producer_id(expected.producer_id).set_producer_epoch(expected.epoch);
+        }
+        let response = ConcreteResponse::EndTxn(EndTxnResponse::new(data));
+        ctx.sender.client_mut().prepare_response_with_matcher_disconnected(
+            end_txn_matcher(result, request.producer_id, request.epoch),
+            response,
+            should_disconnect,
+        );
+    }
+
+    /// `sendEndTxnResponse(error, result, producerId, epoch)` (Java 4254-4260).
+    fn send_end_txn_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        result: TransactionResult,
+        producer_id: i64,
+        epoch: i16,
+    ) {
+        ctx.sender
+            .client_mut()
+            .respond_with_matcher(end_txn_matcher(result, producer_id, epoch), end_txn_response(error));
+    }
+
+    /// `prepareAddOffsetsToTxnResponse(error, consumerGroupId, producerId, producerEpoch)`
+    /// (Java 4273-4288).
+    fn prepare_add_offsets_to_txn_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        consumer_group_id: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+    ) {
+        use crate::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
+        use crate::common::requests::{AddOffsetsToTxnResponse, ConcreteRequest};
+
+        let consumer_group_id = consumer_group_id.to_string();
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            let ConcreteRequest::AddOffsetsToTxn(request) = request else {
+                panic!("expected an AddOffsetsToTxn request, got {request}");
+            };
+            assert_eq!(request.data().group_id, consumer_group_id);
+            assert_eq!(request.data().transactional_id, TRANSACTIONAL_ID);
+            assert_eq!(request.data().producer_id, producer_id);
+            assert_eq!(request.data().producer_epoch, producer_epoch);
+            true
+        });
+
+        let mut data = AddOffsetsToTxnResponseData::new();
+        data.set_error_code(error.code());
+        ctx.sender.client_mut().prepare_response_with_matcher(
+            matcher,
+            ConcreteResponse::AddOffsetsToTxn(AddOffsetsToTxnResponse::new(data)),
+        );
+    }
+
+    /// `prepareTxnOffsetCommitResponse(consumerGroupId, producerId, producerEpoch,
+    /// txnOffsetCommitResponse)` (Java 4290-4301).
+    fn prepare_txn_offset_commit_response(
+        ctx: &mut SenderTestContext,
+        consumer_group_id: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        responses: &[(TopicPartition, Errors)],
+    ) {
+        prepare_txn_offset_commit_response_inner(ctx, consumer_group_id, producer_id, producer_epoch, None, responses);
+    }
+
+    /// `prepareTxnOffsetCommitResponse(consumerGroupId, producerId, producerEpoch,
+    /// groupInstanceId, memberId, generationId, txnOffsetCommitResponse)`
+    /// (Java 4303-4320).
+    /// Java passes `groupInstanceId`, `memberId` and `generationId` as three separate
+    /// parameters read off its own fields; they are taken from the
+    /// [`ConsumerGroupMetadata`] the matching `sendOffsetsToTransaction` call used, which
+    /// is where all three come from and keeps the argument count inside clippy's limit.
+    fn prepare_txn_offset_commit_response_with_group_metadata(
+        ctx: &mut SenderTestContext,
+        producer_id: i64,
+        producer_epoch: i16,
+        group_metadata: &ConsumerGroupMetadata,
+        responses: &[(TopicPartition, Errors)],
+    ) {
+        prepare_txn_offset_commit_response_inner(
+            ctx,
+            group_metadata.group_id(),
+            producer_id,
+            producer_epoch,
+            Some((
+                group_metadata
+                    .group_instance_id()
+                    .expect("this overload is for a metadata carrying a group instance id")
+                    .to_string(),
+                group_metadata.member_id().to_string(),
+                group_metadata.generation_id(),
+            )),
+            responses,
+        );
+    }
+
+    fn prepare_txn_offset_commit_response_inner(
+        ctx: &mut SenderTestContext,
+        consumer_group_id: &str,
+        producer_id: i64,
+        producer_epoch: i16,
+        group_metadata: Option<(String, String, i32)>,
+        responses: &[(TopicPartition, Errors)],
+    ) {
+        use crate::common::requests::{ConcreteRequest, TxnOffsetCommitResponse};
+
+        let consumer_group_id = consumer_group_id.to_string();
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            let ConcreteRequest::TxnOffsetCommit(request) = request else {
+                panic!("expected a TxnOffsetCommit request, got {request}");
+            };
+            assert_eq!(request.data().group_id, consumer_group_id);
+            assert_eq!(request.data().producer_id, producer_id);
+            assert_eq!(request.data().producer_epoch, producer_epoch);
+            if let Some((group_instance_id, member_id, generation_id)) = &group_metadata {
+                assert_eq!(request.data().group_instance_id.as_deref(), Some(group_instance_id.as_str()));
+                assert_eq!(request.data().member_id, *member_id);
+                assert_eq!(request.data().generation_id, *generation_id);
+            }
+            true
+        });
+
+        let error_map: HashMap<TopicPartition, Errors> = responses.iter().cloned().collect();
+        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(0, &error_map));
+        ctx.sender.client_mut().prepare_response_with_matcher(matcher, response);
+    }
+
+    /// `prepareFindCoordinatorResponse(error, shouldDisconnect, coordinatorType,
+    /// coordinatorKey)` (Java 4042-4054).
+    fn prepare_find_coordinator_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        should_disconnect: bool,
+        coordinator_type: CoordinatorType,
+        coordinator_key: &str,
+    ) {
+        use crate::common::requests::ConcreteRequest;
+
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        let key = coordinator_key.to_string();
+        let expected_key = key.clone();
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            let ConcreteRequest::FindCoordinator(request) = request else {
+                panic!("expected a FindCoordinator request, got {request}");
+            };
+            assert_eq!(
+                CoordinatorType::for_id(request.data().key_type).expect("a known coordinator type"),
+                coordinator_type
+            );
+            let actual = if request.data().coordinator_keys.is_empty() {
+                request.data().key.clone()
+            } else {
+                request.data().coordinator_keys[0].clone()
+            };
+            assert_eq!(actual, expected_key);
+            true
+        });
+        ctx.sender.client_mut().prepare_response_with_matcher_disconnected(
+            matcher,
+            find_coordinator_response(error, &key, &node),
+            should_disconnect,
+        );
+    }
+
+    /// `prepareInitPidResponse(error, shouldDisconnect, producerId, producerEpoch)`
+    /// (Java 4056-4063), which delegates to the eight-argument form with
+    /// `keepPreparedTxn = enable2Pc = false` and no ongoing transaction.
+    fn prepare_init_pid_response(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        should_disconnect: bool,
+        producer_id: i64,
+        producer_epoch: i16,
+    ) {
+        use crate::common::requests::{ConcreteRequest, InitProducerIdResponse};
+        use crate::init_producer_id_response_data::InitProducerIdResponseData;
+
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            let ConcreteRequest::InitProducerId(request) = request else {
+                panic!("expected an InitProducerId request, got {request}");
+            };
+            assert_eq!(request.data().transactional_id.as_deref(), Some(TRANSACTIONAL_ID));
+            assert_eq!(request.data().transaction_timeout_ms, TRANSACTION_TIMEOUT_MS);
+            assert!(!request.data().keep_prepared_txn);
+            assert!(!request.data().enable2_pc);
+            true
+        });
+
+        let mut data = InitProducerIdResponseData::new();
+        data.set_error_code(error.code())
+            .set_producer_epoch(producer_epoch)
+            .set_producer_id(producer_id)
+            .set_throttle_time_ms(0)
+            .set_ongoing_txn_producer_id(-1)
+            .set_ongoing_txn_producer_epoch(-1);
+        ctx.sender.client_mut().prepare_response_with_matcher_disconnected(
+            matcher,
+            ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data)),
+            should_disconnect,
+        );
+    }
+
+    /// `doInitTransactions()` (Java 4348-4350), which delegates to
+    /// `doInitTransactions(producerId, epoch)` (Java 4352-4365).
+    async fn do_init_transactions(ctx: &mut SenderTestContext) {
+        do_init_transactions_with(ctx, TXN_PRODUCER_ID, TXN_EPOCH).await;
+    }
+
+    /// `doInitTransactions(producerId, epoch)` (Java 4352-4365).
+    ///
+    /// Java's `maybeUpdateTransactionV2Enabled(true)` at the end (Java 4360) is
+    /// reproduced literally, because a V2 context must leave `initializeTransactions`
+    /// with the flag latched — `run_init_transactions` (the `SenderTest` helper) does
+    /// not do this, which is why this group needs its own.
+    async fn do_init_transactions_with(ctx: &mut SenderTestContext, producer_id: i64, epoch: i16) {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let result = ctx
+            .initialize_transactions()
+            .expect("initTransactions is valid from UNINITIALIZED");
+        prepare_find_coordinator_response(ctx, Errors::None, false, CoordinatorType::Transaction, TRANSACTIONAL_ID);
+        // Java reads `transactionManager.coordinator(TRANSACTION)`; the coordinator nodes
+        // are Sender-confined here (rules §2), so the predicate reads the `Sender`.
+        run_until(&mut ctx.sender, |sender| {
+            sender.coordinator(CoordinatorType::Transaction).expect("valid type").is_some()
+        })
+        .await;
+        let manager = ctx.transaction_manager();
+        let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
+        assert_eq!(
+            ctx.sender.coordinator(CoordinatorType::Transaction).expect("valid type"),
+            Some(&node)
+        );
+
+        prepare_init_pid_response(ctx, Errors::None, false, producer_id, epoch);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().has_producer_id()).await;
+        }
+
+        result.await_result().await.expect("initTransactions succeeded");
+        assert!(result.is_successful());
+        manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
+    }
+
+    /// `beginTransaction()` on the shared manager, taking the guard for the call only.
+    fn begin_transaction(ctx: &SenderTestContext) {
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_transaction()
+            .expect("beginTransaction");
+    }
+
+    /// `maybeAddPartition(tp)` on the shared manager.
+    fn maybe_add_partition(ctx: &SenderTestContext, tp: &TopicPartition) {
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .maybe_add_partition(tp)
+            .expect("maybeAddPartition");
+    }
+
+    /// `beginCommit()`, with both guards taken in the mandated
+    /// `pending_requests` → `TransactionManager` order.
+    fn begin_commit(ctx: &SenderTestContext) -> Arc<TransactionalRequestResult> {
+        let pending_requests = ctx.pending_requests();
+        let mut pending_requests = pending_requests.lock().unwrap();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_commit(&mut pending_requests)
+            .expect("beginCommit")
+    }
+
+    /// `beginAbort()`, from the application side.
+    fn begin_abort(ctx: &SenderTestContext) -> Arc<TransactionalRequestResult> {
+        let pending_requests = ctx.pending_requests();
+        let mut pending_requests = pending_requests.lock().unwrap();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .begin_abort(&mut pending_requests, Caller::App)
+            .expect("beginAbort")
+    }
+
+    /// `sendOffsetsToTransaction(offsets, groupMetadata)`.
+    fn send_offsets_to_transaction(
+        ctx: &SenderTestContext,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
+    ) -> Arc<TransactionalRequestResult> {
+        let pending_requests = ctx.pending_requests();
+        let mut pending_requests = pending_requests.lock().unwrap();
+        ctx.transaction_manager()
+            .lock()
+            .unwrap()
+            .send_offsets_to_transaction(offsets, group_metadata, &mut pending_requests)
+            .expect("sendOffsetsToTransaction")
+    }
+
+    /// `new ConsumerGroupMetadata(consumerGroupId)`.
+    fn consumer_group_metadata() -> ConsumerGroupMetadata {
+        #[allow(deprecated)]
+        ConsumerGroupMetadata::new(CONSUMER_GROUP_ID)
+    }
+
+    /// `new ConsumerGroupMetadata(consumerGroupId, generationId, memberId,
+    /// Optional.of(groupInstanceId))` (Java 2691).
+    fn full_consumer_group_metadata() -> ConsumerGroupMetadata {
+        #[allow(deprecated)]
+        ConsumerGroupMetadata::with_details(
+            CONSUMER_GROUP_ID,
+            GENERATION_ID,
+            MEMBER_ID,
+            Some(GROUP_INSTANCE_ID.to_string()),
+        )
+    }
+
+    /// `new OffsetAndMetadata(offset)`, which cannot fail for a non-negative offset.
+    fn offset(offset: i64) -> OffsetAndMetadata {
+        OffsetAndMetadata::new(offset).expect("a non-negative offset")
+    }
+
+    /// `assertProduceFutureFailed(future)` (Java 4444-4453).
+    async fn assert_produce_future_failed(future: &Arc<FutureRecordMetadata>) {
+        assert!(future.is_done());
+        future.get().await.expect_err("Expected produce future to throw");
+    }
+
+    /// `verifyCommitOrAbortTransactionRetriable(firstTransactionResult,
+    /// retryTransactionResult)` (Java 3997-4026).
+    ///
+    /// The `EndTxn` is answered but its response is **disconnected**, so the result
+    /// stays incomplete and the manager must re-look-up the coordinator before the
+    /// retry. `handleCachedTransactionRequestResult` then hands back the *same* result
+    /// object for a matching retry and rejects a mismatched one.
+    async fn verify_commit_or_abort_transaction_retriable(
+        ctx: &mut SenderTestContext,
+        first_transaction_result: TransactionResult,
+        retry_transaction_result: TransactionResult,
+    ) -> Result<(), KafkaError> {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        do_init_transactions(ctx).await;
+
+        begin_transaction(ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(ctx, &tp0);
+
+        ctx.append_to_accumulator(&tp0).await;
+
+        prepare_add_partitions_to_txn_response(ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+
+        let result = match first_transaction_result {
+            TransactionResult::Commit => begin_commit(ctx),
+            TransactionResult::Abort => begin_abort(ctx),
+        };
+        prepare_end_txn_response_v2(
+            ctx,
+            Errors::None,
+            first_transaction_result,
+            ProducerIdAndEpoch::new(TXN_PRODUCER_ID, TXN_EPOCH),
+            ProducerIdAndEpoch::new(TXN_PRODUCER_ID, TXN_EPOCH),
+            true,
+        );
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+        assert!(!result.is_completed());
+        // Java: `assertThrows(TimeoutException.class, () -> result.await(MAX_BLOCK_TIMEOUT, MILLISECONDS))`.
+        let timeout = result
+            .await_result_timeout(Duration::from_millis(MAX_BLOCK_TIMEOUT as u64))
+            .await
+            .expect_err("the disconnected EndTxn leaves the result pending");
+        assert!(
+            matches!(timeout, KafkaError::Timeout(_)),
+            "expected a TimeoutException, got {timeout}"
+        );
+
+        prepare_find_coordinator_response(ctx, Errors::None, false, CoordinatorType::Transaction, TRANSACTIONAL_ID);
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+
+        let retry_result = match retry_transaction_result {
+            TransactionResult::Commit => {
+                let pending_requests = ctx.pending_requests();
+                let mut pending_requests = pending_requests.lock().unwrap();
+                ctx.transaction_manager().lock().unwrap().begin_commit(&mut pending_requests)?
+            },
+            TransactionResult::Abort => {
+                let pending_requests = ctx.pending_requests();
+                let mut pending_requests = pending_requests.lock().unwrap();
+                ctx.transaction_manager()
+                    .lock()
+                    .unwrap()
+                    .begin_abort(&mut pending_requests, Caller::App)?
+            },
+        };
+        // Java's `assertEquals(retryResult, result)` compares object identity, because
+        // `TransactionalRequestResult` does not override `equals`. `Arc::ptr_eq` is that
+        // comparison — and it is the whole point of the check: the cached result must be
+        // handed back, not a fresh one.
+        assert!(
+            Arc::ptr_eq(&retry_result, &result),
+            "the cached result must be reused for a matching retry"
+        );
+
+        prepare_end_txn_response(ctx, Errors::None, retry_transaction_result, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let retry_result = Arc::clone(&retry_result);
+            run_until(&mut ctx.sender, move |_| retry_result.is_completed()).await;
+        }
+        assert!(!ctx.transaction_manager().lock().unwrap().has_ongoing_transaction());
+        Ok(())
+    }
+
+    /// Translated from `TransactionManagerTest.testRetryAbortTransaction`
+    /// (Java 3695-3697).
+    #[tokio::test]
+    async fn test_retry_abort_transaction() {
+        let mut ctx = txn_mgr_test_context(false);
+        verify_commit_or_abort_transaction_retriable(&mut ctx, TransactionResult::Abort, TransactionResult::Abort)
+            .await
+            .expect("retrying an abort after an abort timeout is allowed");
+    }
+
+    /// Translated from `TransactionManagerTest.testRetryCommitTransaction`
+    /// (Java 3700-3702).
+    #[tokio::test]
+    async fn test_retry_commit_transaction() {
+        let mut ctx = txn_mgr_test_context(false);
+        verify_commit_or_abort_transaction_retriable(&mut ctx, TransactionResult::Commit, TransactionResult::Commit)
+            .await
+            .expect("retrying a commit after a commit timeout is allowed");
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testRetryAbortTransactionAfterCommitTimeout`
+    /// (Java 3705-3707).
+    ///
+    /// Java asserts `IllegalStateException`; the Rust equivalent is the
+    /// `Errors::UnknownServerError`-coded `KafkaError::illegal_state`
+    /// `handle_cached_transaction_request_result` returns when the cached operation does
+    /// not match the requested one.
+    #[tokio::test]
+    async fn test_retry_abort_transaction_after_commit_timeout() {
+        let mut ctx = txn_mgr_test_context(false);
+        let error =
+            verify_commit_or_abort_transaction_retriable(&mut ctx, TransactionResult::Commit, TransactionResult::Abort)
+                .await
+                .expect_err("aborting while a commit is pending is an invalid transition");
+        assert_eq!(
+            error.message(),
+            "Cannot attempt operation `abortTransaction` because the previous call to \
+             `commitTransaction` timed out and must be retried"
+        );
+    }
+
+    /// Translated from
+    /// `TransactionManagerTest.testRetryCommitTransactionAfterAbortTimeout`
+    /// (Java 3710-3712).
+    #[tokio::test]
+    async fn test_retry_commit_transaction_after_abort_timeout() {
+        let mut ctx = txn_mgr_test_context(false);
+        let error =
+            verify_commit_or_abort_transaction_retriable(&mut ctx, TransactionResult::Abort, TransactionResult::Commit)
+                .await
+                .expect_err("committing while an abort is pending is an invalid transition");
+        assert_eq!(
+            error.message(),
+            "Cannot attempt operation `commitTransaction` because the previous call to \
+             `abortTransaction` timed out and must be retried"
+        );
+    }
+
+    /// Translated from `TransactionManagerTest.testSenderShutdownWithPendingTransactions`
+    /// (Java 228-247).
+    #[tokio::test]
+    async fn test_sender_shutdown_with_pending_transactions() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+        begin_transaction(&ctx);
+
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        let send_future = ctx.append_to_accumulator(&tp0).await;
+
+        prepare_add_partitions_to_txn(&mut ctx, &[(tp0.clone(), Errors::None)]);
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
+
+        ctx.sender.initiate_close();
+        ctx.sender.run_once().await.expect("run_once");
+
+        let result = begin_commit(&ctx);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let result = Arc::clone(&result);
+            run_until(&mut ctx.sender, move |_| result.is_completed()).await;
+        }
+        {
+            let send_future = Arc::clone(&send_future);
+            run_until(&mut ctx.sender, move |_| send_future.is_done()).await;
+        }
+    }
+
+    /// Translated from `TransactionManagerTest.testBasicTransaction` (Java 881-931).
+    #[tokio::test]
+    async fn test_basic_transaction() {
+        use crate::producer::internals::producer_test_utils::run_until;
+
+        let mut ctx = txn_mgr_test_context(false);
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        maybe_add_partition(&ctx, &tp0);
+
+        let response_future = ctx.append_to_accumulator(&tp0).await;
+
+        assert!(!response_future.is_done());
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+
+        let manager = ctx.transaction_manager();
+        assert!(!manager.lock().unwrap().transaction_contains_partition(&tp0));
+        assert!(!manager.lock().unwrap().is_send_to_partition_allowed(&tp0));
+        {
+            let manager = Arc::clone(&manager);
+            let tp0 = tp0.clone();
+            run_until(&mut ctx.sender, move |_| {
+                manager.lock().unwrap().transaction_contains_partition(&tp0)
+            })
+            .await;
+        }
+        assert!(manager.lock().unwrap().is_send_to_partition_allowed(&tp0));
+        assert!(!response_future.is_done());
+        {
+            let response_future = Arc::clone(&response_future);
+            run_until(&mut ctx.sender, move |_| response_future.is_done()).await;
+        }
+
+        let mut offsets = HashMap::new();
+        offsets.insert(tp1.clone(), offset(1));
+
+        let add_offsets_result = send_offsets_to_transaction(&ctx, offsets, consumer_group_metadata());
+
+        assert!(!manager.lock().unwrap().has_pending_offset_commits());
+
+        prepare_add_offsets_to_txn_response(&mut ctx, Errors::None, CONSUMER_GROUP_ID, TXN_PRODUCER_ID, TXN_EPOCH);
+
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| manager.lock().unwrap().has_pending_offset_commits()).await;
+        }
+        // The result doesn't complete until TxnOffsetCommit returns.
+        assert!(!add_offsets_result.is_completed());
+
+        prepare_find_coordinator_response(&mut ctx, Errors::None, false, CoordinatorType::Group, CONSUMER_GROUP_ID);
+        prepare_txn_offset_commit_response(
+            &mut ctx,
+            CONSUMER_GROUP_ID,
+            TXN_PRODUCER_ID,
+            TXN_EPOCH,
+            &[(tp1.clone(), Errors::None)],
+        );
+
+        assert!(ctx.sender.coordinator(CoordinatorType::Group).expect("valid type").is_none());
+        run_until(&mut ctx.sender, |sender| {
+            sender.coordinator(CoordinatorType::Group).expect("valid type").is_some()
+        })
+        .await;
+        assert!(manager.lock().unwrap().has_pending_offset_commits());
+
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| !manager.lock().unwrap().has_pending_offset_commits()).await;
+        }
+        // We should only be done after both RPCs complete.
+        assert!(add_offsets_result.is_completed());
+
+        begin_commit(&ctx);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let manager = Arc::clone(&manager);
+            run_until(&mut ctx.sender, move |_| !manager.lock().unwrap().has_ongoing_transaction()).await;
+        }
+        assert!(!manager.lock().unwrap().is_completing());
+        assert!(!manager.lock().unwrap().transaction_contains_partition(&tp0));
     }
 
     #[test]

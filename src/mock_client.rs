@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::sync::Notify;
 
 use crate::common::Node;
+use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
 
@@ -130,10 +131,21 @@ impl MockConnectionState {
     }
 }
 
+/// A predicate asserted against the request a prepared response is about to answer.
+///
+/// Translated from `MockClient.RequestMatcher` (`MockClient.java:637-639`), a
+/// functional interface whose `matches(AbstractRequest)` Java evaluates inside
+/// `send` and `respond`. Every `TransactionManagerTest` `prepare*`/`send*` helper
+/// supplies one, and the assertions live *inside* it — so a port without matchers
+/// silently drops them.
+pub type RequestMatcher = Box<dyn Fn(&ConcreteRequest) -> bool + Send>;
+
 /// A queued future response to be delivered when a matching request is sent.
 struct FutureResponse {
     /// If set, only match requests to this specific node.
     node: Option<Node>,
+    /// If set, asserted against the built request before the response is handed back.
+    request_matcher: Option<RequestMatcher>,
     /// The response body to deliver.
     response_body: Option<ConcreteResponse>,
     /// Whether to simulate a disconnection.
@@ -316,6 +328,30 @@ impl MockClient {
         self.respond_with_disconnect(response, false);
     }
 
+    /// Queue up a response for the next pending request, first asserting `matcher`
+    /// against it.
+    ///
+    /// Translated from `MockClient.respond(RequestMatcher, AbstractResponse)`
+    /// (`MockClient.java:294-296`), which `TransactionManagerTest`'s `sendProduceResponse`
+    /// / `sendAddPartitionsToTxnResponse` / `sendEndTxnResponse` use to answer a request
+    /// that is *already* in flight.
+    ///
+    /// # Panics
+    ///
+    /// If no request is pending, or if `matcher` rejects it — Java throws
+    /// `IllegalStateException` in the same place (`:301-303`).
+    pub fn respond_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
+        let built = self
+            .requests
+            .front_mut()
+            .expect("No requests pending for inbound response")
+            .request_builder_mut()
+            .build()
+            .expect("the pending request builds");
+        assert!(matcher(&built), "Request matcher did not match next-in-line request {built}");
+        self.respond_with_disconnect(response, false);
+    }
+
     /// Queue up a response with a possible disconnect flag.
     pub fn respond_with_disconnect(&mut self, response: ConcreteResponse, disconnected: bool) {
         let mut request = self.requests.pop_front().expect("No requests pending for inbound response");
@@ -406,23 +442,46 @@ impl MockClient {
 
     /// Prepare a future response that will be delivered when a matching request is sent.
     pub fn prepare_response(&mut self, response: ConcreteResponse) {
-        self.prepare_response_from(None, response, false, false);
+        self.prepare_response_from(None, None, response, false, false);
+    }
+
+    /// Prepare a future response, asserting `matcher` against the request it answers.
+    ///
+    /// Translated from `MockClient.prepareResponse(RequestMatcher, AbstractResponse)`
+    /// (`MockClient.java:246-248`).
+    pub fn prepare_response_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
+        self.prepare_response_from(None, Some(matcher), response, false, false);
+    }
+
+    /// Prepare a future response with both a matcher and a disconnect flag.
+    ///
+    /// Translated from
+    /// `MockClient.prepareResponse(RequestMatcher, AbstractResponse, boolean)`
+    /// (`MockClient.java:258-260`).
+    pub fn prepare_response_with_matcher_disconnected(
+        &mut self,
+        matcher: RequestMatcher,
+        response: ConcreteResponse,
+        disconnected: bool,
+    ) {
+        self.prepare_response_from(None, Some(matcher), response, disconnected, false);
     }
 
     /// Prepare a future response from a specific node.
     pub fn prepare_response_for_node(&mut self, response: ConcreteResponse, node: &Node) {
-        self.prepare_response_from(Some(node.clone()), response, false, false);
+        self.prepare_response_from(Some(node.clone()), None, response, false, false);
     }
 
     /// Prepare a disconnect response for a specific node.
     pub fn prepare_response_disconnected(&mut self, response: ConcreteResponse, disconnected: bool) {
-        self.prepare_response_from(None, response, disconnected, false);
+        self.prepare_response_from(None, None, response, disconnected, false);
     }
 
     /// Prepare an unsupported version response.
     pub fn prepare_unsupported_version_response(&mut self) {
         self.future_responses.push_back(FutureResponse {
             node: None,
+            request_matcher: None,
             response_body: None,
             disconnected: false,
             is_unsupported_request: true,
@@ -432,12 +491,14 @@ impl MockClient {
     fn prepare_response_from(
         &mut self,
         node: Option<Node>,
+        request_matcher: Option<RequestMatcher>,
         response: ConcreteResponse,
         disconnected: bool,
         is_unsupported_version: bool,
     ) {
         self.future_responses.push_back(FutureResponse {
             node,
+            request_matcher,
             response_body: Some(response),
             disconnected,
             is_unsupported_request: is_unsupported_version,
@@ -558,6 +619,17 @@ impl KafkaClient for MockClient {
 
         if let Some(idx) = matched_idx {
             let future_resp = self.future_responses.remove(idx).unwrap();
+            // Java builds the request unconditionally here (`MockClient.java:495`) and
+            // then evaluates the matcher. This port builds it only when a matcher is
+            // present, because `build()` on a `ProduceRequestBuilder` *moves* the
+            // serialized records out of the batch (PLAN §9.18) — a side effect Java's
+            // `build()` does not have. Nothing downstream of a matched future response
+            // reads the request body, so the narrower build is equivalent; doing it
+            // unconditionally would make every existing matcher-less test pay it.
+            if let Some(matcher) = future_resp.request_matcher {
+                let built = request.request_builder_mut().build().expect("the request builds");
+                assert!(matcher(&built), "Request matcher did not match next-in-line request {built}");
+            }
             let version = request.request_builder().latest_allowed_version();
             let header = request.make_header(version).expect("Failed to create header");
             let callback = request.take_callback();
