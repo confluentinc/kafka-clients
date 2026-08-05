@@ -1400,6 +1400,11 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
+        // This method is `doSend`'s zero-copy twin, so it owes the same two entry
+        // guards (`KafkaProducer.java:988-989`). Without this a 2PC caller could send
+        // through the FFI path while the transaction was prepared, which
+        // `Self::do_send` refuses.
+        self.throw_if_in_prepared_state()?;
 
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
