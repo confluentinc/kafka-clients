@@ -1,8 +1,68 @@
 ---
 name: review-m11-phase6
-description: M11 Phase 6 (public producer txn API + Sender txn loop) — pass 1 = 7 findings, 0 behavioural; name-prefix splitter blind spot, rotated citations, unpinned prod fix, refused-spec record sweep
+description: M11 Phase 6 (public producer txn API + Sender txn loop) — 7→4 findings, 0 behavioural ever; splitter blind spots, rotated citations, unpinned prod fix, and a Critic false fact the Actor caught
 metadata:
   type: project
+---
+
+**Pass 2 (`8c4cace`, all 7 fixes): 4 findings, all records — and the Actor corrected a
+false supporting fact of *mine*.** Three of the four were created by the fix commit
+itself. Lessons specific to pass 2, before the pass-1 material below:
+
+## P2.1 A fix commit that updates counts must be swept for every prose site carrying them
+
+Fixes 1-2 moved two denominators (27→28, 15→16) and updated the code blocks and the commit
+message, but left the pre-fix numbers in **four** prose sites: PLAN §Phase-6's spec line,
+its two-sentence "Status: landed" paragraph, §9.21's amendment bullet, and the Actor's own
+`phase6_public_txn_api_notes.md`. Sweep: `grep -rn "All 27\|27 transactional\|15
+transactional\|22 translated" design/ src/ .claude/`.
+
+Sharpest instance: §9.21's bullet said Phase 6 "changed **disposition only** … with an
+**empty membership diff**" — true when written for pass 1, falsified by fix 1 *in the same
+commit*, which added a member. This is the milestone's signature defect (a fix's own
+justification is the new defect surface) in its purest form: two fixes in one commit, each
+correct, mutually inconsistent.
+
+## P2.2 A correction in one section does not correct the section that cites it
+
+§10.9 refuted my false fact explicitly ("That is false: it exists, at
+`KafkaProducerMetrics.java:124`") *and* §9.21, amended in the same commit, asserted the
+refuted version in the Actor's own voice 740 lines earlier. After any "X was wrong,
+here's the corrected form" edit, grep the wrong claim's distinctive token repo-wide —
+here `grep -n recordPrepareTxn PLAN.md` returned both the claim and its refutation.
+
+## P2.3 I asserted a false exhaustiveness claim — two compounding errors to avoid
+
+See §6 below for the full account. The two mechanics, worth internalising:
+**(a)** Kafka abbreviates inconsistently — `recordPrepareTxn`/`recordBeginTxn` beside
+`beginTransaction` — so a grep built from the long form cannot match the accessor. Grep the
+**field** (`prepareTxnSensor`) and follow it, or grep both stems. **(b)** I read a bounded
+`sed` window, saw the `record*` run end, and treated truncation as exhaustive. Never back a
+"no X anywhere in the class" claim with a windowed read.
+
+Corollary: when a correct conclusion has two candidate supporting facts, verify the one you
+assert, not the one that sounds stronger. A false premise for a true conclusion is still a
+defect — and the Actor was right to refuse to relay it.
+
+## P2.4 Verifying an instrumentation-vs-contract claim: find where the hook runs
+
+The pin's contract test sleeps 300 ms in a Sender exit hook and asserts a flag after
+`close`. Whether "with the join the flag is *necessarily* set" is a causal guarantee or a
+timing margin turns entirely on **where the hook runs**: it is inside the `spawn_blocking`
+closure after `block_on(..)` returns, so the `JoinHandle` cannot resolve until the hook
+completes — a guarantee. Had it been a detached task, the same prose would have been a
+race. Always locate the hook relative to the joined future before crediting or faulting
+such a doc.
+
+## P2.5 Two sibling accounting blocks can disagree about what a line number means
+
+`KafkaProducerTest`'s block cites the **declaration** line (2423, correctly rejecting the
+2422 annotation); `SenderTest`'s new entry cites the **annotation** (507, not 508) while
+its own convention line says "the `public void` declaration line throughout". Check a new
+entry against the block's stated convention *and* against the sibling block — and check
+**all** citations to establish whether a deviation is newly introduced (here 1 of 55) or
+inherited.
+
 ---
 
 Phase 6 (`Producer` trait txn methods, `KafkaProducer`'s five public methods, Sender
@@ -130,10 +190,31 @@ it: only the 4 rare public methods + construction in `kafka_producer.rs`.
 
 The Actor refused PLAN §Phase-6's `prepare_transaction` and was **right** — in `kafka/` at
 tag `4.2.0`, `prepareTransaction` exists only on `TransactionManager`; `Producer.java` has
-0 hits. Stronger evidence than the Actor's own: `KafkaProducerMetrics` creates
-`prepareTxnSensor` but has **no `recordPrepareTxn` method**, so the sensor is dead and
-implies no producer method (a dangling metric is not evidence of a method — check for its
-`record*` caller). `completeTransaction` likewise exists only in a message string.
+0 hits. `completeTransaction` likewise exists only in a message string.
+
+The metrics sensor is dead scaffolding and independently confirms the refusal, but state
+the fact correctly: **`recordPrepareTxn` DOES exist, at `KafkaProducerMetrics.java:124`.**
+The load-bearing fact is that it has **zero callers** — `grep -rn recordPrepareTxn kafka/`
+gives 1 hit tree-wide (its own declaration) against `recordInit`'s 3 in
+`kafka/clients/src/` (declaration, `KafkaProducer.java:655`, and
+`KafkaProducerMetricsTest.java:52`). A sensor plus a recorder that nothing invokes, not
+even a test, is what a forward-looking KIP-939 artifact looks like.
+
+**I got this wrong in pass 1** and the Actor corrected me; it is recorded in §10.9
+deviation 2. Two compounding mistakes, both worth avoiding:
+  - I grepped `prepareTransaction`, but the method is `recordPrepareTxn` — **Txn, not
+    Transaction**. Kafka abbreviates inconsistently (`recordBeginTxn`/`recordCommitTxn`
+    vs. `beginTransaction`), so a pattern built from the long form cannot match the
+    accessor. Grep both stems, or grep the field (`prepareTxnSensor`) and follow it.
+  - I then read `sed -n '55,115p'`, saw the `record*` run end at `recordSendOffsets`, and
+    treated a **truncated window as exhaustive**. The method was at 124, nine lines past
+    my read.
+
+This is the mirror image of §2's own warning about exhaustiveness claims — "no X anywhere
+in the class" is the strongest possible claim and needs the widest possible grep. When a
+*correct conclusion* has two candidate supporting facts, verify the one you assert rather
+than the one that sounds stronger; a false premise for a true conclusion is still a defect,
+and the Actor was right to refuse to propagate it.
 
 The spec line *was* struck through with a correction, but PLAN §9.21's "Handed forward"
 sentence still promised the surface to Phase 6. **When a phase refuses a hand-forward,

@@ -68,4 +68,4 @@
 - [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim
 - [M11 Phase 5a txn state machine](review_m11_phase5a.md) — CLOSED 7→2→0, all findings were records. Extract+run shipped derivations (guard the extraction); deleting a guard voids every skip citing it; falsify rules §2
 - [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→1→0, closes Phase 5. Caller both-reachable grep per entry point; builder snapshots defeat "retry carries only X"; state reachability = grep the writers' Caller
-- [M11 Phase 6 public txn API](review_m11_phase6.md) — pass 1: 7 findings, 0 behavioural. Name-prefix splitter blind spots; citations right as a set wrong as a mapping; unpinned prod fix; `} else {` brace trap
+- [M11 Phase 6 public txn API](review_m11_phase6.md) — 7→4, 0 behavioural. Splitter blind spots; set-right/mapping-wrong citations; unpinned prod fix; my own false exhaustiveness claim caught by the Actor

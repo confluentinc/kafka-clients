@@ -3203,11 +3203,38 @@ mod tests {
     /// the assertion is `is_partition_pending_add` (`TransactionManager.java:571`) — the
     /// state `maybeAddPartition` exists to produce.
     ///
-    /// That is strictly stronger than `verify`: Mockito confirms the call was made,
-    /// while this confirms it was made *and* had its effect *and* carried the right
-    /// partition. It is also why this test could be written at all rather than deferred
-    /// like `SenderTest`'s one mock-injected entry, whose stub makes a real method
-    /// *throw* and so has no real-state equivalent.
+    /// That is stronger than `verify` on one axis: Mockito confirms the call was made,
+    /// while this confirms it was made *and* had its effect. It is **not** stronger for
+    /// carrying the right partition — `verify(..).maybeAddPartition(topicPartition)`
+    /// checks the argument too, so that clause is parity, not superiority.
+    ///
+    /// The effect clause is a real gain, and holds because the state read is isolated.
+    /// `is_partition_pending_add` reads the union
+    /// `new_partitions_in_transaction ∪ pending_partitions_in_transaction`
+    /// (`TransactionManager.java:571`), and in this crate:
+    /// `new_partitions_in_transaction.insert` has exactly one call site, inside
+    /// `maybe_add_partition`; and `pending_partitions_in_transaction` is only ever filled
+    /// by `add_partitions_to_transaction_handler`'s
+    /// `.extend(new_partitions_in_transaction.iter())`, so it is downstream of that same
+    /// insert. The union is therefore non-empty only if `maybe_add_partition` ran, and
+    /// the test asserts the negative pre-condition first.
+    ///
+    /// It is also why this test could be written at all rather than deferred like
+    /// `SenderTest`'s one mock-injected entry, whose stub makes a real method *throw* and
+    /// so has no real-state equivalent.
+    ///
+    /// # The one Java assertion not carried across
+    ///
+    /// Java opens with `assertEquals(future, producer.send(record))` (`:2439`), comparing
+    /// the returned future against a **pre-built** `FutureRecordMetadata` that
+    /// `expectAppend` (`:2445`) installed by stubbing `ctx.accumulator.append(..)` and
+    /// `ctx.partitioner.partition(..)` to return it. That assertion is about the
+    /// *accumulator* mock, not the manager mock the deviation above discusses, and it is
+    /// unrepresentable here for the same reason: with a real `RecordAccumulator` the
+    /// future is created inside `append`, so there is no pre-known value to compare
+    /// identity against. What survives of its intent — that `send` hands back the
+    /// accumulator's own pending future rather than a completed or failed one — is
+    /// asserted directly by `!future.is_done()` below.
     ///
     /// # Why this method was missing until Critic 46 issue 4
     ///

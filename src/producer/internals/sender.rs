@@ -7517,7 +7517,7 @@ mod tests {
     // name prefix: the Java splitter matched `/^    (public|private) void test/` and the
     // Rust grep matched `` `test[A-Za-z]+` ``. `SenderTest.java` has exactly one
     // annotated test whose name does not start with `test` —
-    // `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (507) — and
+    // `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (508) — and
     // it was therefore missing from the Java list, from every group below, and from the
     // count.
     //
@@ -7626,7 +7626,7 @@ mod tests {
     // could not have been written before `Sender::run`'s transactional tail was live,
     // plus the one the old scope program could not see:
     //
-    //   507  senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
+    //   508  senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
     //          -> test_sender_thread_should_not_get_stuck_when_throttled_and_adding_partitions_to_txn
     //          Needed `MockClient::advance_time_during_poll`, Java's
     //          `client.advanceTimeDuringPoll(true)` (`SenderTest.java:511`) — a
@@ -7765,7 +7765,7 @@ mod tests {
     // The 16, restated in prose so a reader need not run anything. Five of them are
     // translated (marked); the rest are the owed/blocked list above:
     //
-    //   `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (507)
+    //   `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (508)
     //     [TRANSLATED] — beginTransaction, maybeAddPartition; the manager is built at
     //     `SenderTest.java:515`. Absent from every earlier revision of this block; see
     //     "why this program changed" above.
@@ -7934,7 +7934,7 @@ mod tests {
 
     /// Translated from
     /// `SenderTest.senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn`
-    /// (Java 507-544).
+    /// (Java 508-545).
     ///
     /// With the coordinator throttled, `awaitNodeReady` must ride out the throttle and
     /// no longer: `NetworkClientUtils.awaitReady` clamps its poll timeout to

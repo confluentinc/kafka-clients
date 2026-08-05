@@ -481,18 +481,34 @@ Translations of note:
   `sender.rs:977–982`.
 - Remove the Phase-1 transactions guard (§7.1).
 
-**Tests:** the 27 transactional tests in `KafkaProducerTest.java`, plus the
-transactional subset of `SenderTest.java`.
+**Tests:** the transactional tests in `KafkaProducerTest.java`, plus the transactional
+subset of `SenderTest.java`. This line said "the 27" until Phase 6 derived the set
+mechanically and found 28 — see the Status note.
 
-**Status: landed.** All 27 `KafkaProducerTest` methods are accounted for — 22
-translated, 1 justified as untranslatable (`testNullGroupMetadataInSendOffsets`
-passes `null`), 4 already in `producer_config.rs` from Phase 1 — with the
-derivation and its real output in the PHASE-6 TEST ACCOUNTING block in
-`src/producer/kafka_producer.rs`. Of the 15 transactional `SenderTest` methods,
-4 are translated (the shutdown group, the ones that needed `Sender::run`'s
-transactional tail) and **11 are handed to Phase 8** with per-method reasons in
-the accounting block at the end of `src/producer/internals/sender.rs`; 2 of the
-11 are blocked on named missing surface. Deviations are recorded in §10.9.
+**Status: landed.** Every transactional `KafkaProducerTest` method is accounted for
+(translated, or named and justified), and so is every transactional `SenderTest`
+method (translated, owed with an owner, or blocked on named missing surface).
+
+**The counts deliberately live in one place each, and it is not here.** They are in
+the PHASE-6 TEST ACCOUNTING block in `src/producer/kafka_producer.rs` and the
+`SenderTest.java` accounting block at the end of `src/producer/internals/sender.rs`,
+each of which derives its numbers from a shipped program over the Java source and
+pastes that program's real output. Restating them in this prose is how they went stale:
+Critic 46 pass 1 moved both denominators (`KafkaProducerTest` 27 → 28,
+transactional `SenderTest` 15 → 16) because two live Java tests were invisible to the
+scope programs, and the fix updated the blocks while four prose sites kept the pre-fix
+figures (pass 2 issue 2). A number with two homes has two chances to be wrong, so this
+section now points at the homes instead.
+
+What is stable and worth stating here: the `KafkaProducerTest` set partitions into
+methods translated in this phase, exactly one justified non-translation
+(`testNullGroupMetadataInSendOffsets`, which passes `null` for a value type), and the
+idempotence-config methods Phase 1 already translated in `producer_config.rs`. The
+transactional `SenderTest` group splits into the shutdown-path methods Phase 6
+translated — the ones that needed `Sender::run`'s transactional tail, so no earlier
+phase could have written them — plus the throttle method the repaired scope program
+surfaced, with the remainder **handed to Phase 8**, two of those blocked on named
+missing surface. Deviations are recorded in §10.9.
 
 Also in this phase, outside the table: `PendingRequests` became shared state
 (§10.9 deviation 1), and `await_sender_handle` lost-join bug fixed (deviation 3).
@@ -2111,24 +2127,45 @@ accumulator/Sender surface), the transactional `SenderTest` group to Phase 6
 recorded here because §9.21 is the natural entry point for "what did Phase 5 owe Phase
 6?" and a refused hand-forward needs its record at *every* site, not just at §Phase-6:**
 
-  - The `SenderTest` group is **15**, not 18. The sentence originally said 18, which was
-    the pre-Phase-5a count: `18 = 3 + 15`, and the block's own pasted derivation at
-    `c59c09d:7547-7549` says so — it covers "the eighteen entries **this group and the 5a
-    group above** cover", with the three 5a ones printing `-`. The header already read
-    `TRANSACTIONAL (15)` at `c59c09d`, i.e. before Phase 6 touched it, so the 15 was
-    Phase 5b's own reclassification and Phase 6 changed disposition only (4 translated,
-    11 to Phase 8) with an empty membership diff.
+  - **What Phase 5 handed forward was 15, not 18** — the sentence originally said 18,
+    which was the pre-Phase-5a count. `18 = 3 + 15`, and the block's own pasted
+    derivation at `c59c09d:7547-7549` says so: it covers "the eighteen entries **this
+    group and the 5a group above** cover", with the three 5a ones printing `-`. The
+    header already read `TRANSACTIONAL (15)` at `c59c09d`, i.e. before Phase 6 touched
+    it, so the 15 was Phase 5b's own reclassification.
+
+    That is a statement about the **hand-forward**, and is now scoped as one, because
+    Phase 6 went on to change the group's membership as well as its disposition: fix 1
+    for Critic 46 pass 1 added `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn`,
+    which the old prefix-keyed scope program could not see. An earlier revision of this
+    bullet claimed "disposition only … with an empty membership diff" — true when
+    written against pass 1, and falsified by fix 1 **in the same commit** (Critic 46
+    pass 2 issue 2). The group's current size and split live in the accounting block at
+    the end of `src/producer/internals/sender.rs`, which is authoritative; this bullet
+    deliberately no longer restates them, so it cannot drift again.
   - **`prepare_transaction` was refused, with reason, and the refusal stands.**
     `KafkaProducer.java` in 4.2 has no such method — only `TransactionManager` does — so
     there was no public surface to hand forward. See §10.9 deviation 2 for the evidence,
     and §Phase-6's struck-through spec line for the correction at the point of
-    specification. Critic 46 confirmed it independently and added a stronger argument
-    than Phase 6's own: `KafkaProducerMetrics.java:80` creates a `prepareTxnSensor` but
-    the class has **no `recordPrepareTxn` method**, so the sensor is dead
-    forward-looking KIP-939 scaffolding and implies no 4.2 producer method. The 4.2
-    producer-side 2PC surface is `throwIfInPreparedState` (`:968-976`), which Phase 6
-    translated at all of its Java call sites plus the zero-copy FFI `send` that
-    duplicates `doSend`'s guards.
+    specification. Critic 46 confirmed it independently, and the metrics hit is dead
+    KIP-939 scaffolding — but **only in the corrected form recorded at §10.9
+    deviation 2**, which is the authority: `KafkaProducerMetrics.java:80` creates a
+    `prepareTxnSensor` and `:124` *does* declare `recordPrepareTxn`, which has **zero
+    callers tree-wide** (one occurrence, its own declaration) against `recordInit`'s
+    three. The 4.2 producer-side 2PC surface is `throwIfInPreparedState` (`:968-976`),
+    which Phase 6 translated at all of its Java call sites plus the zero-copy FFI
+    `send` that duplicates `doSend`'s guards.
+
+    An earlier revision of *this* bullet asserted, in Phase 6's own voice, that the
+    class has "no `recordPrepareTxn` method" — the false supporting fact §10.9
+    deviation 2 refutes, **written into this section by the same commit that wrote the
+    refutation** (Critic 46 pass 2 issue 1). Recorded because the lesson is not the
+    fact but the *sweep*: refusing to propagate a bad claim into the section where the
+    dispute was argued, while restating it in the section a reader hits first, is no
+    refusal at all. A claim being corrected has to be corrected everywhere it appears,
+    which is checkable —
+    `grep -n recordPrepareTxn design/history/Milestone-11/PLAN.md` must not return two
+    sections that disagree.
 
 ---
 

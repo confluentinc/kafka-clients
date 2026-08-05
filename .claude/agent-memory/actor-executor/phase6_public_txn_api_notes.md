@@ -81,8 +81,11 @@ And a `commitTransaction` after a failed send reports Java's *bare* `KafkaExcept
 ("Cannot execute transactional method because we are in an error state"), not the send's
 own error — `maybeFailWithError` wraps `lastError`.
 
-**Outstanding at hand-off:** 11 of the 15 transactional `SenderTest` methods, owner
-Phase 8, per-method reasons in the accounting block at the end of
-`src/producer/internals/sender.rs`. Two suggested rule amendments are recorded in PLAN
-§10.9 (rules §2's `pendingRequests` classification; CLAUDE.md §9.6.6's timer-starvation
-pitfall).
+**Outstanding at hand-off:** most of the transactional `SenderTest` group, owner Phase 8,
+with per-method reasons in the accounting block at the end of
+`src/producer/internals/sender.rs`. That block derives its counts from a shipped program
+and is the only place to read them from — an earlier version of this note carried "11 of
+the 15", which its own phase then falsified by adding a sixteenth (Critic 46 pass 2
+issue 2). **Do not copy a derived count into a note; cite where it is derived.** Two
+suggested rule amendments are recorded in PLAN §10.9 (rules §2's `pendingRequests`
+classification; CLAUDE.md §9.6.6's timer-starvation pitfall).
