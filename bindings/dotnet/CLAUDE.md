@@ -201,6 +201,16 @@ public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord> { }  /
 public interface IConsumerCommon {               // shared sync surface (async + deferred sync mirror)
     void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
     ConsumerGroupMetadata GroupMetadata();
+
+    // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1).
+    // METHODS, not properties (M5/P1): each does a P/Invoke + marshalling, can throw, and
+    // returns a fresh owned snapshot per call (FDG method rule) — matching GroupMetadata()
+    // + Java/Python. Java returns a Set; IReadOnlySet post-dates netstandard2.0 → collection.
+    IReadOnlyCollection<TopicPartition> Assignment();
+    IReadOnlyCollection<string> Subscription();
+    IReadOnlyCollection<TopicPartition> Paused();
+    void EnforceRebalance(string? reason = null); // KIP-848 logged no-op → returns success
+    void CommitAsync();                           // Java commitAsync — non-blocking, fire-and-forget (§4 note; M5/P6)
 }
 
 public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable {   // Java `Consumer`
@@ -208,16 +218,16 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
     Task Unsubscribe(CancellationToken cancellationToken = default);
-    Task Commit(CancellationToken cancellationToken = default);                // Java commitAsync
+    // Java commitSync / commitSync(Map) — blocks in Java → Task (async-bridged; §4 note; M5/P6)
+    Task Commit(CancellationToken cancellationToken = default);
+    Task Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        CancellationToken cancellationToken = default);
     Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default);
     Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
 
-    void CommitSync();                            // Java commitSync — genuinely sync, blocks (§4 note)
-
-    // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1)
-    IReadOnlyCollection<TopicPartition> Assignment { get; }   // Java returns a Set; IReadOnlySet is
-    IReadOnlyCollection<string> Subscription { get; }         //   post-netstandard2.0, so collection
-    // Wakeup() / GroupMetadata() live on IConsumerCommon
+    // Assignment() / Subscription() / Paused() / EnforceRebalance() / Wakeup() /
+    // GroupMetadata() / CommitAsync() (Java commitAsync, fire-and-forget) live on
+    // IConsumerCommon (non-blocking → stays sync)
 }
 
 // A sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is the **deferred** twin — a later milestone.
@@ -233,10 +243,15 @@ public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsume
 ```
 
 **Clipped to today's ABI**, like the producer — the fuller Java surface lands as
-each piece is wired (async/sync split per the idiom map): `Assign`/`Seek`/`Pause`/
-`Resume`, `Committed`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
-`PartitionsFor`/`ListTopics`, headers on `ConsumerRecord`, and a
-`ConsumerRebalanceListener` argument on `Subscribe`. A typed
+each piece is wired (async/sync split per the idiom map). Already wired:
+`Assign`/`Seek`/`SeekToBeginning`/`SeekToEnd`/`Pause`/`Resume`/`Position`/`Committed`/
+`BeginningOffsets`/`EndOffsets`/`OffsetsForTimes` (M4/M5), plus
+`PartitionsFor`/`ListTopics` (M5/P5, with the nested public value types
+`PartitionInfo`/`Node`), with the public value types
+`OffsetAndMetadata`/`OffsetAndTimestamp` (M5/P4), plus the commit family
+`Commit`/`Commit(offsets)`/`CommitAsync` (M5/P6, with the public
+`OffsetAndMetadata` constructor). Still to come: pattern subscribe, headers on
+`ConsumerRecord`, and a `ConsumerRebalanceListener` argument on `Subscribe`. A typed
 `Consumer<TKey,TValue>` arrives with deserializers (§4), same as the producer.
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
@@ -252,7 +267,7 @@ its C# realization, and where the enforcing rule lives.
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
 | `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §A5 |
 | `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` (family) / `InvalidOperationException` (`ObjectDisposedException` when used after close) | validate **before** the FFI call — ffi §A5 |
-| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit`/`CommitSync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
+| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` (async) | invoked on the **caller's task** during `poll`/`commit`/`close` — consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` (async) | same caller's-task model — consumer-threading §31 |
@@ -312,25 +327,46 @@ not transfer). **If you cannot check, assume it blocks.**
 
 Any **one** trigger is enough — blocking is just the most common of the three.
 
-**Stays sync on the consumer — exactly these:** `Assignment`, `Subscription`,
-`Paused` (properties), `GroupMetadata()`, `Wakeup()`, `Metrics`,
-`Register`/`UnregisterMetricForSubscription`, and `EnforceRebalance()` (a no-op
-that only logs under KIP-848). **On the producer:** `Metrics`,
-`BeginTransaction()`, and the two metric-subscription methods. Everything else is
-async.
+**Stays sync on the consumer — exactly these:** `Assignment()`, `Subscription()`,
+`Paused()` (**methods** — shipped M5/P1; they override the generic "getter →
+property" idiom-map row on FDG grounds: each does a P/Invoke + marshalling, can
+throw, and returns a fresh owned snapshot per call, matching the shipped
+`GroupMetadata()` + Java/Python), `GroupMetadata()`, `Wakeup()`, `Metrics`,
+`Register`/`UnregisterMetricForSubscription`, and `EnforceRebalance(string? reason
+= null)` (a no-op that only logs under KIP-848 → returns success, never throws on
+that path; one method collapses Java's two overloads). **On the producer:**
+`Metrics`, `BeginTransaction()`, and the two metric-subscription methods.
+Everything else is async.
 
 ⚠ **The ABI must be able to honor it.** Where Java blocks but the ABI exposes only
 a sync entry point — `current_lag`, `seek_with_metadata` — the rule cannot be
 followed, because wrapping the sync call in `Task.Run` is sync-over-async
 (forbidden, ffi §B7). Those are **Mode B** (§6.3), not judgment calls.
 
-**Exception — Java sync/async pairs.** Where Java ships an explicit pair (e.g.
-`commitSync`/`commitAsync`), keep **both** — mirror the Java names directly:
-`CommitSync()` stays genuinely synchronous — it blocks the caller, which is fine
-since commit is low-frequency, not hot-path — **plus** `Commit()` (`Task`, Java's
-`commitAsync`; the `Async` is dropped because the interface already carries the
-async distinction). The sync twin (`CommitSync`) keeps Java's own name and calls
-the blocking-native ABI directly (never sync-over-async).
+**Exception — Java sync/async pairs (the commit family, M5/P6).** Where Java ships
+an explicit pair (`commitSync`/`commitSync(Map)` + `commitAsync`), keep **both**, but
+map each **from its Java blocking behavior** (the idiom map), not its Java name:
+
+- **`Task Commit(...)`** (two overloads, on `IAsyncConsumer`) = the **confirming**
+  commit — Java `commitSync` / `commitSync(Map)`; Python `commit()`. Java `commitSync`
+  **blocks** → idiom map → `Task`. It is **async-bridged** over the void
+  `op_callback_t` (`Consumer_commit_sync_async` / `_commit_sync_offsets_async`), *not*
+  a blocking-thread `CommitSync` façade — bridging avoids the blocking-thread footgun
+  (a `CommitSync` that `block_on`s the caller thread). You can `await` it to know the
+  commit landed.
+- **`void CommitAsync()`** (on `IConsumerCommon`) = the **fire-and-forget** commit —
+  Java `commitAsync()`; Python `commit_async()`. Java `commitAsync` is **non-blocking**
+  → idiom map → sync `void`. It calls the sync `Consumer_commit_async` (returns
+  `KafkaError*`) directly (the `EnforceRebalance` sync-op shape), takes no
+  `CancellationToken`, and lives on the shared non-blocking base because it is
+  flavor-independent (§3 / PLAN §5).
+
+Naming: `Commit` + `CommitAsync` is **exact Python parity** (`commit` / `commit_async`)
+— note the mapping inverts the Java-name intuition (Java's `commitSync` → our `Commit`;
+Java's `commitAsync` → our `CommitAsync`), because the map reads Java's *blocking
+behavior* (`commitSync` blocks → `Task`; `commitAsync` non-blocking → sync `void`), not
+the Java method name. There is **no** `CommitSync` member — a blocking-thread sync
+façade would be the very sync-over-async footgun the async bridge exists to avoid.
 
 ---
 
