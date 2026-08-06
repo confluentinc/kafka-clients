@@ -290,3 +290,4 @@
 - [FFI callback bridging Phase 4](ffi_callback_bridging_phase4_notes.md) — ConsumerHandle_t guard bypass; in-runtime block_on returns error not panic; commit-callback as guard probe
 - [FFI callback bridging Phase 5](ffi_callback_bridging_phase5_notes.md) — unsubscribe/close do NOT release the listener; take_error; negative-assert mutation check
 - [FFI callback bridging Phase 6](ffi_callback_bridging_phase6_notes.md) — pytest IS runnable (public-PyPI index + threads.h shim); release the GIL around callback-firing FFI calls
+- [FFI callback bridging Phase 7](ffi_callback_bridging_phase7_notes.md) — multilanguage-tests had silently rotted; verify C++ FFI code by extract-and-link + ASan; xtask lint skips test binaries
