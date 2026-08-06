@@ -93,6 +93,18 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
     public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
 
     /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<string> Subscription() => _native.Subscription();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+
+    /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>
