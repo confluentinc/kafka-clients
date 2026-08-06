@@ -1,6 +1,7 @@
-# Critic 49 — resolved findings (review of `e147a1e..21343fe`)
+# Critic 49 — resolved findings (review of `e147a1e..21343fe`, two passes)
 
-All four findings were real and are fixed. The production fix in `3740cb3` was confirmed
+All five findings were real and are fixed — four from pass 1, one (issue 5) filed in
+pass 2 against the fixup for issue 4. The production fix in `3740cb3` was confirmed
 correct by the Critic and is unchanged; every fix below is in test / example code.
 
 | # | Fix | Fixup of | Verification |
@@ -8,7 +9,8 @@ correct by the Critic and is unchanged; every fix below is in test / example cod
 | 1 | `txn_errors_producer` case 3 now states Java's actual behaviour (a **bare** `KafkaException` from `InitProducerIdHandler`'s fall-through, `TransactionManager.java:1535-1536`) and asserts it: error code `UnknownServerError` **and** the message prefix `Unexpected error in InitProducerIdResponse;`. The `(expect InvalidTransactionTimeout)` claim is gone from both the module doc and the label. | `12bd5d2` | live broker: ✅ with the asserted shape; the three outcomes that used to share one ✅ are now distinguishable |
 | 2 | `runs_for` is floored at 1 (`.max(1)`), so a zero-run topic no longer makes `sequence_check`'s expectation empty. Its doc comment's false claim that "check 1 already gates" the empty case is corrected — check 1 counts a different topic. | `12bd5d2` | empirically probed: pointing the flush check at an empty topic now prints `❌ … expected 1000 records, got 0` and exits 1, where it previously printed `✅ 0 records, exactly as expected` |
 | 3 | `test_send_after_producer_fenced_fails_the_future` seeds `ABORTABLE_ERROR` (with a `ProducerFenced` `last_error`) instead of `FATAL_ERROR`, asserts `!has_fatal_error()` before the send, and observes the real `ABORTABLE_ERROR -> FATAL_ERROR` transition after. The full re-raised message is asserted too, per DoD §3. | `3740cb3` | verified non-tautological by patching `do_send_bytes` to keep the failed future but skip `maybe_transition_to_error_state` — the test then fails on exactly that assertion |
-| 4 | `send_expect_failure` returns a `SendFailure { Synchronous, ViaFuture }` enum. Case 2 requires `expect_synchronous` (Java's `catch (Exception e)` rethrow); the poison case and the lifecycle fencing case require `expect_via_future`, which additionally proves those records reached the broker. | `12bd5d2` | live broker: `txn_errors_producer` six ✅ exit 0, `txn_lifecycle_producer` all ✅ exit 0 |
+| 4 | `send_expect_failure` returns a `SendFailure { Synchronous, ViaFuture }` enum. Case 2 requires `expect_synchronous` (Java's `catch (Exception e)` rethrow); the poison case and the lifecycle fencing case require `expect_via_future`. **Correction (issue 5):** the original wording here claimed `expect_via_future` "additionally proves those records reached the broker". It does not — a local `ensure_valid_record_size` rejection is delivered through the future too, in Java as much as here. What proves the end-to-end path is the error *code*, now asserted. | `12bd5d2` | live broker: `txn_errors_producer` six ✅ exit 0, `txn_lifecycle_producer` all ✅ exit 0 |
+| 5 | The poison case now asserts `error.error() == Errors::MessageTooLarge`, which only a broker response produces (a local rejection yields `KafkaError::RecordTooLarge`, carrying no wire code, so its `error()` degrades to `UnknownServerError`). Its label says "rejected by the broker" and its comment's false rationale is corrected. `expect_via_future` is kept as a correct statement about the surface Java specifies, no longer as a local-vs-remote discriminator. | `67944a7` | counter-checked by removing the 5 MB `max.request.size` override: the case then prints ❌ on the code assertion and the program exits 1, where it previously printed ✅ |
 
 Note on scope: the Critic's two **rules-change suggestions** (S1 for `CLAUDE.md` §9.6, S2
 for `definition-of-done.md` §3) are deliberately NOT applied and remain in
@@ -167,3 +169,61 @@ end.
   variant of `send_expect_failure` that fails the case when `send()` returned `Ok`.
 
 ---
+
+---
+
+## Issue 5: `expect_via_future` in the poison case does not establish the end-to-end path it is documented to establish
+
+*(new in pass 2 — introduced by `67944a7`, the fixup for issue 4)*
+
+- **File**: `examples/txn_errors_producer.rs:292-308`. The same claim is repeated in
+  `67944a7`'s commit message and in `COMMENTS.DONE.49.md`'s issue-4 row ("which
+  additionally proves those records reached the broker").
+- **Severity**: Wrong test (a guarantee stated that the check cannot falsify — the
+  same shape as issue 1)
+- **Java Reference**: `KafkaProducer.java:1031` (`ensureValidRecordSize`) →
+  `RecordTooLargeException extends ApiException`
+  (`kafka/clients/src/main/java/org/apache/kafka/common/errors/RecordTooLargeException.java:26`)
+  → `catch (ApiException e)` at `KafkaProducer.java:1056-1068` →
+  `return new FutureFailure(e)`.
+- **Description**:
+
+  The new comment at `:292-295` reads: "the client cap is raised to 5 MB above
+  precisely so this record is *accepted* locally and rejected by the broker. **A
+  synchronous failure would mean it never left the client**, so the case would no
+  longer be testing the end-to-end path its comment claims." Both halves are false:
+
+  - A *local* rejection is **not** synchronous. `ensure_valid_record_size` failing
+    routes through `handle_api_exception` (`src/producer/kafka_producer.rs:1049-1051`),
+    which returns `Ok(KafkaFuture::new(FutureRecordMetadata::failed(..)))` (`:1204`) —
+    that is `SendFailure::ViaFuture`. Java behaves identically: `RecordTooLargeException`
+    is an `ApiException`, so it takes `catch (ApiException e)` and becomes a
+    `FutureFailure` rather than a throw.
+  - Consequently `expect_via_future` cannot separate "the broker rejected it" from
+    "`max.request.size` rejected it locally". Drop the 5 MB override, or change
+    `estimate_size_in_bytes_upper_bound`, and the record never leaves the client while
+    the case still prints `✅ the 1.5 MB record was rejected`. The rest of case 5 keeps
+    passing too: a local `RecordTooLarge` still reaches
+    `maybe_transition_to_error_state` → `transition_to_abortable_error`, so
+    "commit refuses" and "abort works" both still hold.
+
+  Nothing in the case asserts the error code — `:304` only *prints* it — so the
+  end-to-end claim rests entirely on a discriminator that does not discriminate.
+
+- **Actual**: The case requires only that the failure arrived through the ack future,
+  which is true of a purely client-side rejection as well.
+- **Expected**: Assert the code. `Errors::MessageTooLarge` can only come from a broker
+  response; a local rejection produces `KafkaError::RecordTooLarge(String)`, whose
+  `error()` is `Errors::UnknownServerError` (`src/common/kafka_error.rs:447-461`,
+  `:470-475`), and a broker that never answered produces a `Timeout`. Requiring
+  `error.error() == Errors::MessageTooLarge` pins the end-to-end path for real. Keep
+  `expect_via_future` — it is a correct, if weaker, statement about which surface
+  delivered the error — but correct the rationale in the code comment, and the
+  corresponding sentence in `COMMENTS.DONE.49.md`.
+
+  This does **not** apply to the other two call sites. Case 2's `expect_synchronous` is
+  exactly right (Java's `IllegalStateException` is not a `KafkaException` and is
+  rethrown out of `send()`, `KafkaProducer.java:1077-1081`), and
+  `txn_lifecycle_producer`'s `expect_via_future` is sound — A holds no local error and
+  no size cap is in play, and that case does assert the code is a fencing one
+  (`examples/txn_lifecycle_producer.rs:130`).
