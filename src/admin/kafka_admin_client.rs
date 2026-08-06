@@ -11556,4 +11556,230 @@ mod tests {
         // Once the hard deadline passes, the task exits and aborts the call.
         assert!(runnable.should_exit_for_test(now + 30_000));
     }
+
+    /// A [`KafkaClient`] wrapper whose `poll` records the timeout it was handed
+    /// and, once armed, advances the mock clock by that timeout — i.e. it
+    /// behaves like a real `poll` that finds nothing on the socket and waits the
+    /// whole budget it was given. That makes the wait the I/O loop *would* have
+    /// performed observable on the mock clock (`MockClient::poll` ignores its
+    /// timeout, so no assertion on real elapsed time is possible).
+    ///
+    /// Recording the argument mirrors Mockito's
+    /// `verify(client).poll(captor.capture(), anyLong())`; the consumer tests
+    /// use the same wrapper shape (`CountingClient` in
+    /// `consumer/internals/consumer_network_thread.rs`).
+    struct WaitingClient {
+        inner: MockClient,
+        time: Arc<MockTime>,
+        poll_timeouts: Arc<Mutex<Vec<i64>>>,
+        advance_clock: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl WaitingClient {
+        fn new(inner: MockClient, time: Arc<MockTime>) -> Self {
+            Self {
+                inner,
+                time,
+                poll_timeouts: Arc::new(Mutex::new(Vec::new())),
+                advance_clock: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn poll_timeouts(&self) -> Arc<Mutex<Vec<i64>>> {
+            Arc::clone(&self.poll_timeouts)
+        }
+
+        fn advance_clock(&self) -> Arc<std::sync::atomic::AtomicBool> {
+            Arc::clone(&self.advance_clock)
+        }
+    }
+
+    impl KafkaClient for WaitingClient {
+        fn is_ready(&self, node: &Node, now: i64) -> bool {
+            self.inner.is_ready(node, now)
+        }
+        async fn ready(&mut self, node: &Node, now: i64) -> bool {
+            self.inner.ready(node, now).await
+        }
+        fn connection_delay(&self, node: &Node, now: i64) -> i64 {
+            self.inner.connection_delay(node, now)
+        }
+        fn poll_delay_ms(&self, node: &Node, now: i64) -> i64 {
+            self.inner.poll_delay_ms(node, now)
+        }
+        fn connection_failed(&self, node: &Node) -> bool {
+            self.inner.connection_failed(node)
+        }
+        fn authentication_error(&self, node: &Node) -> Option<String> {
+            self.inner.authentication_error(node)
+        }
+        fn send(&mut self, request: crate::ClientRequest, now: i64) {
+            self.inner.send(request, now)
+        }
+        async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
+            self.poll_timeouts.lock().unwrap().push(timeout);
+            let now = if self.advance_clock.load(Ordering::Acquire) {
+                self.time.sleep(timeout);
+                self.time.now.load(Ordering::Acquire)
+            } else {
+                now
+            };
+            self.inner.poll(timeout, now).await
+        }
+        async fn disconnect(&mut self, node_id: &str) {
+            self.inner.disconnect(node_id).await
+        }
+        async fn close_connection(&mut self, node_id: &str) {
+            self.inner.close_connection(node_id).await
+        }
+        fn least_loaded_node(&self, now: i64) -> crate::LeastLoadedNode {
+            self.inner.least_loaded_node(now)
+        }
+        fn in_flight_request_count(&self) -> i32 {
+            self.inner.in_flight_request_count()
+        }
+        fn has_in_flight_requests(&self) -> bool {
+            self.inner.has_in_flight_requests()
+        }
+        fn in_flight_request_count_for_node(&self, node_id: &str) -> usize {
+            self.inner.in_flight_request_count_for_node(node_id)
+        }
+        fn has_in_flight_requests_for_node(&self, node_id: &str) -> bool {
+            self.inner.has_in_flight_requests_for_node(node_id)
+        }
+        fn has_ready_nodes(&self, now: i64) -> bool {
+            self.inner.has_ready_nodes(now)
+        }
+        fn wakeup(&self) {
+            self.inner.wakeup()
+        }
+        fn wakeup_handle(&self) -> Arc<Notify> {
+            self.inner.wakeup_handle()
+        }
+        fn wakeup_notify(&self) -> Arc<Notify> {
+            self.inner.wakeup_notify()
+        }
+        fn new_client_request(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+        ) -> crate::ClientRequest {
+            self.inner
+                .new_client_request(node_id, request_builder, created_time_ms, expect_response)
+        }
+        fn new_client_request_with_timeout(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+            request_timeout_ms: i32,
+            callback: Option<crate::RequestCompletionHandler>,
+        ) -> crate::ClientRequest {
+            self.inner.new_client_request_with_timeout(
+                node_id,
+                request_builder,
+                created_time_ms,
+                expect_response,
+                request_timeout_ms,
+                callback,
+            )
+        }
+        fn initiate_close(&self) {
+            self.inner.initiate_close()
+        }
+        fn active(&self) -> bool {
+            self.inner.active()
+        }
+        async fn close(&mut self) {
+            self.inner.close().await
+        }
+    }
+
+    /// Java bounds every `client.poll(...)` by the time left until the
+    /// hard-shutdown deadline once `close()` has been called
+    /// (`KafkaAdminClient.java:1500-1502`):
+    ///
+    /// ```java
+    /// long pollTimeout = Math.min(1200000, timeoutProcessor.nextTimeoutMs());
+    /// if (curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME) {
+    ///     pollTimeout = Math.min(pollTimeout, curHardShutdownTimeMs - now);
+    /// }
+    /// ```
+    ///
+    /// Without that clamp an in-flight **external** call keeps `should_exit`
+    /// false (which is correct — see the test above), while the poll itself
+    /// waits on the far larger call deadline
+    /// (`default.api.timeout.ms`) or, in production, on `NetworkClient`'s own
+    /// `request.timeout.ms` cap. `close(100ms)` would then block for tens of
+    /// seconds, and because the FFI `close` is a `block_on`, C and Python
+    /// callers would see the same overrun.
+    #[tokio::test]
+    async fn close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline() {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(MockClient::new(nodes.clone(), time.provider()), Arc::clone(&time));
+        let poll_timeouts = client.poll_timeouts();
+        let advance_clock = client.advance_clock();
+        let config = test_config();
+        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+
+        // Put an external RPC in flight. The mock has no prepared response, so
+        // the call sits in `correlation_id_to_calls`: `pending_calls` is empty,
+        // hence no `retry_backoff_ms` floor, and the only contributors left to
+        // the poll timeout are the call deadline (`default.api.timeout.ms`) and
+        // `metadata.max.age.ms`.
+        let _result = admin.list_topics(ListTopicsOptions::new());
+        for _ in 0..40 {
+            if runnable.client_mut().inner.request_count() >= 1 {
+                break;
+            }
+            runnable.run_once().await;
+        }
+        assert!(
+            runnable.client_mut().inner.request_count() >= 1,
+            "the listTopics request should have been sent"
+        );
+        assert!(
+            runnable.has_active_external_calls_for_test(),
+            "the in-flight listTopics call should be an active external call"
+        );
+
+        // `close(Duration::from_millis(100))`.
+        let now = time.now.load(Ordering::Acquire);
+        let hard_deadline = now + 100;
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(hard_deadline, Ordering::Release);
+
+        // From here on the client waits out every timeout it is given, like a
+        // real one polling an idle socket.
+        poll_timeouts.lock().unwrap().clear();
+        advance_clock.store(true, Ordering::Release);
+
+        runnable.run().await;
+
+        let timeouts = poll_timeouts.lock().unwrap().clone();
+        assert!(
+            !timeouts.is_empty(),
+            "the run loop should have polled at least once after close()"
+        );
+        for timeout in &timeouts {
+            assert!(
+                *timeout <= 100,
+                "every poll after close() must be clamped to the remaining shutdown budget \
+                 (100 ms), got {timeouts:?}"
+            );
+        }
+        let waited = time.now.load(Ordering::Acquire) - now;
+        assert!(
+            waited <= 100,
+            "close(100ms) must not overrun its deadline: the I/O task waited {waited}ms"
+        );
+    }
 }
