@@ -7,6 +7,84 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 3 — "Consumer partition ops": DONE (2026-08-06).** Five void-async
+  members on `IAsyncConsumer`, all `Task <Op>(IReadOnlyCollection<TopicPartition>, CancellationToken)`:
+  `Assign` / `Pause` / `Resume` / `SeekToBeginning` / `SeekToEnd`. **Mode A (no Rust
+  authored):** all five `_async` fns + the shared void `op_callback_t` + the two
+  `MockConsumer_update_*_offsets` helpers already ship; no ABI change. **NO new completion
+  bridge this phase** (unlike M5/P2's scalar bridge) — all five reuse the proven **void**
+  bridge (`SubmitVoidOperation` + `ConsumerCallbacks.Operation`) **verbatim**; the only new
+  managed work is marshalling a `TopicPartition` collection into the ABI's parallel arrays.
+  Delivered:
+  - **`NativeConsumer`**: five thin `<Op>WithCallback(IReadOnlyCollection<TopicPartition>,
+    CT)` methods, each `=> SubmitPartitionOp(partitions, ct, NativeMethods.Consumer<Op>Async)`.
+    One shared `SubmitPartitionOp` validates the collection preconditions (§B5) BEFORE any
+    pin/P-Invoke, snapshots the `(topic, partition)` pairs, then runs the **unchanged**
+    `SubmitVoidOperation` with a submit lambda that marshals via the shared
+    `WithPinnedTopics`. One `NativePartitionOpSubmit` delegate binds a method-group ref to
+    each `_async` DllImport.
+  - **Shared collection→parallel-array marshaller (`WithPinnedTopics`)**: extracted from the
+    shipped sync `Assign`'s pinning; used by **all five async ops AND the retained internal
+    sync `Assign`** (no duplicated pinning). Pins `count` topics **call-scoped** (freed at
+    submit return — the core copies during the call, verified for both `Consumer_assign` and
+    each `_async`'s `read_topic_partitions`; never held across the `Task`), fills the
+    `IntPtr[]` topics + passes the blittable `int[]` partitions straight through — **no
+    per-element copy beyond the UTF-8 encode** (§A3/§A4).
+  - **`NativeMethods`**: five `_async` void DllImports (each `(IntPtr[] topics, int[]
+    partitions, int count, OperationCallback, IntPtr userData)`, reusing the shipped
+    `op_callback_t` = `OperationCallback` — no new delegate) + the two per-`(topic, partition,
+    offset)` mock offset helpers (`MockConsumer_update_beginning/end_offsets`).
+  - **Assign reconciliation (PLAN §1, user-locked):** promoted `Assign` to the **public async**
+    member on `IAsyncConsumer` (via `assign_async`, broker-free on the mock); **REMOVED** the
+    public inherent sync `AsyncMockConsumer.Assign(IReadOnlyList<TopicPartition>)` — no
+    sync/async `Assign` overload footgun, one public `Assign` (Task). Migrated the **10**
+    public-root test-setup sites from `consumer.Assign(...)` to `await consumer.Assign(...)`
+    (every existing assertion kept; sync `void` test methods that used it became `async Task`).
+    The **internal** sync `NativeConsumer.Assign((string,int)[])` + the `Consumer_assign`
+    DllImport + the **4 `Interop/` tests** that use them are **untouched** (75 Interop tests
+    still green).
+  - **Mock offset helpers wired (§6.6):** `UpdateBeginningOffset` / `UpdateEndOffset` inherent
+    forwarders on `AsyncMockConsumer` so `SeekToBeginning`/`SeekToEnd` are observed end-to-end
+    via a follow-up poll (position reset to the beginning/end offset).
+  - **`IAsyncConsumer`**: five new members with full XML docs (CS1591); `AsyncKafkaConsumer` +
+    `AsyncMockConsumer` forward each to `_native.<Op>WithCallback`. Doc-sync: dropped
+    `assign`/`pause`/`resume`/`seekTo*` from the `IAsyncConsumer` additive-growth
+    "not-yet-wired" remark; updated the `AsyncMockConsumer` mock-only-helpers remark; lifted
+    the M5/P1 `Paused()` "non-empty not reachable until a public Pause lands" note (now
+    reachable); confirmed/updated the CLAUDE.md §3 sketch prose (these are now wired).
+  - **Error / precondition mapping (§B5):** null collection → `ArgumentNullException`;
+    per-element null topic → `ArgumentException`; negative partition →
+    `ArgumentOutOfRangeException` (unreachable through a constructed `TopicPartition`, whose
+    ctor rejects it — the `Seek`/`Position` precedent — but kept as defense-in-depth in
+    `SubmitPartitionOp`). **Empty collection = valid pass-through** (`assign([])` clears,
+    the others no-op) — never a spurious throw. Operational failure → faulted `Task` with
+    `KafkaException`; concurrent → faulted (core-delivered `ConcurrentModification`);
+    post-dispose → `ObjectDisposedException` (`ThrowIfClosed` before submit); pre-canceled
+    token → `OperationCanceledException` synchronously (mirrors `SubscribeWithCallback`).
+  - **Tests:** new `PublicConsumerPartitionOpsTests.cs` at the **test root** (public-surface,
+    broker-free via `AsyncMockConsumer`): Assign→Assignment reflects it; Assign([]) clears;
+    **Pause→Paused returns the paused set (closes the M5/P1 non-empty `Paused()` gap)**;
+    Resume clears; SeekToBeginning/SeekToEnd resolve broker-free AND observed via poll (the
+    new offset helpers); empty-collection no-op; a **deterministic** operational failure
+    (`Pause` of an unassigned partition) asserting the `KafkaException` **message** content
+    ("No current assignment for partition …", DoD §3) + consumer-reusable-after-fault;
+    preconditions (null collection / per-element null topic / negative-partition-ctor-guard);
+    post-dispose; pre-canceled token; wakeup-leaves-usable; per-op marshalling allocation
+    sanity (net8+). **153 → 175 tests**, all green on net10.0 across **multiple** full runs
+    (D8.8 serial gate stable). All 6 TFM build legs (library ns2.0/net8.0/net10.0 + tests
+    net462/net8.0/net10.0) clean, 0 warnings; `dotnet format --verify-no-changes` clean.
+  - **Deviations (recorded, COMMENTS.DONE.12):** (a) the deterministic failure path is
+    `Pause` of an **unassigned** partition (a clean broker-free operational failure asserting
+    the message), chosen over the non-deterministic concurrent-op path the PLAN left as a
+    fallback; (b) the negative-partition precondition is asserted via the `TopicPartition`
+    ctor guard (a negative value cannot reach the op through a constructed struct — the
+    shipped `Position` precedent), with the binding's own `SubmitPartitionOp` check kept as
+    defense-in-depth; (c) `WithPinnedTopics` takes a `Func<int, string>` topic accessor so
+    the one helper serves both the tuple-form sync `Assign` and the `TopicPartition`-form
+    async ops without a per-element copy.
+  - Approved plan + closed record: `design/history/M5/P3-consumer-partition-ops/`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P3. N=12.
+
 - **Milestone 5 / Phase 2 — "Consumer `Position`": DONE (2026-08-06).** The single async
   member `Task<long> Position(TopicPartition, CancellationToken)` on `IAsyncConsumer` —
   the CLAUDE.md §3-sketch-committed shape (no shape change). Its real work is the **third

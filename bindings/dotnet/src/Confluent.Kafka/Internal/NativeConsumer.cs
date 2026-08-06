@@ -927,9 +927,9 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// Same concurrency contract and accepted residual as <see cref="Assignment"/>. A
-    /// <b>non-empty</b> result is not reachable broker-free until a public <c>Pause</c>
-    /// lands (a later phase): the mock's <c>paused()</c> starts empty and nothing can add
-    /// to it yet, so the reachable states are empty / assigned-but-not-paused.
+    /// <b>non-empty</b> result is now reachable broker-free via the public <c>Pause</c>
+    /// (M5/P3): <c>Pause</c> a partition, then <c>Paused()</c> returns it (previously the
+    /// mock's <c>paused()</c> could only be empty until a public <c>Pause</c> landed).
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">

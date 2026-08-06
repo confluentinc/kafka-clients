@@ -239,8 +239,9 @@ public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsume
 ```
 
 **Clipped to today's ABI**, like the producer — the fuller Java surface lands as
-each piece is wired (async/sync split per the idiom map): `Assign`/`Seek`/`Pause`/
-`Resume`, `Committed`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
+each piece is wired (async/sync split per the idiom map). Already wired:
+`Assign`/`Seek`/`SeekToBeginning`/`SeekToEnd`/`Pause`/`Resume`/`Position` (M4/M5).
+Still to come: `Committed`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
 `PartitionsFor`/`ListTopics`, headers on `ConsumerRecord`, and a
 `ConsumerRebalanceListener` argument on `Subscribe`. A typed
 `Consumer<TKey,TValue>` arrives with deserializers (§4), same as the producer.
