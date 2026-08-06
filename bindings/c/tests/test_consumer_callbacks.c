@@ -14,7 +14,9 @@
 
 // User-callback bindings of the consumer C FFI: the `OffsetCommitCallback`
 // equivalent (`kafka_consumer_Consumer_commit_async_with_callback` and
-// `..._commit_async_offsets_with_callback`), plus the reentrancy handle
+// `..._commit_async_offsets_with_callback`), the `ConsumerRebalanceListener`
+// equivalent (`kafka_consumer_ConsumerRebalanceListener_t` +
+// `kafka_consumer_Consumer_subscribe_with_listener`), and the reentrancy handle
 // (`kafka_consumer_ConsumerHandle_t`) user callbacks use to call back into the
 // consumer.
 //
@@ -22,7 +24,15 @@
 // `on_complete` inline (mirroring Java's `MockConsumer.commitAsync`, which calls
 // `callback.onComplete` synchronously), so a commit through these entry points
 // exercises the full adapter round trip: app thread -> dispatcher thread (C
-// callback) -> back to the app thread.
+// callback) -> back to the app thread. `kafka_consumer_MockConsumer_rebalance`
+// (Java's `MockConsumer.rebalance`) drives the rebalance callbacks the same way.
+//
+// Not covered here: `on_partitions_lost` with a NULL `lost` callback delegating
+// to `on_partitions_revoked` (Java's default method). The mock never fires
+// `on_partitions_lost` — neither does Java's — so the delegation is asserted in
+// the Rust unit tests of `src/ffi/consumer.rs`
+// (`on_partitions_lost_delegates_to_revoked_when_no_lost_callback`), which invoke
+// the adapter directly.
 
 #include <confluent_kafka.h>
 #include <string.h>
@@ -697,6 +707,626 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
     kafka_consumer_Consumer_destroy(c);
 }
 
+// ---------------------------------------------------------------------------
+// kafka_consumer_ConsumerRebalanceListener_t — the rebalance listener
+// ---------------------------------------------------------------------------
+
+/* Snapshot of a partition list delivered to a listener callback. */
+typedef struct {
+    int32_t count;
+    char topics[4][64];
+    int32_t partitions[4];
+} tp_snapshot_t;
+
+/* Snapshots `list` and then destroys it — the callee owns the delivered list. */
+static void take_and_destroy_list(kafka_consumer_TopicPartitionList_t *list, tp_snapshot_t *out) {
+    out->count = list != NULL ? kafka_consumer_TopicPartitionList_count(list) : -1;
+    for (int32_t i = 0; i < out->count && i < 4; i++) {
+        const kafka_consumer_TopicPartition_t *tp = kafka_consumer_TopicPartitionList_get(list, i);
+        snprintf(out->topics[i], sizeof(out->topics[i]), "%s", kafka_consumer_TopicPartition_topic(tp));
+        out->partitions[i] = kafka_consumer_TopicPartition_partition(tp);
+    }
+    kafka_consumer_TopicPartitionList_destroy(list);
+}
+
+/* What the plain revoked/assigned listener callbacks observed. */
+typedef struct {
+    atomic_int revoked_calls;
+    atomic_int assigned_calls;
+    tp_snapshot_t revoked;
+    tp_snapshot_t assigned;
+    pthread_t revoked_thread;
+    pthread_t assigned_thread;
+    /* Non-zero: the assigned callback returns an error handle. */
+    int assigned_fails;
+} listener_result_t;
+
+static void listener_result_init(listener_result_t *r) {
+    memset(r, 0, sizeof(*r));
+    atomic_init(&r->revoked_calls, 0);
+    atomic_init(&r->assigned_calls, 0);
+    r->revoked.count = -1;
+    r->assigned.count = -1;
+}
+
+static kafka_common_KafkaError_t *on_revoked(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+    listener_result_t *r = (listener_result_t *)user_data;
+    r->revoked_thread = pthread_self();
+    take_and_destroy_list(partitions, &r->revoked);
+    atomic_fetch_add(&r->revoked_calls, 1);
+    return NULL;
+}
+
+#define LISTENER_ERROR_MESSAGE "listener refused the assignment"
+
+static kafka_common_KafkaError_t *on_assigned(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+    listener_result_t *r = (listener_result_t *)user_data;
+    r->assigned_thread = pthread_self();
+    take_and_destroy_list(partitions, &r->assigned);
+    atomic_fetch_add(&r->assigned_calls, 1);
+    if (r->assigned_fails) {
+        /* The C equivalent of the Java listener throwing: ownership of the
+         * handle transfers to the client, which turns it back into an `Err`. */
+        return kafka_common_KafkaError_new(-1, LISTENER_ERROR_MESSAGE);
+    }
+    return NULL;
+}
+
+/* A mock consumer subscribed to `topic` with a listener over `result`. */
+static kafka_consumer_Consumer_t *make_subscribed_mock(const char *topic, listener_result_t *result) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(c);
+    kafka_consumer_ConsumerRebalanceListener_t *listener =
+        kafka_consumer_ConsumerRebalanceListener_new(on_revoked, on_assigned, NULL, result, NULL);
+    TEST_ASSERT_NOT_NULL(listener);
+    const char *topics[1] = {topic};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, listener));
+    return c;
+}
+
+/* Drives `MockConsumer.rebalance` with a (topic, partition) list. */
+static kafka_common_KafkaError_t *rebalance_to(kafka_consumer_Consumer_t *c,
+                                              const char *const *topics,
+                                              const int32_t *partitions,
+                                              int32_t count) {
+    return kafka_consumer_MockConsumer_rebalance(c, topics, partitions, count);
+}
+
+// ---------------------------------------------------------------------------
+// assigned gets the ADDED partitions, revoked gets the REMOVED ones
+//
+// Mirrors Java's `MockConsumer.rebalance`: `onPartitionsRevoked` fires only when
+// something was removed, `onPartitionsAssigned` fires with the newly added
+// partitions (and fires even when nothing was added).
+// ---------------------------------------------------------------------------
+
+static void test_rebalance_listener_assigned_then_revoked(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+    kafka_consumer_Consumer_t *c = make_subscribed_mock("test", &result);
+
+    /* First rebalance: nothing assigned before, so both partitions are added. */
+    const char *topics2[2] = {"test", "test"};
+    int32_t partitions2[2] = {0, 1};
+    TEST_ASSERT_NULL(rebalance_to(c, topics2, partitions2, 2));
+
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.assigned_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.revoked_calls)); /* nothing removed */
+    TEST_ASSERT_EQUAL_INT32(2, result.assigned.count);
+    TEST_ASSERT_EQUAL_STRING("test", result.assigned.topics[0]);
+    TEST_ASSERT_EQUAL_INT32(0, result.assigned.partitions[0]);
+    TEST_ASSERT_EQUAL_STRING("test", result.assigned.topics[1]);
+    TEST_ASSERT_EQUAL_INT32(1, result.assigned.partitions[1]);
+
+    /* The assignment really was applied. */
+    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_TopicPartitionList_count(asg));
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    /* Second rebalance down to {test-1}: test-0 is revoked, nothing is added —
+     * but `onPartitionsAssigned` still fires, with an empty list. */
+    const char *topics1[1] = {"test"};
+    int32_t partitions1[1] = {1};
+    TEST_ASSERT_NULL(rebalance_to(c, topics1, partitions1, 1));
+
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.revoked_calls));
+    TEST_ASSERT_EQUAL_INT32(1, result.revoked.count);
+    TEST_ASSERT_EQUAL_STRING("test", result.revoked.topics[0]);
+    TEST_ASSERT_EQUAL_INT32(0, result.revoked.partitions[0]);
+
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&result.assigned_calls));
+    TEST_ASSERT_EQUAL_INT32(0, result.assigned.count);
+
+    asg = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionList_count(asg));
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// A rebalance on a manually-assigned consumer is rejected, as in Java
+// (`IllegalArgumentException` from `assignFromSubscribed`), and the mock driver
+// is mock-only.
+// ---------------------------------------------------------------------------
+
+static void test_rebalance_requires_a_subscription_and_a_mock(void) {
+    const char *topics[1] = {"test"};
+    int32_t partitions[1] = {0};
+
+    /* Manual assignment: no dynamic assignment allowed. */
+    kafka_consumer_Consumer_t *manual = make_assigned_mock("test", 0);
+    kafka_common_KafkaError_t *err = rebalance_to(manual, topics, partitions, 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(err), "manual assignment in use"),
+                                 kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+    kafka_consumer_Consumer_destroy(manual);
+
+    /* A real consumer has no rebalance driver. */
+    const char *configs[] = {
+        "bootstrap.servers", "localhost:9092",
+        "group.id",          "rebalance-test-group",
+        "group.protocol",    "consumer",
+        NULL
+    };
+    kafka_consumer_ConsumerProperties_t *props = kafka_consumer_ConsumerProperties_from_configs(configs);
+    TEST_ASSERT_NOT_NULL(props);
+    kafka_common_KafkaError_t *new_err = NULL;
+    kafka_consumer_Consumer_t *real = kafka_consumer_KafkaConsumer_new(props, &new_err);
+    kafka_consumer_ConsumerProperties_destroy(props);
+    TEST_ASSERT_NULL(new_err);
+    TEST_ASSERT_NOT_NULL(real);
+
+    err = rebalance_to(real, topics, partitions, 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(err), "only supported on a MockConsumer"),
+                                 kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+    kafka_consumer_Consumer_destroy(real);
+}
+
+// ---------------------------------------------------------------------------
+// Listener callbacks run on the dispatcher thread, never on the caller's
+// ---------------------------------------------------------------------------
+
+static void test_rebalance_listener_runs_on_dispatcher_thread(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+    kafka_consumer_Consumer_t *c = make_subscribed_mock("test", &result);
+
+    const char *topics[1] = {"test"};
+    int32_t partitions[1] = {0};
+    TEST_ASSERT_NULL(rebalance_to(c, topics, partitions, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.assigned_calls));
+    TEST_ASSERT_NOT_EQUAL(pthread_self(), result.assigned_thread);
+
+    int32_t none[1] = {0};
+    TEST_ASSERT_NULL(rebalance_to(c, topics, none, 0));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.revoked_calls));
+    TEST_ASSERT_NOT_EQUAL(pthread_self(), result.revoked_thread);
+    /* Both callbacks of one consumer share the single dispatcher thread. */
+    TEST_ASSERT_EQUAL(result.assigned_thread, result.revoked_thread);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// The rebalance does not complete until the listener returns
+// (`consumer-threading.md` §31, regression test #2)
+//
+// The listener parks on a condvar. The main thread observes that the
+// `MockConsumer_rebalance` call (driven from a helper thread) has NOT returned
+// while the listener is parked, releases it, and then checks the ordering: the
+// listener returned strictly before the rebalance call did.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    kafka_consumer_Consumer_t *consumer;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int release;             /* guarded by `mutex` */
+    atomic_int in_callback;
+    /* Monotonic ticket numbers proving the ordering. */
+    atomic_int seq;
+    int listener_return_seq;
+    int rebalance_return_seq;
+    atomic_int rebalance_returned;
+    kafka_common_KafkaError_t *rebalance_error;
+} parking_listener_t;
+
+static kafka_common_KafkaError_t *on_assigned_parking(kafka_consumer_TopicPartitionList_t *partitions,
+                                                     void *user_data) {
+    parking_listener_t *p = (parking_listener_t *)user_data;
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+
+    atomic_store(&p->in_callback, 1);
+    pthread_mutex_lock(&p->mutex);
+    while (!p->release) {
+        pthread_cond_wait(&p->cond, &p->mutex);
+    }
+    pthread_mutex_unlock(&p->mutex);
+
+    p->listener_return_seq = atomic_fetch_add(&p->seq, 1);
+    return NULL;
+}
+
+static kafka_common_KafkaError_t *on_revoked_parking(kafka_consumer_TopicPartitionList_t *partitions,
+                                                    void *user_data) {
+    (void)user_data;
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+    return NULL;
+}
+
+static void *rebalance_thread_main(void *arg) {
+    parking_listener_t *p = (parking_listener_t *)arg;
+    const char *topics[1] = {"test"};
+    int32_t partitions[1] = {0};
+    p->rebalance_error = kafka_consumer_MockConsumer_rebalance(p->consumer, topics, partitions, 1);
+    p->rebalance_return_seq = atomic_fetch_add(&p->seq, 1);
+    atomic_store(&p->rebalance_returned, 1);
+    return NULL;
+}
+
+static void test_rebalance_blocks_until_listener_returns(void) {
+    parking_listener_t probe;
+    memset(&probe, 0, sizeof(probe));
+    pthread_mutex_init(&probe.mutex, NULL);
+    pthread_cond_init(&probe.cond, NULL);
+    atomic_init(&probe.in_callback, 0);
+    atomic_init(&probe.seq, 1);
+    atomic_init(&probe.rebalance_returned, 0);
+
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(c);
+    probe.consumer = c;
+
+    kafka_consumer_ConsumerRebalanceListener_t *listener = kafka_consumer_ConsumerRebalanceListener_new(
+        on_revoked_parking, on_assigned_parking, NULL, &probe, NULL);
+    const char *topics[1] = {"test"};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, listener));
+
+    pthread_t thread;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&thread, NULL, rebalance_thread_main, &probe));
+
+    /* Wait until the listener is parked inside the callback. */
+    TEST_ASSERT_TRUE(wait_for(&probe.in_callback, 1));
+
+    /* The listener is still inside the callback, so the rebalance cannot have
+     * returned. Give it a real window to (incorrectly) return. */
+    struct timespec ts = {0, 100000000}; /* 100ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.rebalance_returned));
+
+    /* Release the listener. */
+    pthread_mutex_lock(&probe.mutex);
+    probe.release = 1;
+    pthread_cond_signal(&probe.cond);
+    pthread_mutex_unlock(&probe.mutex);
+
+    TEST_ASSERT_EQUAL_INT(0, pthread_join(thread, NULL));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.rebalance_returned));
+    TEST_ASSERT_NULL(probe.rebalance_error);
+    /* The listener returned strictly before the rebalance call did. */
+    TEST_ASSERT_TRUE(probe.listener_return_seq < probe.rebalance_return_seq);
+
+    kafka_consumer_Consumer_destroy(c);
+    pthread_cond_destroy(&probe.cond);
+    pthread_mutex_destroy(&probe.mutex);
+}
+
+// ---------------------------------------------------------------------------
+// A listener may call back into the consumer through `ConsumerHandle_t` without
+// deadlocking (`consumer-threading.md` §31, regression test #1, adapted)
+//
+// Java gets this for free because the callback runs on the polling thread. Here
+// the callback runs on the dispatcher thread — a plain OS thread — while the
+// consumer task that triggered the rebalance awaits it, so a nested blocking
+// handle op is legal and completes. On a mock-derived handle the op itself is
+// unsupported by the core, which is still the proof that matters: the call
+// *returns* instead of hanging, and it is not rejected by the access guard.
+//
+// The same test also documents the guard: the plain `kafka_consumer_Consumer_*`
+// API is rejected with ConcurrentModification from inside the callback.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    kafka_consumer_Consumer_t *consumer;
+    kafka_consumer_ConsumerHandle_t *handle;
+    atomic_int fired;
+    int handle_assignment_non_null;
+    int handle_commit_error_code;
+    char handle_commit_message[192];
+    int owner_commit_error_code;
+} listener_reentrancy_t;
+
+static kafka_common_KafkaError_t *on_assigned_reentrant(kafka_consumer_TopicPartitionList_t *partitions,
+                                                       void *user_data) {
+    listener_reentrancy_t *p = (listener_reentrancy_t *)user_data;
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+
+    /* The sanctioned reentrancy path: a blocking handle op from inside the
+     * listener returns (it does not deadlock and is not guard-rejected). */
+    kafka_common_KafkaError_t *handle_err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
+    if (handle_err != NULL) {
+        p->handle_commit_error_code = kafka_common_KafkaError_code(handle_err);
+        snprintf(p->handle_commit_message, sizeof(p->handle_commit_message), "%s",
+                 kafka_common_KafkaError_message(handle_err));
+        kafka_common_KafkaError_destroy(handle_err);
+    }
+
+    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
+    p->handle_assignment_non_null = asg != NULL;
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    /* The plain API is not: the app thread driving the rebalance holds the
+     * access guard. */
+    kafka_common_KafkaError_t *owner_err = kafka_consumer_Consumer_commit_sync(p->consumer);
+    p->owner_commit_error_code = owner_err != NULL ? kafka_common_KafkaError_code(owner_err) : 0;
+    kafka_common_KafkaError_destroy(owner_err);
+
+    atomic_fetch_add(&p->fired, 1);
+    return NULL;
+}
+
+static kafka_common_KafkaError_t *on_revoked_noop(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+    (void)user_data;
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+    return NULL;
+}
+
+static void test_listener_calls_consumer_handle_no_deadlock(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(c);
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    listener_reentrancy_t probe;
+    memset(&probe, 0, sizeof(probe));
+    atomic_init(&probe.fired, 0);
+    probe.consumer = c;
+    probe.handle = h;
+    probe.handle_commit_error_code = INT32_MAX; /* sentinel: callback ran */
+
+    kafka_consumer_ConsumerRebalanceListener_t *listener =
+        kafka_consumer_ConsumerRebalanceListener_new(on_revoked_noop, on_assigned_reentrant, NULL, &probe, NULL);
+    const char *topics[1] = {"test"};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, listener));
+
+    /* If the nested handle op deadlocked, this call would never return. */
+    int32_t partitions[1] = {0};
+    TEST_ASSERT_NULL(rebalance_to(c, topics, partitions, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.fired));
+
+    /* The handle op reached the core: the mock's unsupported error, never
+     * ConcurrentModification. */
+    TEST_ASSERT_NOT_EQUAL(INT32_MAX, probe.handle_commit_error_code);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(probe.handle_commit_message, MOCK_HANDLE_UNSUPPORTED),
+                                 probe.handle_commit_message);
+    TEST_ASSERT_TRUE(probe.handle_assignment_non_null);
+
+    /* Control: the plain API is guard-rejected from inside the callback. */
+    TEST_ASSERT_EQUAL_INT(CONCURRENT_MODIFICATION_CODE, probe.owner_commit_error_code);
+
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// An error handle returned by a listener propagates out of the rebalance
+// (the C equivalent of the Java listener throwing)
+// ---------------------------------------------------------------------------
+
+static void test_listener_error_propagates(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+    result.assigned_fails = 1;
+    kafka_consumer_Consumer_t *c = make_subscribed_mock("test", &result);
+
+    const char *topics[1] = {"test"};
+    int32_t partitions[1] = {0};
+    kafka_common_KafkaError_t *err = rebalance_to(c, topics, partitions, 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.assigned_calls));
+    /* The core propagates the listener's error with `?`, so the message is the
+     * one the C callback supplied, verbatim. */
+    TEST_ASSERT_EQUAL_STRING(LISTENER_ERROR_MESSAGE, kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// user_data_destroy fires exactly once when the registration is released
+//
+// A registered listener is released when a subsequent `subscribe` replaces it
+// (matching Java: `SubscriptionState.unsubscribe()` clears the subscription but
+// keeps the listener), or when the consumer is destroyed.
+// ---------------------------------------------------------------------------
+
+/* Listener callbacks paired with `destroy_counter_t` user_data — they must NOT
+ * reinterpret it as a `listener_result_t`. */
+static kafka_common_KafkaError_t *on_revoked_counting(kafka_consumer_TopicPartitionList_t *partitions,
+                                                     void *user_data) {
+    destroy_counter_t *counter = (destroy_counter_t *)user_data;
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+    atomic_fetch_add(&counter->callback_calls, 1);
+    return NULL;
+}
+
+static kafka_common_KafkaError_t *on_assigned_counting(kafka_consumer_TopicPartitionList_t *partitions,
+                                                      void *user_data) {
+    destroy_counter_t *counter = (destroy_counter_t *)user_data;
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+    atomic_fetch_add(&counter->callback_calls, 1);
+    return NULL;
+}
+
+static destroy_counter_t *new_destroy_counter(void) {
+    destroy_counter_t *counter = (destroy_counter_t *)malloc(sizeof(destroy_counter_t));
+    TEST_ASSERT_NOT_NULL(counter);
+    atomic_init(&counter->destroy_calls, 0);
+    atomic_init(&counter->callback_calls, 0);
+    return counter;
+}
+
+static void test_listener_user_data_destroy_fires_exactly_once(void) {
+    /* (1) Never subscribed: `_destroy` releases it. */
+    destroy_counter_t *never = new_destroy_counter();
+    kafka_consumer_ConsumerRebalanceListener_t *unused = kafka_consumer_ConsumerRebalanceListener_new(
+        on_revoked_counting, on_assigned_counting, NULL, never, on_user_data_destroy);
+    TEST_ASSERT_NOT_NULL(unused);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&never->destroy_calls));
+    kafka_consumer_ConsumerRebalanceListener_destroy(unused);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&never->destroy_calls));
+    free(never);
+
+    /* (2) Registered, used, then replaced by a plain `subscribe`. */
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(c);
+    destroy_counter_t *counter = new_destroy_counter();
+    kafka_consumer_ConsumerRebalanceListener_t *listener = kafka_consumer_ConsumerRebalanceListener_new(
+        on_revoked_counting, on_assigned_counting, NULL, counter, on_user_data_destroy);
+    const char *topics[1] = {"test"};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, listener));
+
+    int32_t partitions[1] = {0};
+    TEST_ASSERT_NULL(rebalance_to(c, topics, partitions, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter->callback_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&counter->destroy_calls));
+
+    /* Replacing the registration releases the old listener. The Arc may be
+     * dropped on a consumer task, so allow for a brief window. */
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe(c, topics, 1));
+    TEST_ASSERT_TRUE(wait_for(&counter->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter->destroy_calls));
+
+    kafka_consumer_Consumer_destroy(c);
+    /* Still exactly once after the consumer is gone. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter->destroy_calls));
+    free(counter);
+
+    /* (3) Registered and released by destroying the consumer. */
+    kafka_consumer_Consumer_t *c2 = kafka_consumer_MockConsumer_new("earliest");
+    destroy_counter_t *counter2 = new_destroy_counter();
+    kafka_consumer_ConsumerRebalanceListener_t *listener2 = kafka_consumer_ConsumerRebalanceListener_new(
+        on_revoked_counting, on_assigned_counting, NULL, counter2, on_user_data_destroy);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c2, topics, 1, listener2));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&counter2->destroy_calls));
+    kafka_consumer_Consumer_destroy(c2);
+    TEST_ASSERT_TRUE(wait_for(&counter2->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter2->destroy_calls));
+    free(counter2);
+}
+
+// ---------------------------------------------------------------------------
+// A failing subscribe still consumes the listener
+//
+// `subscribe_with_listener` takes ownership unconditionally, so the destroy hook
+// fires even when the call never registers anything. Driven deterministically by
+// calling it from inside a commit callback, where the app thread still holds the
+// access guard (see `test_consumer_handle_usable_while_op_in_flight`).
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    kafka_consumer_Consumer_t *consumer;
+    destroy_counter_t *counter;
+    atomic_int fired;
+    int subscribe_error_code;
+} subscribe_reject_t;
+
+static void on_commit_subscribing(kafka_consumer_OffsetMap_t *offsets,
+                                  kafka_common_KafkaError_t *error,
+                                  void *user_data) {
+    subscribe_reject_t *p = (subscribe_reject_t *)user_data;
+    kafka_consumer_OffsetMap_destroy(offsets);
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_consumer_ConsumerRebalanceListener_t *listener = kafka_consumer_ConsumerRebalanceListener_new(
+        on_revoked_counting, on_assigned_counting, NULL, p->counter, on_user_data_destroy);
+    const char *topics[1] = {"test"};
+    kafka_common_KafkaError_t *err =
+        kafka_consumer_Consumer_subscribe_with_listener(p->consumer, topics, 1, listener);
+    p->subscribe_error_code = err != NULL ? kafka_common_KafkaError_code(err) : 0;
+    kafka_common_KafkaError_destroy(err);
+
+    atomic_fetch_add(&p->fired, 1);
+}
+
+static void test_failing_subscribe_with_listener_still_releases_the_listener(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+
+    subscribe_reject_t probe;
+    memset(&probe, 0, sizeof(probe));
+    atomic_init(&probe.fired, 0);
+    probe.consumer = c;
+    probe.counter = new_destroy_counter();
+    probe.subscribe_error_code = INT32_MAX; /* sentinel: callback ran */
+
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async_with_callback(c, on_commit_subscribing, &probe, NULL));
+    TEST_ASSERT_TRUE(wait_for(&probe.fired, 1));
+
+    /* The guard was held, so the subscribe was rejected... */
+    TEST_ASSERT_EQUAL_INT(CONCURRENT_MODIFICATION_CODE, probe.subscribe_error_code);
+    /* ...and the listener was released anyway, exactly once, with no callback. */
+    TEST_ASSERT_TRUE(wait_for(&probe.counter->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.counter->destroy_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.counter->callback_calls));
+
+    kafka_consumer_Consumer_destroy(c);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.counter->destroy_calls));
+    free(probe.counter);
+}
+
+// ---------------------------------------------------------------------------
+// The async subscribe variant registers the listener the same way
+// ---------------------------------------------------------------------------
+
+/* Completion of a void-returning async consumer op. */
+typedef struct {
+    atomic_int fired;
+    int had_error;
+    int32_t error_code;
+} op_result_t;
+
+static void on_subscribe_done(kafka_common_KafkaError_t *error, void *user_data) {
+    op_result_t *r = (op_result_t *)user_data;
+    if (error != NULL) {
+        r->had_error = 1;
+        r->error_code = kafka_common_KafkaError_code(error);
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_subscribe_with_listener_async(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(c);
+
+    kafka_consumer_ConsumerRebalanceListener_t *listener =
+        kafka_consumer_ConsumerRebalanceListener_new(on_revoked, on_assigned, NULL, &result, NULL);
+    op_result_t op;
+    memset(&op, 0, sizeof(op));
+    atomic_init(&op.fired, 0);
+
+    const char *topics[1] = {"test"};
+    kafka_consumer_Consumer_subscribe_with_listener_async(c, topics, 1, listener, on_subscribe_done, &op);
+    TEST_ASSERT_TRUE(wait_for(&op.fired, 1));
+    TEST_ASSERT_FALSE(op.had_error);
+
+    int32_t partitions[1] = {0};
+    TEST_ASSERT_NULL(rebalance_to(c, topics, partitions, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.assigned_calls));
+    TEST_ASSERT_EQUAL_INT32(1, result.assigned.count);
+    TEST_ASSERT_EQUAL_STRING("test", result.assigned.topics[0]);
+    TEST_ASSERT_EQUAL_INT32(0, result.assigned.partitions[0]);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_commit_async_with_callback_fires_with_offsets_null_error);
@@ -710,5 +1340,14 @@ int main(void) {
     RUN_TEST(test_consumer_handle_wakeup);
     RUN_TEST(test_consumer_handle_usable_while_op_in_flight);
     RUN_TEST(test_consumer_handle_shares_state_with_real_consumer);
+    RUN_TEST(test_rebalance_listener_assigned_then_revoked);
+    RUN_TEST(test_rebalance_requires_a_subscription_and_a_mock);
+    RUN_TEST(test_rebalance_listener_runs_on_dispatcher_thread);
+    RUN_TEST(test_rebalance_blocks_until_listener_returns);
+    RUN_TEST(test_listener_calls_consumer_handle_no_deadlock);
+    RUN_TEST(test_listener_error_propagates);
+    RUN_TEST(test_listener_user_data_destroy_fires_exactly_once);
+    RUN_TEST(test_failing_subscribe_with_listener_still_releases_the_listener);
+    RUN_TEST(test_subscribe_with_listener_async);
     return UNITY_END();
 }
