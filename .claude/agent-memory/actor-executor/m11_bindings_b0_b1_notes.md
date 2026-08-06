@@ -1,6 +1,6 @@
 ---
 name: m11-bindings-b0-b1-notes
-description: M11 admin bindings B0+B1 — no access guard, finish_sync opaque-type trap, cbindgen skips module docs, ffi-feature archive clobbering, Python ext unbuildable on macOS
+description: M11 admin bindings B0+B1 — no access guard, finish_sync opaque-type trap, cbindgen skips module docs, ffi-feature archive clobbering, Python ext unbuildable on macOS, deadline-clamp omissions and clock-advancing test client
 metadata:
   type: project
 ---
@@ -116,6 +116,30 @@ Java gates shutdown on `hasActiveExternalCalls()`, which **skips `Call`s with
 `internal == true`** — a filter that is easy to drop when translating, and whose
 absence only shows up against an unreachable broker. Suspect the same class of
 omission in any predicate that decides "is there still work outstanding".
+
+## A deadline needs translating twice: into the exit predicate *and* into the wait
+
+`processRequests` clamps `pollTimeout` to `curHardShutdownTimeMs - now`
+(`KafkaAdminClient.java:1500-1502`) *and* consults the deadline in
+`threadShouldExit`. Only the predicate had been translated, so the loop reached
+its exit check no sooner than the poll returned — `close(100ms)` blocked up to
+`request.timeout.ms`. When a Java loop mentions a deadline in more than one
+place, translate every one; a shutdown/timeout budget honoured only by the
+predicate is honoured only after the blocking wait it was supposed to bound.
+
+## Making "how long would the loop have blocked" assertable under a mock clock
+
+`MockClient::poll` ignores its timeout, so no assertion on elapsed time is
+possible and predicate-level tests cannot see a missing clamp. The fix is a
+test-only `KafkaClient` wrapper (`WaitingClient` in `kafka_admin_client.rs`,
+same shape as the consumer's `CountingClient`) that records each poll timeout
+and, behind an `AtomicBool` armed after setup, advances the `MockTime` by it —
+a poll that finds an idle socket and waits its whole budget. The wait then shows
+up on the mock clock: deterministic, instant, no real sleeping, and it fails
+loudly with the offending timeout in the message. Arm the flag only after the
+setup pumps, or the setup's own polls skew the clock. Recording the argument is
+the Rust stand-in for Mockito's `verify(client).poll(captor.capture(), ...)` and
+is the DoD #7 justification for the wrapper.
 
 ## Behaviour verified against Java, not assumed
 
