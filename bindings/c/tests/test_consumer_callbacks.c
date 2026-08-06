@@ -14,7 +14,9 @@
 
 // User-callback bindings of the consumer C FFI: the `OffsetCommitCallback`
 // equivalent (`kafka_consumer_Consumer_commit_async_with_callback` and
-// `..._commit_async_offsets_with_callback`).
+// `..._commit_async_offsets_with_callback`), plus the reentrancy handle
+// (`kafka_consumer_ConsumerHandle_t`) user callbacks use to call back into the
+// consumer.
 //
 // All tests are MockConsumer-backed. The mock's core `commit_async_impl` awaits
 // `on_complete` inline (mirroring Java's `MockConsumer.commitAsync`, which calls
@@ -362,6 +364,339 @@ static void test_commit_returns_only_after_callback_returns(void) {
     kafka_consumer_Consumer_destroy(c);
 }
 
+// ---------------------------------------------------------------------------
+// kafka_consumer_ConsumerHandle_t — the reentrancy handle
+// ---------------------------------------------------------------------------
+
+/* ConcurrentModificationError maps to the UnknownServerError numeric code (-1),
+ * since it carries no embedded Kafka `Errors` value (see `KafkaError::error()`).
+ * A handle op must NEVER produce it. */
+#define CONCURRENT_MODIFICATION_CODE (-1)
+
+/* Substring of the core's `unsupported_version` message for a handle obtained
+ * from a MockConsumer (`ConsumerHandle::async_state`). */
+#define MOCK_HANDLE_UNSUPPORTED "not supported on a MockConsumer handle"
+
+/* Asserts that `err` is a non-null "unsupported on a mock handle" error, then
+ * frees it. */
+static void assert_unsupported_on_mock(kafka_common_KafkaError_t *err) {
+    TEST_ASSERT_NOT_NULL(err);
+    const char *message = kafka_common_KafkaError_message(err);
+    TEST_ASSERT_NOT_NULL(message);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, MOCK_HANDLE_UNSUPPORTED), message);
+    kafka_common_KafkaError_destroy(err);
+}
+
+static void test_consumer_handle_new_destroy(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    /* Handles are independent: a second one can be taken while the first is
+     * alive, and destroying one leaves the other (and the consumer) usable. */
+    kafka_consumer_ConsumerHandle_t *h2 = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h2);
+    TEST_ASSERT_NOT_EQUAL(h, h2);
+    kafka_consumer_ConsumerHandle_destroy(h2);
+
+    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
+    TEST_ASSERT_NOT_NULL(asg);
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    /* NULL is a no-op. */
+    kafka_consumer_ConsumerHandle_destroy(NULL);
+    kafka_consumer_ConsumerHandle_wakeup(NULL);
+
+    /* Destroy the handle before the consumer (documented contract). */
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// Sync getters never return NULL (no guard) but are empty on a mock handle,
+// even when the owning consumer has an assignment — the mock's ConsumerHandle
+// carries only the shared wakeup flag, not the SubscriptionState (core
+// behavior, see `ConsumerHandleInner::Mock`).
+// ---------------------------------------------------------------------------
+
+static void test_consumer_handle_sync_getters_empty_on_mock(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    /* The consumer itself does see the assignment... */
+    kafka_consumer_TopicPartitionList_t *owner_asg = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_NOT_NULL(owner_asg);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_TopicPartitionList_count(owner_asg));
+    kafka_consumer_TopicPartitionList_destroy(owner_asg);
+
+    /* ...while the mock-derived handle reports empty sets. */
+    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
+    TEST_ASSERT_NOT_NULL(asg);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(asg));
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    kafka_consumer_StringList_t *sub = kafka_consumer_ConsumerHandle_subscription(h);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(sub));
+    kafka_consumer_StringList_destroy(sub);
+
+    kafka_consumer_TopicPartitionList_t *paused = kafka_consumer_ConsumerHandle_paused(h);
+    TEST_ASSERT_NOT_NULL(paused);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(paused));
+    kafka_consumer_TopicPartitionList_destroy(paused);
+
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// Every async op on a mock-derived handle fails with the core's
+// `unsupported_version` error — it never hangs and never panics.
+// ---------------------------------------------------------------------------
+
+static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    const char *topics[1] = {"test"};
+    int32_t partitions[1] = {0};
+    int64_t offsets[1] = {1};
+    int32_t leader_epochs[1] = {-1};
+    int64_t timestamps[1] = {0};
+
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_commit_sync(h));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_commit_async(h));
+    assert_unsupported_on_mock(
+        kafka_consumer_ConsumerHandle_commit_sync_offsets(h, topics, partitions, offsets, leader_epochs, NULL, 1));
+    assert_unsupported_on_mock(
+        kafka_consumer_ConsumerHandle_commit_async_offsets(h, topics, partitions, offsets, leader_epochs, NULL, 1));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_assign(h, topics, partitions, 1));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_seek(h, "test", 0, 5));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_seek_with_metadata(h, "test", 0, 5, -1, NULL));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_seek_to_beginning(h, topics, partitions, 1));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_seek_to_end(h, topics, partitions, 1));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_pause(h, topics, partitions, 1));
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_resume(h, topics, partitions, 1));
+
+    /* Value-returning ops leave their out-params untouched on failure. */
+    int64_t position = -7;
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_position(h, "test", 0, &position));
+    TEST_ASSERT_EQUAL_INT64(-7, position);
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_position_timeout(h, "test", 0, 100, &position));
+    TEST_ASSERT_EQUAL_INT64(-7, position);
+
+    kafka_consumer_OffsetMap_t *committed = NULL;
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_committed(h, topics, partitions, 1, &committed));
+    TEST_ASSERT_NULL(committed);
+
+    kafka_consumer_LongOffsetMap_t *long_map = NULL;
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_beginning_offsets(h, topics, partitions, 1, &long_map));
+    TEST_ASSERT_NULL(long_map);
+    assert_unsupported_on_mock(kafka_consumer_ConsumerHandle_end_offsets(h, topics, partitions, 1, &long_map));
+    TEST_ASSERT_NULL(long_map);
+
+    kafka_consumer_OffsetAndTimestampMap_t *ts_map = NULL;
+    assert_unsupported_on_mock(
+        kafka_consumer_ConsumerHandle_offsets_for_times(h, topics, partitions, timestamps, 1, &ts_map));
+    TEST_ASSERT_NULL(ts_map);
+
+    /* A marshaling failure is reported before the op is driven, so it yields
+     * the validation error rather than the unsupported-on-mock one. */
+    int64_t bad_offsets[1] = {-1};
+    kafka_common_KafkaError_t *err =
+        kafka_consumer_ConsumerHandle_commit_sync_offsets(h, topics, partitions, bad_offsets, leader_epochs, NULL, 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "negative offset"));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// wakeup() through the handle arms the same flag the next poll observes
+// (deterministic: nothing else is in flight, so nothing can consume the flag).
+// ---------------------------------------------------------------------------
+
+static void test_consumer_handle_wakeup(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    kafka_consumer_ConsumerHandle_wakeup(h);
+
+    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_consumer_ConsumerRecords_t *records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    TEST_ASSERT_NULL(records);
+    TEST_ASSERT_NOT_NULL(poll_err);
+    kafka_common_KafkaError_destroy(poll_err);
+
+    /* The flag was consumed, so the next poll succeeds. */
+    poll_err = NULL;
+    records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    TEST_ASSERT_NULL(poll_err);
+    TEST_ASSERT_NOT_NULL(records);
+    kafka_consumer_ConsumerRecords_destroy(records);
+
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// The handle bypasses the access guard
+//
+// A commit callback runs on the dispatcher thread *while the app thread that
+// called commit still holds the owner guard* (the mock invokes `on_complete`
+// inline inside the guarded commit). From there:
+//   - a plain `kafka_consumer_Consumer_*` op is rejected with
+//     ConcurrentModification (proving the guard really is held), while
+//   - `kafka_consumer_ConsumerHandle_*` ops are NOT rejected — the getter
+//     returns a list and the async op returns the mock's unsupported error.
+// This is exactly the reentrancy the rebalance listener (Phase 5) needs.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    kafka_consumer_Consumer_t *consumer;
+    kafka_consumer_ConsumerHandle_t *handle;
+    atomic_int fired;
+    int handle_assignment_non_null;
+    int32_t handle_assignment_count;
+    int handle_commit_error_code;
+    char handle_commit_message[192];
+    int owner_commit_error_code;
+} guard_probe_t;
+
+static void on_commit_probing_guard(kafka_consumer_OffsetMap_t *offsets,
+                                   kafka_common_KafkaError_t *error,
+                                   void *user_data) {
+    guard_probe_t *p = (guard_probe_t *)user_data;
+    kafka_consumer_OffsetMap_destroy(offsets);
+    kafka_common_KafkaError_destroy(error);
+
+    /* The guard IS held right now: a plain consumer op is rejected. */
+    kafka_common_KafkaError_t *owner_err = kafka_consumer_Consumer_commit_sync(p->consumer);
+    p->owner_commit_error_code = owner_err != NULL ? kafka_common_KafkaError_code(owner_err) : 0;
+    kafka_common_KafkaError_destroy(owner_err);
+
+    /* The handle bypasses it: the getter succeeds... */
+    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
+    p->handle_assignment_non_null = asg != NULL;
+    p->handle_assignment_count = asg != NULL ? kafka_consumer_TopicPartitionList_count(asg) : -1;
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    /* ...and the async op reaches the core (mock => unsupported, NOT the
+     * ConcurrentModification the guarded path would have produced). */
+    kafka_common_KafkaError_t *handle_err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
+    if (handle_err != NULL) {
+        p->handle_commit_error_code = kafka_common_KafkaError_code(handle_err);
+        snprintf(p->handle_commit_message, sizeof(p->handle_commit_message), "%s",
+                 kafka_common_KafkaError_message(handle_err));
+        kafka_common_KafkaError_destroy(handle_err);
+    }
+
+    atomic_fetch_add(&p->fired, 1);
+}
+
+static void test_consumer_handle_usable_while_op_in_flight(void) {
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    guard_probe_t probe;
+    memset(&probe, 0, sizeof(probe));
+    atomic_init(&probe.fired, 0);
+    probe.consumer = c;
+    probe.handle = h;
+    probe.handle_commit_error_code = INT32_MAX; /* sentinel: callback ran */
+
+    kafka_common_KafkaError_t *err =
+        kafka_consumer_Consumer_commit_async_with_callback(c, on_commit_probing_guard, &probe, NULL);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_TRUE(wait_for(&probe.fired, 1));
+
+    /* Control: the owner guard was held, so the plain consumer op was rejected. */
+    TEST_ASSERT_EQUAL_INT(CONCURRENT_MODIFICATION_CODE, probe.owner_commit_error_code);
+
+    /* The handle getter was not rejected (it returned a list, not NULL). */
+    TEST_ASSERT_TRUE(probe.handle_assignment_non_null);
+    TEST_ASSERT_EQUAL_INT32(0, probe.handle_assignment_count);
+
+    /* The handle commit reached the core: the mock's unsupported error, never
+     * ConcurrentModification. */
+    TEST_ASSERT_NOT_EQUAL(INT32_MAX, probe.handle_commit_error_code);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(probe.handle_commit_message, MOCK_HANDLE_UNSUPPORTED),
+                                 probe.handle_commit_message);
+
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// The Async (real KafkaConsumer) arm of the handle
+//
+// No broker is needed: the handle shares the consumer's `SubscriptionState`, so
+// `subscription()` reflects a `subscribe()` made on the consumer, and
+// `position()` on a partition that is not assigned fails fast with an
+// IllegalState error (never `unsupported`, which is the mock-only outcome).
+// ---------------------------------------------------------------------------
+
+static void test_consumer_handle_shares_state_with_real_consumer(void) {
+    const char *configs[] = {
+        "bootstrap.servers", "localhost:9092",
+        "group.id",          "handle-test-group",
+        "group.protocol",    "consumer",
+        NULL
+    };
+    kafka_consumer_ConsumerProperties_t *props = kafka_consumer_ConsumerProperties_from_configs(configs);
+    TEST_ASSERT_NOT_NULL(props);
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_consumer_Consumer_t *c = kafka_consumer_KafkaConsumer_new(props, &err);
+    kafka_consumer_ConsumerProperties_destroy(props);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(c);
+
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(c);
+    TEST_ASSERT_NOT_NULL(h);
+
+    const char *topics[1] = {"handle-topic"};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe(c, topics, 1));
+
+    /* The handle reads the consumer's shared SubscriptionState. */
+    kafka_consumer_StringList_t *sub = kafka_consumer_ConsumerHandle_subscription(h);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_StringList_count(sub));
+    TEST_ASSERT_EQUAL_STRING("handle-topic", kafka_consumer_StringList_get(sub, 0));
+    kafka_consumer_StringList_destroy(sub);
+
+    /* Nothing assigned yet (no broker), so these are empty but non-null. */
+    kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
+    TEST_ASSERT_NOT_NULL(asg);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(asg));
+    kafka_consumer_TopicPartitionList_destroy(asg);
+
+    kafka_consumer_TopicPartitionList_t *paused = kafka_consumer_ConsumerHandle_paused(h);
+    TEST_ASSERT_NOT_NULL(paused);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_TopicPartitionList_count(paused));
+    kafka_consumer_TopicPartitionList_destroy(paused);
+
+    /* An async op reaches the real implementation: `position` on a partition
+     * that is not assigned fails immediately (no broker round trip). */
+    int64_t position = -7;
+    kafka_common_KafkaError_t *pos_err =
+        kafka_consumer_ConsumerHandle_position_timeout(h, "handle-topic", 0, 100, &position);
+    TEST_ASSERT_NOT_NULL(pos_err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(pos_err), "partitions assigned"),
+                                 kafka_common_KafkaError_message(pos_err));
+    TEST_ASSERT_EQUAL_INT64(-7, position);
+    kafka_common_KafkaError_destroy(pos_err);
+
+    kafka_consumer_ConsumerHandle_destroy(h);
+    kafka_consumer_Consumer_destroy(c);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_commit_async_with_callback_fires_with_offsets_null_error);
@@ -369,5 +704,11 @@ int main(void) {
     RUN_TEST(test_commit_callback_runs_on_dispatcher_thread);
     RUN_TEST(test_commit_callback_user_data_destroy_fires_exactly_once);
     RUN_TEST(test_commit_returns_only_after_callback_returns);
+    RUN_TEST(test_consumer_handle_new_destroy);
+    RUN_TEST(test_consumer_handle_sync_getters_empty_on_mock);
+    RUN_TEST(test_consumer_handle_async_ops_unsupported_on_mock);
+    RUN_TEST(test_consumer_handle_wakeup);
+    RUN_TEST(test_consumer_handle_usable_while_op_in_flight);
+    RUN_TEST(test_consumer_handle_shares_state_with_real_consumer);
     return UNITY_END();
 }
