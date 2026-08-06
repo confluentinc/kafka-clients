@@ -1,6 +1,6 @@
 ---
 name: m11-bindings-b0-b1-notes
-description: M11 admin bindings slices B0+B1 — admin FFI has no access guard, finish_sync opaque-type trap, per-key result flattening, macOS cannot build the Python ext
+description: M11 admin bindings B0+B1 — no access guard, finish_sync opaque-type trap, cbindgen skips module docs, ffi-feature archive clobbering, Python ext unbuildable on macOS
 metadata:
   type: project
 ---
@@ -60,15 +60,42 @@ it destroys the handle it is given.
 
 Result entries are sorted by key so C's index addressing is reproducible.
 
+## cbindgen does NOT copy module-level rustdoc into the header
+
+Only per-item rustdoc reaches `target/include/confluent_kafka.h`. So a C-visible
+doc comment must never say "see the module-level *X* section" — that reference
+dangles for the only audience that reads the header. State the whole contract on
+every entry point, even at the cost of repeating it 9 times. Verify with
+`grep -c "<the sentence>" target/include/confluent_kafka.h` after `cargo build
+--features ffi`.
+
 ## Environment gotchas
 
 - `cargo xtask lint` does **not** enable the `ffi` feature, so the FFI modules
   escape the standard lint gate. Run
   `cargo clippy --all-targets --features ffi -- -D warnings` separately.
+  `clippy`/`rustfmt` need nix: `nix shell nixpkgs#clippy nixpkgs#rustc
+  nixpkgs#cargo --command ...` / `nix shell nixpkgs#rustfmt --command ...`.
+- **Plain `cargo build` / `cargo test` overwrite `target/debug/
+  libconfluent_kafka.a` without the FFI symbols**, and `bindings/c/build`'s
+  CMake cache pins that exact path. The C link then fails with a wall of
+  "Undefined symbols for architecture arm64" naming every `kafka_*` function —
+  which looks like a broken FFI but is a stale archive. Always re-run
+  `cargo build --features ffi` immediately before `cmake --build`.
+- `cargo xtask check-generated` fails on a **clean** tree (unformatted files
+  under `target/debug/build/*/out/generated`), so it is not a usable gate; the
+  four real gates are build (both feature settings), test, `format-check`,
+  clippy-with-ffi. Confirmed by stashing all changes and re-running.
 - `_confluentkafka.c` includes `<threads.h>`, which the macOS SDK does not have,
-  so **the Python extension cannot be built on this host at all**. Run the
-  Python suite in a Linux container (rust:1.95-bookworm + python3-dev, rsync the
-  tree excluding `target/`, `pip install --no-build-isolation -e .`).
+  so **the Python extension cannot be built on this host at all**. The Linux
+  container route also proved unreliable: Docker Desktop wedged with containers
+  stuck in `Created` for 7+ min and never started them. Budget one attempt, then
+  report the Python suite as unverified rather than fighting the daemon.
+  Recipe when it does work: image `ckr-pytest:dev` already carries `/venv` +
+  python3-dev + a Linux `/w/target`; mount the repo at `/src:ro` and
+  `tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /w -xf -`
+  so the incremental Linux target dir is reused, then `pip install
+  --no-build-isolation -e .` and pytest.
 - Host `pip` points at an authenticated CodeArtifact index that 401s; use
   `--index-url https://pypi.org/simple` or build inside Docker.
 - `cmake` is not on PATH; use `nix shell nixpkgs#cmake --command cmake ...`.
@@ -76,6 +103,19 @@ Result entries are sorted by key so C's index addressing is reproducible.
 - cbindgen emitted the new admin types even before they were added to
   `cbindgen.toml`'s `[export] include` (they are reachable from exported
   functions), but they were added anyway per the plan's checklist.
+
+## Broker-less production-client tests earn their keep
+
+The mock-only admin suites cannot see anything about the real client's I/O task.
+Adding `test_kafka_admin.c` (no broker needed — construction only parses config,
+and every RPC carries a short explicit timeout) immediately exposed a shutdown
+hang in `AdminClientRunnable::should_exit`. When a C test hangs, `sample <pid>`
+on macOS names the exact blocked frame and is much faster than bisecting.
+
+Java gates shutdown on `hasActiveExternalCalls()`, which **skips `Call`s with
+`internal == true`** — a filter that is easy to drop when translating, and whose
+absence only shows up against an unreachable broker. Suspect the same class of
+omission in any predicate that decides "is there still work outstanding".
 
 ## Behaviour verified against Java, not assumed
 
