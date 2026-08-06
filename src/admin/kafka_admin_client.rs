@@ -11484,4 +11484,76 @@ mod tests {
         assert_remove_members_reason(None, DEFAULT_LEAVE_GROUP_REASON).await;
         assert_remove_members_reason(Some(""), DEFAULT_LEAVE_GROUP_REASON).await;
     }
+
+    // --- shutdown ------------------------------------------------------------
+
+    /// Java's `threadShouldExit` consults `hasActiveExternalCalls()`, which
+    /// skips every `Call` with `internal == true`
+    /// (`KafkaAdminClient.java:1419-1441`). The metadata refresh
+    /// (`makeMetadataCall`) is internal and is recreated on every backoff
+    /// expiry, so counting it would keep the I/O task alive for as long as the
+    /// bootstrap brokers stay unreachable: `close(timeout)` would block for the
+    /// whole timeout, and Java's no-argument `Admin.close()` — which passes
+    /// `Duration.ofMillis(Long.MAX_VALUE)` — would never return at all.
+    #[tokio::test]
+    async fn close_exits_the_io_task_while_only_the_internal_metadata_call_is_active() {
+        let (admin, mut runnable, time, _nodes) = env();
+        // Force the refresh the production client performs on its own once the
+        // seeded metadata expires (or fails), then let phase 4 create the
+        // internal call. The mock has no prepared response, so the call stays
+        // active indefinitely — exactly the unreachable-broker situation.
+        admin.shared.metadata_manager.request_update();
+        time.sleep(1_000);
+        pump(&mut runnable, 2).await;
+        assert!(
+            runnable.has_active_calls_for_test(),
+            "the internal metadata refresh call should be active"
+        );
+        assert!(
+            !runnable.has_active_external_calls_for_test(),
+            "the metadata refresh call is internal, so it is not an active external call"
+        );
+
+        // Java's no-argument `Admin.close()`: no reachable hard deadline.
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(i64::MAX, Ordering::Release);
+
+        assert!(
+            runnable.should_exit_for_test(time.now.load(Ordering::Acquire)),
+            "close() must not wait on an internal call: the I/O task has to exit at once"
+        );
+    }
+
+    /// The other half of the contract: an **external** call does hold the loop
+    /// open until the hard-shutdown deadline, so `close(timeout)` still gives a
+    /// user-submitted RPC its chance to finish.
+    #[tokio::test]
+    async fn close_waits_for_an_active_external_call_until_the_hard_deadline() {
+        let (admin, mut runnable, time, _nodes) = env();
+        let _result = admin.list_topics(ListTopicsOptions::new());
+        pump(&mut runnable, 1).await;
+        assert!(
+            runnable.has_active_external_calls_for_test(),
+            "the submitted listTopics call should be an active external call"
+        );
+
+        let now = time.now.load(Ordering::Acquire);
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(now + 30_000, Ordering::Release);
+        assert!(
+            !runnable.should_exit_for_test(now),
+            "an active external call keeps the I/O task alive until the hard deadline"
+        );
+
+        // Once the hard deadline passes, the task exits and aborts the call.
+        assert!(runnable.should_exit_for_test(now + 30_000));
+    }
 }
