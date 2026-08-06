@@ -89,3 +89,4 @@
 - [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — read_bytes_owned/BytesReader, BytesDeserializer slice_ref, BytesMut deviation, 0.11 allocs/record
 - [FFI callback bridging Phase 1](ffi_callback_bridging_phase1_notes.md) — branch base didn't build (2 merge breaks); deny(warnings) vs new pub(crate); no cmake/venv here
 - [FFI callback bridging Phase 2](ffi_callback_bridging_phase2_notes.md) — delivery callback can get BOTH metadata+error; Err drops callback unfired; callback FFI tested in C only
+- [FFI callback bridging Phase 3](ffi_callback_bridging_phase3_notes.md) — cbindgen breaks on Option<fn-alias>; build the CallbackTarget adapter before any fallible step
