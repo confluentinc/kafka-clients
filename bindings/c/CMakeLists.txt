@@ -69,11 +69,16 @@ target_include_directories(test_kafka_consumer PRIVATE ${RUST_INCLUDE_DIR})
 # addition to ${SYSTEM_LIBS} (which is empty under shared linking).
 target_link_libraries(test_kafka_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
+add_executable(test_mock_admin tests/test_mock_admin.c)
+target_include_directories(test_mock_admin PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_mock_admin unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
 add_test(NAME mock_consumer COMMAND test_mock_consumer)
 add_test(NAME kafka_consumer COMMAND test_kafka_consumer)
+add_test(NAME mock_admin COMMAND test_mock_admin)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).
