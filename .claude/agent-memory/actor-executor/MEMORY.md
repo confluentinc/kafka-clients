@@ -288,3 +288,4 @@
 - [FFI callback bridging Phase 2](ffi_callback_bridging_phase2_notes.md) — delivery callback can get BOTH metadata+error; Err drops callback unfired; callback FFI tested in C only
 - [FFI callback bridging Phase 3](ffi_callback_bridging_phase3_notes.md) — cbindgen breaks on Option<fn-alias>; build the CallbackTarget adapter before any fallible step
 - [FFI callback bridging Phase 4](ffi_callback_bridging_phase4_notes.md) — ConsumerHandle_t guard bypass; in-runtime block_on returns error not panic; commit-callback as guard probe
+- [FFI callback bridging Phase 5](ffi_callback_bridging_phase5_notes.md) — unsubscribe/close do NOT release the listener; take_error; negative-assert mutation check
