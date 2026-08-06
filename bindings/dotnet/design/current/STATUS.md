@@ -7,6 +7,120 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 4 — "Consumer offset-map query siblings" (Category E1): DONE
+  (2026-08-06).** The four async offset-map queries on `IAsyncConsumer` — `Committed`
+  (`IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>`), `OffsetsForTimes`
+  (`…, OffsetAndTimestamp>`, the one **map-input** query), `BeginningOffsets` / `EndOffsets`
+  (`…, long>`) — plus the two new public value types `OffsetAndMetadata` /
+  `OffsetAndTimestamp`. **Mode A (no Rust authored):** all four `_async` fns + their three
+  container types (`OffsetMap_t` / `OffsetAndTimestampMap_t` / `LongOffsetMap_t`) + accessors
+  + the two value types + the three callbacks already ship; no ABI change. The owned-handle
+  **map** copy-out bridge (the `OnPoll` template, cloned once per container type). Delivered:
+  - **Two public value types** (`Confluent.Kafka` root, `sealed class`, getter-props, full
+    XML docs, the `ConsumerGroupMetadata` precedent): `OffsetAndMetadata { long Offset; string
+    Metadata (non-null, "" = unset); int? LeaderEpoch }` and `OffsetAndTimestamp { long Offset;
+    long Timestamp; int? LeaderEpoch }`. **`LeaderEpoch` maps the ABI presence-flag** (an `I1`
+    `bool` return + `out int32`) → `int?` (false ⇒ null, true ⇒ epoch — honored, not
+    hardcoded). Both carry `ToString()`; no `IEquatable` (they are dictionary *values*, not
+    keys) — recorded deviation.
+  - **`NativeMethods`**: 4 `_async` void DllImports (`committed` / `offsets_for_times` /
+    `beginning_offsets` / `end_offsets`); 3 container types × (`count` / `get_key` / `get_value`
+    / `destroy`); 2 value-type accessors × (`offset` / `metadata|timestamp` / `leader_epoch`
+    with `[MarshalAs(I1)] bool` + `out int`). Reused the shipped `TopicPartition_topic` /
+    `_partition` for the map keys. The value-type `_destroy` accessors are **deliberately NOT
+    declared** — they are borrowed map elements (Category 4), never freed by the binding
+    (structurally prevents a borrowed-element free).
+  - **3 owned-handle trampolines in `ConsumerCallbacks`** (`OnCommitted` / `OnOffsetsForTimes`
+    / `OnLongOffsets`) — `OnPoll` clones differing only in the result type, the copy-out
+    marshaller, and which container `_destroy` runs in the `finally`. Every `OnPoll` invariant
+    verbatim: no-throw boundary, copy-out on the dispatcher thread BEFORE `_destroy`, map root
+    `_destroy` null-safe in the `finally` (no-op on the failure/null path), error via
+    `Complete` (frees the error handle), per-op `GCHandle` freed once, `RunContinuationsAsync`.
+    `OnLongOffsets` is **shared** by `beginning`/`end` (they share `long_offsets_callback_t`).
+    Each callback typedef gets its own delegate type (distinct C fn-pointer types, self-
+    documenting DllImport parameters).
+  - **3 copy-out marshallers** (`OffsetMapMarshal` / `OffsetAndTimestampMapMarshal` /
+    `LongOffsetMapMarshal`) + a shared `OffsetMapMarshalShared` (the `TopicPartition_t` key
+    copy-out + the leader-epoch presence-flag decode, reused by all three) +
+    `EmptyReadOnlyDictionary<K,V>` (the `Array.Empty` analog for the empty-map path — ns2.0 has
+    no built-in). Borrow discipline (§B2 Category 4): the map key/value **elements** are
+    borrowed and never freed; only the map root is destroyed (by the trampoline, after
+    copy-out). Metadata/topic strings via the **NUL-terminated** `Utf8Marshal.PtrToString`
+    (§B3), copied out before the root destroy.
+  - **`NativeConsumer`**: `CommittedWithCallback` / `OffsetsForTimesWithCallback` /
+    `BeginningOffsetsWithCallback` / `EndOffsetsWithCallback` over a new
+    `SubmitOwnedHandleOperation<T>` parallel submit helper (a clone of `SubmitOperation<T>`
+    passing only `(consumer, userData)`; each op closes over its own strongly-typed rooted
+    callback at the call site) — **the proven poll / void / scalar submit paths are left
+    byte-for-byte untouched** (PLAN §4.2; diff-verified: zero deletions to `SubmitOperation` /
+    `SubmitScalarOperation` / `SubmitVoidOperation` / `OnPoll` / `ConsumerCallbacks.Poll`).
+    `WithPinnedTopicsAndTimestamps` variant for the one map-input query (adds a blittable
+    `long[]` timestamps). Shared `SnapshotPartitions` / `ExtractPartitions` validate+snapshot
+    the TP collection once (§B5) — `SubmitPartitionOp` refactored to reuse them, so the
+    validation is not copy-pasted (PLAN §3), behavior-identical.
+  - **`IAsyncConsumer`**: the four members with full XML docs (CS1591); dropped `committed` /
+    `beginningOffsets` / `endOffsets` / `offsetsForTimes` from the additive-growth
+    "not-yet-wired" remark (commit family / `partitionsFor`·`listTopics` / pattern subscribe
+    remain). Both `AsyncKafkaConsumer` + `AsyncMockConsumer` forward each. Doc-sync: CLAUDE.md
+    §3 sketch prose updated (these + the two value types are now wired).
+  - **API shape (PLAN §2/§3/§5, all user-locked):** names mirror Java (no `Async` suffix);
+    Java `Map` → `IReadOnlyDictionary`, `Long` values → `long`, `Set`/`Collection` inputs →
+    `IReadOnlyCollection<TopicPartition>`; the `Map<TP,Long>` input →
+    `IReadOnlyDictionary<TopicPartition,long>`. **One method each, NO `TimeSpan` overload**
+    (the async ABI has no timeout — the `Position`/`Close` precedent). The `CancellationToken`
+    is **user cancellation → `wakeup()`, NOT a deadline**; pre-canceled →
+    `OperationCanceledException` synchronously. Preconditions BEFORE any pin/P-Invoke (§B5):
+    null collection/map → `ArgumentNullException`; null element/key topic → `ArgumentException`;
+    negative partition → `ArgumentOutOfRangeException` (the `TopicPartition` ctor guard). A
+    **negative timestamp** in `OffsetsForTimes` is a Kafka-valid sentinel — **accepted**, not
+    rejected. **Empty input** is a valid pass-through for the collection queries;
+    `OffsetsForTimes({})` still faults on the mock (the FFI does not short-circuit empty —
+    verified in `src/ffi/consumer.rs`).
+  - **Reachability (PLAN §6, documented not silently skipped):**
+    `BeginningOffsets`/`EndOffsets` **fully data-testable** broker-free (shipped
+    `UpdateBeginningOffset`/`UpdateEndOffset`) — non-empty round-trip + unset-TP `illegal_state`
+    faulted (message asserted). `Committed` **empty-only** broker-free (the mock's committed
+    map is populated only by the not-yet-wired commit-with-offsets family) — empty + faulted
+    paths tested; the **non-empty end-to-end data test is deferred to the commit-family phase**
+    (which reuses `OffsetAndMetadata`). `OffsetsForTimes` **faulted-only** — the mock returns
+    `unsupported_version` unconditionally (mirrors Java's not-implemented `MockConsumer`);
+    tested the faulted `Task` + message + code 35. The **non-empty `OffsetMap_t` /
+    `OffsetAndTimestampMap_t` copy-out** (incl. the value-type `LeaderEpoch` presence flag
+    through a borrowed element) is **not reachable broker-free** (no ABI container constructor;
+    mock `committed` empty; `offsets_for_times` errors) — **deferred, documented**; the
+    presence-flag decode is unit-tested directly (`OffsetMapMarshalShared.ReadLeaderEpoch`), the
+    value types' `int?` mapping at the value level, and the valid non-empty `LongOffsetMap_t`
+    copy-out end-to-end via `Beginning`/`EndOffsets`.
+  - **Finding — the container `_count`/`_get` accessors are NOT null-safe** (only `_destroy`
+    is): the ABI safety contract says "`map` must be a valid handle". The production path is
+    correct (the trampolines call `CopyOut` only on the success branch, where the map is
+    guaranteed non-null; the failure branch has `map == null` and calls only the null-safe
+    `*Destroy`). A first cut of the marshaller unit tests passed `IntPtr.Zero` to `CopyOut` and
+    crashed the host (`box_offset_map` null deref); removed those contract-violating cases (the
+    empty/non-empty valid-container paths are covered end-to-end instead).
+  - **Tests:** `PublicConsumerOffsetQueryTests.cs` (test root) + `PublicConsumerOffsetValueTypeTests.cs`
+    (value types) + `Interop/OffsetMapMarshalTests.cs` (presence-flag decode +
+    `EmptyReadOnlyDictionary`) + the four members folded into `PublicConsumerTfmSmokeTests`.
+    **175 → 214 tests**, all green on net10.0 across **10/10** full runs (D8.8 serial gate
+    stable). All 6 TFM build legs (library ns2.0/net8.0/net10.0 + tests net462/net8.0/net10.0)
+    clean, 0 warnings; `dotnet format --verify-no-changes` clean.
+  - **Deviations (recorded, COMMENTS.DONE.13):** (a) `SubmitOwnedHandleOperation<T>` added as a
+    parallel submit helper (the "clone" option) rather than generalizing `SubmitOperation<T>`'s
+    signature — leaves the proven poll path byte-for-byte untouched (PLAN §4.2 permitted
+    either); (b) three distinct callback delegate types (one per ABI typedef) rather than one
+    shared `(IntPtr,IntPtr,IntPtr)` delegate — self-documenting DllImport parameters, no
+    behavioral difference; (c) the value types carry `ToString` but no `IEquatable` (dictionary
+    *values*, not keys — PLAN §1 left this to the Actor); (d) the non-empty
+    `OffsetMap`/`OffsetAndTimestampMap` copy-out + `Committed` non-empty data + `OffsetsForTimes`
+    data are not reachable broker-free (documented reachable slices, not skipped); (e) the
+    container-accessor null-safety finding (production correct; unit tests corrected).
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all
+    library + test TFMs → net10.0 tests green (net8.0 *run* + net462 are CI/Windows-only; all
+    three *build* legs pass locally) → `dotnet format --verify-no-changes` clean. CS1591 on the
+    4 members + 2 value types; Apache-2.0 header on every new file; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P4-consumer-offset-queries/`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P4. N=13.
+
 - **Milestone 5 / Phase 3 — "Consumer partition ops": DONE (2026-08-06).** Five void-async
   members on `IAsyncConsumer`, all `Task <Op>(IReadOnlyCollection<TopicPartition>, CancellationToken)`:
   `Assign` / `Pause` / `Resume` / `SeekToBeginning` / `SeekToEnd`. **Mode A (no Rust
