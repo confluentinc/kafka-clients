@@ -6,21 +6,31 @@
 |---|---|
 | Complete | Milestones 1-10 (see `design/history/MILESTONES.md`) |
 | In progress | Milestone 11 — producer idempotence and transactions (Phase 8, the last phase) |
-| Source | 263 files, ~176 000 lines under `src/` |
+| Source | 263 files, ~176 600 lines under `src/` |
 | Tests | ~2 666 passing (lib + protocol/message + consumer + producer suites), 3 `#[ignore]`d |
 | Java base | Apache Kafka 4.2.0 (`kafka/` submodule at `a18251b`) |
 
-Breakdown by area:
+Breakdown by area. File counts are exact; line counts are rounded to the nearest
+hundred **deliberately** — an exact figure here was invalidated twice inside Milestone
+11 Phase 8 by later commits in the same phase, once by a 22-line doc comment, so the
+precision was costing review cycles without buying anything. Re-derive with:
+
+```sh
+for d in common consumer producer ffi; do
+  echo "$d $(find src/$d -name '*.rs' | wc -l) $(find src/$d -name '*.rs' -exec cat {} + | wc -l)"
+done
+echo "root $(find src -maxdepth 1 -name '*.rs' | wc -l) $(find src -maxdepth 1 -name '*.rs' -exec cat {} + | wc -l)"
+```
 
 | Area | Files | Lines |
 |---|---|---|
-| `src/common/` | 148 | 47 627 |
-| `src/consumer/` | 64 | 64 516 |
-| `src/producer/` | 23 | 42 099 |
-| `src/ffi/` | 4 | 7 757 |
-| root client layer (`src/*.rs`) | 22 | 14 242 |
+| `src/common/` | 148 | ~47 600 |
+| `src/consumer/` | 64 | ~64 500 |
+| `src/producer/` | 23 | ~42 200 |
+| `src/ffi/` | 4 | ~7 800 |
+| root client layer (`src/*.rs`) | 22 | ~14 300 |
 
-`src/producer/` roughly tripled over Milestone 11 (15 894 → 42 099 lines): the
+`src/producer/` roughly tripled over Milestone 11 (15 894 → ~42 200 lines): the
 `TransactionManager` and its dependency closure, the transactional `Sender` loop
 and public producer API, plus the translated `TransactionManagerTest` and
 `SenderTest` suites, which are the larger half.
