@@ -160,6 +160,20 @@ impl CreateTopicsResult {
         self.future_for(topic).then_apply_try(|tmac| tmac.replication_factor())
     }
 
+    /// The raw per-topic futures, keyed by topic name.
+    ///
+    /// Java has no equivalent accessor because Java callers hold the per-key
+    /// `KafkaFuture`s and inspect each one through `values()` / `topicId(topic)`
+    /// / `config(topic)` etc. The C FFI cannot: it has to flatten the whole
+    /// batch into one handle carrying a value *and* an error per key
+    /// (`PLAN-bindings.md` D2), which needs the `TopicMetadataAndConfig` future
+    /// itself — not the `KafkaFuture<Void>` that `values()` maps it to, nor four
+    /// separate `then_apply_try` views of the same source. Crate-internal, so
+    /// the public surface still matches Java exactly.
+    pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<TopicMetadataAndConfig>> {
+        &self.futures
+    }
+
     fn future_for(&self, topic: &str) -> &KafkaFuture<TopicMetadataAndConfig> {
         self.futures
             .get(topic)
