@@ -107,6 +107,26 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
         _native.PositionWithCallback(partition, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.CommittedWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default) =>
+        _native.OffsetsForTimesWithCallback(timestampsToSearch, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.BeginningOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.EndOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken).AsTask();
 

@@ -52,11 +52,12 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Additive-growth surface.</b> This is a deliberate <em>subset</em> of Java's
 /// <c>Consumer</c> — the operations proven and wired so far (subscribe → poll →
-/// assign / seek / seekToBeginning / seekToEnd / pause / resume → position → group
-/// metadata → close), enough for a complete broker loop with auto-commit
-/// (<c>enable.auto.commit</c>) plus manual partition management. The remaining Java
-/// members (commit family, <c>committed</c>, the owned-handle query siblings, pattern
-/// subscribe, …) arrive in later phases as <b>additive</b> members on
+/// assign / seek / seekToBeginning / seekToEnd / pause / resume → position →
+/// committed / beginningOffsets / endOffsets / offsetsForTimes → group metadata →
+/// close), enough for a complete broker loop with auto-commit
+/// (<c>enable.auto.commit</c>) plus manual partition management and offset queries. The
+/// remaining Java members (commit family, <c>partitionsFor</c> / <c>listTopics</c>,
+/// pattern subscribe, …) arrive in later phases as <b>additive</b> members on
 /// this same interface and new public types — they do not change this shape. No
 /// throwing stubs for not-yet-wired ops. The surface is safe to grow additively because
 /// the binding is pre-publish with no external implementers; a typed generic sibling
@@ -246,6 +247,103 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the last committed offset (and its metadata / leader epoch) for each of
+    /// <paramref name="partitions"/> (Java <c>committed(Set&lt;TopicPartition&gt;)</c>).
+    /// Blocks in Java (a cross-thread event round-trip), so it returns a
+    /// <see cref="Task"/> here, resolving with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}"/> — partitions
+    /// with no committed offset are <b>omitted</b> from the result (an empty dictionary
+    /// when none are committed) — or faulting with a <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>One method, no <c>TimeSpan</c> overload this phase.</b> Java's timed
+    /// <c>committed(Set, Duration)</c> overload is <b>deferred</b> until the C ABI exposes
+    /// a timed <c>committed_async</c> (the shipped <see cref="Position"/> / <see cref="Close"/>
+    /// precedent). The <paramref name="cancellationToken"/> is user-initiated cancellation
+    /// (mapped to <c>wakeup()</c>), <b>not</b> a timeout; a pre-canceled token throws
+    /// <see cref="OperationCanceledException"/> synchronously.
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions whose committed offsets to read.</param>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <returns>The committed offsets, keyed by topic-partition (absent partitions omitted).</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Looks up the offset of the earliest record whose timestamp is greater than or equal
+    /// to the given timestamp, for each entry in <paramref name="timestampsToSearch"/>
+    /// (Java <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;)</c>). Blocks in Java, so it
+    /// returns a <see cref="Task"/> here, resolving with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndTimestamp}"/> — or faulting
+    /// with a <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// A <b>negative timestamp</b> is a Kafka-valid sentinel (the EARLIEST / LATEST special
+    /// timestamps) and is passed through, <b>not</b> rejected. No <c>TimeSpan</c> overload
+    /// this phase (the async ABI has no timeout); the <paramref name="cancellationToken"/>
+    /// is user-initiated cancellation, not a timeout.
+    /// </remarks>
+    /// <param name="timestampsToSearch">The target timestamp (ms since epoch) per topic-partition.</param>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <returns>The resolved offset and timestamp per topic-partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the earliest available offset for each of <paramref name="partitions"/>
+    /// (Java <c>beginningOffsets(Collection&lt;TopicPartition&gt;)</c>). Blocks in Java, so
+    /// it returns a <see cref="Task"/> here, resolving with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/> — or faulting with a
+    /// <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// No <c>TimeSpan</c> overload this phase (the async ABI has no timeout); the
+    /// <paramref name="cancellationToken"/> is user-initiated cancellation, not a timeout.
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions whose beginning offsets to read.</param>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <returns>The earliest offset per topic-partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the latest offset (log-end offset) for each of <paramref name="partitions"/>
+    /// (Java <c>endOffsets(Collection&lt;TopicPartition&gt;)</c>). Blocks in Java, so it
+    /// returns a <see cref="Task"/> here, resolving with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/> — or faulting with a
+    /// <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// No <c>TimeSpan</c> overload this phase (the async ABI has no timeout); the
+    /// <paramref name="cancellationToken"/> is user-initiated cancellation, not a timeout.
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions whose end offsets to read.</param>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <returns>The latest offset per topic-partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Closes the consumer gracefully (Java <c>close()</c>), joining the background task,

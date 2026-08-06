@@ -178,6 +178,38 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr userData);
 
     /// <summary>
+    /// The submit shape shared by the M5/P4 owned-handle offset-map ops
+    /// (<c>committed</c> / <c>offsetsForTimes</c> / <c>beginning|endOffsets</c>). Unlike
+    /// <see cref="NativeResultSubmit"/> (which takes the poll callback as a parameter),
+    /// this passes only <c>(consumer, userData)</c>: each op closes over its own
+    /// strongly-typed rooted callback (<see cref="ConsumerCallbacks.OffsetMapCallback"/>
+    /// / <see cref="ConsumerCallbacks.OffsetAndTimestampMapCallback"/> /
+    /// <see cref="ConsumerCallbacks.LongOffsetMapCallback"/>) at the call site, so the
+    /// four <c>_async</c> DllImports keep their distinct, self-documenting delegate
+    /// parameter types. Added as a parallel helper (rather than reshaping the proven poll
+    /// <see cref="NativeResultSubmit"/> / <see cref="SubmitOperation{TResult}"/>) so the
+    /// shipped poll / void / scalar submit paths are left byte-for-byte untouched
+    /// (PLAN §4.2 — the "clone a parallel submit helper" option).
+    /// </summary>
+    private delegate void NativeOwnedHandleSubmit(IntPtr consumer, IntPtr userData);
+
+    /// <summary>
+    /// The <c>_async</c> ABI shape shared by <c>beginning_offsets_async</c> and
+    /// <c>end_offsets_async</c> (both take the parallel <c>(topics[], partitions[],
+    /// count)</c> arrays plus the shared <c>long_offsets_callback_t</c> and return a
+    /// <c>LongOffsetMap_t</c>). A method-group reference to each
+    /// <c>NativeMethods.Consumer{Beginning,End}OffsetsAsync</c> binds to this, so
+    /// <see cref="SubmitLongOffsetsOp"/> marshals once and dispatches to either.
+    /// </summary>
+    private delegate void NativeLongOffsetsSubmit(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        ConsumerCallbacks.LongOffsetMapCallback callback,
+        IntPtr userData);
+
+    /// <summary>
     /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> once
     /// closed (the use-after-dispose guard). Exposed for the interop tests, which
     /// drive the raw ABI against it; the public client will not expose the handle.
@@ -608,6 +640,192 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             NativeMethods.ConsumerPositionAsync(
                 consumer, topicPin.Pointer, partition.Partition, callback, userData);
         });
+    }
+
+    /// <summary>
+    /// Returns the last committed offset for each of <paramref name="partitions"/> (async;
+    /// Java <c>committed(Set&lt;TopicPartition&gt;)</c>) — the M5/P4 proof of the
+    /// owned-handle <c>OffsetMap_t</c> completion. The returned
+    /// <see cref="Task{TResult}"/> resolves with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}"/> (copied out of
+    /// the native map on the dispatcher thread, §6.4) — an <b>empty</b> dictionary for
+    /// uncommitted / unassigned partitions (the mock omits absent TPs) — or faults with a
+    /// <see cref="KafkaException"/>. A concurrent second op faults the <see cref="Task"/>
+    /// (ConcurrentModification, ffi §B5).
+    /// </summary>
+    /// <remarks>
+    /// <b>Reachability (mock).</b> The mock's <c>committed</c> map is populated only by the
+    /// commit-with-offsets family, which is not yet wired in the binding — so broker-free a
+    /// non-empty result is not observable end-to-end this phase; the non-empty copy-out is
+    /// exercised by the direct <c>OffsetMapMarshal</c> unit test, and the non-empty
+    /// end-to-end assertion is deferred to the commit-family phase (which reuses
+    /// <see cref="OffsetAndMetadata"/>). No <c>TimeSpan</c> overload — the async ABI has no
+    /// timeout (the shipped <c>Position</c> / <c>Close</c> precedent); the
+    /// <paramref name="cancellationToken"/> is user cancellation → <c>wakeup()</c>, not a
+    /// deadline.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> CommittedWithCallback(
+        IReadOnlyCollection<TopicPartition> partitions,
+        CancellationToken cancellationToken = default)
+    {
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        int count = snapshot.Length;
+        int[] partitionArray = ExtractPartitions(snapshot);
+
+        return SubmitOwnedHandleOperation<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>>(
+            cancellationToken,
+            (consumer, userData) =>
+                WithPinnedTopics(count, i => snapshot[i].Topic, partitionArray, (pointers, parts, cnt) =>
+                    NativeMethods.ConsumerCommittedAsync(
+                        consumer, pointers, parts, cnt, ConsumerCallbacks.Committed, userData)));
+    }
+
+    /// <summary>
+    /// Looks up the offset of the first record at or after each timestamp in
+    /// <paramref name="timestampsToSearch"/> (async; Java
+    /// <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;)</c>) — the M5/P4 owned-handle
+    /// <c>OffsetAndTimestampMap_t</c> completion with the one <b>map input</b> shape. The
+    /// returned <see cref="Task{TResult}"/> resolves with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndTimestamp}"/> — or faults
+    /// with a <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reachability (mock).</b> The mock's <c>offsets_for_times</c> returns
+    /// <c>unsupported_version</c> unconditionally (mirroring Java's not-implemented
+    /// <c>MockConsumer</c>), so every broker-free call on <c>AsyncMockConsumer</c> faults
+    /// the <see cref="Task"/> — even for an empty map (the FFI does not short-circuit empty
+    /// before the mock call). The full member is still wired (Java-public; the success /
+    /// copy-out path is proven by the other two offset-map marshallers of identical shape).
+    /// A <b>negative timestamp</b> is a Kafka-valid sentinel (EARLIEST/LATEST special
+    /// timestamps) and is passed through, NOT rejected. No <c>TimeSpan</c> overload (the
+    /// async ABI has no timeout).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimesWithCallback(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
+        CancellationToken cancellationToken = default)
+    {
+        // Preconditions BEFORE any pin / P-Invoke (ffi §B5). null map rejected; empty map
+        // valid (passes count == 0). Snapshot the (topic, partition, timestamp) triples.
+        if (timestampsToSearch is null)
+        {
+            throw new ArgumentNullException(nameof(timestampsToSearch));
+        }
+
+        int count = timestampsToSearch.Count;
+        string[] topics = new string[count];
+        int[] partitionArray = new int[count];
+        long[] timestamps = new long[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
+        {
+            TopicPartition tp = entry.Key;
+            if (tp.Topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
+            }
+
+            if (tp.Partition < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timestampsToSearch), tp.Partition, "Partition must not be negative.");
+            }
+
+            // A NEGATIVE timestamp is a Kafka-valid sentinel (EARLIEST/LATEST special
+            // timestamps are negative in ListOffsets) — pass it through, do NOT reject
+            // (PLAN §3). The FFI treats it as an opaque i64.
+            topics[index] = tp.Topic;
+            partitionArray[index] = tp.Partition;
+            timestamps[index] = entry.Value;
+            index++;
+        }
+
+        return SubmitOwnedHandleOperation<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>>(
+            cancellationToken,
+            (consumer, userData) =>
+                WithPinnedTopicsAndTimestamps(count, i => topics[i], partitionArray, timestamps, (pointers, parts, times, cnt) =>
+                    NativeMethods.ConsumerOffsetsForTimesAsync(
+                        consumer, pointers, parts, times, cnt, ConsumerCallbacks.OffsetsForTimes, userData)));
+    }
+
+    /// <summary>
+    /// Returns the earliest available offset for each of <paramref name="partitions"/>
+    /// (async; Java <c>beginningOffsets(Collection&lt;TopicPartition&gt;)</c>) — an
+    /// owned-handle <c>LongOffsetMap_t</c> completion. The returned
+    /// <see cref="Task{TResult}"/> resolves with an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/> — or faults with a
+    /// <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reachability (mock).</b> Fully data-testable broker-free: set an offset via the
+    /// shipped <see cref="UpdateBeginningOffset"/>, then this returns it; a TP with no
+    /// offset set faults with <c>illegal_state</c> (<c>"The partition &lt;tp&gt; does not
+    /// have a beginning offset."</c>). No <c>TimeSpan</c> overload (the async ABI has no
+    /// timeout).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsetsWithCallback(
+        IReadOnlyCollection<TopicPartition> partitions,
+        CancellationToken cancellationToken = default) =>
+        SubmitLongOffsetsOp(partitions, cancellationToken, NativeMethods.ConsumerBeginningOffsetsAsync);
+
+    /// <summary>
+    /// Returns the latest offset (log-end offset) for each of <paramref name="partitions"/>
+    /// (async; Java <c>endOffsets(Collection&lt;TopicPartition&gt;)</c>) — the LATEST analog
+    /// of <see cref="BeginningOffsetsWithCallback"/>, sharing the same
+    /// <c>long_offsets_callback_t</c> and <c>LongOffsetMap_t</c> result.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reachability (mock).</b> Symmetric to <see cref="BeginningOffsetsWithCallback"/>:
+    /// set an offset via the shipped <see cref="UpdateEndOffset"/>, then this returns it; a
+    /// TP with no offset set faults with <c>illegal_state</c> (<c>"The partition &lt;tp&gt;
+    /// does not have an end offset."</c>).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsetsWithCallback(
+        IReadOnlyCollection<TopicPartition> partitions,
+        CancellationToken cancellationToken = default) =>
+        SubmitLongOffsetsOp(partitions, cancellationToken, NativeMethods.ConsumerEndOffsetsAsync);
+
+    /// <summary>
+    /// Shared body for <see cref="BeginningOffsetsWithCallback"/> /
+    /// <see cref="EndOffsetsWithCallback"/> (they share <c>long_offsets_callback_t</c> and
+    /// the <c>LongOffsetMap_t</c> result). Validates + snapshots the collection (§B5), then
+    /// runs the owned-handle bridge with <paramref name="submit"/> (the correct
+    /// <c>beginning</c> / <c>end</c> <c>_async</c> fn) and the shared
+    /// <see cref="ConsumerCallbacks.LongOffsets"/> trampoline.
+    /// </summary>
+    private Task<IReadOnlyDictionary<TopicPartition, long>> SubmitLongOffsetsOp(
+        IReadOnlyCollection<TopicPartition> partitions,
+        CancellationToken cancellationToken,
+        NativeLongOffsetsSubmit submit)
+    {
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        int count = snapshot.Length;
+        int[] partitionArray = ExtractPartitions(snapshot);
+
+        return SubmitOwnedHandleOperation<IReadOnlyDictionary<TopicPartition, long>>(
+            cancellationToken,
+            (consumer, userData) =>
+                WithPinnedTopics(count, i => snapshot[i].Topic, partitionArray, (pointers, parts, cnt) =>
+                    submit(consumer, pointers, parts, cnt, ConsumerCallbacks.LongOffsets, userData)));
     }
 
     /// <summary>
@@ -1247,38 +1465,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         // Preconditions BEFORE any pin / P-Invoke (ffi §B5): the ABI does not validate them
         // and panics/mismaps on violation (a negative partition is silently mapped to
         // "unset"). A null collection is rejected; an EMPTY collection is valid (Java: NPE
-        // on null vs no-op / clear on empty), so we do NOT reject empty. Snapshot the
-        // (topic, partition) pairs while validating.
-        if (partitions is null)
-        {
-            throw new ArgumentNullException(nameof(partitions));
-        }
-
-        (string Topic, int Partition)[] snapshot = new (string, int)[partitions.Count];
-        int index = 0;
-        foreach (TopicPartition tp in partitions)
-        {
-            if (tp.Topic is null)
-            {
-                throw new ArgumentException(
-                    "Topic names must not be null.", nameof(partitions));
-            }
-
-            if (tp.Partition < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(partitions), tp.Partition, "Partition must not be negative.");
-            }
-
-            snapshot[index++] = (tp.Topic, tp.Partition);
-        }
-
+        // on null vs no-op / clear on empty), so we do NOT reject empty. SnapshotPartitions
+        // is the shared validate-and-snapshot reused by the M5/P4 collection-input queries
+        // (PLAN §3 — the validation is not copy-pasted).
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
         int count = snapshot.Length;
-        int[] partitionArray = new int[count];
-        for (int i = 0; i < count; i++)
-        {
-            partitionArray[i] = snapshot[i].Partition;
-        }
+        int[] partitionArray = ExtractPartitions(snapshot);
 
         return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
             WithPinnedTopics(count, i => snapshot[i].Topic, partitionArray, (pointers, parts, cnt) =>
@@ -1363,6 +1555,46 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Submits an owned-handle offset-map async op — the M5/P4 analog of
+    /// <see cref="SubmitOperation{TResult}"/> for the four offset-map queries. Roots the
+    /// per-op context via a <see cref="GCHandle"/> (invariant #1), wires cancellation,
+    /// then runs <paramref name="submit"/>, which pins its input arrays call-scoped and
+    /// P/Invokes the correct <c>_async</c> fn <b>with its own strongly-typed rooted
+    /// callback captured at the call site</b> (so this helper stays callback-type-agnostic
+    /// and passes only <c>(consumer, userData)</c>). Ownership of the <see cref="GCHandle"/>
+    /// transfers to the completion callback (the sole owner of its free, invariant #2) the
+    /// moment native is entered; if <paramref name="submit"/> throws before that, the
+    /// context is abandoned (handle freed) here. The result copy-out happens in the
+    /// callback on the dispatcher thread (ffi §6.4), not here. A structural clone of
+    /// <see cref="SubmitOperation{TResult}"/> — the poll / void / scalar submit paths are
+    /// left byte-for-byte untouched (PLAN §4.2).
+    /// </summary>
+    private Task<TResult> SubmitOwnedHandleOperation<TResult>(
+        CancellationToken cancellationToken,
+        NativeOwnedHandleSubmit submit)
+    {
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        try
+        {
+            context.RegisterCancellation(cancellationToken, Wakeup);
+            submit(_handle.DangerousGetHandle(), GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback will never fire → we own cleanup.
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
     /// The one shared collection→parallel-array marshaller for every partition op — the
     /// sync <see cref="Assign(IReadOnlyList{ValueTuple{string, int}})"/> and all five async
     /// ops (<see cref="AssignWithCallback"/> / <see cref="PauseWithCallback"/> /
@@ -1410,6 +1642,103 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                 pins[i]?.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// The <see cref="WithPinnedTopics"/> variant for the one <b>map-input</b> query
+    /// (<c>offsetsForTimes</c>): it additionally passes a blittable <c>long[]</c>
+    /// <paramref name="timestamps"/> alongside the pinned topic pointers and partitions,
+    /// matching the ABI's parallel <c>(topics[], partitions[], timestamps[], count)</c>.
+    /// The topic strings are pinned <b>call-scoped</b> (freed at <paramref name="body"/>
+    /// return — the core reads them synchronously before spawning, ffi §A4/§B4); the
+    /// blittable <c>int[]</c> / <c>long[]</c> arrays are passed straight through (no
+    /// per-element copy beyond the UTF-8 encode). A <paramref name="count"/> of 0 runs
+    /// <paramref name="body"/> with empty arrays (§B5).
+    /// </summary>
+    private static void WithPinnedTopicsAndTimestamps(
+        int count,
+        Func<int, string> topicAt,
+        int[] partitions,
+        long[] timestamps,
+        Action<IntPtr[], int[], long[], int> body)
+    {
+        Utf8Marshal.PinnedUtf8String?[] pins = new Utf8Marshal.PinnedUtf8String?[count];
+        IntPtr[] pointers = new IntPtr[count];
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(topicAt(i));
+                pins[i] = pin;
+                pointers[i] = pin.Pointer;
+            }
+
+            body(pointers, partitions, timestamps, count);
+        }
+        finally
+        {
+            for (int i = 0; i < pins.Length; i++)
+            {
+                pins[i]?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Validates a <see cref="TopicPartition"/> collection (§B5) and snapshots it into a
+    /// <c>(Topic, Partition)</c> array — the shared precondition + snapshot for the three
+    /// collection-input offset-map queries (<see cref="CommittedWithCallback"/> /
+    /// <see cref="BeginningOffsetsWithCallback"/> / <see cref="EndOffsetsWithCallback"/>),
+    /// the same validation <see cref="SubmitPartitionOp"/> performs inline. A
+    /// <see langword="null"/> collection is rejected; an <b>empty</b> collection is valid
+    /// (yields a zero-length snapshot, passed through as <c>count == 0</c>). Validated
+    /// BEFORE any pin / P-Invoke, because the ABI does not validate preconditions and
+    /// panics/mismaps on violation (CLAUDE.md §3).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    private static (string Topic, int Partition)[] SnapshotPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (partitions is null)
+        {
+            throw new ArgumentNullException(nameof(partitions));
+        }
+
+        (string Topic, int Partition)[] snapshot = new (string, int)[partitions.Count];
+        int index = 0;
+        foreach (TopicPartition tp in partitions)
+        {
+            if (tp.Topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(partitions));
+            }
+
+            if (tp.Partition < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(partitions), tp.Partition, "Partition must not be negative.");
+            }
+
+            snapshot[index++] = (tp.Topic, tp.Partition);
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Projects the partition indices out of a <c>(Topic, Partition)</c> snapshot into a
+    /// blittable <c>int[]</c> (the parallel-array partitions passed to the ABI).
+    /// </summary>
+    private static int[] ExtractPartitions((string Topic, int Partition)[] snapshot)
+    {
+        int[] partitionArray = new int[snapshot.Length];
+        for (int i = 0; i < snapshot.Length; i++)
+        {
+            partitionArray[i] = snapshot[i].Partition;
+        }
+
+        return partitionArray;
     }
 
     /// <summary>
