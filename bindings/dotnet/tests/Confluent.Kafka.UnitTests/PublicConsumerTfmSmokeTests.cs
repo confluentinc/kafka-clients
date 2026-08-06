@@ -118,6 +118,36 @@ public sealed class PublicConsumerTfmSmokeTests
         }
     }
 
+    [Fact]
+    public async Task MockConsumer_PartitionMetadataQueries_MarshalOnTheTfmMatrix()
+    {
+        // The two M5/P5 partition-metadata queries marshal the nested tree (list/map ->
+        // PartitionInfo -> Node) on ns2.0 / net8.0 / net10.0, using only netstandard2.0-safe
+        // APIs so the net462 build leg passes. PartitionsFor / ListTopics carry data broker-free
+        // via UpdatePartitions.
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        try
+        {
+            consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+
+            System.Collections.Generic.IReadOnlyList<PartitionInfo> partitions = default!;
+            await TestTimeout.Run(async () => partitions = await consumer.PartitionsFor(Topic), s_deadline);
+            PartitionInfo info = Assert.Single(partitions);
+            Assert.Equal(Topic, info.Topic);
+            Assert.Equal(7, info.Leader!.Id);
+            Assert.Equal("broker-1", info.Leader.Host);
+
+            System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<PartitionInfo>> map = default!;
+            await TestTimeout.Run(async () => map = await consumer.ListTopics(), s_deadline);
+            Assert.True(map.ContainsKey(Topic));
+            Assert.Single(map[Topic]);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
     private static async Task<ConsumerRecords> Poll(AsyncMockConsumer consumer)
     {
         ConsumerRecords result = default!;
