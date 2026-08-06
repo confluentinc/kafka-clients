@@ -71,3 +71,4 @@
 - [M11 Phase 6 public txn API](review_m11_phase6.md) — CLOSED 7→4→1→1→0, 0 behavioural. A documented escape shape is adversarial input for the next checker; sweep blind spots incl. two of mine
 - [M11 Phase 7 MockProducer txn](review_m11_phase7.md) — CLOSED 4→0. Artifacts agreeing on "three" can name different threes; normalisation diffs need every swap + a rename map
 - [M11 Phase 8 parity sweep + broker tests](review_m11_phase8.md) — CLOSED 11→3→1→0, closes M11. Inert harness surface; derive every column or ship none
+- [M11 doSend deadlock + txn_* manual suite](review_m11_dosend_deadlock_manual_suite.md) — 4 findings, all test/example. Carve-out audit = enumerate callee errors; verdict-can't-fail traps; set-X-assert-X
