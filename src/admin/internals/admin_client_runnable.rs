@@ -38,7 +38,11 @@ use super::admin_metadata_manager::AdminMetadataManager;
 use super::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 
 /// Sentinel for "no hard-shutdown deadline set".
-const NO_HARD_SHUTDOWN: i64 = i64::MIN;
+///
+/// Plays the role of Java's `KafkaAdminClient.INVALID_SHUTDOWN_TIME`: it is
+/// lower than every reachable deadline, so the "is an earlier deadline already
+/// installed?" comparison in `KafkaAdminClient::close` orders the same way.
+pub(crate) const NO_HARD_SHUTDOWN: i64 = i64::MIN;
 
 /// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
 const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
@@ -219,8 +223,9 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// (`make_metadata_call`) is internal and is re-created on every backoff
     /// expiry, so counting it would keep the loop alive forever whenever the
     /// bootstrap brokers are unreachable — making `close()` block until the hard
-    /// shutdown deadline, and Java's no-argument `Admin.close()`
-    /// (`Duration::from_millis(i64::MAX)`) never return at all.
+    /// shutdown deadline, which for Java's no-argument `Admin.close()`
+    /// (`Duration::from_millis(i64::MAX)`, clamped to a year like Java's) means
+    /// for all practical purposes never.
     fn has_active_external_calls(&self) -> bool {
         self.pending_calls.iter().any(|call| !call.internal)
             || self

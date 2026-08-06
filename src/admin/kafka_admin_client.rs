@@ -114,7 +114,7 @@ use crate::network_client::NetworkClient;
 use super::internals::abort_transaction_handler::AbortTransactionHandler;
 use super::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
 use super::internals::admin_api_future::AdminApiFuture;
-use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSignal};
+use super::internals::admin_client_runnable::{AdminClientRunnable, NO_HARD_SHUTDOWN, ShutdownSignal};
 use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
 use super::internals::alter_consumer_group_offsets_handler::AlterConsumerGroupOffsetsHandler;
@@ -208,6 +208,11 @@ const DEFAULT_LEAVE_GROUP_REASON: &str = "member was removed by an admin";
 const RETRY_BACKOFF_EXP_BASE: i32 = 2;
 /// The `RETRY_BACKOFF_JITTER` used by the admin retry backoff (Java constant).
 const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
+/// Upper bound on `close`'s wait, mirroring
+/// `Math.min(TimeUnit.DAYS.toMillis(365), waitTimeMs)` in
+/// `KafkaAdminClient.close(Duration)` ("Limit the timeout to a year").
+const MAX_CLOSE_WAIT_TIME_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 
 /// State shared between the `KafkaAdminClient` handle and (indirectly) the
 /// background task.
@@ -4731,17 +4736,86 @@ impl Admin for KafkaAdminClient {
     }
 
     async fn close(&self, timeout: Duration) {
+        // Java: `waitTimeMs = Math.min(TimeUnit.DAYS.toMillis(365), timeout.toMillis())`.
+        // Its `waitTimeMs < 0` check throws `IllegalArgumentException`; a
+        // `Duration` cannot be negative, so that branch is unrepresentable here.
+        let wait_time_ms = timeout.as_millis().min(MAX_CLOSE_WAIT_TIME_MS as u128) as i64;
         let now = self.now();
-        let deadline = now.saturating_add(timeout.as_millis() as i64);
-        self.shared
-            .shutdown
-            .hard_shutdown_deadline_ms
-            .store(deadline, std::sync::atomic::Ordering::Release);
+        let new_hard_shutdown_time_ms = now.saturating_add(wait_time_ms);
+
+        // Java publishes the deadline through a compare-and-set loop whose whole
+        // purpose is monotonicity: if another `close()` already installed an
+        // earlier deadline it keeps that one ("Hard shutdown time is already
+        // earlier than requested"), so the deadline only ever moves forward in
+        // urgency. A plain store would let `close(60s)` after `close(100ms)`
+        // re-widen the poll budget that `run_once` reads on every iteration.
+        //
+        // Java also reassigns `newHardShutdownTimeMs = prev` on that branch, but
+        // only to feed a debug log, so it has no counterpart here.
+        let mut prev = NO_HARD_SHUTDOWN;
+        loop {
+            match self.shared.shutdown.hard_shutdown_deadline_ms.compare_exchange(
+                prev,
+                new_hard_shutdown_time_ms,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    if actual < new_hard_shutdown_time_ms {
+                        // An earlier (more urgent) deadline is already installed.
+                        break;
+                    }
+                    prev = actual;
+                },
+            }
+        }
         self.shared.shutdown.closing.store(true, std::sync::atomic::Ordering::Release);
+        // Java calls `client.wakeup()` from inside the successful CAS arm. Here
+        // the wakeup follows the `closing` store so the woken I/O task is
+        // guaranteed to observe both, and it is issued on the
+        // already-earlier-deadline path too (where it is a harmless no-op: the
+        // `close()` that installed that deadline has already woken the task).
         self.shared.wakeup.notify_one();
-        let handle = self.shared.bg_handle.lock().unwrap().take();
-        if let Some(handle) = handle {
-            let _ = handle.await;
+
+        // Java ends with a *timed* join (`KafkaAdminClient.close`):
+        //
+        // ```java
+        // if (Thread.currentThread() != thread) {
+        //     thread.join(waitTimeMs);
+        // }
+        // ```
+        //
+        // The deadline installed above is only a hint to the I/O loop; the timed
+        // join is the caller's guarantee, and it matters more here than in Java:
+        // Java's `sendEligibleCalls` calls the non-blocking NIO
+        // `client.ready(...)`, whereas ours awaits `NetworkClient::ready` →
+        // `initiate_connect` → `Selector::connect`, which awaits the TCP
+        // handshake and no shutdown deadline can interrupt.
+        //
+        // Java's `Thread.currentThread() != thread` self-deadlock guard has no
+        // analogue: the I/O task owns no `Admin` handle and every per-`Call` hook
+        // it runs is a sync closure, so `close()` cannot be re-entered from it.
+        // Should that ever change, the timed join bounds the wait instead of
+        // deadlocking, where Java skips the join entirely.
+        //
+        // Deliberate divergence: Java's `Thread.join(0)` means "wait forever", so
+        // `close(Duration::ZERO)` there is unbounded. We treat 0 as 0, because
+        // both `Admin::close`'s rustdoc and the exported C header promise a
+        // return within `timeout`, and because of the uninterruptible connect
+        // await above the Java behavior would be a genuine hang rather than the
+        // near-immediate return it is in Java.
+        let mut handle = self.shared.bg_handle.lock().unwrap().take();
+        if let Some(join_handle) = handle.as_mut() {
+            let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle)
+                .await
+                .is_ok();
+            if !joined {
+                // Expired: leave the task running, exactly as Java leaves the
+                // I/O thread running after an expired join, and put the handle
+                // back so a later `close()` can still join it.
+                *self.shared.bg_handle.lock().unwrap() = handle;
+            }
         }
     }
 }
@@ -11573,6 +11647,7 @@ mod tests {
         time: Arc<MockTime>,
         poll_timeouts: Arc<Mutex<Vec<i64>>>,
         advance_clock: Arc<std::sync::atomic::AtomicBool>,
+        stuck: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl WaitingClient {
@@ -11582,6 +11657,7 @@ mod tests {
                 time,
                 poll_timeouts: Arc::new(Mutex::new(Vec::new())),
                 advance_clock: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stuck: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
 
@@ -11591,6 +11667,15 @@ mod tests {
 
         fn advance_clock(&self) -> Arc<std::sync::atomic::AtomicBool> {
             Arc::clone(&self.advance_clock)
+        }
+
+        /// Once armed, `poll` never returns, so the I/O loop can never reach
+        /// `should_exit` again. It stands in for any `await` inside a
+        /// `run_once` phase that no shutdown deadline can interrupt — in
+        /// production the unbounded `socket.connect(...).await` that
+        /// `send_eligible_calls` reaches through `client.ready(...)`.
+        fn stuck(&self) -> Arc<std::sync::atomic::AtomicBool> {
+            Arc::clone(&self.stuck)
         }
     }
 
@@ -11618,6 +11703,9 @@ mod tests {
         }
         async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
             self.poll_timeouts.lock().unwrap().push(timeout);
+            if self.stuck.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
             let now = if self.advance_clock.load(Ordering::Acquire) {
                 self.time.sleep(timeout);
                 self.time.now.load(Ordering::Acquire)
@@ -11780,6 +11868,96 @@ mod tests {
         assert!(
             waited <= 100,
             "close(100ms) must not overrun its deadline: the I/O task waited {waited}ms"
+        );
+    }
+
+    /// The deadline clamped in the test above is only a *hint* to the I/O loop.
+    /// The caller's guarantee is Java's **timed** join at the end of
+    /// `KafkaAdminClient.close(Duration)`:
+    ///
+    /// ```java
+    /// if (Thread.currentThread() != thread) {
+    ///     thread.join(waitTimeMs);   // returns after waitTimeMs regardless
+    /// }
+    /// ```
+    ///
+    /// It matters more in Rust than in Java: Java's `sendEligibleCalls` calls the
+    /// non-blocking NIO `client.ready(...)` and cannot block, whereas ours awaits
+    /// `NetworkClient::ready` → `initiate_connect` → `Selector::connect`, which
+    /// awaits the TCP handshake with no timeout of its own. An unbounded
+    /// `handle.await` would then hand a `close(50ms)` caller — including the C
+    /// and Python layers, which `block_on` it — a wait bounded only by the OS
+    /// connect timeout.
+    #[tokio::test]
+    async fn close_returns_within_its_timeout_even_when_the_io_task_cannot_exit() {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(MockClient::new(nodes.clone(), time.provider()), Arc::clone(&time));
+        let stuck = client.stuck();
+        let config = test_config();
+        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+
+        // From its first poll on, the I/O task is parked forever: it can neither
+        // finish work nor re-evaluate `should_exit`, so nothing but the timed
+        // join can end the wait.
+        stuck.store(true, Ordering::Release);
+        admin.spawn(runnable);
+        // An active external call, so `should_exit` could not short-circuit on
+        // "all work has been completed" even if the task did run again.
+        let _result = admin.list_topics(ListTopicsOptions::new());
+
+        let started = std::time::Instant::now();
+        let returned = tokio::time::timeout(Duration::from_secs(5), admin.close(Duration::from_millis(50))).await;
+        assert!(
+            returned.is_ok(),
+            "close(50ms) must return even though the I/O task can never exit; it was still \
+             blocked after 5s"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "close(50ms) must be bounded by its timeout, but it returned only after {elapsed:?}"
+        );
+    }
+
+    /// Java publishes the hard-shutdown deadline through a compare-and-set loop
+    /// that only ever moves it *earlier* (`KafkaAdminClient.close`: "Hard
+    /// shutdown time is already earlier than requested"). A plain store would let
+    /// a later, more relaxed `close()` re-widen the poll budget that `run_once`
+    /// reads on every iteration — stretching the wait of a caller already parked
+    /// in the join above.
+    #[tokio::test]
+    async fn close_never_widens_an_existing_hard_shutdown_deadline() {
+        let (admin, _runnable, time, _nodes) = env();
+        let now = time.now.load(Ordering::Acquire);
+        let deadline = || admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
+
+        // No task was spawned, so each `close()` here only publishes the deadline.
+        admin.close(Duration::from_millis(100)).await;
+        assert_eq!(deadline(), now + 100, "the first close() installs its own deadline");
+
+        admin.close(Duration::from_secs(60)).await;
+        assert_eq!(
+            deadline(),
+            now + 100,
+            "a later, more relaxed close() must keep the earlier deadline"
+        );
+
+        admin.close(Duration::from_millis(10)).await;
+        assert_eq!(deadline(), now + 10, "a more urgent close() does move the deadline earlier");
+    }
+
+    /// Java caps the wait at a year ("Limit the timeout to a year"), which also
+    /// keeps the deadline it derives finite — the no-argument `Admin.close()`
+    /// passes `Duration.ofMillis(Long.MAX_VALUE)`.
+    #[tokio::test]
+    async fn close_clamps_the_wait_to_a_year() {
+        let (admin, _runnable, time, _nodes) = env();
+        let now = time.now.load(Ordering::Acquire);
+        admin.close(Duration::from_millis(i64::MAX as u64)).await;
+        assert_eq!(
+            admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),
+            now + MAX_CLOSE_WAIT_TIME_MS
         );
     }
 }
