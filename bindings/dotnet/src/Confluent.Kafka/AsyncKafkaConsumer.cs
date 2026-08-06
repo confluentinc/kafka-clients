@@ -127,6 +127,14 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
         _native.EndOffsetsWithCallback(partitions, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
+        _native.PartitionsForWithCallback(topic, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default) =>
+        _native.ListTopicsWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken).AsTask();
 

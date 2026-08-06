@@ -829,6 +829,156 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> (async; Java
+    /// <c>partitionsFor(String)</c>) — the M5/P5 owned-handle <c>PartitionInfoList_t</c>
+    /// completion (Category E2). The returned <see cref="Task{TResult}"/> resolves with an
+    /// owned <see cref="IReadOnlyList{PartitionInfo}"/> (the whole borrowed tree copied out
+    /// on the dispatcher thread before the root destroy, §6.4/§B2) — an <b>empty</b> list for
+    /// a topic with no registered partitions (the mock returns empty for an unregistered
+    /// topic) — or faults with a <see cref="KafkaException"/>. A concurrent second op faults
+    /// the <see cref="Task"/> (ConcurrentModification, ffi §B5).
+    /// </summary>
+    /// <remarks>
+    /// <b>Empty topic is forwarded, NOT rejected (Java/Python-faithful, PLAN §8.2).</b> The
+    /// binding guards only <see langword="null"/> (for FFI panic-safety, §B5); an empty /
+    /// whitespace topic is passed straight to the core (the Python sibling does zero topic
+    /// validation). The single topic is pinned <b>call-scoped</b> — the core copies it
+    /// synchronously during the submit (ffi §A3/§B3), so a scoped <see cref="Utf8Marshal.Pin"/>
+    /// is the fit (not the array-shaped <see cref="WithPinnedTopics"/>). No <c>TimeSpan</c>
+    /// overload (the async ABI has no timeout — the <c>Position</c> / <c>Close</c> precedent);
+    /// the <paramref name="cancellationToken"/> is user cancellation → <c>wakeup()</c>, not a
+    /// deadline.
+    /// </remarks>
+    /// <param name="topic">The topic whose partition metadata to read.</param>
+    /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyList<PartitionInfo>> PartitionsForWithCallback(
+        string topic,
+        CancellationToken cancellationToken = default)
+    {
+        // Precondition BEFORE any pin / P-Invoke (ffi §B5): the ABI does not null-check
+        // `topic` (it would panic across FFI). An EMPTY topic is NOT rejected — Java/Python
+        // do no topic validation; the binding guards only null (PLAN §8.2). Match the shipped
+        // Seek / Position null-topic precedent.
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        return SubmitOwnedHandleOperation<IReadOnlyList<PartitionInfo>>(
+            cancellationToken,
+            (consumer, userData) =>
+            {
+                // Call-scoped pin: partitions_for_async copies the topic string synchronously
+                // during the submit (the header's safety note requires only a valid C string
+                // for the call's duration — no borrow past the return), so the buffer is freed
+                // once the native call returns (ffi §A3/§B3), matching the shipped Position /
+                // Seek topic marshalling. A single topic → the scoped Pin, not the array helper.
+                using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+                NativeMethods.ConsumerPartitionsForAsync(
+                    consumer, topicPin.Pointer, ConsumerCallbacks.PartitionsFor, userData);
+            });
+    }
+
+    /// <summary>
+    /// Returns metadata for all topics the consumer is authorized to view (async; Java
+    /// <c>listTopics()</c>) — the M5/P5 owned-handle <c>TopicPartitionInfoMap_t</c>
+    /// completion, the one query with <b>no input</b>. The returned
+    /// <see cref="Task{TResult}"/> resolves with an owned
+    /// <see cref="IReadOnlyDictionary{String, IReadOnlyList}"/> of topic →
+    /// <see cref="PartitionInfo"/> list (the whole borrowed tree copied out on the dispatcher
+    /// thread before the root destroy) — an <b>empty</b> dictionary when no topics are
+    /// registered — or faults with a <see cref="KafkaException"/>. A concurrent second op
+    /// faults the <see cref="Task"/> (ConcurrentModification, ffi §B5).
+    /// </summary>
+    /// <remarks>
+    /// No input to marshal — the submit just P/Invokes <c>list_topics_async</c>. No
+    /// <c>TimeSpan</c> overload (the async ABI has no timeout); the
+    /// <paramref name="cancellationToken"/> is user cancellation → <c>wakeup()</c>, not a
+    /// deadline.
+    /// </remarks>
+    /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopicsWithCallback(
+        CancellationToken cancellationToken = default)
+    {
+        return SubmitOwnedHandleOperation<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>>(
+            cancellationToken,
+            (consumer, userData) =>
+                NativeMethods.ConsumerListTopicsAsync(consumer, ConsumerCallbacks.ListTopics, userData));
+    }
+
+    /// <summary>
+    /// Registers partition metadata for <paramref name="topic"/> on a <c>MockConsumer</c>
+    /// (mock-only driver; mirrors Java <c>updatePartitions</c>) so
+    /// <see cref="PartitionsForWithCallback"/> / <see cref="ListTopicsWithCallback"/> return
+    /// data broker-free. Each of <paramref name="partitionCount"/> partitions is built with a
+    /// single leader node <c>(leaderId, leaderHost, leaderPort)</c> that is also its sole
+    /// replica and in-sync replica (offline replicas empty, no rack — a reachable-slice limit
+    /// of the mock). Errors (via <see cref="KafkaException"/>) on a real consumer
+    /// (<c>illegal_state</c>). Both strings are pinned call-scoped.
+    /// </summary>
+    /// <param name="topic">The topic to register partition metadata for.</param>
+    /// <param name="partitionCount">The number of partitions to register (non-negative).</param>
+    /// <param name="leaderId">The leader node id for every partition.</param>
+    /// <param name="leaderHost">The leader host for every partition.</param>
+    /// <param name="leaderPort">The leader port for every partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core rejected the update (e.g. a real consumer).</exception>
+    internal void UpdatePartitions(
+        string topic,
+        int partitionCount,
+        int leaderId,
+        string leaderHost,
+        int leaderPort)
+    {
+        // Preconditions BEFORE the P/Invoke (ffi §B5): the ABI does not null-check the two
+        // required strings (it would panic across FFI), and a negative partition count is a
+        // programmer error, not a Kafka outcome.
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (leaderHost is null)
+        {
+            throw new ArgumentNullException(nameof(leaderHost));
+        }
+
+        if (partitionCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partitionCount), partitionCount, "Partition count must not be negative.");
+        }
+
+        ThrowIfClosed();
+
+        IntPtr error;
+        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic))
+        using (Utf8Marshal.PinnedUtf8String hostPin = Utf8Marshal.Pin(leaderHost))
+        {
+            error = NativeMethods.MockConsumerUpdatePartitions(
+                _handle.DangerousGetHandle(),
+                topicPin.Pointer,
+                partitionCount,
+                leaderId,
+                hostPin.Pointer,
+                leaderPort);
+        }
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
     /// Assigns the consumer to <paramref name="topicPartitions"/> (sync; works on both
     /// the async and mock consumers). Used to make a partition eligible for
     /// <see cref="AddRecord"/> on a <c>MockConsumer</c> — a broker-free driver. The

@@ -53,12 +53,13 @@ namespace Confluent.Kafka;
 /// <b>Additive-growth surface.</b> This is a deliberate <em>subset</em> of Java's
 /// <c>Consumer</c> — the operations proven and wired so far (subscribe → poll →
 /// assign / seek / seekToBeginning / seekToEnd / pause / resume → position →
-/// committed / beginningOffsets / endOffsets / offsetsForTimes → group metadata →
-/// close), enough for a complete broker loop with auto-commit
-/// (<c>enable.auto.commit</c>) plus manual partition management and offset queries. The
-/// remaining Java members (commit family, <c>partitionsFor</c> / <c>listTopics</c>,
-/// pattern subscribe, …) arrive in later phases as <b>additive</b> members on
-/// this same interface and new public types — they do not change this shape. No
+/// committed / beginningOffsets / endOffsets / offsetsForTimes → partitionsFor /
+/// listTopics → group metadata → close), enough for a complete broker loop with
+/// auto-commit (<c>enable.auto.commit</c>) plus manual partition management, offset
+/// queries, and partition-metadata queries. The remaining Java members (the commit
+/// family, pattern subscribe, the rebalance listener, …) arrive in later phases as
+/// <b>additive</b> members on this same interface and new public types — they do not
+/// change this shape. No
 /// throwing stubs for not-yet-wired ops. The surface is safe to grow additively because
 /// the binding is pre-publish with no external implementers; a typed generic sibling
 /// (<c>IAsyncConsumer&lt;TKey,TValue&gt;</c> with serializers) will arrive as a new type,
@@ -344,6 +345,51 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> (Java
+    /// <c>partitionsFor(String)</c>). Blocks in Java (a metadata fetch), so it returns a
+    /// <see cref="Task"/> here, resolving with an owned
+    /// <see cref="IReadOnlyList{PartitionInfo}"/> — an <b>empty</b> list for a topic with no
+    /// known partitions — or faulting with a <see cref="KafkaException"/>. The
+    /// <see cref="PartitionInfo"/> / <see cref="Node"/> fields are owned copies; nothing
+    /// native-backed escapes (ffi-marshalling.md §B2/§B4; consumer-threading.md §27).
+    /// </summary>
+    /// <remarks>
+    /// An <b>empty</b> <paramref name="topic"/> is <b>forwarded</b> to the core, <b>not</b>
+    /// rejected (Java/Python-faithful — the binding validates only <see langword="null"/>);
+    /// only a <see langword="null"/> topic throws (before any native call). No
+    /// <c>TimeSpan</c> overload this phase (the async ABI has no timeout — the
+    /// <see cref="Position"/> / <see cref="Close"/> precedent); the
+    /// <paramref name="cancellationToken"/> is user-initiated cancellation (mapped to
+    /// <c>wakeup()</c>), <b>not</b> a timeout.
+    /// </remarks>
+    /// <param name="topic">The topic whose partition metadata to read.</param>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <returns>The partition metadata for <paramref name="topic"/>, as an owned list.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns metadata for all topics the consumer is authorized to view (Java
+    /// <c>listTopics()</c>). Blocks in Java (a metadata fetch), so it returns a
+    /// <see cref="Task"/> here, resolving with an owned
+    /// <see cref="IReadOnlyDictionary{String, IReadOnlyList}"/> of topic name →
+    /// <see cref="PartitionInfo"/> list — an <b>empty</b> dictionary when no topics are known
+    /// — or faulting with a <see cref="KafkaException"/>. The values are owned copies;
+    /// nothing native-backed escapes.
+    /// </summary>
+    /// <remarks>
+    /// No <c>TimeSpan</c> overload this phase (the async ABI has no timeout); the
+    /// <paramref name="cancellationToken"/> is user-initiated cancellation, not a timeout.
+    /// </remarks>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <returns>The partition metadata per topic, keyed by topic name.</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Closes the consumer gracefully (Java <c>close()</c>), joining the background task,

@@ -423,4 +423,138 @@ internal static class ConsumerCallbacks
             context?.FreeGcHandle();
         }
     }
+
+    // ---- Owned-handle partition-metadata completions (ffi §B6/§B7) — M5/P5 ----
+    //
+    // Two more OnPoll clones for the partition-metadata query family (Category E2). Each
+    // differs from OnPoll ONLY in (a) the OperationCompletionSource<TResult> result type,
+    // (b) the nested copy-out marshaller called on success (PartitionInfoListMarshal /
+    // TopicPartitionInfoMapMarshal), and (c) which container _destroy runs in the finally
+    // (PartitionInfoListDestroy / TopicPartitionInfoMapDestroy). Every OnPoll correctness
+    // invariant is preserved verbatim: no-throw boundary, copy-out on THIS (dispatcher)
+    // thread BEFORE _destroy, container _destroy null-safe in the finally (a no-op on the
+    // failure/null path), error via OperationCompletionSource<T>.Complete (which frees the
+    // error handle), per-op GCHandle freed exactly once via FreeGcHandle, and
+    // RunContinuationsAsynchronously (via the OperationCompletionSource<T>). The only new
+    // dimension vs the E1 offset-map clones is the DEPTH of the copy-out — the whole tree
+    // (list/map → PartitionInfo → leader/replica Nodes → node strings) is copied out before
+    // the single root _destroy, and NO borrowed element (PartitionInfo, Node, nested list)
+    // is ever freed (Category 4). Each ABI callback typedef is a distinct C function-pointer
+    // type sharing the (container*, error*, ud) = (IntPtr, IntPtr, IntPtr) layout; each gets
+    // its own delegate type so the matching NativeMethods DllImport binds a strongly-typed,
+    // self-documenting parameter.
+
+    /// <summary>
+    /// The C signature for <c>kafka_consumer_Consumer_partitions_for_callback_t</c>:
+    /// <c>void (*)(kafka_consumer_PartitionInfoList_t* list,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the owned-handle completion
+    /// shape (§B6/§B7), the <c>PartitionInfoList_t</c> analog of <see cref="PollCallback"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void PartitionInfoListCallback(IntPtr list, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The single rooted instance passed to every <c>partitions_for_async</c> submission.
+    /// Rooted for the process lifetime, so the native thunk never dangles (§B6 keep-alive).
+    /// </summary>
+    internal static readonly PartitionInfoListCallback PartitionsFor = OnPartitionsFor;
+
+    /// <summary>
+    /// The <c>partitionsFor</c> completion trampoline — an <see cref="OnPoll"/> clone for
+    /// the owned <c>PartitionInfoList_t</c>. Copies out the whole borrowed tree on this
+    /// (dispatcher) thread via <see cref="PartitionInfoListMarshal.CopyOut"/>, then the
+    /// <c>finally</c> destroys the list root via the null-safe
+    /// <see cref="NativeMethods.PartitionInfoListDestroy"/>. Every <c>PartitionInfo</c> /
+    /// <c>Node</c> / nested string is <b>borrowed</b> (Category 4) and never freed — only the
+    /// list root is destroyed (ffi §B2).
+    /// </summary>
+    private static void OnPartitionsFor(IntPtr list, IntPtr error, IntPtr userData)
+    {
+        OperationCompletionSource<IReadOnlyList<PartitionInfo>>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (OperationCompletionSource<IReadOnlyList<PartitionInfo>>)handle.Target!;
+            if (error != IntPtr.Zero)
+            {
+                context.Complete(error);
+            }
+            else
+            {
+                // Success (list is a non-null owned borrow-root). Copy out the whole tree on
+                // THIS (dispatcher) thread; the finally then destroys the root.
+                IReadOnlyList<PartitionInfo> marshalled = PartitionInfoListMarshal.CopyOut(list);
+                context.CompleteWithResult(marshalled);
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary: never unwind into native. Surface via the Task; the finally
+            // still frees the list + GCHandle if we recovered the context.
+            context?.TrySetException(exception);
+        }
+        finally
+        {
+            // Sole owner of BOTH frees, on EVERY path (§B6). Destroy is null-safe, so it is a
+            // no-op when list is null (failure / inline rejection); the borrowed PartitionInfo
+            // / Node / string ELEMENTS are never destroyed (§B2 Category 4).
+            NativeMethods.PartitionInfoListDestroy(list);
+            context?.FreeGcHandle();
+        }
+    }
+
+    /// <summary>
+    /// The C signature for <c>kafka_consumer_Consumer_list_topics_callback_t</c>:
+    /// <c>void (*)(kafka_consumer_TopicPartitionInfoMap_t* map,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the owned-handle completion
+    /// shape (§B6/§B7), the <c>TopicPartitionInfoMap_t</c> analog of
+    /// <see cref="PollCallback"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void TopicPartitionInfoMapCallback(IntPtr map, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The single rooted instance passed to every <c>list_topics_async</c> submission.
+    /// Rooted for the process lifetime, so the native thunk never dangles (§B6 keep-alive).
+    /// </summary>
+    internal static readonly TopicPartitionInfoMapCallback ListTopics = OnListTopics;
+
+    /// <summary>
+    /// The <c>listTopics</c> completion trampoline — an <see cref="OnPoll"/> clone for the
+    /// owned <c>TopicPartitionInfoMap_t</c>. Copies out the whole borrowed tree (map →
+    /// per-topic nested list → info → nodes) on this (dispatcher) thread via
+    /// <see cref="TopicPartitionInfoMapMarshal.CopyOut"/>, then the <c>finally</c> destroys
+    /// the map root via the null-safe
+    /// <see cref="NativeMethods.TopicPartitionInfoMapDestroy"/>. Every topic string, nested
+    /// list, <c>PartitionInfo</c>, and <c>Node</c> is <b>borrowed</b> (Category 4) and never
+    /// freed — only the map root is destroyed (ffi §B2).
+    /// </summary>
+    private static void OnListTopics(IntPtr map, IntPtr error, IntPtr userData)
+    {
+        OperationCompletionSource<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (OperationCompletionSource<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>>)handle.Target!;
+            if (error != IntPtr.Zero)
+            {
+                context.Complete(error);
+            }
+            else
+            {
+                IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> marshalled =
+                    TopicPartitionInfoMapMarshal.CopyOut(map);
+                context.CompleteWithResult(marshalled);
+            }
+        }
+        catch (Exception exception)
+        {
+            context?.TrySetException(exception);
+        }
+        finally
+        {
+            NativeMethods.TopicPartitionInfoMapDestroy(map);
+            context?.FreeGcHandle();
+        }
+    }
 }

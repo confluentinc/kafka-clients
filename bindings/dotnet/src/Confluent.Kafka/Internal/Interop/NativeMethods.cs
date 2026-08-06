@@ -975,4 +975,249 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_OffsetAndTimestamp_leader_epoch", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool OffsetAndTimestampLeaderEpoch(IntPtr oat, out int outEpoch);
+
+    // ---- Async partition-metadata queries (owned-handle completion, ffi §B6/§B7) — M5/P5 ----
+    //
+    // Both resolve via the owned-handle completion shape (the poll analog): on success the
+    // container is a non-null owned root (a Category-3 borrow-root, freed by the trampoline's
+    // copy-out-then-destroy) and `error` is null; on failure (incl. the inline core-guard
+    // rejection) the container is null and `error` is non-null. The callback takes ownership
+    // of whichever is non-null. `partitions_for` pins its one topic call-scoped (the core
+    // copies it synchronously during the submit, ffi §A3/§B3); `list_topics` takes no input.
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_partitions_for_async</c> — the partition metadata for
+    /// <paramref name="topic"/> asynchronously (one-operation-in-flight). The completion
+    /// fires via <paramref name="callback"/> with an owned <c>PartitionInfoList_t</c>
+    /// (Category-3), copied out then destroyed by the trampoline. <paramref name="topic"/>
+    /// is a pinned NUL-terminated UTF-8 buffer, valid for the duration of the call (the
+    /// core copies it synchronously during the submit).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_partitions_for_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerPartitionsForAsync(
+        IntPtr consumer,
+        IntPtr topic,
+        ConsumerCallbacks.PartitionInfoListCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_list_topics_async</c> — metadata for all topics the
+    /// consumer is authorized to view asynchronously (one-operation-in-flight). Takes
+    /// <b>no input</b>. The completion fires via <paramref name="callback"/> with an owned
+    /// <c>TopicPartitionInfoMap_t</c> (Category-3), copied out then destroyed by the
+    /// trampoline.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_list_topics_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerListTopicsAsync(
+        IntPtr consumer,
+        ConsumerCallbacks.TopicPartitionInfoMapCallback callback,
+        IntPtr userData);
+
+    // ---- PartitionInfoList_t — owned borrow-root + borrowed PartitionInfo elements (ffi §B2) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfoList_count</c> — the number of partition-info
+    /// entries in the owned list. NOT null-safe (only <c>_destroy</c> is) — call only on a
+    /// non-null root (the success branch of the trampoline).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfoList_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionInfoListCount(IntPtr list);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfoList_get</c> — the <c>PartitionInfo_t</c> at
+    /// <paramref name="index"/>, <b>borrowed</b> (Category 4; a <c>const *</c> return valid
+    /// until the list is destroyed), or <see cref="IntPtr.Zero"/> if out of range. Never
+    /// freed by the binding (there is a <c>PartitionInfo_destroy</c>, but it is only for a
+    /// standalone-owned info — a list element is a borrowed view; freeing it is a UAF).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfoList_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr PartitionInfoListGet(IntPtr list, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfoList_destroy</c> — frees the owned partition-info-list
+    /// root (every borrowed <c>PartitionInfo</c> / <c>Node</c> / string from it is
+    /// invalidated). Null-safe (no-op). Called by the trampoline <b>after</b> the copy-out
+    /// completes.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfoList_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void PartitionInfoListDestroy(IntPtr list);
+
+    // ---- TopicPartitionInfoMap_t — owned borrow-root + borrowed topic / list elements (ffi §B2) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionInfoMap_count</c> — the number of topics in the owned
+    /// map. NOT null-safe (only <c>_destroy</c> is).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionInfoMapCount(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionInfoMap_get_topic</c> — the topic name at
+    /// <paramref name="index"/> as a <b>NUL-terminated</b> <c>const char*</c> owned by the
+    /// map (borrowed; valid until the map is destroyed), or <see cref="IntPtr.Zero"/> if out
+    /// of range. Copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy —
+    /// NUL-terminated form (§B3), NOT the length-delimited form (contrast
+    /// <see cref="NodeHost"/> / <see cref="NodeRack"/>, which ARE length-delimited).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoMapGetTopic(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionInfoMap_get_partitions</c> — the
+    /// <c>PartitionInfoList_t</c> for the topic at <paramref name="index"/>, <b>borrowed</b>
+    /// (Category 4; a nested <c>const *</c> container valid until the map is destroyed), or
+    /// <see cref="IntPtr.Zero"/> if out of range. Copied out (via
+    /// <see cref="PartitionInfoListCount"/> / <see cref="PartitionInfoListGet"/>) before the
+    /// map root is destroyed; <b>never</b> <c>PartitionInfoList_destroy</c>'d as a map value
+    /// (it is borrowed here — only the map root is destroyed).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_get_partitions", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoMapGetPartitions(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionInfoMap_destroy</c> — frees the owned map root (every
+    /// borrowed topic string, nested list, and its <c>PartitionInfo</c> / <c>Node</c>
+    /// elements are invalidated). Null-safe (no-op). Called by the trampoline <b>after</b>
+    /// the copy-out completes.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionInfoMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void TopicPartitionInfoMapDestroy(IntPtr map);
+
+    // ---- PartitionInfo_t accessors — borrowed views into the owning root (ffi §B2 Category 4) ----
+    //
+    // Every accessor return is a borrowed view: scalars by value, `_leader` / `_replica(i)` /
+    // etc. return `const Node_t*` (borrowed), `_topic` returns a NUL-terminated `const char*`
+    // (borrowed, handle-owned). The binding NEVER calls PartitionInfo_destroy on a list/map
+    // element (a borrowed Category-4 view — freeing it is a double-free/UAF). Copied out
+    // before the owning root is destroyed.
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_topic</c> — the topic name as a <b>NUL-terminated</b>
+    /// <c>const char*</c> owned by the handle (§B3 NUL-scan form). Copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before the owning root is destroyed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr PartitionInfoTopic(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_partition</c> — the partition id (by value).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionInfoPartition(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_leader</c> — the leader <c>Node_t</c>, <b>borrowed</b>
+    /// (Category 4), or <see cref="IntPtr.Zero"/> if the partition has no leader. Never
+    /// freed (there is no <c>Node_destroy</c>). A null pointer maps to a null
+    /// <see cref="Node"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_leader", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr PartitionInfoLeader(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_replica_count</c> — the number of replica nodes.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionInfoReplicaCount(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_replica</c> — the replica <c>Node_t</c> at
+    /// <paramref name="index"/>, <b>borrowed</b> (Category 4), or <see cref="IntPtr.Zero"/>
+    /// if out of range. Never freed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr PartitionInfoReplica(IntPtr info, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_in_sync_replica_count</c> — the number of in-sync
+    /// replica nodes.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_in_sync_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionInfoInSyncReplicaCount(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_in_sync_replica</c> — the in-sync replica
+    /// <c>Node_t</c> at <paramref name="index"/>, <b>borrowed</b> (Category 4), or
+    /// <see cref="IntPtr.Zero"/> if out of range. Never freed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_in_sync_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr PartitionInfoInSyncReplica(IntPtr info, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_offline_replica_count</c> — the number of offline
+    /// replica nodes.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_offline_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionInfoOfflineReplicaCount(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_consumer_PartitionInfo_offline_replica</c> — the offline replica
+    /// <c>Node_t</c> at <paramref name="index"/>, <b>borrowed</b> (Category 4), or
+    /// <see cref="IntPtr.Zero"/> if out of range. Never freed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_PartitionInfo_offline_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr PartitionInfoOfflineReplica(IntPtr info, int index);
+
+    // ---- Node_t (kafka_common_Node) accessors — borrowed views (ffi §B2 Category 4) ----
+    //
+    // A Node is a borrowed view: it has NO _destroy (freed with its owning PartitionInfo,
+    // which is freed with the root container). `_id` / `_port` are scalars by value.
+    // `_host` and `_rack` are LENGTH-DELIMITED (`const char*` + `out int32_t len`), NOT
+    // NUL-terminated (§B3): use Utf8Marshal.PtrToString(ptr, len), NEVER a NUL-scan (the
+    // slice borrows into the container with no terminator — a scan over-reads). `_rack`
+    // returns (null, -1) when absent → Node.Rack == null.
+
+    /// <summary>
+    /// <c>kafka_common_Node_id</c> — the node (broker) id (by value).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Node_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int NodeId(IntPtr node);
+
+    /// <summary>
+    /// <c>kafka_common_Node_host</c> — the node host as a <b>length-delimited</b>
+    /// <c>(const char*, out int32_t len)</c> pair (NOT NUL-terminated; borrows into the
+    /// owning <c>PartitionInfo</c>). Copy via <see cref="Utf8Marshal.PtrToString(IntPtr, int)"/>
+    /// using <paramref name="outLen"/> — NEVER a NUL-scan (§B3 over-read trap) — before the
+    /// owning root is destroyed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Node_host", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr NodeHost(IntPtr node, out int outLen);
+
+    /// <summary>
+    /// <c>kafka_common_Node_port</c> — the node port (by value).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Node_port", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int NodePort(IntPtr node);
+
+    /// <summary>
+    /// <c>kafka_common_Node_rack</c> — the node rack as a <b>length-delimited</b>
+    /// <c>(const char*, out int32_t len)</c> pair, or <c>(null, -1)</c> when absent. Copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr, int)"/> using <paramref name="outLen"/> —
+    /// NEVER a NUL-scan (§B3) — before the owning root is destroyed. The absent
+    /// <c>(null, -1)</c> maps to a null <see cref="Node.Rack"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Node_rack", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr NodeRack(IntPtr node, out int outLen);
+
+    // ---- MockConsumer_update_partitions — mock-only partition-metadata driver (ffi §B5) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_update_partitions</c> — registers
+    /// <paramref name="partitionCount"/> partitions for <paramref name="topic"/> on a mock
+    /// consumer (mock only), each with a single leader node
+    /// <c>(leaderId, leaderHost, leaderPort)</c> that also serves as its sole replica and
+    /// in-sync replica (offline replicas empty, no rack). Drives
+    /// <see cref="ConsumerPartitionsForAsync"/> / <see cref="ConsumerListTopicsAsync"/>
+    /// broker-free. Both strings are pinned NUL-terminated UTF-8 buffers. Returns null on
+    /// success, or a non-null error handle (incl. <c>illegal_state</c> for an async
+    /// consumer).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_partitions", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerUpdatePartitions(
+        IntPtr consumer,
+        IntPtr topic,
+        int partitionCount,
+        int leaderId,
+        IntPtr leaderHost,
+        int leaderPort);
 }

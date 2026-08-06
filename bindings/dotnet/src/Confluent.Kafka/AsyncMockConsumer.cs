@@ -29,8 +29,9 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// The mock-only helpers (<see cref="AddRecord"/>, <see cref="SetPollError"/>,
-/// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>) are <b>inherent
-/// methods on this concrete type, not on <see cref="IAsyncConsumer"/></b>
+/// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>,
+/// <see cref="UpdatePartitions"/>) are <b>inherent methods on this concrete type, not on
+/// <see cref="IAsyncConsumer"/></b>
 /// (consumer-threading §2; Python's <c>_MockConsumerMixin</c> parity) — tests hold an
 /// <see cref="AsyncMockConsumer"/> directly and pass it as an <see cref="IAsyncConsumer"/>
 /// where the interface is expected. Partition management (<see cref="Assign"/> /
@@ -117,6 +118,14 @@ public sealed class AsyncMockConsumer : IAsyncConsumer
         _native.EndOffsetsWithCallback(partitions, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
+        _native.PartitionsForWithCallback(topic, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default) =>
+        _native.ListTopicsWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken).AsTask();
 
@@ -166,6 +175,27 @@ public sealed class AsyncMockConsumer : IAsyncConsumer
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     public void UpdateEndOffset(string topic, int partition, long offset) =>
         _native.UpdateEndOffset(topic, partition, offset);
+
+    /// <summary>
+    /// Registers partition metadata for <paramref name="topic"/> (mock-only helper; mirrors
+    /// Java <c>updatePartitions(String, List&lt;PartitionInfo&gt;)</c>) so
+    /// <see cref="PartitionsFor"/> and <see cref="ListTopics"/> return data broker-free. Each
+    /// of <paramref name="partitionCount"/> partitions is built with a single leader node
+    /// <c>(leaderId, leaderHost, leaderPort)</c> that is also its sole replica and in-sync
+    /// replica; offline replicas are empty and the node has no rack (a reachable-slice limit
+    /// of the mock — the marshaller's offline-replica and rack paths are still exercised
+    /// structurally, as an empty list / null).
+    /// </summary>
+    /// <param name="topic">The topic to register partition metadata for.</param>
+    /// <param name="partitionCount">The number of partitions to register (non-negative).</param>
+    /// <param name="leaderId">The leader node id for every partition.</param>
+    /// <param name="leaderHost">The leader host for every partition.</param>
+    /// <param name="leaderPort">The leader port for every partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
+        _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
     /// <summary>
     /// Queues a record to be returned by the next <see cref="Poll"/> (mock-only
