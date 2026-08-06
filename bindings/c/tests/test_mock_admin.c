@@ -883,7 +883,8 @@ static void test_mock_admin_delete_topics_by_ids_async(void) {
 }
 
 // ---------------------------------------------------------------------------
-// A NULL out_result must not leak or crash (the handle is freed internally).
+// A NULL out_result means the caller does not want the result, so the handle is
+// never built (see finish_sync). It must not leak or crash.
 // ---------------------------------------------------------------------------
 
 static void test_mock_admin_null_out_result(void) {
