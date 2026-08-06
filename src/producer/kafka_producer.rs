@@ -43,6 +43,7 @@ use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
+use crate::common::protocol::Errors;
 use crate::common::record::CompressionType;
 use crate::common::record::RecordBatch;
 use crate::common::record::abstract_records;
@@ -1083,10 +1084,49 @@ impl<K, V> KafkaProducer<K, V> {
                 // nothing. (Critic 44 issue 1.)
                 if let Some(transaction_manager) = &self.transaction_manager {
                     // `Caller::App`: this runs on the application task.
-                    if let Err(error) = transaction_manager.lock().unwrap().maybe_add_partition(&result.topic_partition)
-                    {
-                        let partition = result.topic_partition.partition();
-                        return self.handle_api_exception(error, topic, partition, None);
+                    //
+                    // The guard is bound to its own statement so it is released at the
+                    // `;`. It MUST NOT stay alive into the error handling below:
+                    // `handle_api_exception` re-locks this same non-reentrant
+                    // `std::sync::Mutex` through `maybe_transition_to_error_state`, and an
+                    // `if let` scrutinee's temporaries live for the whole success arm —
+                    // edition 2024 only shortens them across the `else`. Written inline,
+                    // this self-deadlocks the application task.
+                    let add_partition =
+                        transaction_manager.lock().unwrap().maybe_add_partition(&result.topic_partition);
+                    if let Err(error) = add_partition {
+                        // `maybeAddPartition` throws across two of `doSend`'s catch
+                        // blocks, so the error class decides how the failure surfaces:
+                        //
+                        // - `ProducerFencedException` / `InvalidProducerEpochException`
+                        //   (`maybeFailWithError`, `TransactionManager.java:1157-1167`)
+                        //   are `ApiException`s: `catch (ApiException e)` records the
+                        //   error state and returns a failed future.
+                        // - `IllegalStateException` — a send that is out of order with
+                        //   the transactional API (Java 439-448), or a previous
+                        //   operation that timed out (`throwIfPendingState`, Java
+                        //   1249-1258), or a previous invalid transition (Java 1168) —
+                        //   is not even a `KafkaException`, so it reaches
+                        //   `catch (Exception e)` and is rethrown out of `send()`.
+                        // - The bare `KafkaException` of Java 1172 is not an
+                        //   `ApiException` either, so `catch (KafkaException e)`
+                        //   rethrows it as well. Neither rethrowing block calls
+                        //   `maybeTransitionToErrorState`.
+                        let is_api_exception = error.is_api_exception()
+                            // This crate spells a bare `KafkaException` as
+                            // `Errors::UnknownServerError` for want of a wire code
+                            // (`transaction_manager.rs`, `maybe_fail_with_error`), which
+                            // `is_api_exception` cannot tell from a genuine
+                            // `UnknownServerException`. It is unambiguous here: this arm
+                            // sees only what `maybeAddPartition` raises locally, never a
+                            // broker error. Misfiling it would overwrite `last_error`
+                            // with "we are in an error state" and lose the real cause.
+                            && error.error() != Errors::UnknownServerError;
+                        if is_api_exception {
+                            let partition = result.topic_partition.partition();
+                            return self.handle_api_exception(error, topic, partition, None);
+                        }
+                        return Err(error);
                     }
                 }
 
@@ -1116,6 +1156,11 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// [`Caller::App`](crate::producer::internals::Caller::App): `doSend` runs on the
     /// application task.
+    ///
+    /// Locks the [`TransactionManager`]. Java's monitor is reentrant and
+    /// `std::sync::Mutex` is not, so no caller — directly or through
+    /// [`handle_api_exception`](Self::handle_api_exception) — may already hold that
+    /// lock, including in a still-live `if let` / `match` scrutinee temporary.
     fn maybe_transition_to_error_state(&self, error: &KafkaError) {
         if let Some(transaction_manager) = &self.transaction_manager {
             // Java lets an invalid transition propagate out of `doSend`. That cannot
@@ -3272,6 +3317,286 @@ mod tests {
         assert!(
             ctx.transaction_manager.lock().unwrap().is_partition_pending_add(&partition),
             "doSend must call maybeAddPartition with the partition the accumulator chose"
+        );
+    }
+
+    // =====================================================================
+    // `maybeAddPartition`'s failure arm in `doSend`
+    //
+    // `TransactionManagerTest` covers what `maybeAddPartition` raises in each state
+    // (`testFailIfNotReadyForSend*`, Java 262-300, translated in
+    // `transaction_manager.rs`). What follows covers the other half — how `doSend`
+    // *surfaces* each of those, which only `KafkaProducer` decides — and it has no
+    // Java counterpart: Java's own `KafkaProducerTest` reaches this arm once, through
+    // a Mockito stub, in `testPartitionAddedToTransaction` above. These rows therefore
+    // do NOT enter the Phase-6 accounting block's denominator.
+    //
+    // They exist because the arm shipped with a self-deadlock: written inline as
+    // `if let Err(e) = tm.lock().unwrap().maybe_add_partition(..)`, the scrutinee's
+    // `MutexGuard` outlives the whole success arm (edition 2024 only shortens it
+    // across `else`), and the body re-locked the same non-reentrant
+    // `std::sync::Mutex` through `handle_api_exception` →
+    // `maybe_transition_to_error_state`. Java's monitor is reentrant, so no Java test
+    // could have caught it.
+    // =====================================================================
+
+    /// How long [`bounded`] waits before calling a send wedged.
+    ///
+    /// Generous against a loaded CI box; the operations under test do no I/O and
+    /// finish in microseconds.
+    const DEADLOCK_BOUND: Duration = Duration::from_secs(10);
+
+    /// Runs `body` on its own thread and returns its value, failing the test if it
+    /// does not finish within [`DEADLOCK_BOUND`].
+    ///
+    /// A `tokio::time::timeout` around the send would NOT bound these tests. The
+    /// regression they guard blocks the thread inside `std::sync::Mutex::lock`, so the
+    /// future never yields, the runtime never advances its timers, and the timeout can
+    /// never fire — the symptom is a hung `cargo test`, not a failing one. Only a
+    /// second thread can observe a wedged first one, so `body` gets a thread and its
+    /// own current-thread runtime while the test thread waits on a channel.
+    ///
+    /// On a timeout the worker stays blocked forever, holding the producer it built.
+    /// That is deliberate and harmless: it shares nothing with any other test, and
+    /// libtest ends the process with `exit(2)` rather than joining stray threads.
+    fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // `send` fails only if the receiver timed out and gave up; nothing to do.
+            let _ = tx.send(body());
+        });
+        rx.recv_timeout(DEADLOCK_BOUND).unwrap_or_else(|_| {
+            panic!(
+                "{what} did not return within {DEADLOCK_BOUND:?} — the send path is wedged. \
+                 doSend's maybeAddPartition arm must release the TransactionManager guard \
+                 before handling the error, because handle_api_exception re-locks it."
+            )
+        })
+    }
+
+    /// Runs `body` on a fresh current-thread runtime inside [`bounded`].
+    fn bounded_block_on<F>(what: &str, body: impl FnOnce() -> F + Send + 'static) -> F::Output
+    where
+        F: std::future::Future,
+        F::Output: Send + 'static,
+    {
+        bounded(what, move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime")
+                .block_on(body())
+        })
+    }
+
+    /// The record every test below sends; its contents are irrelevant because no send
+    /// is expected to reach a batch's wire form.
+    fn misuse_record() -> ProducerRecord<String, String> {
+        ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()))
+    }
+
+    /// `send()` on a transactional producer that never called `initTransactions`.
+    ///
+    /// The state `TransactionManagerTest.testFailIfNotReadyForSendNoProducerId`
+    /// (Java 262-265) asserts on, surfaced through `doSend`. `maybeAddPartition` raises
+    /// `IllegalStateException` (`TransactionManager.java:439-442`), which is not a
+    /// `KafkaException` at all, so it misses `catch (ApiException e)` *and*
+    /// `catch (KafkaException e)`, reaches `catch (Exception e)`
+    /// (`KafkaProducer.java:1077-1081`) and is rethrown out of `send()`.
+    #[test]
+    fn test_send_before_init_transactions_returns_illegal_state() {
+        let error = bounded_block_on("send before initTransactions", || async {
+            let ctx = TxnProducerContext::transactional();
+            ctx.producer
+                .send(misuse_record())
+                .await
+                .expect_err("an uninitialized transactional producer cannot send")
+        });
+
+        assert!(
+            matches!(error, KafkaError::IllegalState(_)),
+            "IllegalStateException is not an ApiException, so it must be returned by send() \
+             rather than reported through the future; got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "IllegalStateError: Cannot add partition {TOPIC}-0 to transaction before completing a call to initTransactions"
+            )
+        );
+    }
+
+    /// `send()` on an initialized transactional producer with no open transaction.
+    ///
+    /// The state `TransactionManagerTest.testFailIfNotReadyForSendNoOngoingTransaction`
+    /// (Java 282-286) asserts on, surfaced through `doSend`. Same
+    /// `IllegalStateException` treatment as above, from
+    /// `TransactionManager.java:443-448`, whose message carries the state and Java's
+    /// double space before it.
+    #[test]
+    fn test_send_outside_transaction_returns_illegal_state() {
+        let error = bounded_block_on("send outside a transaction", || async {
+            let mut ctx = TxnProducerContext::transactional();
+            init_transactions(&mut ctx).await;
+            ctx.producer
+                .send(misuse_record())
+                .await
+                .expect_err("a send needs an open transaction")
+        });
+
+        assert!(
+            matches!(error, KafkaError::IllegalState(_)),
+            "expected the IllegalState to be returned by send(), got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("IllegalStateError: Cannot add partition {TOPIC}-0 to transaction while in state  READY")
+        );
+    }
+
+    /// `send()` after an abortable error, the state
+    /// `TransactionManagerTest.testFailIfNotReadyForSendAfterAbortableError`
+    /// (Java 288-294) asserts on.
+    ///
+    /// `maybeFailWithError` raises a **bare** `KafkaException`
+    /// (`TransactionManager.java:1172`). `ApiException extends KafkaException`, not the
+    /// other way round, so `catch (ApiException e)` does not match and
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1073-1076`) rethrows it — a
+    /// block that, unlike the `ApiException` one, never calls
+    /// `maybeTransitionToErrorState`. Hence the second assertion: routing this error to
+    /// the `ApiException` arm would overwrite `lastError` with the "we are in an error
+    /// state" wrapper and lose the cause the application needs.
+    #[test]
+    fn test_send_after_abortable_error_returns_error_without_overwriting_last_error() {
+        let (error, last_error) = bounded_block_on("send after an abortable error", || async {
+            let mut ctx = TxnProducerContext::transactional();
+            init_transactions(&mut ctx).await;
+            ctx.producer.begin_transaction().expect("beginTransaction");
+            ctx.transaction_manager
+                .lock()
+                .unwrap()
+                .transition_to_abortable_error(KafkaError::with_message(Errors::InvalidTxnState, "cause"), Caller::App)
+                .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+
+            let error = ctx
+                .producer
+                .send(misuse_record())
+                .await
+                .expect_err("an abortable error blocks further sends");
+            let last_error = ctx.transaction_manager.lock().unwrap().last_error().cloned();
+            (error, last_error)
+        });
+
+        assert_eq!(
+            error.error(),
+            Errors::UnknownServerError,
+            "this crate spells Java's bare KafkaException as UnknownServerError; got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+        let last_error = last_error.expect("the manager keeps the abortable cause");
+        assert_eq!(
+            last_error.error(),
+            Errors::InvalidTxnState,
+            "the rethrowing catch block must not run maybeTransitionToErrorState, which \
+             would replace the cause with the wrapper; got {last_error:?}"
+        );
+    }
+
+    /// `send()` after a fatal error, the state
+    /// `TransactionManagerTest.testFailIfNotReadyForSendAfterFatalError` (Java 296-300)
+    /// asserts on. Same bare-`KafkaException` treatment as the abortable case.
+    #[test]
+    fn test_send_after_fatal_error_returns_error() {
+        let error = bounded_block_on("send after a fatal error", || async {
+            let mut ctx = TxnProducerContext::transactional();
+            init_transactions(&mut ctx).await;
+            ctx.transaction_manager
+                .lock()
+                .unwrap()
+                .transition_to_fatal_error(
+                    KafkaError::with_message(Errors::ClusterAuthorizationFailed, "cause"),
+                    Caller::App,
+                )
+                .expect("FATAL_ERROR is always reachable");
+            ctx.producer
+                .send(misuse_record())
+                .await
+                .expect_err("a fatal error blocks further sends")
+        });
+
+        assert_eq!(error.error(), Errors::UnknownServerError, "got {error:?}");
+        assert_eq!(
+            error.to_string(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+    }
+
+    /// `send()` on a purely **idempotent** producer whose manager is in a fatal state,
+    /// the state
+    /// `TransactionManagerTest.testFailIfNotReadyForSendIdempotentProducerFatalError`
+    /// (Java 274-280) asserts on.
+    ///
+    /// `maybeFailWithError` runs before `maybeAddPartition`'s `isTransactional()` test
+    /// (`TransactionManager.java:438` vs `:441`), so a producer with no
+    /// `transactional.id` reaches the same arm.
+    #[test]
+    fn test_idempotent_send_after_fatal_error_returns_error() {
+        let error = bounded_block_on("idempotent send after a fatal error", || async {
+            let ctx = TxnProducerContext::new(&[], 1);
+            ctx.transaction_manager
+                .lock()
+                .unwrap()
+                .transition_to_fatal_error(KafkaError::with_message(Errors::UnsupportedVersion, "cause"), Caller::App)
+                .expect("FATAL_ERROR is always reachable");
+            ctx.producer
+                .send(misuse_record())
+                .await
+                .expect_err("a fatal error blocks further sends")
+        });
+
+        assert_eq!(error.error(), Errors::UnknownServerError, "got {error:?}");
+    }
+
+    /// The other side of the split: an `ApiException` out of `maybeAddPartition` still
+    /// takes `catch (ApiException e)` and is reported through the future.
+    ///
+    /// This is the arm that actually re-locks the manager —
+    /// `handle_api_exception` → `maybe_transition_to_error_state` — so it is the direct
+    /// regression test for the deadlock. `maybeFailWithError` re-raises a fenced
+    /// producer as `ProducerFencedException` (`TransactionManager.java:1157-1161`),
+    /// which IS an `ApiException`.
+    #[test]
+    fn test_send_after_producer_fenced_fails_the_future() {
+        let (send_result, state_is_fatal) = bounded_block_on("send after being fenced", || async {
+            let mut ctx = TxnProducerContext::transactional();
+            init_transactions(&mut ctx).await;
+            ctx.transaction_manager
+                .lock()
+                .unwrap()
+                .transition_to_fatal_error(KafkaError::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
+                .expect("FATAL_ERROR is always reachable");
+
+            let send_result = ctx.producer.send(misuse_record()).await;
+            let future = match send_result {
+                Ok(future) => Ok(future.get().await.expect_err("the fenced send cannot be acked")),
+                Err(error) => Err(error),
+            };
+            let state_is_fatal = ctx.transaction_manager.lock().unwrap().has_fatal_error();
+            (future, state_is_fatal)
+        });
+
+        let error = send_result.expect("an ApiException is reported through the future, not the call");
+        assert_eq!(
+            error.error(),
+            Errors::ProducerFenced,
+            "ProducerFencedException is an ApiException, so doSend returns a failed future; got {error:?}"
+        );
+        assert!(
+            state_is_fatal,
+            "the ApiException block runs maybeTransitionToErrorState, which keeps a fenced producer fatal"
         );
     }
 
