@@ -331,8 +331,13 @@ batch, because `ControlRecordType` was untranslated. Phase 8 translated it
 (`src/common/record/control_record_type.rs`) and implemented
 `CompletedFetch::contains_abort_marker`, after a broker integration test
 (`tests/integration/producer_transactions_test.rs::test_aborted_transaction_records_are_discarded`)
-proved the deferral's "this is rare" justification false — a producer id is stable across a
-producer's transactions, so abort-then-commit reuses it by construction.
+proved the deferral's "this is rare" justification false. The trigger was in fact **any
+`read_committed` fetch reaching an ABORT marker**: the removed guard sat after
+`consume_aborted_transactions_up_to`, and the marker batch is itself a control batch carrying
+the id that call had just inserted — so one aborted transaction, with nothing after it, was
+enough, and `read_committed` was unusable on any partition that had ever had an abort.
+(Producer-id stability rebuts Phase 7a's stated premise, but it is not the trigger; see
+PLAN §9.27.)
 
 Those tests are therefore **owed, not blocked**: what they still need is a fixture that
 emits a real control batch. Tracked as `design/history/Milestone-11/PLAN.md` §9.26, with

@@ -51,6 +51,8 @@
 //!
 //! Every *verification* consumer uses `assign` rather than `subscribe`, so no
 //! rebalance is involved and the read is a pure fetch against a known partition.
+//! ([`assigned_consumer`] only builds the consumer; the caller chooses `assign` or
+//! `subscribe`.)
 //! Only [`test_consume_transform_produce_with_offsets`]'s input consumer
 //! subscribes, because `send_offsets_to_transaction` needs real group metadata
 //! (a generation and member id) for the broker to accept the `TxnOffsetCommit`.
@@ -119,7 +121,27 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
     .expect("failed to build a transactional producer")
 }
 
-/// A consumer pinned to `tp` at its beginning, at the given isolation level.
+/// A plain (non-idempotent, non-transactional) producer, for seeding input topics.
+fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("client.id".to_string(), client_id.to_string()),
+        ("acks".to_string(), "all".to_string()),
+        ("max.block.ms".to_string(), "30000".to_string()),
+        ("linger.ms".to_string(), "0".to_string()),
+    ]);
+    KafkaProducer::from_config(
+        ProducerConfig::from_properties(&props).expect("invalid plain producer config"),
+        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer),
+    )
+    .expect("failed to build a plain producer")
+}
+
+/// A consumer for `group_id` at the given isolation level.
+///
+/// Callers either `assign` a partition (every verification consumer, so no rebalance
+/// is involved) or `subscribe` — see the module docstring for which and why.
 fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
@@ -204,23 +226,52 @@ async fn drain_for(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>, budget: D
 
 /// Produce continues correctly across an epoch bump the broker forces.
 ///
-/// The only way to make a *real* broker bump a producer's epoch from the client
-/// API is a second `initTransactions` on the same `transactional.id`: the
-/// coordinator fences the previous incarnation and hands the new one a higher
-/// epoch. So the scenario is realised as two producers sharing a
-/// `transactional.id`:
+/// The scenario is two producers sharing a `transactional.id`. A second
+/// `initTransactions` on that id makes the coordinator fence the previous
+/// incarnation and hand the new one a higher epoch, so the bump is broker-real:
 ///
 ///   - the first commits a transaction at its original epoch;
 ///   - the second calls `init_transactions`, which bumps the epoch and aborts any
 ///     transaction the first left open;
-///   - the second then produces and commits at the bumped epoch, and its records
-///     land exactly once — which is the idempotence claim, since the sequence
-///     numbers restart at 0 under the new epoch and the broker must accept them;
-///   - the first, now fenced, cannot produce.
+///   - the second produces and commits at the bumped epoch;
+///   - the first, now fenced, cannot produce;
+///   - and all five committed records read back exactly once each, in order.
 ///
-/// Asserting all four is what makes this a test of the *bump* rather than of
-/// fencing alone: a client that failed to reset its sequences after the bump
-/// would be rejected with `OutOfOrderSequenceNumber` at the third step.
+/// # What this does and does not pin
+///
+/// It pins the broker-side contract end to end: the coordinator issues a higher
+/// epoch, the old incarnation is fenced, the new one is accepted, and no record is
+/// lost or duplicated across the two.
+///
+/// It does **not** exercise the client-side sequence reset. The second incarnation
+/// is a fresh [`KafkaProducer`], so its `TransactionManager` and `TxnPartitionMap`
+/// start empty and its sequences are 0 because they were never anything else —
+/// `bump_idempotent_producer_epoch`, `start_sequences_at_beginning` and
+/// `request_idempotent_epoch_bump_for_partition` are all off this path, and no
+/// arrangement of them changes the outcome here. An earlier revision of this
+/// comment claimed "a client that failed to reset its sequences after the bump
+/// would be rejected with `OutOfOrderSequenceNumber`", which is a property this
+/// test cannot distinguish.
+///
+/// That path is covered at unit level, where the same producer instance survives
+/// the bump and the reset is therefore observable:
+/// `sender.rs::test_out_of_order_sequence_is_retried_and_bumps_the_epoch`,
+/// `sender.rs::test_bump_transactional_epoch_on_unknown_producer_id_error`, and
+/// `transaction_manager.rs::test_producer_id_reset`.
+///
+/// Restructuring so one incarnation survives a *broker-issued* bump would need
+/// either a deliberately-induced abortable error or a cluster with
+/// `transaction.version` finalized at 2 (where every `EndTxn` returns a bumped
+/// epoch). The latter is a different `ClusterConfig`, so it would fork this suite
+/// off the pooled container the `PlaintextConsumer*` tests share; the former is
+/// awkward to induce reliably against a real broker. Neither is worth it when the
+/// reset already has three unit tests — hence: keep the scenario, and describe
+/// only what it proves.
+///
+/// (A second `initTransactions` is also not the *only* broker-driven bump — an
+/// abort after an abortable error bumps through the coordinator too. It is the one
+/// that is easy to induce, which is a reason to choose it and not a reason to call
+/// it unique.)
 #[tokio::test]
 async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
     let mut ctx = TestContext::new(cluster_config()).await;
@@ -313,10 +364,23 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
 /// `read_committed` consumer and visible to a `read_uncommitted` one; committing
 /// makes them visible to both.
 ///
-/// The `read_uncommitted` half is what makes the `read_committed` half
-/// meaningful: it proves the records really are on the broker while the
-/// transaction is open, so the empty `read_committed` read is the isolation level
-/// doing its job rather than a produce that never happened.
+/// # Two independent ways this could pass vacuously, and the gate for each
+///
+/// *Duration*: too short a negative poll and the records simply had not arrived.
+/// Handled by [`NEGATIVE_POLL_BUDGET`] being a fixed budget rather than a deadline.
+///
+/// *Liveness*: a `read_committed` reader that has not yet resolved metadata or
+/// reset its position returns empty for reasons unrelated to the isolation level,
+/// and the assertion passes anyway. The `read_uncommitted` pairing does **not**
+/// close this — it proves the records are on the broker (which the awaited `send_all`
+/// acks already proved), not that the `read_committed` reader was live during its
+/// own budget. So one non-transactional record is seeded *before* the transaction
+/// opens and the negative drain must return exactly that record: the reader is
+/// proven to have fetched from the partition, and the transactional records are
+/// proven absent, in a single assertion.
+///
+/// (`test_aborted_transaction_records_are_discarded` gets the same gate for free —
+/// its negative drain runs on a consumer that has already delivered records.)
 #[tokio::test]
 async fn test_transactional_records_are_visible_only_after_commit() {
     let mut ctx = TestContext::new(cluster_config()).await;
@@ -324,19 +388,27 @@ async fn test_transactional_records_are_visible_only_after_commit() {
     let bootstrap = ctx.bootstrap_servers().to_string();
     let tp = TopicPartition::new(topic.clone(), 0);
 
+    // The liveness seed: one non-transactional record, before any transaction opens.
+    // A read_committed consumer must always see this one, so its presence in the
+    // negative drain below proves the reader actually fetched.
+    let seeder = plain_producer(&bootstrap, "txn-visible-seed");
+    send_all(&seeder, &topic, 0, &["seed"]).await;
+
     let producer = transactional_producer(&bootstrap, &format!("{topic}-txn-id"));
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
     send_all(&producer, &topic, 0, &["v1", "v2", "v3"]).await;
 
-    // Before the commit: read_committed sees nothing.
+    // Before the commit: read_committed sees the seed and nothing else.
     let committed_group = ctx.group_id("txn-visible-committed");
     let mut committed_reader = assigned_consumer(&bootstrap, &committed_group, "read_committed");
     committed_reader.assign(vec![tp.clone()]).await.expect("assign");
     let before = drain_for(&mut committed_reader, NEGATIVE_POLL_BUDGET).await;
-    assert!(
-        before.is_empty(),
-        "a read_committed consumer must not see records of an open transaction, saw {before:?}"
+    assert_eq!(
+        before,
+        vec!["seed".to_string()],
+        "a read_committed consumer must see the seed (proving it fetched) and none of the \
+         open transaction's records"
     );
 
     // Before the commit: read_uncommitted does see them, so they are genuinely
@@ -344,14 +416,15 @@ async fn test_transactional_records_are_visible_only_after_commit() {
     let uncommitted_group = ctx.group_id("txn-visible-uncommitted");
     let mut uncommitted_reader = assigned_consumer(&bootstrap, &uncommitted_group, "read_uncommitted");
     uncommitted_reader.assign(vec![tp.clone()]).await.expect("assign");
-    let uncommitted = consume_values(&mut uncommitted_reader, 3, CONSUME_DEADLINE).await;
+    let uncommitted = consume_values(&mut uncommitted_reader, 4, CONSUME_DEADLINE).await;
     assert_eq!(
         uncommitted,
-        vec!["v1".to_string(), "v2".to_string(), "v3".to_string()],
+        vec!["seed".to_string(), "v1".to_string(), "v2".to_string(), "v3".to_string()],
         "a read_uncommitted consumer must see the open transaction's records"
     );
 
-    // Commit, and the same read_committed consumer now sees them.
+    // Commit, and the same read_committed consumer now sees them. It has already
+    // consumed the seed, so only the three transactional records remain for it.
     producer.commit_transaction().await.expect("commitTransaction");
     let after = consume_values(&mut committed_reader, 3, CONSUME_DEADLINE).await;
     assert_eq!(
@@ -459,19 +532,7 @@ async fn test_consume_transform_produce_with_offsets() {
     let input_tp = TopicPartition::new(input_topic.clone(), 0);
 
     // Seed the input topic with a plain (non-transactional) producer.
-    let seed_props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.clone()),
-        ("client.id".to_string(), "txn-ctp-seed".to_string()),
-        ("acks".to_string(), "all".to_string()),
-        ("max.block.ms".to_string(), "30000".to_string()),
-        ("linger.ms".to_string(), "0".to_string()),
-    ]);
-    let seeder: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::from_config(
-        ProducerConfig::from_properties(&seed_props).expect("invalid seed producer config"),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
-    )
-    .expect("failed to build the seed producer");
+    let seeder = plain_producer(&bootstrap, "txn-ctp-seed");
     send_all(&seeder, &input_topic, 0, &["a", "b", "c"]).await;
 
     // The transform consumer subscribes rather than assigns: it must have real

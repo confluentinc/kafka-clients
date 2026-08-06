@@ -65,12 +65,27 @@
 //! as low-impact: "production readers will hit it only if their producers reuse
 //! producer IDs after an abort, which is rare". **That assessment was wrong,
 //! and the Phase-8 broker integration test
-//! `test_aborted_transaction_records_are_discarded` is what falsified it.** A
-//! producer id is stable for a producer's lifetime, so a producer that aborts
-//! one transaction and commits the next reuses it by construction; every
-//! `read_committed` consumer of such a partition hit the bail. The lesson is
-//! about the shape of the claim rather than the branch: "rare" was asserted
-//! about a *client* behaviour without checking what the client actually does.
+//! `test_aborted_transaction_records_are_discarded` is what falsified it.**
+//!
+//! The true trigger is narrower to state and far wider in effect: **any
+//! `read_committed` fetch that reached an ABORT marker at all.** The removed
+//! guard sat *after* `consume_aborted_transactions_up_to`, and the ABORT marker
+//! batch is itself a control batch carrying the aborted transaction's own
+//! producer id — which that call has just inserted, since the response's
+//! `AbortedTransaction.first_offset` is ≤ the marker's `last_offset` by
+//! construction. So the bail fired on the marker of the very transaction just
+//! skipped, in the same fetch. No producer-id reuse and no later commit were
+//! needed: a single aborted transaction with nothing after it was enough, as was
+//! an empty aborted transaction whose marker is its only batch. `read_committed`
+//! was unusable on any partition that had ever had an abort.
+//!
+//! Producer-id stability is the rebuttal of Phase 7a's *stated premise* — a
+//! producer id is allocated once per incarnation and is stable across that
+//! producer's transactions, so "reuse" is what every transactional producer does
+//! — but it is not the description of the trigger, and an earlier revision of
+//! this comment let it stand as one. The lesson is about the shape of the claim
+//! rather than the branch: "rare" was asserted about a *client* behaviour
+//! without checking what the client actually does.
 
 #![allow(dead_code)]
 
