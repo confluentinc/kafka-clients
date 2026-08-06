@@ -39,12 +39,35 @@
 //! - a **bare (synchronous)** entry point that submits the RPC and blocks until
 //!   every per-key future has resolved, writing one flattened result handle; and
 //! - an **`_async`** entry point that submits the RPC, returns immediately, and
-//!   delivers the same flattened result handle through a C callback fired on the
-//!   per-handle dispatcher thread.
+//!   delivers the same flattened result handle through a C callback (see
+//!   *Callback thread* below).
 //!
 //! In both cases the RPC method itself is invoked on the **calling** thread, so
 //! the request is enqueued as promptly as in Java; only the awaiting of the
 //! per-key futures moves to the tokio runtime.
+//!
+//! # Callback thread
+//!
+//! Every `_async` entry point fires its callback **exactly once**, but not
+//! always on the same thread:
+//!
+//! - Normally, on the handle's **dispatcher thread**, after the RPC's futures
+//!   have resolved.
+//! - **Synchronously, on the calling thread, before the entry point returns**,
+//!   when the operation fails before it can be submitted: `admin` is NULL, or
+//!   argument marshaling fails (for example an unparseable base64 topic id
+//!   passed to `kafka_admin_AdminClient_delete_topics_by_ids_async` /
+//!   `_describe_topics_by_ids_async`). This is plain bad input, not only a
+//!   programming error, so a caller must not assume the entry point has returned
+//!   by the time the callback runs.
+//! - On a **tokio worker thread**, if the dispatcher has already been torn down
+//!   when the result arrives (only reachable while the handle is being
+//!   destroyed).
+//!
+//! Firing inline keeps the callback obligation total — no path drops it — but it
+//! means a caller must not hold a lock across `..._async(...)` and re-acquire it
+//! in the callback, and must publish anything the callback needs (including
+//! `user_data`) *before* the submit rather than after it.
 //!
 //! A flattened `kafka_admin_*Result_t` exposes `_count` / `_get_key(i)` /
 //! `_get_value(i)` / `_get_error(i)` / `_destroy`, so per-key data *and* per-key
@@ -490,7 +513,9 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// Closes the admin client asynchronously. See
 /// [`kafka_admin_AdminClient_close`].
 ///
-/// The callback fires exactly once, on the handle's dispatcher thread.
+/// The callback fires exactly once: normally on the handle's dispatcher thread,
+/// but **synchronously on the calling thread** if `admin` is NULL (see the
+/// module-level *Callback thread* section).
 ///
 /// # Safety
 ///
@@ -524,8 +549,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
 // ---------------------------------------------------------------------------
 
 /// Async dispatch for a **void-returning** admin operation (currently only
-/// `close`). `op` runs on the runtime; the callback fires on the dispatcher
-/// thread.
+/// `close`). `op` runs on the runtime and the callback fires on the dispatcher
+/// thread — except for a NULL `admin`, which fires the callback inline on the
+/// calling thread (module docs, *Callback thread*).
 ///
 /// # Safety
 ///
@@ -596,6 +622,11 @@ impl SendUserData {
 /// error handle from the `Err`), and fires the typed C callback. Building the
 /// handle inside `complete` (never inside the task) keeps the task's future free
 /// of non-`Send` raw pointers.
+///
+/// Two paths never reach the dispatcher and run `complete` **inline on the
+/// calling thread** instead: a NULL `admin`, and a `submit` that returns `Err`
+/// (argument marshaling failed, so no RPC was issued and no task is spawned).
+/// See the module docs, *Callback thread*.
 ///
 /// # Safety
 ///
@@ -2263,7 +2294,9 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
 
 /// Creates topics asynchronously. See [`kafka_admin_AdminClient_create_topics`].
 ///
-/// The callback fires exactly once, on the handle's dispatcher thread.
+/// The callback fires exactly once: normally on the handle's dispatcher thread,
+/// but **synchronously on the calling thread** if `admin` is NULL (see the
+/// module-level *Callback thread* section).
 ///
 /// # Safety
 ///
@@ -2415,6 +2448,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 
 /// Deletes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics_by_ids`].
+///
+/// An unparseable or NULL id fires the callback with that error **synchronously,
+/// on the calling thread, before this function returns**, because the RPC is
+/// never submitted (module docs, *Callback thread*).
 ///
 /// # Safety
 ///
@@ -2647,6 +2684,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 
 /// Describes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics_by_ids`].
+///
+/// An unparseable or NULL id fires the callback with that error **synchronously,
+/// on the calling thread, before this function returns**, because the RPC is
+/// never submitted (module docs, *Callback thread*).
 ///
 /// # Safety
 ///
