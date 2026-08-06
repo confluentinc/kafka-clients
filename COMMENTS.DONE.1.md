@@ -677,3 +677,90 @@ never returned at all. Fixed to mirror Java, with two regression tests whose tee
 were verified by reverting the predicate.
 
 Commit `afeeff35` (tests), `21e9c3f0` (the bug it found).
+
+---
+
+# M11 bindings B0 + B1 (Critic round 2)
+
+## Issue: `close(timeout)` can overrun the hard-shutdown deadline by up to `request.timeout.ms` — the poll-timeout clamp to `curHardShutdownTimeMs` was never translated
+
+**Fixed** in `src/admin/internals/admin_client_runnable.rs` (`run_once`, phase 2).
+The Critic's diagnosis was exact: `hard_shutdown_deadline_ms` was read in one
+place only (`should_exit`), so nothing bounded the poll itself.
+
+Java (`KafkaAdminClient.java:1500-1502`, verified in the in-tree source):
+
+```java
+long pollTimeout = Math.min(1200000, timeoutProcessor.nextTimeoutMs());
+if (curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME) {
+    pollTimeout = Math.min(pollTimeout, curHardShutdownTimeMs - now);
+}
+```
+
+The Rust translation now sits at the same point in the phase order — immediately
+after the timeout-processor minimum (`handle_timeouts`) and before the
+node-assignment / metadata / send phases, all of which only ever lower the value
+with `.min`, so the clamp cannot be undone later:
+
+```rust
+let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
+if hard_shutdown_deadline_ms != NO_HARD_SHUTDOWN {
+    poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
+}
+```
+
+`saturating_sub` rather than Java's plain subtraction: `close()` with a negative
+(Java no-argument) timeout stores `i64::MAX` as the deadline, and saturating
+arithmetic keeps that unreachable-deadline case overflow-free for every value of
+`now`. For all reachable values the result is identical to Java's.
+
+**Test**: `close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline` in
+`src/admin/kafka_admin_client.rs`. It exercises `run_once`/`run` rather than the
+`should_exit` predicate, which is what the two round-1 shutdown tests could not
+reach:
+
+- an external `listTopics` call is driven until it is genuinely in flight
+  (`correlation_id_to_calls`), so `pending_calls` is empty and the
+  `retry_backoff_ms` floor does not apply — the Critic's reachable path;
+- `closing` + a hard deadline 100 ms out stand in for
+  `close(Duration::from_millis(100))`;
+- the client is a new test-only `WaitingClient` wrapper that records the timeout
+  each `poll` is handed and, once armed, advances the mock clock by it — i.e. it
+  behaves like a real `poll` that finds an idle socket and waits its whole
+  budget. `MockClient::poll` ignores its timeout, so without this the wait the
+  loop *would* have performed is unobservable. This mirrors Mockito's
+  `verify(client).poll(captor.capture(), anyLong())`; the same wrapper shape
+  already exists for the consumer (`CountingClient` in
+  `consumer/internals/consumer_network_thread.rs`), which is the DoD #7
+  justification for a struct with no Java counterpart.
+
+The test asserts both that every post-`close()` poll timeout is `<= 100` and
+that the loop advanced the clock by at most 100 ms before exiting. Teeth
+verified by deleting the clamp: it fails with
+`every poll after close() must be clamped to the remaining shutdown budget (100 ms), got [60000]`
+— i.e. the unclamped loop waits on the `default.api.timeout.ms`-derived call
+deadline (and in production on `NetworkClient`'s `request.timeout.ms` cap, 30 s).
+
+## Issue (LOW): the per-entry-point callback-thread docs drop the third case, while the module doc claims they restate it "in full"
+
+**Fixed** by taking the Critic's preferred option — adding the missing case to
+all 9 `_async` entry points, so the module-doc claim becomes true and C readers
+get the thread-affinity contract in the only place they read.
+
+Each of the 9 (`close`, `create_topics`, `delete_topics`,
+`delete_topics_by_ids`, `list_topics`, `describe_topics`,
+`describe_topics_by_ids`, `create_partitions`, `delete_records`) now restates all
+three cases: dispatcher thread, synchronously on the calling thread, **and** on a
+tokio worker thread when the dispatcher has already been torn down by the time
+the result arrives (reachable only during `kafka_admin_AdminClient_destroy`),
+with the consequence spelled out — callbacks are not guaranteed to be serialised
+on one thread. The wording is also now uniform across the 9 (the previous text
+had drifted into two line-wrapping variants); the two by-ids entry points keep
+their extra unparseable-id clause.
+
+Case 3 was re-verified before documenting it: `enqueue_or_run_inline`
+(`src/ffi/common.rs:241-245`) runs the job on the sending thread when
+`tx.send` fails, and that sender is the spawned tokio task.
+
+Verified in the **generated** header, not the source:
+`grep -c "tokio worker" target/include/confluent_kafka.h` → 9.
