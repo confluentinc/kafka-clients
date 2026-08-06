@@ -285,3 +285,4 @@
 - [Consumer FFI Phase F/G](consumer_ffi_phase_fg_notes.md) — no-broker wakeup pattern, unsupported_version = code 35, header typedef counting, make verify decomposition
 - [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — read_bytes_owned/BytesReader, BytesDeserializer slice_ref, BytesMut deviation, 0.11 allocs/record
 - [FFI callback bridging Phase 1](ffi_callback_bridging_phase1_notes.md) — branch base didn't build (2 merge breaks); deny(warnings) vs new pub(crate); no cmake/venv here
+- [FFI callback bridging Phase 2](ffi_callback_bridging_phase2_notes.md) — delivery callback can get BOTH metadata+error; Err drops callback unfired; callback FFI tested in C only
