@@ -243,6 +243,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // 2. Time out expired calls; base poll timeout.
         let mut poll_timeout = MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
 
+        // Once `close()` has been called, bound the poll by the time remaining
+        // to the hard-shutdown deadline, so the loop is guaranteed to reach
+        // `should_exit` no later than that deadline. Without this an in-flight
+        // external call keeps `should_exit` false while the poll itself waits on
+        // the (far larger) call deadline, and `close(timeout)` overruns by up to
+        // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1500-1502`.
+        let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
+        if hard_shutdown_deadline_ms != NO_HARD_SHUTDOWN {
+            poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
+        }
+
         // 3. Assign nodes to pending calls.
         poll_timeout = poll_timeout.min(self.maybe_drain_pending_calls(now));
 
