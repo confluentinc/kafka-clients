@@ -87,3 +87,5 @@
 - [Phase 7 MockProducer txn surface](phase7_mock_producer_notes.md) — reentrant-Java-monitor → inner-type body split
 - [Phase 8 parity sweep](phase8_parity_sweep_notes.md) — MockClient RequestMatcher unlocked the 140-method sweep; blockage notes expire (re-verify)
 - [Phase 8 Critic patterns](phase8_critic_round1_patterns.md) — inert mock surface (check routing not signature); put structural sweeps in xtask not commit messages; paste taxonomies
+- [Guard-in-scrutinee deadlock](guard_in_scrutinee_deadlock.md) — Java's reentrant monitor hides this class; how to bound a Mutex-deadlock test (tokio::timeout cannot)
+- [doSend's ApiException/KafkaException split](java_exception_hierarchy_dosend_split.md) — bare KafkaException spelled UnknownServerError defeats is_api_exception(); carve out locally
