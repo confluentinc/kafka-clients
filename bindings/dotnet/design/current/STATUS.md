@@ -7,6 +7,71 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 1 — "Consumer sync read surface (`Assignment` / `Subscription` /
+  `Paused` / `EnforceRebalance`)": DONE (2026-08-06).** The four sync members CLAUDE.md §4
+  names in its "stays sync" list that were still unshipped — the Category A sync state
+  getters + Category H `enforce_rebalance`. **Mode A (no Rust authored):** all four ABI
+  functions and both list types (`TopicPartitionList_t` / `StringList_t`) already ship in
+  the generated header; no ABI change, no new op semantics. M5 opened as a **new
+  milestone** for completing the consumer surface (the earlier tentative "M5 = sync
+  `IConsumer` facade" reservation moves to a later milestone; this milestone grows the
+  **async** surface via `IConsumerCommon`). Delivered:
+  - **`NativeMethods`**: four `[DllImport]`s (`Consumer_assignment` / `_subscription` /
+    `_paused` / `_enforce_rebalance`) + the `TopicPartitionList_t` / `StringList_t`
+    accessors (`_count` / `_get` / `_destroy`) + `TopicPartition_topic` / `_partition`
+    (borrowed elements, never freed — only the list root is destroyed). No new callback
+    delegates, no `[MarshalAs]` (all sync, no `bool` returns).
+  - **Two copy-out marshallers** (`Internal/Interop/TopicPartitionListMarshal`,
+    `StringListMarshal`), mirroring the shipped `ConsumerGroupMetadataMarshal`: read every
+    element out (NUL-terminated `Utf8Marshal.PtrToString(ptr)`, §B3 — **not** the
+    length-delimited receive-path form), then `_destroy` the root in a `finally`. Both are
+    Category-3 owned borrow-roots whose elements are Category-4 borrowed views (copy-out
+    before destroy, §B2). **No new `SafeHandle`** — transient, caller-thread, fully
+    consumed in one sync call (the `ConsumerGroupMetadataMarshal` read-and-free pattern,
+    not the long-lived handle pattern). No `unsafe`.
+  - **`NativeConsumer`** gains `Assignment()` / `Subscription()` / `Paused()` (concurrent
+    null-handle → `InvalidOperationException` via a **shared `ThrowIfConcurrentNull`**
+    helper — `GetGroupMetadataHandleOrThrow` was refactored to reuse it, so all five sync
+    reads share exactly one concurrency contract) and `EnforceRebalance(string?)` (pins
+    `reason` call-scoped or `IntPtr.Zero`; `FromHandle` throw-iff-non-null discipline).
+  - **`IConsumerCommon`** gains the four members; `AsyncKafkaConsumer` +
+    `AsyncMockConsumer` forward. The three getters are plain `()` **methods** returning
+    `IReadOnlyCollection<T>`, and `EnforceRebalance` is a method with `string? reason =
+    null`.
+  - **`enforceRebalance` is a KIP-848 logged no-op that returns success** (SOURCE-VERIFIED:
+    Java `AsyncKafkaConsumer.enforceRebalance` throws nothing; Rust core
+    `enforce_rebalance` returns `Ok(())`; the FFI `sync_void_op` returns a null error
+    handle). `EnforceRebalance` therefore never throws a `KafkaException` on that path —
+    the still-present `FromHandle` check is the uniform sync-op discipline reserving a real
+    error for a future classic-protocol arm. ⚠ The header's `enforce_rebalance` doc
+    ("returns an unsupported-version error") is **stale** — flagged as a separate
+    **Rust-core doc-fix dependency**, not acted on in this C#-only phase; the mapping
+    follows the actual behavior.
+  - **Deviations (recorded, COMMENTS.DONE.10):** (a) the four members on `IConsumerCommon`
+    rather than the literal §3-sketch `IAsyncConsumer` placement (consistent with M4/P4b's
+    `Wakeup`/`GroupMetadata` move); (b) the three getters as **methods, not properties**
+    (reverses the §3 sketch's property form, on FDG "throws / does work /
+    fresh-collection-per-call → method" + the shipped `GroupMetadata()` precedent +
+    Java/Python parity); (c) `EnforceRebalance` as one method collapsing Java's two
+    overloads; (d) the stale ABI doc raised as a Rust-core dependency; (e) the D-Q4-style
+    non-deterministic-concurrency + non-empty-`Paused` reachability limits (both recorded,
+    not silently skipped).
+  - **Tests:** new `Interop/ConsumerSyncReadTests.cs` — the full §7 list broker-free via
+    `AsyncMockConsumer` (getter round-trips as **sets**, non-ASCII through both
+    marshallers, post-dispose `ObjectDisposedException` on all four, `EnforceRebalance`
+    no-throw incl. non-ASCII reason, allocation sanity net8.0+). Concurrent-null → IOE
+    verified by the reachable free-guard seam + code inspection of `ThrowIfConcurrentNull`
+    (D-Q4 non-determinism ceiling). **122 → 141 tests**, all green across ≥4 full net10.0
+    runs; serial execution (D8.8) unchanged; every awaited op under a `TestTimeout` guard.
+    Discovery: the core rejects `Assign` + `Subscribe` together (mutually exclusive).
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all
+    library TFMs (netstandard2.0 / net8.0 / net10.0) + all test TFMs (net462 / net8.0 /
+    net10.0) → net10.0 tests green (net8.0 *run* + net462 are CI/Windows-only; all three
+    *build* legs pass locally) → `dotnet format --verify-no-changes` clean. CS1591 on every
+    new public member; Apache-2.0 header on the two new files; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P1-consumer-sync-read-surface/`.
+    Commits on the new branch `prashah_dev_public_consumer_remaining` (post-M4 consumer
+    work), as a new PR for M5/P1. N=10.
 - **Milestone 4 / Phase 4b — "Async-surface rename (`IAsyncConsumer`, drop the `Async`
   suffix, `WithCallback`)": DONE (2026-08-05).** A pure C# rename of M4/P4a's async
   surface into its final shape — **no ABI change (Mode A), no Rust authored, no new

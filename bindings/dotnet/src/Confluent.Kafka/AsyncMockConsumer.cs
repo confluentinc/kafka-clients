@@ -78,6 +78,18 @@ public sealed class AsyncMockConsumer : IAsyncConsumer
     /// <inheritdoc/>
     public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
 
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<string> Subscription() => _native.Subscription();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+
     /// <summary>
     /// Assigns the mock consumer to the given topic-partitions (mock-only helper). A
     /// partition must be assigned before <see cref="AddRecord"/> can queue a record on
