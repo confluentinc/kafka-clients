@@ -910,3 +910,375 @@ Suggested addition to `definition-of-done.md` §3, as a fifth bullet:
 That turns a per-block convention into a repo-wide one, makes the sweep's population
 derivable rather than chosen, and would have caught six of this phase's nine deviations
 mechanically.
+
+
+---
+
+# =========================================================================
+# Critic 48 pass 2 — three findings, all resolved
+# =========================================================================
+
+Loop: 11 → 3 → (pass 3 pending). **Three conceded, none disputed.** Each was re-derived
+from the sources before the finding was accepted; all three derivations agreed with the
+Critic.
+
+Also actioned, from the Critic's housekeeping note: `COMMENTS.48.md` is now **truncated to
+0 bytes** rather than deleted, matching all seven sibling `COMMENTS.4x.md` placeholders. The
+pass-1 close deleted it, which would have errored a Manager loop that reads the path to test
+emptiness.
+
+Adjudications recorded in the Critic's favour this pass, for the record: pass-1 item 2's
+fork-the-container reasoning was confirmed against `cluster_pool::get_or_create`'s keying,
+and item 5's rounded-counts deviation was ruled in the Actor's favour with the general rule
+minted — **ask for exactness only where the number cannot be re-derived.**
+
+# Critic 48 — Milestone 11 Phase 8, pass 2 (`8356e80..HEAD`)
+
+Review of the eleven fixes across `a49d060`, `fe253e0`, `1bdd846` (+ four memory commits).
+**Nine of eleven fixes are clean.** Three findings, all in the fixes' own records — two of
+them created by this round, which is the milestone's signature shape one last time.
+
+Loop: 11 → 3.
+
+*(Housekeeping: `1bdd846` **deleted** `COMMENTS.48.md` rather than truncating it, where all
+seven sibling `COMMENTS.4x.md` files exist as 0-byte placeholders. Recreated by this file.
+Not filed — but a Manager loop that reads the file to test emptiness would have errored on a
+missing path.)*
+
+## Reproduced before filing
+
+  - **The widened header sweep, re-implemented independently:** `{'SenderTest': 52,
+    'TransactionManagerTest': 50}`, **total 102, 0 mismatches**. All nine deviations fixed,
+    including the cross-method `1932-1976 → 1932-1970`, and the three pre-existing
+    start-line slips corrected to the true declarations 749 / 3601 / 3726.
+  - **All 16 `MockClient.java` citations** in `mock_client.rs` printed beside the lines they
+    land on: all 16 correct (`:623-625` `interface RequestMatcher`, `:196-198` /
+    `:200-218` the two `disconnect` overloads, `:382-392` `respond(RequestMatcher, ..)`,
+    `:384-385` / `:388-389` its two throws, `:445-447` / `:472-474` the two matcher
+    `prepareResponse`s, `:259` the unconditional build, `:49` / `:432` / `:458`
+    `ALWAYS_TRUE`, plus the pre-existing `:74` / `:145-147` / `:346-348`).
+  - **The attribute-strip sweep** (doc line → one or more `#[..]` lines → doc line) over
+    every `.rs` under `src/`: **0 suspects**, matching the claim. `current_state` has its
+    doc and `#[cfg(test)]` back, `close_call_count` follows it with one gate each.
+  - **`status.md`'s re-derivation command run verbatim:** common 148/47 649, consumer
+    64/64 531, producer 23/42 203, ffi 4/7 757, root 22/14 255, total 263/176 604 — every
+    rounded figure in the table is the correct nearest hundred, and `structure.md` agrees.
+  - **Issue 1's mechanism, from the routing code:** `pending_produce_responses` has exactly
+    one insert (`sender.rs:2346`, at send) and exactly one removal (`:906`, keyed on the
+    response's correlation id); `fail_expired_batches(expired_inflight_batches, now,
+    **false**)` (`:1610`) yields `retain = true` and pushes the batch to
+    `batches_awaiting_response` (`:1657`) **without** touching the routing map. So the
+    expiry really does leave the entry intact and the late `INVALID_TXN_STATE` really is
+    routed into `handle_produce_response` for a done batch. The mutation claim is airtight
+    in both halves: with one removal site keyed on a response, deleting the response leaves
+    `pending_produce_responses` at 1 (assertion 1 fails), while the previous revision's
+    retaining disconnect pushed a `ClientResponse` carrying the *same* correlation id, so
+    that assertion would have passed without the late response. `batches_awaiting_response`
+    likewise drains only there — its other drain (`:701`) is in `run`'s shutdown tail,
+    unreachable from the test's `run_once` calls.
+  - **Issue 2's three named unit tests exist and cover what is claimed** — each keeps one
+    manager across the bump, which is what makes the reset observable:
+    `test_out_of_order_sequence_is_retried_and_bumps_the_epoch` (epoch 1→2,
+    `first_in_flight_sequence == 0`, and the re-drained batch's own `producer_epoch() == 2`
+    / `base_sequence() == 0`), `test_bump_transactional_epoch_on_unknown_producer_id_error`
+    (`sequence_number(&tp0) == 0` after the bump),
+    `transaction_manager.rs::test_producer_id_reset` (tp0 3→0, tp1 untouched).
+  - **Issue 2's restructuring reasoning holds.** `cluster_pool::get_or_create` keys on
+    `config.clone()` — the whole `ClusterConfig` including `server_properties` — so adding a
+    `transaction.version` feature level really would mint a second container and fork this
+    suite off the `PlaintextConsumer*` pool. **Ruled in the Actor's favour.**
+  - Gates: `cargo xtask format-check` ✅, `cargo xtask lint` ✅, `cargo test` 2 666 passing /
+    3 `#[ignore]`d.
+  - Item 3 verified in all its places: the any-abort scope in the module docstring, §9.27
+    and the `01-fetch-path.md` addendum (and `fe253e0`'s message explicitly supersedes the
+    immutable `c37f0f3` one — the right handling of an artifact that cannot be edited);
+    §9.25's dropped-batch/hanging-futures/leaked-buffer upgrade in both the PLAN and the
+    call-site comment; §9.19's amendment, whose "four blocked" header and "3 are blocked
+    below" summary are explicitly reconciled ("`testTransactionalSplitBatchAndSend` plus the
+    three below") and whose 33 + 18 + 3 = 54, 54 − 2 = 52 now closes.
+
+## Item 5 — adjudicated in the Actor's favour, no finding
+
+Issue 11.1's "Expected" was the exact `47 649`; the Actor rounded every line figure to the
+nearest hundred instead, kept file counts exact, and shipped the `find | wc -l` command that
+re-derives them.
+
+**That is better than what I asked for, and it is the convention that should win here.** My
+finding's substance was that the table asserted something false; the fix makes it true *and*
+removes the property that made it go false twice inside one phase. It is the same move I have
+endorsed since Phase 4 pass 3 — answer an accounting finding with a derivation rather than a
+patched number, and the review of the artifact becomes running its command. The rounding is
+marked with `~` and explained at the site, file counts stay exact because they do not churn,
+`structure.md` already rounded so the two files now agree, and the one exact figure in the
+narrative (`15 894 → ~42 200`) correctly keeps its frozen left-hand side. I re-ran the shipped
+command and every rounded value is right.
+
+The general rule I would draw, for the record: **ask for exactness only where the number
+cannot be re-derived.** Where a derivation can be shipped, ship it and round the display.
+
+---
+
+## Issue 12: the fix for Issue 1 left `disconnect_by_id` with two stacked doc blocks
+
+- **File**: `src/mock_client.rs:287-292`
+- **Severity**: Bug (doc-hygiene, same class as Issue 8 — created by Issue 8's own round)
+- **Java Reference**: `MockClient.java:196-198`
+
+**Description.** Removing the inert overload deleted `disconnect_by_id`'s body and moved the
+`pub fn` to the end of the rewritten doc block, but left the *old* doc block in place above
+it. The item now carries two summaries and two `Translated from` lines:
+
+    /// Disconnect a node by ID string, creating disconnect responses for all
+    /// pending requests to that node.
+    ///
+    /// Translated from `MockClient.disconnect(String)`.
+    /// Disconnects `node_id`, failing its in-flight requests.
+    ///
+    /// Translated from `MockClient.disconnect(String)` (`MockClient.java:196-198`), which
+    /// delegates to the two-argument overload with `allowLateResponses = false`.
+
+There is no `///` separator between lines 291 and 292, so rustdoc renders them as one
+paragraph: "Translated from `MockClient.disconnect(String)`. Disconnects `node_id`, failing
+its in-flight requests."
+
+This is exactly Issue 8's failure mode — an item's doc left behind when the item around it
+moved — and it is the second time in this phase that the *fix for* a doc-hygiene finding
+introduced one. Worth stating precisely because the round also shipped a crate-wide sweep
+for this family: the sweep's shape is *doc line → one or more `#[..]` lines → doc line*,
+which reproduces **0 suspects** (I ran it) and structurally cannot see a doc block stacked
+directly on another with no attribute between. A sweep for the shape that *did* occur —
+contiguous `///` blocks containing two or more `Translated from` openers — returns exactly
+one hit across all of `src/`: `src/mock_client.rs:288`.
+
+**Expected.** One doc block: the new summary, one `Translated from` with the citation, then
+the `# Why the allowLateResponses overload is not translated` section. And, since the round
+shipped a sweep for this family, widen it to catch a doc block appended to a doc block —
+that is the shape it missed, and it missed the one instance that existed.
+
+**Actual.** Two summaries and two `Translated from` lines on one item, the second pair
+running on from the first.
+
+
+**Resolution — conceded; blocks merged, and the sweep is now an xtask that catches both
+shapes.**
+
+Confirmed exactly as filed: two summaries, two `Translated from` lines, no `///` separator.
+Merged into one block — one summary, one `Translated from` with the citation, then the
+`# Why the allowLateResponses overload is not translated` section.
+
+On the sweep, the finding's diagnosis is the important half: the shipped shape (doc →
+attributes → doc) **structurally cannot** see a doc block stacked directly on another, and
+it missed the one instance that existed. So rather than extend an ad-hoc script, both shapes
+now live in **`cargo xtask doc-hygiene`**, which `cargo xtask lint` runs first — CLAUDE.md §6
+puts repeatable checks in xtask rather than shell scripts, and a check nobody is obliged to
+run is a check that finds the next instance one review round late. Which was chosen, as
+asked: a sibling shape inside one new durable command, wired into the existing gate.
+
+  - Shape 1 (migrated attribute/doc): `///` line → one or more `#[..]` lines → `///` line.
+  - Shape 2 (stacked doc): one contiguous `///` run carrying two or more `Translated from`
+    openers.
+
+**Both mutation-checked.** Restoring the stacked block reports
+`src/mock_client.rs:288 one doc block carries 2 'Translated from' openers`; re-migrating
+`close_call_count` into `current_state`'s attribute list reports
+`src/producer/internals/transaction_manager.rs:1961 doc comment separated from its item by an
+attribute list`. Exit codes measured without pipes: **1** mutated, **0** restored, and
+`cargo xtask lint` **0**.
+
+---
+
+## Issue 13: the corrected header-sweep bullet mis-classifies `testFailedInflightBatchAfterEpochBump` twice
+
+- **File**: `src/producer/internals/sender.rs` (the header-sweep bullet, ~7643-7650)
+- **Severity**: Missing Requirement (record — the bullet is the lesson, and its taxonomy is wrong)
+- **Java Reference**: `TransactionManagerTest.java:3724-3727`, `:3809-3816`
+
+**Description.** The rewritten bullet classifies the nine fixed deviations:
+
+> Eight of the nine were ±1 or ±2 at one end. `testMultipleAddPartitionsPerForOneProduce`
+> was not: cited `1932-1976`, it ran six lines past its own closing brace at 1970 […]
+> Three were pre-existing start-line slips citing the `@ParameterizedTest` / `@ValueSource`
+> annotation rather than the declaration […]
+
+Both sentences are wrong about the same entry, `testFailedInflightBatchAfterEpochBump`,
+which was cited `(Java 3727-3810)` against a true `3726-3816`:
+
+1. **It was not "±1 or ±2 at one end".** It was off at *both* ends, and the end was off by
+   **six** — 3810 is `Errors.NONE, 500L, b1AppendTime, 0L);`, mid-body, five lines before
+   the method's last statement. So the count is **seven** of the nine in that class, and
+   there were **two** large-deviation entries, not one. The other is arguably the worse of
+   the pair to have omitted: `testMultipleAddPartitionsPerForOneProduce`'s over-run at least
+   landed in a neighbouring method's annotations, whereas this one truncated its own method
+   by six lines while also starting one line late.
+2. **It did not cite an annotation.** `TransactionManagerTest.java:3724` is
+   `@ParameterizedTest`, `:3725` is `@ValueSource(booleans = {true, false})`, `:3726` is the
+   declaration and `:3727` is `// Use a custom Sender to allow multiple inflight requests`
+   — the first *body* line. So of the three pre-existing start-line slips only **two**
+   (`testDuplicateSequenceAfterProducerReset` 748 → 749,
+   `testHealthyPartitionRetriesDuringEpochBump` 3599 → 3601) cited an annotation; this one
+   started one line *inside* the body.
+
+The fixes themselves are all correct — the sweep reproduces 102/0 and the corrected values
+749 / 3601 / 3726 are the true declarations. What is wrong is the taxonomy written beside
+them, which is the part a future sweeper reads to know what shapes to expect. Its effect is
+to halve the large-deviation class and to make every pre-existing slip look like an
+annotation-line habit, when one of them was a body-line slip that only a both-ends check
+finds — which is the bullet's own stated rule.
+
+Same shape as pass 1's Issue 10, in the same bullet: the corrections land, the sentence
+generalising them does not.
+
+**Expected.** "Seven of the nine were ±1 or ±2 at one end" plus both exceptions named
+(`testMultipleAddPartitionsPerForOneProduce` `1932-1976`, six lines into the next method's
+`@EnumSource`; `testFailedInflightBatchAfterEpochBump` `3727-3810`, one line into its own
+body and six lines short of its closing brace), and "two of the three pre-existing
+start-line slips cited the annotation; the third cited the first body line".
+
+**Actual.** Eight/one and three/three.
+
+
+**Resolution — conceded; the bullet is replaced by pasted derivation output rather than
+patched prose.**
+
+Re-derived all nine rows myself before accepting the finding, reading each cited value from
+the pre-fix state and each true value from the Java file, and classifying what the *cited*
+line actually holds. The result matches the finding exactly:
+
+    testFailedInflightBatchAfterEpochBump  cited 3727-3810  true 3726-3816
+        start +1 (body comment); end -6 (body statement)
+
+So it was wrong at both ends, the end by six and mid-body, and 3727 is
+`// Use a custom Sender to allow multiple inflight requests` — a body comment, not an
+annotation. The class is **seven** of nine at a single end, with **two** large deviations, and
+**two** of the three pre-existing start-line slips cited an annotation while the third cited
+the first body line.
+
+The bullet now carries the nine-row table as pasted output, with `Δstart`/`Δend` and what the
+cited line holds, followed by the two exceptions named individually. That is the fix the
+coordinator asked for — re-derive every row rather than patch the named one — and it also
+removes the failure mode: this taxonomy was written wrong twice, once per round (pass-1 Issue
+10, pass-2 Issue 13), both times as prose beside correct corrections. Derivation output cannot
+drift from the thing it describes.
+
+Verified: the widened sweep still reports 102 headers (52 + 50), 0 mismatches; `sender.rs`
+tests exit 0.
+
+---
+
+## Issue 14: PLAN §9.28's appeal to CLAUDE.md §11 misapplies the rule it cites
+
+- **File**: `design/history/Milestone-11/PLAN.md` §9.28, final paragraph
+- **Severity**: Missing Requirement (record — the justification for a design conclusion a later phase would act on)
+- **Java Reference**: `Sender.java` `sendProduceRequest`; CLAUDE.md §11
+
+**Description.** The framing the coordinator asked me to adjudicate — "recording a
+consequence rather than proposing to reverse it" — is **accurate and the right call**, and
+§9.28 is otherwise the best of the three new sections: the Java mechanism, the false claim it
+replaces, the reason the port cannot reproduce it, and the substitute test's four assertions
+are all correct as written. One sentence is not:
+
+> the faithful fix is not the overload but the routing: threading a per-request completion
+> handler through the produce path the way Java does. That is a send/receive-path change and
+> **CLAUDE.md §11 warns against per-message callbacks on the hot path**, so the current
+> design is very likely the right one […]
+
+Two problems, and they compound:
+
+1. **§11 states no such rule.** Its four bullets are `Arc<str>` for identifiers cloned per
+   message, atomics over `Mutex<i64>`, no `Pin<Box<dyn Future>>` per call on hot paths, and
+   no per-message `tokio::spawn` on the send path. None is about completion callbacks.
+2. **§11's own scope note excludes the granularity being dismissed.** The rule's **"Hot
+   path" definition** reads: "per-record / per-message dispatch (send-path record build,
+   batch drain, deserialize/serialize, wire framing). This does **not** include per-RPC or
+   per-batch top-level API surfaces […] there, one `Pin<Box<dyn Future>>` per call is
+   amortized over many records and is negligible." A `RequestCompletionHandler` on the
+   produce path is **one per produce request**, covering every batch in it across every
+   partition — per-RPC by construction, which is precisely what §11 carves out. The sentence
+   also calls it a "per-message callback", which mis-states the alternative it is rejecting.
+
+So the conclusion ("the current design is very likely the right one") is asserted on a rule
+that does not reach it. The conclusion is probably still right — but for a reason this port
+already documents, three times, in the file §9.28 is about: **a Rust
+`RequestCompletionHandler` cannot capture `&mut self`** (`sender.rs:182`, `:348`, `:374`).
+That is a structural obstacle, not a performance budget, and it is why
+`pending_produce_responses` exists at all.
+
+This matters because §9.28 is what a later phase reads before deciding whether to touch the
+routing. As written it says "a rule forbids it", so the real trade-off — an ownership problem
+with known workarounds, against Java fidelity — never gets weighed. Same family as Phase 4
+lesson 13 and Phase 6 §5: a justification that proves a different claim than the one it
+states, in a section that will be cited.
+
+**Expected.** Drop the §11 appeal, or scope it correctly (§11 explicitly exempts per-RPC
+surfaces, so it does not bear on this). State the actual obstacle — a Rust completion handler
+cannot capture `&mut self`, which is why produce responses are processed after `poll()`
+returns — and note that this makes the current design a consequence of Rust's ownership
+model rather than of a performance rule, which is a stronger reason not to reverse it.
+
+**Actual.** The conclusion rests on a rule whose stated scope excludes the case, and
+describes a per-RPC handler as a per-message callback.
+
+
+**Resolution — conceded; the rationale is moved to the ownership ground with the three
+citations.**
+
+Both problems verified against the sources before accepting. CLAUDE.md §11's four bullets are
+`Arc<str>` for per-message identifiers, atomics over `Mutex<i64>`, no `Pin<Box<dyn Future>>`
+per call on hot paths, and no per-message `tokio::spawn` — none about completion callbacks.
+And §11's "Hot path" definition reads, verbatim: "This does **not** include per-RPC or
+per-batch top-level API surfaces". A `RequestCompletionHandler` is one per produce *request*,
+covering every batch across every partition in it — per-RPC, exactly the carve-out. So the
+appeal did not reach the case, and "per-message callback" mis-described the alternative.
+
+The three ownership citations were each read and are each on point: `sender.rs:182`
+(`PendingProduceRequest`'s doc — "because `handleProduceResponse` needs `&mut self`, we cannot
+capture `self` inside the callback … process responses after `client.poll()` returns", citing
+CLAUDE.md §9 as the sanctioned translation), `:348` (the same for the transactional handler
+Java attaches at `Sender.java:504-505`), `:374` (why `batches_awaiting_response` must be an
+explicit field — the field Phase 8's re-translated test now asserts on).
+
+§9.28's closing paragraph now states that the obstacle is structural, quotes and withdraws the
+§11 claim in place, gives the three citations, and frames the trade-off a later phase would
+actually weigh: an ownership limit with known but invasive workarounds (interior mutability
+over the Sender's state, or a channel from the handler back into the loop) against Java
+fidelity in one test. The coordinator's point stands — that is a stronger reason than the
+mis-cited budget, and it is now the reason on record.
+
+The one other §11 citation in the PLAN (§10.6's per-record `Arc<str>` rebuild) was checked and
+is a correct appeal to §11's actual first bullet.
+
+---
+
+# Not findings — checked and cleared this pass
+
+  - **The "twice" framing.** `# The "twice", and how it is reached here` could be read as
+    promising the doubling is reproduced; the body says the opposite in its third sentence
+    ("That mechanism does not port") and the property under test is stated first. Java's own
+    sequence is expiry-fails-the-batch (in `sendProducerData`) then *two* response
+    handlings (disconnect, then late); the port has expiry plus *one*. Documented as a
+    mechanism divergence in three places (test rustdoc, accounting entry, §9.28) and the
+    property Java pins is preserved. Accepted.
+  - **"whose purpose there is to stop the Sender sending anything new".** Under-states the
+    dropped `disconnect`'s other role — it is also what produces Java's first delivery — but
+    the immediately preceding clause says the batch is failed by expiry "instead of by a
+    disconnect delivery", so the sentence is about the residual purpose. Marginal; not filed.
+  - **`transaction.version` finalized at 2 ⇒ "every `EndTxn` returns a bumped epoch"** —
+    correct for KIP-890 part 2, and consistent with
+    `test_epoch_update_after_bump_from_end_txn_response_in_v2`. Not load-bearing for the
+    decision either way.
+  - **§9.19's two counts** ("four blocked entries" in the status line, "3 are blocked below"
+    in the summary) are reconciled in the text and the Phase-4-era numbers are flagged as
+    superseded by the `sender.rs` block, with the earlier 32/2 slip named. Internally
+    consistent.
+  - **`plain_producer`** extraction is a genuine de-duplication (it replaced the inline
+    seeder in the consume-transform-produce test) and the seeded record's three knock-on
+    expectation changes are all updated (`before == ["seed"]`, `uncommitted` 3 → 4 with
+    `"seed"` first, and the post-commit read unchanged because the seed was already
+    consumed).
+  - **`1bdd846`'s grouping disclosure** — issues 7/9/10's diffs landed in `a49d060` whose
+    message covers 1/5/6/8, stated rather than left to be noticed, with the reason
+    (splitting one file's rewrite would have left neither commit building). Correct call and
+    correctly disclosed.
+
+*(The DoD §3 fifth-bullet suggestion from pass 1 is with the coordinator and is deliberately
+not re-filed.)*

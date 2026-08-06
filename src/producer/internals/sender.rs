@@ -7643,12 +7643,39 @@ mod tests {
     //     ask what M excludes. All nine are corrected; the alternation is what keeps them
     //     corrected.
     //
-    //     Eight of the nine were ±1 or ±2 at one end.
-    //     `testMultipleAddPartitionsPerForOneProduce` was not: cited `1932-1976`, it ran six
-    //     lines past its own closing brace at 1970 and into `testRetriableErrors`'s
-    //     `@EnumSource` list, i.e. it spanned two methods. Three were pre-existing start-line
-    //     slips citing the `@ParameterizedTest` / `@ValueSource` annotation rather than the
-    //     declaration — the shape Critic 46 pass 2 found, now caught mechanically.
+    //     The nine, classified by re-deriving each end against the Java file rather than
+    //     described in prose — because the prose form of this taxonomy was wrong twice, once
+    //     per review round (Critic 48 issues 10 and 13). `Δstart` / `Δend` are cited minus
+    //     true, and the parenthesis is what the *cited* line actually holds:
+    //
+    //       testDuplicateSequenceAfterProducerReset            748-810   749-810   start -1 (annotation)
+    //       testHealthyPartitionRetriesDuringEpochBump         3599-3692 3601-3692 start -2 (annotation)
+    //       testSenderShutdownWithPendingTransactions          228-247   228-246   end   +1 (body statement)
+    //       testFatalErrorWhenProduceResponse..InvalidPidMapping 1435-1449 1435-1448 end +1 (body statement)
+    //       testSendOffsetWithGroupMetadataFailAsAutoDowngrade.. 2666-2681 2666-2682 end -1 (body statement)
+    //       testTransitionToFatalErrorWhenRetriedBatchIsExpired 2979-3037 2979-3036 end +1 (body statement)
+    //       testBumpTransactionalEpochOnRecoverableAddOffsets.. 3567-3598 3567-3597 end +1 (body statement)
+    //       testMultipleAddPartitionsPerForOneProduce          1932-1976 1932-1970 end   +6 (body statement)
+    //       testFailedInflightBatchAfterEpochBump              3727-3810 3726-3816 start +1 (body comment),
+    //                                                                              end  -6 (body statement)
+    //
+    //     So **seven** of the nine were ±1 or ±2 at a single end, and **two** were large:
+    //
+    //       - `testMultipleAddPartitionsPerForOneProduce` over-ran by six lines past its own
+    //         closing brace at 1970, into `testRetriableErrors`'s `@EnumSource` list — it
+    //         spanned two methods.
+    //       - `testFailedInflightBatchAfterEpochBump` was wrong at **both** ends: it started
+    //         one line *inside* its own body (3727 is `// Use a custom Sender to allow
+    //         multiple inflight requests`, not an annotation) and ended six lines short of
+    //         its closing brace, mid-body. Only a both-ends check finds it, which is this
+    //         bullet's own stated rule applied to itself.
+    //
+    //     And of the three pre-existing start-line slips, **two** cited the
+    //     `@ParameterizedTest` / `@ValueSource` annotation (the shape Critic 46 pass 2
+    //     found); the third is the body-comment start above. An earlier revision of this
+    //     bullet said "eight of the nine" and "three … citing the annotation", i.e. it
+    //     halved the large-deviation class and made every pre-existing slip look like an
+    //     annotation habit. The table is pasted derivation output so it cannot drift again.
     //
     //     Re-running the sweep is not ceremony on the `SenderTest` side either: it caught two
     //     of Phase 8's own ranges off by one at the *end*

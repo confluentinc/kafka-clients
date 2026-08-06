@@ -2550,10 +2550,41 @@ they drain only by it being handled. Mutation-checked: deleting the response fai
 assertion, where the previous (inert) revision still passed.
 
 **If this is ever revisited**, the faithful fix is not the overload but the routing:
-threading a per-request completion handler through the produce path the way Java does. That
-is a send/receive-path change and CLAUDE.md §11 warns against per-message callbacks on the
-hot path, so the current design is very likely the right one and this entry exists to record
-the consequence rather than to propose reversing it.
+threading a per-request completion handler through the produce path the way Java does.
+
+**The obstacle is ownership, not a performance budget.** An earlier revision of this
+paragraph said "CLAUDE.md §11 warns against per-message callbacks on the hot path", and that
+was wrong twice over (Critic 48 issue 14). §11 states no rule about completion callbacks at
+all — its four bullets are `Arc<str>` for per-message identifiers, atomics over
+`Mutex<i64>`, no `Pin<Box<dyn Future>>` per call on hot paths, and no per-message
+`tokio::spawn` on the send path. And §11's own **"Hot path" definition** explicitly *excludes*
+the granularity being dismissed: "This does **not** include per-RPC or per-batch top-level API
+surfaces". A `RequestCompletionHandler` is **one per produce request**, covering every batch
+in it across every partition — per-RPC by construction, i.e. precisely what §11 carves out.
+Calling it a "per-message callback" mis-described the alternative being rejected.
+
+The real constraint is structural, and this port documents it three times in the very file
+§9.28 is about: **a Rust `RequestCompletionHandler` cannot capture `&mut self`.**
+
+  - `sender.rs:182` (`PendingProduceRequest`'s own doc): "In Java, this data is captured in
+    the `RequestCompletionHandler` callback closure. In Rust, because
+    `handleProduceResponse` needs `&mut self`, we cannot capture `self` inside the callback.
+    Instead, we store the topic-partition set and topic names here and process responses
+    after `client.poll()` returns" — and it cites CLAUDE.md §9 as the sanctioned translation
+    of a callback into code that runs after the await.
+  - `sender.rs:348`: the same reasoning for the *transactional* handler, which Java attaches
+    to the `ClientRequest` at `Sender.java:504-505`.
+  - `sender.rs:374`: why `batches_awaiting_response` must be an explicit field rather than a
+    closure capture — the same ownership limit, and the field that Phase 8's re-translated
+    test now asserts on.
+
+So `pending_produce_responses` exists *because* of the ownership model, not as a performance
+optimisation, and the double delivery is unreachable as a consequence of that. That is a
+stronger reason not to reverse the design than the mis-cited budget was — an ownership
+obstacle with known but invasive workarounds (interior mutability over the Sender's state, or
+a channel from the handler back into the loop), weighed against Java fidelity in one test.
+This entry records the consequence rather than proposing the reversal, but a later phase
+weighing it should weigh *that* trade-off.
 
 ---
 
