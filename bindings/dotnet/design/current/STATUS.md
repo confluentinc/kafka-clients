@@ -7,6 +7,336 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 4 — "Consumer offset-map query siblings" (Category E1): DONE
+  (2026-08-06).** The four async offset-map queries on `IAsyncConsumer` — `Committed`
+  (`IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>`), `OffsetsForTimes`
+  (`…, OffsetAndTimestamp>`, the one **map-input** query), `BeginningOffsets` / `EndOffsets`
+  (`…, long>`) — plus the two new public value types `OffsetAndMetadata` /
+  `OffsetAndTimestamp`. **Mode A (no Rust authored):** all four `_async` fns + their three
+  container types (`OffsetMap_t` / `OffsetAndTimestampMap_t` / `LongOffsetMap_t`) + accessors
+  + the two value types + the three callbacks already ship; no ABI change. The owned-handle
+  **map** copy-out bridge (the `OnPoll` template, cloned once per container type). Delivered:
+  - **Two public value types** (`Confluent.Kafka` root, `sealed class`, getter-props, full
+    XML docs, the `ConsumerGroupMetadata` precedent): `OffsetAndMetadata { long Offset; string
+    Metadata (non-null, "" = unset); int? LeaderEpoch }` and `OffsetAndTimestamp { long Offset;
+    long Timestamp; int? LeaderEpoch }`. **`LeaderEpoch` maps the ABI presence-flag** (an `I1`
+    `bool` return + `out int32`) → `int?` (false ⇒ null, true ⇒ epoch — honored, not
+    hardcoded). Both carry `ToString()`; no `IEquatable` (they are dictionary *values*, not
+    keys) — recorded deviation.
+  - **`NativeMethods`**: 4 `_async` void DllImports (`committed` / `offsets_for_times` /
+    `beginning_offsets` / `end_offsets`); 3 container types × (`count` / `get_key` / `get_value`
+    / `destroy`); 2 value-type accessors × (`offset` / `metadata|timestamp` / `leader_epoch`
+    with `[MarshalAs(I1)] bool` + `out int`). Reused the shipped `TopicPartition_topic` /
+    `_partition` for the map keys. The value-type `_destroy` accessors are **deliberately NOT
+    declared** — they are borrowed map elements (Category 4), never freed by the binding
+    (structurally prevents a borrowed-element free).
+  - **3 owned-handle trampolines in `ConsumerCallbacks`** (`OnCommitted` / `OnOffsetsForTimes`
+    / `OnLongOffsets`) — `OnPoll` clones differing only in the result type, the copy-out
+    marshaller, and which container `_destroy` runs in the `finally`. Every `OnPoll` invariant
+    verbatim: no-throw boundary, copy-out on the dispatcher thread BEFORE `_destroy`, map root
+    `_destroy` null-safe in the `finally` (no-op on the failure/null path), error via
+    `Complete` (frees the error handle), per-op `GCHandle` freed once, `RunContinuationsAsync`.
+    `OnLongOffsets` is **shared** by `beginning`/`end` (they share `long_offsets_callback_t`).
+    Each callback typedef gets its own delegate type (distinct C fn-pointer types, self-
+    documenting DllImport parameters).
+  - **3 copy-out marshallers** (`OffsetMapMarshal` / `OffsetAndTimestampMapMarshal` /
+    `LongOffsetMapMarshal`) + a shared `OffsetMapMarshalShared` (the `TopicPartition_t` key
+    copy-out + the leader-epoch presence-flag decode, reused by all three) +
+    `EmptyReadOnlyDictionary<K,V>` (the `Array.Empty` analog for the empty-map path — ns2.0 has
+    no built-in). Borrow discipline (§B2 Category 4): the map key/value **elements** are
+    borrowed and never freed; only the map root is destroyed (by the trampoline, after
+    copy-out). Metadata/topic strings via the **NUL-terminated** `Utf8Marshal.PtrToString`
+    (§B3), copied out before the root destroy.
+  - **`NativeConsumer`**: `CommittedWithCallback` / `OffsetsForTimesWithCallback` /
+    `BeginningOffsetsWithCallback` / `EndOffsetsWithCallback` over a new
+    `SubmitOwnedHandleOperation<T>` parallel submit helper (a clone of `SubmitOperation<T>`
+    passing only `(consumer, userData)`; each op closes over its own strongly-typed rooted
+    callback at the call site) — **the proven poll / void / scalar submit paths are left
+    byte-for-byte untouched** (PLAN §4.2; diff-verified: zero deletions to `SubmitOperation` /
+    `SubmitScalarOperation` / `SubmitVoidOperation` / `OnPoll` / `ConsumerCallbacks.Poll`).
+    `WithPinnedTopicsAndTimestamps` variant for the one map-input query (adds a blittable
+    `long[]` timestamps). Shared `SnapshotPartitions` / `ExtractPartitions` validate+snapshot
+    the TP collection once (§B5) — `SubmitPartitionOp` refactored to reuse them, so the
+    validation is not copy-pasted (PLAN §3), behavior-identical.
+  - **`IAsyncConsumer`**: the four members with full XML docs (CS1591); dropped `committed` /
+    `beginningOffsets` / `endOffsets` / `offsetsForTimes` from the additive-growth
+    "not-yet-wired" remark (commit family / `partitionsFor`·`listTopics` / pattern subscribe
+    remain). Both `AsyncKafkaConsumer` + `AsyncMockConsumer` forward each. Doc-sync: CLAUDE.md
+    §3 sketch prose updated (these + the two value types are now wired).
+  - **API shape (PLAN §2/§3/§5, all user-locked):** names mirror Java (no `Async` suffix);
+    Java `Map` → `IReadOnlyDictionary`, `Long` values → `long`, `Set`/`Collection` inputs →
+    `IReadOnlyCollection<TopicPartition>`; the `Map<TP,Long>` input →
+    `IReadOnlyDictionary<TopicPartition,long>`. **One method each, NO `TimeSpan` overload**
+    (the async ABI has no timeout — the `Position`/`Close` precedent). The `CancellationToken`
+    is **user cancellation → `wakeup()`, NOT a deadline**; pre-canceled →
+    `OperationCanceledException` synchronously. Preconditions BEFORE any pin/P-Invoke (§B5):
+    null collection/map → `ArgumentNullException`; null element/key topic → `ArgumentException`;
+    negative partition → `ArgumentOutOfRangeException` (the `TopicPartition` ctor guard). A
+    **negative timestamp** in `OffsetsForTimes` is a Kafka-valid sentinel — **accepted**, not
+    rejected. **Empty input** is a valid pass-through for the collection queries;
+    `OffsetsForTimes({})` still faults on the mock (the FFI does not short-circuit empty —
+    verified in `src/ffi/consumer.rs`).
+  - **Reachability (PLAN §6, documented not silently skipped):**
+    `BeginningOffsets`/`EndOffsets` **fully data-testable** broker-free (shipped
+    `UpdateBeginningOffset`/`UpdateEndOffset`) — non-empty round-trip + unset-TP `illegal_state`
+    faulted (message asserted). `Committed` **empty-only** broker-free (the mock's committed
+    map is populated only by the not-yet-wired commit-with-offsets family) — empty + faulted
+    paths tested; the **non-empty end-to-end data test is deferred to the commit-family phase**
+    (which reuses `OffsetAndMetadata`). `OffsetsForTimes` **faulted-only** — the mock returns
+    `unsupported_version` unconditionally (mirrors Java's not-implemented `MockConsumer`);
+    tested the faulted `Task` + message + code 35. The **non-empty `OffsetMap_t` /
+    `OffsetAndTimestampMap_t` copy-out** (incl. the value-type `LeaderEpoch` presence flag
+    through a borrowed element) is **not reachable broker-free** (no ABI container constructor;
+    mock `committed` empty; `offsets_for_times` errors) — **deferred, documented**; the
+    presence-flag decode is unit-tested directly (`OffsetMapMarshalShared.ReadLeaderEpoch`), the
+    value types' `int?` mapping at the value level, and the valid non-empty `LongOffsetMap_t`
+    copy-out end-to-end via `Beginning`/`EndOffsets`.
+  - **Finding — the container `_count`/`_get` accessors are NOT null-safe** (only `_destroy`
+    is): the ABI safety contract says "`map` must be a valid handle". The production path is
+    correct (the trampolines call `CopyOut` only on the success branch, where the map is
+    guaranteed non-null; the failure branch has `map == null` and calls only the null-safe
+    `*Destroy`). A first cut of the marshaller unit tests passed `IntPtr.Zero` to `CopyOut` and
+    crashed the host (`box_offset_map` null deref); removed those contract-violating cases (the
+    empty/non-empty valid-container paths are covered end-to-end instead).
+  - **Tests:** `PublicConsumerOffsetQueryTests.cs` (test root) + `PublicConsumerOffsetValueTypeTests.cs`
+    (value types) + `Interop/OffsetMapMarshalTests.cs` (presence-flag decode +
+    `EmptyReadOnlyDictionary`) + the four members folded into `PublicConsumerTfmSmokeTests`.
+    **175 → 214 tests**, all green on net10.0 across **10/10** full runs (D8.8 serial gate
+    stable). All 6 TFM build legs (library ns2.0/net8.0/net10.0 + tests net462/net8.0/net10.0)
+    clean, 0 warnings; `dotnet format --verify-no-changes` clean.
+  - **Deviations (recorded, COMMENTS.DONE.13):** (a) `SubmitOwnedHandleOperation<T>` added as a
+    parallel submit helper (the "clone" option) rather than generalizing `SubmitOperation<T>`'s
+    signature — leaves the proven poll path byte-for-byte untouched (PLAN §4.2 permitted
+    either); (b) three distinct callback delegate types (one per ABI typedef) rather than one
+    shared `(IntPtr,IntPtr,IntPtr)` delegate — self-documenting DllImport parameters, no
+    behavioral difference; (c) the value types carry `ToString` but no `IEquatable` (dictionary
+    *values*, not keys — PLAN §1 left this to the Actor); (d) the non-empty
+    `OffsetMap`/`OffsetAndTimestampMap` copy-out + `Committed` non-empty data + `OffsetsForTimes`
+    data are not reachable broker-free (documented reachable slices, not skipped); (e) the
+    container-accessor null-safety finding (production correct; unit tests corrected).
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all
+    library + test TFMs → net10.0 tests green (net8.0 *run* + net462 are CI/Windows-only; all
+    three *build* legs pass locally) → `dotnet format --verify-no-changes` clean. CS1591 on the
+    4 members + 2 value types; Apache-2.0 header on every new file; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P4-consumer-offset-queries/`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P4. N=13.
+
+- **Milestone 5 / Phase 3 — "Consumer partition ops": DONE (2026-08-06).** Five void-async
+  members on `IAsyncConsumer`, all `Task <Op>(IReadOnlyCollection<TopicPartition>, CancellationToken)`:
+  `Assign` / `Pause` / `Resume` / `SeekToBeginning` / `SeekToEnd`. **Mode A (no Rust
+  authored):** all five `_async` fns + the shared void `op_callback_t` + the two
+  `MockConsumer_update_*_offsets` helpers already ship; no ABI change. **NO new completion
+  bridge this phase** (unlike M5/P2's scalar bridge) — all five reuse the proven **void**
+  bridge (`SubmitVoidOperation` + `ConsumerCallbacks.Operation`) **verbatim**; the only new
+  managed work is marshalling a `TopicPartition` collection into the ABI's parallel arrays.
+  Delivered:
+  - **`NativeConsumer`**: five thin `<Op>WithCallback(IReadOnlyCollection<TopicPartition>,
+    CT)` methods, each `=> SubmitPartitionOp(partitions, ct, NativeMethods.Consumer<Op>Async)`.
+    One shared `SubmitPartitionOp` validates the collection preconditions (§B5) BEFORE any
+    pin/P-Invoke, snapshots the `(topic, partition)` pairs, then runs the **unchanged**
+    `SubmitVoidOperation` with a submit lambda that marshals via the shared
+    `WithPinnedTopics`. One `NativePartitionOpSubmit` delegate binds a method-group ref to
+    each `_async` DllImport.
+  - **Shared collection→parallel-array marshaller (`WithPinnedTopics`)**: extracted from the
+    shipped sync `Assign`'s pinning; used by **all five async ops AND the retained internal
+    sync `Assign`** (no duplicated pinning). Pins `count` topics **call-scoped** (freed at
+    submit return — the core copies during the call, verified for both `Consumer_assign` and
+    each `_async`'s `read_topic_partitions`; never held across the `Task`), fills the
+    `IntPtr[]` topics + passes the blittable `int[]` partitions straight through — **no
+    per-element copy beyond the UTF-8 encode** (§A3/§A4).
+  - **`NativeMethods`**: five `_async` void DllImports (each `(IntPtr[] topics, int[]
+    partitions, int count, OperationCallback, IntPtr userData)`, reusing the shipped
+    `op_callback_t` = `OperationCallback` — no new delegate) + the two per-`(topic, partition,
+    offset)` mock offset helpers (`MockConsumer_update_beginning/end_offsets`).
+  - **Assign reconciliation (PLAN §1, user-locked):** promoted `Assign` to the **public async**
+    member on `IAsyncConsumer` (via `assign_async`, broker-free on the mock); **REMOVED** the
+    public inherent sync `AsyncMockConsumer.Assign(IReadOnlyList<TopicPartition>)` — no
+    sync/async `Assign` overload footgun, one public `Assign` (Task). Migrated the **10**
+    public-root test-setup sites from `consumer.Assign(...)` to `await consumer.Assign(...)`
+    (every existing assertion kept; sync `void` test methods that used it became `async Task`).
+    The **internal** sync `NativeConsumer.Assign((string,int)[])` + the `Consumer_assign`
+    DllImport + the **4 `Interop/` tests** that use them are **untouched** (75 Interop tests
+    still green).
+  - **Mock offset helpers wired (§6.6):** `UpdateBeginningOffset` / `UpdateEndOffset` inherent
+    forwarders on `AsyncMockConsumer` so `SeekToBeginning`/`SeekToEnd` are observed end-to-end
+    via a follow-up poll (position reset to the beginning/end offset).
+  - **`IAsyncConsumer`**: five new members with full XML docs (CS1591); `AsyncKafkaConsumer` +
+    `AsyncMockConsumer` forward each to `_native.<Op>WithCallback`. Doc-sync: dropped
+    `assign`/`pause`/`resume`/`seekTo*` from the `IAsyncConsumer` additive-growth
+    "not-yet-wired" remark; updated the `AsyncMockConsumer` mock-only-helpers remark; lifted
+    the M5/P1 `Paused()` "non-empty not reachable until a public Pause lands" note (now
+    reachable); confirmed/updated the CLAUDE.md §3 sketch prose (these are now wired).
+  - **Error / precondition mapping (§B5):** null collection → `ArgumentNullException`;
+    per-element null topic → `ArgumentException`; negative partition →
+    `ArgumentOutOfRangeException` (unreachable through a constructed `TopicPartition`, whose
+    ctor rejects it — the `Seek`/`Position` precedent — but kept as defense-in-depth in
+    `SubmitPartitionOp`). **Empty collection = valid pass-through** (`assign([])` clears,
+    the others no-op) — never a spurious throw. Operational failure → faulted `Task` with
+    `KafkaException`; concurrent → faulted (core-delivered `ConcurrentModification`);
+    post-dispose → `ObjectDisposedException` (`ThrowIfClosed` before submit); pre-canceled
+    token → `OperationCanceledException` synchronously (mirrors `SubscribeWithCallback`).
+  - **Tests:** new `PublicConsumerPartitionOpsTests.cs` at the **test root** (public-surface,
+    broker-free via `AsyncMockConsumer`): Assign→Assignment reflects it; Assign([]) clears;
+    **Pause→Paused returns the paused set (closes the M5/P1 non-empty `Paused()` gap)**;
+    Resume clears; SeekToBeginning/SeekToEnd resolve broker-free AND observed via poll (the
+    new offset helpers); empty-collection no-op; a **deterministic** operational failure
+    (`Pause` of an unassigned partition) asserting the `KafkaException` **message** content
+    ("No current assignment for partition …", DoD §3) + consumer-reusable-after-fault;
+    preconditions (null collection / per-element null topic / negative-partition-ctor-guard);
+    post-dispose; pre-canceled token; wakeup-leaves-usable; per-op marshalling allocation
+    sanity (net8+). **153 → 175 tests**, all green on net10.0 across **multiple** full runs
+    (D8.8 serial gate stable). All 6 TFM build legs (library ns2.0/net8.0/net10.0 + tests
+    net462/net8.0/net10.0) clean, 0 warnings; `dotnet format --verify-no-changes` clean.
+  - **Deviations (recorded, COMMENTS.DONE.12):** (a) the deterministic failure path is
+    `Pause` of an **unassigned** partition (a clean broker-free operational failure asserting
+    the message), chosen over the non-deterministic concurrent-op path the PLAN left as a
+    fallback; (b) the negative-partition precondition is asserted via the `TopicPartition`
+    ctor guard (a negative value cannot reach the op through a constructed struct — the
+    shipped `Position` precedent), with the binding's own `SubmitPartitionOp` check kept as
+    defense-in-depth; (c) `WithPinnedTopics` takes a `Func<int, string>` topic accessor so
+    the one helper serves both the tuple-form sync `Assign` and the `TopicPartition`-form
+    async ops without a per-element copy.
+  - Approved plan + closed record: `design/history/M5/P3-consumer-partition-ops/`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P3. N=12.
+
+- **Milestone 5 / Phase 2 — "Consumer `Position`": DONE (2026-08-06).** The single async
+  member `Task<long> Position(TopicPartition, CancellationToken)` on `IAsyncConsumer` —
+  the CLAUDE.md §3-sketch-committed shape (no shape change). Its real work is the **third
+  completion-bridge shape: the scalar callback** `(int64_t, error*, ud)` — a result carried
+  directly in the callback, with **no owned result handle** to marshal or free (distinct
+  from the shipped void `op` bridge and the owned-handle `poll` bridge). **Mode A (no Rust
+  authored):** `position_async` + `position_callback_t` already ship; no ABI change.
+  Delivered:
+  - **`ConsumerCallbacks`**: a new `PositionCallback` delegate + `OnPosition` trampoline,
+    cloned from `OnPoll`, rooted in a `static readonly` field (§B6 keep-alive), no-throw
+    foreign-thread boundary. **The one structural difference from `OnPoll`:** the `finally`
+    frees **only** the per-op `GCHandle` (`FreeGcHandle()`) — **no `*Destroy`** call,
+    because the scalar owns no result handle. The error handle (failure path) is still
+    freed exactly once via `Complete → KafkaException.FromHandle`.
+  - **`OperationCompletionSource<long>` reused verbatim** — NO new context type, NO edit to
+    `OperationCompletionSource.cs` (it is already result-type-agnostic:
+    `CompleteWithResult(position)` on success, `Complete(error)` on failure). The scalar is
+    blittable, so "marshalling" is trivial — no copy-out, no native read.
+  - **`NativeConsumer`** gains a parallel **`SubmitScalarOperation<T>` + `NativeScalarSubmit`**
+    delegate type (a line-for-line clone of `SubmitOperation<TResult>` with `Poll →
+    Position`) — added rather than generalizing the proven `SubmitOperation` (poll) /
+    `SubmitVoidOperation` paths, which stay byte-for-byte untouched — plus
+    `PositionWithCallback(TopicPartition, CancellationToken)` (preconditions before any
+    native call; call-scoped topic pin via `Utf8Marshal.Pin`).
+  - **`NativeMethods`**: one `[DllImport]` (`Consumer_position_async`, `IntPtr topic` = a
+    pinned NUL-terminated UTF-8 buffer). The **sync `Consumer_position` is deliberately NOT
+    declared** (async-only; wrapping it in `Task.Run` would be the forbidden
+    sync-over-async, §B7).
+  - **`IAsyncConsumer`** gains `Position` (full XML docs, CS1591); `AsyncKafkaConsumer` +
+    `AsyncMockConsumer` forward to `_native.PositionWithCallback`. `position` removed from
+    the `IAsyncConsumer` "not-yet-wired" remarks (doc-sync). The CLAUDE.md §3 sketch already
+    showed `Position` — confirmed, no sketch change.
+  - **API shape (decisions locked in PLAN §2/§3):** **one method, NO `TimeSpan` overload**
+    — Java's timed `position(tp, Duration)` is deferred until a timed `position_async` ABI
+    exists (the shipped `Close` precedent). The **`CancellationToken` is user-initiated
+    cancellation only, NOT a timeout/deadline** — it maps to `wakeup()` (best-effort),
+    mirroring `PollWithCallback`; a pre-canceled token throws `OperationCanceledException`
+    synchronously. Error mapping (§B5): operational failure → faulted `Task<long>` with
+    `KafkaException`; concurrent → faulted (`ConcurrentModification`, core-delivered);
+    post-dispose → `ObjectDisposedException` (`ThrowIfClosed()` before submit); null topic
+    → `ArgumentNullException`, negative partition → `ArgumentOutOfRangeException` (the
+    `Seek`/`Assign` precedent), both before any pin/P-Invoke.
+  - **Deviations (recorded, COMMENTS.DONE.11):** (a) reuse `OperationCompletionSource<long>`
+    verbatim for the scalar bridge (no new context type, no bridge-file change); (b)
+    `SubmitScalarOperation<T>` added as a parallel helper rather than generalizing
+    `SubmitOperation` (to leave the proven poll path untouched); (c) one `Position` method,
+    no `TimeSpan` overload (the `Close` precedent) — the `CancellationToken` is
+    cancellation, not a timeout; (d) the sync `Consumer_position` deliberately not declared;
+    (e) the D-Q4-style non-deterministic-concurrency + no-timed-ABI + non-check-and-clear-
+    wakeup-on-position reachability limits (recorded, not silently skipped).
+  - **Tests:** new `PublicConsumerPositionTests.cs` at the **test root** (public-surface, not
+    under `Interop/`) — the full §6 list broker-free via `AsyncMockConsumer`: happy path
+    (assign → seek → `Position` returns offset, direct + interface + non-ASCII topic pin),
+    unassigned-partition **faulted `Task` with the asserted `KafkaException` message**
+    (DoD §3) + reusable-after, pre-canceled token → `OperationCanceledException`, wakeup
+    non-corruption (reachable seam), null topic → `ArgumentNullException`, negative
+    partition → `ArgumentOutOfRangeException`, post-dispose → `ObjectDisposedException`,
+    concurrency reachable-seam + inspection (D-Q4), per-op allocation sanity (net8.0+,
+    per-RPC not zero-alloc). **141 → 153 tests** (12 new), all green across ≥4 full net10.0
+    runs; serial execution (D8.8) unchanged; every awaited op under a `TestTimeout` guard.
+  - **Free-exactly-once audit (§7.7):** the per-op `GCHandle` freed exactly once on every
+    path (success / operational failure / inline core-rejection / no-throw catch /
+    submit-threw via `AbandonBeforeSubmit`); the error handle freed once on failure (via
+    `FromHandle`); **no result-handle destroy** in `OnPosition`'s `finally` (the one
+    structural difference from `OnPoll`) — verified by inspection.
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all
+    library TFMs (netstandard2.0 / net8.0 / net10.0) + all test TFMs (net462 / net8.0 /
+    net10.0) → net10.0 tests green (net8.0 *run* + net462 are CI/Windows-only; all three
+    *build* legs pass locally) → `dotnet format --verify-no-changes` clean. CS1591 on the new
+    public member; Apache-2.0 header on the one new file; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P2-consumer-position/`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch; M5/P1 already shipped there), as
+    a new PR for M5/P2. N=11.
+- **Milestone 5 / Phase 1 — "Consumer sync read surface (`Assignment` / `Subscription` /
+  `Paused` / `EnforceRebalance`)": DONE (2026-08-06).** The four sync members CLAUDE.md §4
+  names in its "stays sync" list that were still unshipped — the Category A sync state
+  getters + Category H `enforce_rebalance`. **Mode A (no Rust authored):** all four ABI
+  functions and both list types (`TopicPartitionList_t` / `StringList_t`) already ship in
+  the generated header; no ABI change, no new op semantics. M5 opened as a **new
+  milestone** for completing the consumer surface (the earlier tentative "M5 = sync
+  `IConsumer` facade" reservation moves to a later milestone; this milestone grows the
+  **async** surface via `IConsumerCommon`). Delivered:
+  - **`NativeMethods`**: four `[DllImport]`s (`Consumer_assignment` / `_subscription` /
+    `_paused` / `_enforce_rebalance`) + the `TopicPartitionList_t` / `StringList_t`
+    accessors (`_count` / `_get` / `_destroy`) + `TopicPartition_topic` / `_partition`
+    (borrowed elements, never freed — only the list root is destroyed). No new callback
+    delegates, no `[MarshalAs]` (all sync, no `bool` returns).
+  - **Two copy-out marshallers** (`Internal/Interop/TopicPartitionListMarshal`,
+    `StringListMarshal`), mirroring the shipped `ConsumerGroupMetadataMarshal`: read every
+    element out (NUL-terminated `Utf8Marshal.PtrToString(ptr)`, §B3 — **not** the
+    length-delimited receive-path form), then `_destroy` the root in a `finally`. Both are
+    Category-3 owned borrow-roots whose elements are Category-4 borrowed views (copy-out
+    before destroy, §B2). **No new `SafeHandle`** — transient, caller-thread, fully
+    consumed in one sync call (the `ConsumerGroupMetadataMarshal` read-and-free pattern,
+    not the long-lived handle pattern). No `unsafe`.
+  - **`NativeConsumer`** gains `Assignment()` / `Subscription()` / `Paused()` (concurrent
+    null-handle → `InvalidOperationException` via a **shared `ThrowIfConcurrentNull`**
+    helper — `GetGroupMetadataHandleOrThrow` was refactored to reuse it, so all five sync
+    reads share exactly one concurrency contract) and `EnforceRebalance(string?)` (pins
+    `reason` call-scoped or `IntPtr.Zero`; `FromHandle` throw-iff-non-null discipline).
+  - **`IConsumerCommon`** gains the four members; `AsyncKafkaConsumer` +
+    `AsyncMockConsumer` forward. The three getters are plain `()` **methods** returning
+    `IReadOnlyCollection<T>`, and `EnforceRebalance` is a method with `string? reason =
+    null`.
+  - **`enforceRebalance` is a KIP-848 logged no-op that returns success** (SOURCE-VERIFIED:
+    Java `AsyncKafkaConsumer.enforceRebalance` throws nothing; Rust core
+    `enforce_rebalance` returns `Ok(())`; the FFI `sync_void_op` returns a null error
+    handle). `EnforceRebalance` therefore never throws a `KafkaException` on that path —
+    the still-present `FromHandle` check is the uniform sync-op discipline reserving a real
+    error for a future classic-protocol arm. ⚠ The header's `enforce_rebalance` doc
+    ("returns an unsupported-version error") is **stale** — flagged as a separate
+    **Rust-core doc-fix dependency**, not acted on in this C#-only phase; the mapping
+    follows the actual behavior.
+  - **Deviations (recorded, COMMENTS.DONE.10):** (a) the four members on `IConsumerCommon`
+    rather than the literal §3-sketch `IAsyncConsumer` placement (consistent with M4/P4b's
+    `Wakeup`/`GroupMetadata` move); (b) the three getters as **methods, not properties**
+    (reverses the §3 sketch's property form, on FDG "throws / does work /
+    fresh-collection-per-call → method" + the shipped `GroupMetadata()` precedent +
+    Java/Python parity); (c) `EnforceRebalance` as one method collapsing Java's two
+    overloads; (d) the stale ABI doc raised as a Rust-core dependency; (e) the D-Q4-style
+    non-deterministic-concurrency + non-empty-`Paused` reachability limits (both recorded,
+    not silently skipped).
+  - **Tests:** new `Interop/ConsumerSyncReadTests.cs` — the full §7 list broker-free via
+    `AsyncMockConsumer` (getter round-trips as **sets**, non-ASCII through both
+    marshallers, post-dispose `ObjectDisposedException` on all four, `EnforceRebalance`
+    no-throw incl. non-ASCII reason, allocation sanity net8.0+). Concurrent-null → IOE
+    verified by the reachable free-guard seam + code inspection of `ThrowIfConcurrentNull`
+    (D-Q4 non-determinism ceiling). **122 → 141 tests**, all green across ≥4 full net10.0
+    runs; serial execution (D8.8) unchanged; every awaited op under a `TestTimeout` guard.
+    Discovery: the core rejects `Assign` + `Subscribe` together (mutually exclusive).
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all
+    library TFMs (netstandard2.0 / net8.0 / net10.0) + all test TFMs (net462 / net8.0 /
+    net10.0) → net10.0 tests green (net8.0 *run* + net462 are CI/Windows-only; all three
+    *build* legs pass locally) → `dotnet format --verify-no-changes` clean. CS1591 on every
+    new public member; Apache-2.0 header on the two new files; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P1-consumer-sync-read-surface/`.
+    Commits on the new branch `prashah_dev_public_consumer_remaining` (post-M4 consumer
+    work), as a new PR for M5/P1. N=10.
 - **Milestone 4 / Phase 4b — "Async-surface rename (`IAsyncConsumer`, drop the `Async`
   suffix, `WithCallback`)": DONE (2026-08-05).** A pure C# rename of M4/P4a's async
   surface into its final shape — **no ABI change (Mode A), no Rust authored, no new
