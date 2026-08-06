@@ -2050,24 +2050,47 @@ phase; it also needs its own allocation audit against DoD §10.
 
 ### 9.19 Three `SenderTest` methods blocked on missing surface
 
-**Status:** open, and as of Phase 6 there are **five** blocked entries, not three.
+**Status:** open, with **four** blocked entries. The count has moved twice: three at
+Phase 4, five after Phase 6, four after Phase 8 resolved one of them. Only the §9.18
+split gap and the injected-clock gap remain as causes.
+
 Phase 6 built the end-to-end harness the transactional group needed and translated 4 of
 its 15 (`testTransactionalRequestsSentOnShutdown`,
 `testIncompleteTransactionAbortOnShutdown`,
 `testForceShutdownWithIncompleteTransaction`,
 `testTransactionAbortedExceptionOnAbortWithoutError` — the ones whose subject is
-`Sender::run`'s transactional tail). The other **11 are handed to Phase 8**, with a
-per-method reason each in the `sender.rs` accounting block; two of those eleven are
-blocked on named missing surface rather than merely unwritten:
+`Sender::run`'s transactional tail). It handed **11 to Phase 8**, with a per-method reason
+each in the `sender.rs` accounting block.
 
-  - `testTransactionalSplitBatchAndSend` (2385) — blocked on §9.18's split panic, the
-    same gap as `testIdempotentSplitBatchAndSend`.
-  - `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399) — the one entry
-    given `mock(TransactionManager.class)` (Java 3403), stubbing
-    `hasOngoingTransaction()` -> true with `beginAbort()` throwing. `TransactionManager`
-    is a concrete struct here, so it needs either a `#[cfg(test)]` hook that fails
-    `begin_abort` on demand or a forced state where the real machine behaves that way —
-    a `TransactionManager` change, so it belongs with Phase 8's sweep of that class.
+**Phase 8 outcome: 10 of the 11 translated, 1 still blocked.** Of the two that had cited
+named missing surface, one really was blocked and one was not:
+
+  - `testTransactionalSplitBatchAndSend` (2385) — **still blocked** on §9.18's split panic,
+    the same gap as `testIdempotentSplitBatchAndSend`. Re-verified in Phase 8 by running the
+    reproducer rather than by re-reading this note: `test_too_large_batches_are_safely_removed
+    --ignored` still panics at `memory_records_builder.rs:298`.
+  - `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399) — **translated in
+    Phase 8; it was never really blocked.** This entry used to say it needed "either a
+    `#[cfg(test)]` hook that fails `begin_abort` on demand or a forced state where the real
+    machine behaves that way". The second route already existed *and was already exercised
+    by a test in `sender.rs` under a Rust-only name*: an idempotent producer left in
+    `ABORTABLE_ERROR` satisfies both of Java's stubs, because `hasOngoingTransaction()` is
+    true in that state (`TransactionManager.java:1012`) and `beginAbort()`'s
+    `ensureTransactional()` guard rejects it. All that was missing was the Java name and
+    Java's `verify(transactionManager, times(1)).close()`, for which
+    `TransactionManager::close_call_count` is now `#[cfg(test)]`-gated. The lesson is the one
+    Phase 8 recorded: a "blocked on missing surface" note is a claim with a shelf life, and
+    the cheapest way to test it is to look for the surface rather than to re-read the note.
+
+The remaining four blocked entries across both groups are `testTransactionalSplitBatchAndSend`
+plus the three below, of which `testSenderShouldRetryWithBackoffOnRetriableError` is the only
+one not on §9.18.
+
+One further Phase-8 entry is translated but `#[ignore]`d, and is **not** counted as blocked
+because its body is complete and the assertion that fails is a production assertion:
+`testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`, the reproducer for
+§9.25. And `testReceiveFailedBatchTwiceWithTransactions` is translated by a different
+mechanism from Java's, recorded at §9.28.
 
 The `sender.rs` accounting block carries the derivation showing no entry in the group
 names `commitTransaction` / `abortTransaction`, which is what made the original
@@ -2082,11 +2105,14 @@ buffer-pool leak of issue 2.
 The per-method accounting lives in a comment block at the end of
 `src/producer/internals/sender.rs`, which is the authoritative list and carries the two
 shell commands that reproduce both the scope set and the completeness claim. In summary:
-**52** `SenderTest` methods reference a `TransactionManager`, of which **32** are
-translated, **18** are transactional (Phases 5 and 6), and **2** are blocked below; the
+**52** `SenderTest` methods reference a `TransactionManager`, of which **33** are
+translated, **18** are transactional (Phases 5 and 6), and **3** are blocked below; the
 lists carry 2 further entries that are outside the 52 and are marked as such, so
-33 + 18 + 3 = 54 entries and 54 − 2 = 52. This section records only what is left and
-why.
+33 + 18 + 3 = 54 entries and 54 − 2 = 52. (An earlier revision wrote "32 are translated"
+and "2 are blocked" against that same arithmetic — Critic 48 issue 6. The numbers here are
+also Phase-4-era and have since moved; the `sender.rs` accounting block is authoritative
+and now records 53 in-scope methods over 55 entries.) This section records only what is
+left and why.
 
 **Blocked on named missing surface:**
 
@@ -2339,10 +2365,28 @@ transaction need not be aborted. For an idempotent producer it bumps the epoch i
 
 `Sender::can_retry` (`sender.rs`) calls that method with an **empty** batch pool. Per
 rules §7, `start_sequences_at_beginning` errors when a tracked in-flight batch is not
-supplied, so the rewrite does not happen: `last_acked_sequence` is never cleared and the
-sequence counter is never restarted. The error is swallowed by the per-response
-error handling on the produce path (Phase 4's deliberate per-response try/catch), so
-nothing surfaces — the producer simply carries the stale sequence state into the retry.
+supplied, so the sequence rewrite does not happen.
+
+**The consequence is worse than a stale sequence counter: the response is abandoned and the
+batch is dropped.** An earlier revision of this section said "the producer simply carries
+the stale sequence state into the retry"; there is no retry. `complete_batch` reaches
+`if self.can_retry(batch, response, now)?`, so the `Err` short-circuits **before**
+`BatchAction::Reenqueue` can be produced. It propagates out of `handle_produce_response`
+and out of `handle_produce_response_for`'s `?` — at which point the batch has already been
+moved out of `in_flight_batches` into that function's local
+`batches: HashMap<TopicPartition, ProducerBatch>`, which is then dropped. There is no
+`impl Drop` anywhere in `src/producer/`, so:
+
+  - the batch's `ProduceRequestResult` is never `set`, so **every record future on it never
+    resolves** — and no timeout owner remains to expire them;
+  - its pooled buffer is never returned, so `BufferPool` accounting **leaks**, which
+    eventually blocks `send` on `max.block.ms`;
+  - `handle_client_responses` logs `Uncaught error in request completion` and `run_once`
+    still returns `Ok`, which is why the reproducer's `.expect("run_once")` passes and the
+    failure surfaces four assertions later as a stale `last_acked_sequence`.
+
+That is a hang-and-leak on a reachable transactional path, not a sequence-hygiene nicety,
+and it is what sizes the fix. Critic 48 issue 5.
 
 **The comment at the call site asserted the branch was unreachable, and that is how it
 survived.** It read: "`batches` is empty: it supplies the partition's in-flight batches
@@ -2423,12 +2467,30 @@ than silently mis-deliver — and the module docstring justified the deferral li
 > This is conservative; production readers will hit it only if their producers reuse
 > producer IDs after an abort, which is rare.
 
-**The claim is false.** A producer id is assigned once per producer incarnation and is
-stable across its transactions, so a producer that aborts one transaction and commits the
-next reuses it *by construction*. Every `read_committed` consumer of a partition where any
-transaction aborted and a later one committed hit the bail, and worse, it surfaced as an
-`UnsupportedVersion` error rather than as missing data — so it would have read as a broker
-compatibility problem.
+**The claim is false, and the real trigger is much wider than even the rebuttal implies.**
+The guard was
+
+    if batch_meta.is_control_batch && self.aborted_producer_ids.contains(&batch_meta.producer_id)
+
+placed *after* `consume_aborted_transactions_up_to(batch_meta.last_offset)`. The ABORT
+marker batch is itself a control batch carrying the aborted transaction's own producer id,
+and that call has just inserted the id — the response's `AbortedTransaction.first_offset` is
+≤ the marker's `last_offset` by construction. So the bail fired on the marker of the very
+transaction it had just skipped, in the same fetch. The trigger is therefore **any
+`read_committed` fetch that reaches an ABORT marker, i.e. any aborted transaction on the
+partition** — a single aborted transaction with nothing after it, or an empty aborted
+transaction whose marker is its only batch, was enough. `read_committed` was unusable on any
+partition that had ever had an abort. And it surfaced as an `UnsupportedVersion` error rather
+than as missing data, so it would have read as a broker compatibility problem.
+
+Producer-id stability remains the rebuttal of Phase 7a's *stated premise*: an id is
+allocated once per incarnation and is stable across that producer's transactions, so the
+"reuse" the note treated as exotic is what every transactional producer does. But an earlier
+revision of this section, and of the three other artifacts describing the fix, let that
+stand as the *trigger* — i.e. described a two-transaction pattern where the code needed
+only one abort. Critic 48 issue 4. Stating the true scope strengthens this section's own
+lesson rather than weakening it: no test in either suite reached a branch that broke every
+`read_committed` reader of an aborted partition.
 
 Phase 8's `test_aborted_transaction_records_are_discarded` failed on exactly this on its
 first run, which is what exposed it. The fix is the faithful translation:
@@ -2443,6 +2505,55 @@ about a code path and should be checked the same way any other claim is — here
 where `producerId` is assigned would have settled it. The scope of the resulting integration
 gap is the tell: no test anywhere reached the branch, in either the producer or the consumer
 suite, for four phases.
+
+### 9.28 `MockClient.disconnect(node, allowLateResponses)` does not port — produce responses are routed by correlation id, not by callback
+
+**Status:** open as a recorded divergence; no defect. Found by Critic 48 issue 1, after
+Phase 8 shipped a translation of the overload that was **inert** and justified it with a
+false statement about Java.
+
+Java's `MockClient.disconnect(String, boolean allowLateResponses)`
+(`MockClient.java:200-218`) retains the disconnected request so a later `respond*` answers
+it a second time, and that second answer reaches the `Sender` because the routing lives on
+the request: `ClientRequest.callback()` (`ClientRequest.java:104-105`) is a plain **getter**,
+so the disconnect `ClientResponse` and the late one are handed the same
+`RequestCompletionHandler` and `ClientResponse.onComplete` (`:152-154`) fires it both times.
+`Sender.sendProduceRequest` installs exactly such a callback, so a produce response really is
+handled twice.
+
+This port cannot reproduce the mechanism, and the reason is a deliberate design choice, not
+an oversight: `Sender::send_produce_request` passes `None` for the callback ("we process
+responses after poll() returns") and routes by correlation id through
+`Sender::pending_produce_responses`, which the **first** delivery `remove`s. A retained
+request's second answer therefore finds no entry and `handle_produce_response_for` returns
+`Ok(())` without touching the batch. The overload would buy nothing but stopping `respond*`
+from panicking on an empty queue.
+
+**What Phase 8 shipped first, and why it was wrong.** It translated the overload and
+commented that Java's retained request "carries no callback, … which is exactly what Java's
+retained `ClientRequest` does after its `request.callback()` was handed to the disconnect
+`ClientResponse`". `callback()` does not move; the claim is false, and it made an inert
+surface look justified. Both are corrected: the overload is gone,
+`MockClient::disconnect_by_id`'s rustdoc records why it is absent with the Java citations,
+and `testReceiveFailedBatchTwiceWithTransactions` is translated without it.
+
+**How the test is translated instead.** The property Java pins is that a produce response
+for an **already-failed** batch leaves the manager ABORTABLE rather than FATAL. The batch is
+failed by the delivery-timeout expiry — which Java also performs, via the same
+`time.sleep(2000)` — and that path parks the batch in `Sender::batches_awaiting_response`
+*without* consuming its routing entry, so the late `INVALID_TXN_STATE` is genuinely routed
+into `handle_produce_response` for a done batch. Only Java's `disconnect` + `backoff` pair is
+dropped, and its purpose there is to stop the Sender sending anything new, of which there is
+none. Four assertions pin it: both `pending_produce_responses` and
+`batches_awaiting_response` hold the batch before the late response and are empty after, and
+they drain only by it being handled. Mutation-checked: deleting the response fails the first
+assertion, where the previous (inert) revision still passed.
+
+**If this is ever revisited**, the faithful fix is not the overload but the routing:
+threading a per-request completion handler through the produce path the way Java does. That
+is a send/receive-path change and CLAUDE.md §11 warns against per-message callbacks on the
+hot path, so the current design is very likely the right one and this entry exists to record
+the consequence rather than to propose reversing it.
 
 ---
 

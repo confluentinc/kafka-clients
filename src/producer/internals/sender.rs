@@ -2182,9 +2182,17 @@ impl<C: KafkaClient> Sender<C> {
             // (`TransactionManager.java:1042-1050`), and a *transactional* producer does
             // reach that branch: an earlier revision of this comment claimed only the
             // idempotent path did, which is false — the idempotent path takes the
-            // `requestIdempotentEpochBumpForPartition` arm beside it. With an empty pool
-            // `start_sequences_at_beginning` errors on the tracked in-flight batch it was
-            // not given, so the sequence rewrite silently does not happen.
+            // `requestIdempotentEpochBumpForPartition` arm beside it.
+            //
+            // With an empty pool `start_sequences_at_beginning` errors on the tracked
+            // in-flight batch it was not given, and the `?` on this call fires **before**
+            // `BatchAction::Reenqueue` can be produced. The error propagates out of
+            // `handle_produce_response_for`, whose local `batches` map already owns the
+            // batch, and that map is dropped — so the batch is abandoned un-completed: its
+            // record futures never resolve and its pooled buffer is never returned to
+            // `BufferPool`. `run_once` still returns `Ok` (the per-response handler logs
+            // and continues), which is why this is silent. Not "a stale sequence counter":
+            // a hang and a leak.
             //
             // Not fixed here: `can_retry` takes the failing batch by `&` *and* the pool by
             // `&mut`, and the failing batch is still tracked at this point (unlike at
@@ -5192,7 +5200,7 @@ mod tests {
     }
 
     /// Translated from `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`
-    /// (Java 748-810).
+    /// (Java 749-810).
     ///
     /// The only one of the three that goes purely through the real path:
     /// `accumulator.append` + `sender.runOnce()` across a request timeout, a retry and
@@ -5269,8 +5277,8 @@ mod tests {
     }
 
     /// The shared body of `testHealthyPartitionRetriesDuringEpochBump`
-    /// (Java 3599-3692) and `testFailedInflightBatchAfterEpochBump`
-    /// (Java 3727-3810). In Kafka 4.2 the two differ only by one
+    /// (Java 3601-3692) and `testFailedInflightBatchAfterEpochBump`
+    /// (Java 3726-3816). In Kafka 4.2 the two differ only by one
     /// `maybeUpdateProducerIdAndEpoch(tp1)` call before their closing pair of
     /// assertions, which are themselves identical. Both are translated (below)
     /// rather than collapsed into one, so each Java method has a Rust counterpart;
@@ -5434,7 +5442,7 @@ mod tests {
     }
 
     /// Translated from `TransactionManagerTest.testHealthyPartitionRetriesDuringEpochBump`
-    /// (Java 3599-3692).
+    /// (Java 3601-3692).
     #[tokio::test]
     async fn test_healthy_partition_retries_during_epoch_bump() {
         for _transaction_v2_enabled in [true, false] {
@@ -5486,7 +5494,7 @@ mod tests {
     }
 
     /// Translated from `TransactionManagerTest.testFailedInflightBatchAfterEpochBump`
-    /// (Java 3727-3810).
+    /// (Java 3726-3816).
     ///
     /// In Kafka 4.2 this is identical to
     /// `testHealthyPartitionRetriesDuringEpochBump` except that it stops before the
@@ -7620,13 +7628,42 @@ mod tests {
     //
     //   - Entry citations in this block: extract each `` `name` (line) `` pair and check
     //     `sed -n "${line}p"` contains `name(` — **55 pairs, 0 mismatches**.
-    //   - Rustdoc headers: resolve each ``Translated from `SenderTest.<name>` `` to the
-    //     Java declaration and its closing `    }` and compare **both** ends —
-    //     **52 headers, 0 mismatches** as of Phase 8 (41 before it). Re-running it is not
-    //     ceremony: it caught two of Phase 8's own ranges off by one at the *end*
-    //     (`testUnresolvedSequencesAreNotFatal`, `testAwaitPendingRecordsBeforeCommittingTransaction`),
-    //     both because the method's body is wrapped in a `try (Metrics m = ..)` whose
-    //     `        }` precedes the real `    }`. Since corrected.
+    //   - Rustdoc headers: resolve each
+    //     ``Translated from `(SenderTest|TransactionManagerTest).<name>` `` to the Java
+    //     declaration and its closing `    }` and compare **both** ends —
+    //     **102 headers (52 `SenderTest` + 50 `TransactionManagerTest`), 0 mismatches.**
+    //
+    //     **The alternation is the point, and Phase 8 got it wrong first.** Its initial
+    //     sweep matched `` `SenderTest.<name>` `` only, reported "52 headers, 0 mismatches",
+    //     and was silent about the 50 `TransactionManagerTest` headers *in this same file* —
+    //     a population Phase 8 had itself grown from 6 to 50, under this same convention.
+    //     Nine of those 50 deviated, six of them added by Phase 8, and the sweep that was
+    //     re-run and re-reported could not see any of them (Critic 48 issue 9). Phase 6
+    //     pass 4's rule applies to a sweep's own denominator: before asserting an "N of M",
+    //     ask what M excludes. All nine are corrected; the alternation is what keeps them
+    //     corrected.
+    //
+    //     Eight of the nine were ±1 or ±2 at one end.
+    //     `testMultipleAddPartitionsPerForOneProduce` was not: cited `1932-1976`, it ran six
+    //     lines past its own closing brace at 1970 and into `testRetriableErrors`'s
+    //     `@EnumSource` list, i.e. it spanned two methods. Three were pre-existing start-line
+    //     slips citing the `@ParameterizedTest` / `@ValueSource` annotation rather than the
+    //     declaration — the shape Critic 46 pass 2 found, now caught mechanically.
+    //
+    //     Re-running the sweep is not ceremony on the `SenderTest` side either: it caught two
+    //     of Phase 8's own ranges off by one at the *end*
+    //     (`testUnresolvedSequencesAreNotFatal` 1571 → 1572,
+    //     `testAwaitPendingRecordsBeforeCommittingTransaction` 2870 → 2871), both since
+    //     corrected. Their causes differ, and an earlier revision of this bullet gave one
+    //     cause for both: the second is wrapped in a `try (Metrics m = ..)` whose
+    //     `        }` precedes the real `    }`, but `testUnresolvedSequencesAreNotFatal`
+    //     has **no inner braces at all** — 1571 is its last statement and 1572 the closing
+    //     brace, a plain last-statement-for-brace slip (Critic 48 issue 10). The `try
+    //     (Metrics ..)` wrapper is also not the main producer of that shape: eleven
+    //     translated methods have an inner `        }` immediately before their closing
+    //     `    }` and only three come from that wrapper. So the transferable rule is the one
+    //     stated below rather than "watch for `try (Metrics ..)`": check **both** ends
+    //     against the closing brace, whatever the body looks like.
     //
     // Two properties the header sweep needs, each learned by a sweep that lacked it:
     //
@@ -7790,10 +7827,16 @@ mod tests {
     //          split into two Rust tests over a shared body so a failure names its case.
     //   3126 testReceiveFailedBatchTwiceWithTransactions
     //          -> test_receive_failed_batch_twice_with_transactions
-    //          Needed `MockClient::disconnect_by_id_with_late_responses`, i.e. Java's
-    //          `disconnect(node, allowLateResponses = true)` (`MockClient.java:200-218`),
-    //          which this port had not translated. Without it the late response the test's
-    //          name is about cannot be delivered at all.
+    //          The only entry whose *mechanism* does not port. Java retains the request via
+    //          `disconnect(node, allowLateResponses = true)` and re-fires the same
+    //          `RequestCompletionHandler`, because `ClientRequest.callback()` is a getter;
+    //          this port routes produce responses by correlation id through a map the first
+    //          delivery consumes, so a disconnect delivery would swallow the routing. The
+    //          batch is failed by the delivery-timeout expiry instead — Java sleeps past it
+    //          too — and the late response is then genuinely handled for an already-done
+    //          batch, pinned by four assertions on the routing state. PLAN §9.28, and the
+    //          test's own rustdoc, carry the derivation. An earlier Phase-8 revision shipped
+    //          a translated `allowLateResponses` overload that was inert in this port.
     //   3176 testInvalidTxnStateIsAnAbortableError
     //          -> test_invalid_txn_state_is_an_abortable_error
     //   3215 testTransactionAbortableExceptionIsAnAbortableError
@@ -9247,7 +9290,7 @@ mod tests {
     }
 
     /// Translated from `TransactionManagerTest.testSenderShutdownWithPendingTransactions`
-    /// (Java 228-247).
+    /// (Java 228-246).
     #[tokio::test]
     async fn test_sender_shutdown_with_pending_transactions() {
         use crate::producer::internals::producer_test_utils::run_until;
@@ -9367,7 +9410,7 @@ mod tests {
 
     /// Translated from
     /// `TransactionManagerTest.testFatalErrorWhenProduceResponseWithInvalidPidMapping`
-    /// (Java 1435-1449).
+    /// (Java 1435-1448).
     #[tokio::test]
     async fn test_fatal_error_when_produce_response_with_invalid_pid_mapping() {
         use crate::producer::internals::producer_test_utils::run_until;
@@ -9899,7 +9942,7 @@ mod tests {
 
     /// Translated from
     /// `TransactionManagerTest.testMultipleAddPartitionsPerForOneProduce`
-    /// (Java 1932-1976).
+    /// (Java 1932-1970).
     #[tokio::test]
     async fn test_multiple_add_partitions_per_for_one_produce() {
         use crate::producer::internals::producer_test_utils::run_until;
@@ -10708,7 +10751,7 @@ mod tests {
 
     /// Translated from
     /// `TransactionManagerTest.testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled`
-    /// (Java 2666-2681).
+    /// (Java 2666-2682).
     ///
     /// Java caps the *client's* `TXN_OFFSET_COMMIT` at v2 with
     /// `client.setNodeApiVersions(..)`, so `NetworkClient` refuses to send the v3+
@@ -11185,7 +11228,7 @@ mod tests {
 
     /// Translated from
     /// `TransactionManagerTest.testTransitionToFatalErrorWhenRetriedBatchIsExpired`
-    /// (Java 2979-3037).
+    /// (Java 2979-3036).
     ///
     /// Java's `apiVersions.update("0", ..)` caps `INIT_PRODUCER_ID` at v1 and `PRODUCE`
     /// at v7. Only the first is load-bearing here — it is what makes
@@ -11700,7 +11743,7 @@ mod tests {
 
     /// Translated from
     /// `TransactionManagerTest.testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError`
-    /// (Java 3567-3598).
+    /// (Java 3567-3597).
     #[tokio::test]
     async fn test_bump_transactional_epoch_on_recoverable_add_offsets_request_error() {
         use crate::producer::internals::producer_test_utils::run_until;
@@ -12285,6 +12328,37 @@ mod tests {
 
     /// Translated from `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
     /// (Java 3126-3173).
+    ///
+    /// # The "twice", and how it is reached here
+    ///
+    /// The property under test is Java's own stated one: a produce response arriving for a
+    /// batch that has **already been failed** must leave the transaction manager in
+    /// ABORTABLE, not FATAL. Java reaches it by handling the batch's response twice — a
+    /// disconnect delivery, then a late `INVALID_TXN_STATE` — using
+    /// `client.disconnect(node, allowLateResponses = true)` to retain the request.
+    ///
+    /// That mechanism does not port. Java's routing rides on the request:
+    /// `ClientRequest.callback()` (`ClientRequest.java:104-105`) is a getter, so the
+    /// disconnect response and the late one share one `RequestCompletionHandler` and
+    /// `ClientResponse.onComplete` fires it both times. This port routes produce responses
+    /// by correlation id through [`Sender::pending_produce_responses`], which the first
+    /// delivery `remove`s — so a disconnect delivery would consume the routing and the late
+    /// response would be silently discarded. See [`MockClient::disconnect_by_id`] and PLAN
+    /// §9.28.
+    ///
+    /// So the batch is failed by the **delivery-timeout expiry** instead of by a disconnect
+    /// delivery, which leaves the routing entry intact, and the late response is then
+    /// genuinely routed into `handle_produce_response` for an already-done batch. The
+    /// expiry is Java's too (`time.sleep(2000)` past `delivery.timeout.ms`); what is
+    /// dropped is only the `disconnect` + `backoff` pair, whose purpose in Java is to stop
+    /// the Sender sending anything new — and there is nothing new to send here.
+    ///
+    /// The four assertions around the late response are what make this more than a rename:
+    /// `pending_produce_responses` and `batches_awaiting_response` are each asserted to
+    /// hold the batch *before* it and to be empty *after*, and they drain only by the
+    /// response being handled. Mutation-checked — deleting the
+    /// `send_idempotent_producer_response` call fails the first of them, where the previous
+    /// revision of this test (which used the retaining disconnect) still passed.
     #[tokio::test]
     async fn test_receive_failed_batch_twice_with_transactions() {
         let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
@@ -12303,27 +12377,57 @@ mod tests {
         let request1 = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await.expect("run_once"); // send request
 
-        let node = ctx.metadata.fetch().nodes()[0].clone();
+        // Java sleeps past the delivery timeout and then calls
+        // `client.disconnect(node.idString(), true)` + `client.backoff(node, 10)`. Only the
+        // sleep is reproduced; see the rustdoc for why the disconnect is not, and what is
+        // asserted instead.
         ctx.time.sleep(2000);
-        // `client.disconnect(node.idString(), true)` — the request stays answerable, which
-        // is what makes the "twice" in the test's name reachable.
-        ctx.sender
-            .client_mut()
-            .disconnect_by_id_with_late_responses(node.id_string(), true);
-        ctx.sender.client_mut().backoff(&node, 10);
 
         ctx.sender.run_once().await.expect("run_once"); // now expire the batch
         assert_future_failure(&request1, Errors::RequestTimedOut).await;
 
+        // The expired batch is failed but still owes its buffer to the response, so it is
+        // parked and its routing entry survives. This is the precondition for the second
+        // delivery; asserting it here is what makes the assertions after the late response
+        // meaningful rather than vacuous.
+        assert_eq!(
+            ctx.sender.batches_awaiting_response.len(),
+            1,
+            "the expired in-flight batch must be parked awaiting its response"
+        );
+        assert_eq!(
+            ctx.sender.pending_produce_responses.len(),
+            1,
+            "the produce request's routing entry must survive the expiry"
+        );
+
         ctx.time.sleep(20);
 
+        // The late response, for a batch that is already done.
         send_idempotent_producer_response(&mut ctx, Some(0), 0, &tp0, Errors::InvalidTxnState, 0, -1);
         ctx.sender.run_once().await.expect("run_once"); // receive late response
 
+        // THE discriminating assertions: both drain only by the late response being routed
+        // into `handle_produce_response` a second time for this batch. Drop the response
+        // and they stay at 1.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "the late response must have been routed, not discarded"
+        );
+        assert!(
+            ctx.sender.batches_awaiting_response.is_empty(),
+            "handling the late response must release the parked batch's buffer"
+        );
+
         // Loop once and confirm that the transaction manager does not enter a fatal error
-        // state.
+        // state — Java's own stated point.
         ctx.sender.run_once().await.expect("run_once");
-        assert!(ctx.transaction_manager().lock().unwrap().has_abortable_error());
+        let manager = ctx.transaction_manager();
+        assert!(manager.lock().unwrap().has_abortable_error());
+        assert!(
+            !manager.lock().unwrap().has_fatal_error(),
+            "an INVALID_TXN_STATE for an already-failed batch must stay abortable"
+        );
         let result = begin_abort(&ctx);
         abort_and_reinitialize(&mut ctx, &result, producer_id_and_epoch).await;
     }

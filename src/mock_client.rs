@@ -133,7 +133,7 @@ impl MockConnectionState {
 
 /// A predicate asserted against the request a prepared response is about to answer.
 ///
-/// Translated from `MockClient.RequestMatcher` (`MockClient.java:637-639`), a
+/// Translated from `MockClient.RequestMatcher` (`MockClient.java:623-625`), a
 /// functional interface whose `matches(AbstractRequest)` Java evaluates inside
 /// `send` and `respond`. Every `TransactionManagerTest` `prepare*`/`send*` helper
 /// supplies one, and the assertions live *inside* it — so a port without matchers
@@ -289,26 +289,40 @@ impl MockClient {
     /// pending requests to that node.
     ///
     /// Translated from `MockClient.disconnect(String)`.
-    pub fn disconnect_by_id(&mut self, node_id: &str) {
-        self.disconnect_node_with_late_responses(node_id, false);
-    }
-
-    /// Disconnects `node_id`, optionally leaving its in-flight requests answerable.
+    /// Disconnects `node_id`, failing its in-flight requests.
     ///
-    /// Translated from `MockClient.disconnect(String, boolean allowLateResponses)`
-    /// (`MockClient.java:200-218`). With `allow_late_responses` the request stays in the
-    /// queue after the disconnect response is emitted, so a subsequent `respond*` still
-    /// matches it — which is what `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
-    /// needs in order to deliver a response for a batch the Sender has already expired.
-    pub fn disconnect_by_id_with_late_responses(&mut self, node_id: &str, allow_late_responses: bool) {
-        self.disconnect_node_with_late_responses(node_id, allow_late_responses);
+    /// Translated from `MockClient.disconnect(String)` (`MockClient.java:196-198`), which
+    /// delegates to the two-argument overload with `allowLateResponses = false`.
+    ///
+    /// # Why the `allowLateResponses` overload is not translated
+    ///
+    /// `MockClient.disconnect(String, boolean allowLateResponses)`
+    /// (`MockClient.java:200-218`) retains the disconnected request so a later `respond*`
+    /// can answer it a *second* time. In Java that second answer reaches the `Sender`
+    /// because the routing lives on the request: `ClientRequest.callback()`
+    /// (`ClientRequest.java:104-105`) is a plain **getter**, so the disconnect
+    /// `ClientResponse` and the late one are handed the *same*
+    /// `RequestCompletionHandler`, and `ClientResponse.onComplete`
+    /// (`ClientResponse.java:152-154`) fires it both times.
+    ///
+    /// This port cannot reproduce that, because it deliberately does not route produce
+    /// responses through callbacks: `Sender::send_produce_request` passes `None`
+    /// (`sender.rs`, "No callback -- we process responses after poll() returns") and
+    /// routes by correlation id through `Sender::pending_produce_responses`, which the
+    /// **first** delivery `remove`s. A retained request's second answer therefore finds no
+    /// entry and is discarded, so the overload would be inert here — it would only stop
+    /// `respond*` from panicking on an empty queue.
+    ///
+    /// An earlier revision of this file did translate it, with a comment claiming Java's
+    /// retained request "carries no callback". That is false, and it is why the overload is
+    /// documented as absent rather than shipped inert. `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
+    /// is translated without it — see that test's rustdoc — and the divergence is tracked
+    /// as `design/history/Milestone-11/PLAN.md` §9.28.
+    pub fn disconnect_by_id(&mut self, node_id: &str) {
+        self.disconnect_node(node_id);
     }
 
     fn disconnect_node(&mut self, node_id: &str) {
-        self.disconnect_node_with_late_responses(node_id, false);
-    }
-
-    fn disconnect_node_with_late_responses(&mut self, node_id: &str, allow_late_responses: bool) {
         let now = (self.time_provider)();
         // Create disconnect responses for all pending requests to this node
         let mut remaining = VecDeque::new();
@@ -329,15 +343,10 @@ impl MockClient {
                     None,
                 );
                 self.responses.push_back(response);
-                if allow_late_responses {
-                    // Java's `if (!allowLateResponses) iter.remove()` — the request stays
-                    // in the queue so a later `respond*` can still answer it. The callback
-                    // has been moved into the disconnect response above, so the retained
-                    // request carries none; answering it delivers a body with no callback,
-                    // which is exactly what Java's retained `ClientRequest` does after its
-                    // `request.callback()` was handed to the disconnect `ClientResponse`.
-                    remaining.push_back(request);
-                }
+                // Java's `if (!allowLateResponses) iter.remove()` with
+                // `allowLateResponses = false`: the request is dropped, not retained. See
+                // [`Self::disconnect_by_id`] for why the retaining overload is not
+                // translated.
             } else {
                 remaining.push_back(request);
             }
@@ -356,14 +365,14 @@ impl MockClient {
     /// against it.
     ///
     /// Translated from `MockClient.respond(RequestMatcher, AbstractResponse)`
-    /// (`MockClient.java:294-296`), which `TransactionManagerTest`'s `sendProduceResponse`
+    /// (`MockClient.java:382-392`), which `TransactionManagerTest`'s `sendProduceResponse`
     /// / `sendAddPartitionsToTxnResponse` / `sendEndTxnResponse` use to answer a request
     /// that is *already* in flight.
     ///
     /// # Panics
     ///
-    /// If no request is pending, or if `matcher` rejects it — Java throws
-    /// `IllegalStateException` in the same place (`:301-303`).
+    /// If no request is pending (Java's `:384-385`), or if `matcher` rejects it — Java
+    /// throws `IllegalStateException` in the same place (`:388-389`).
     pub fn respond_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
         let built = self
             .requests
@@ -472,7 +481,8 @@ impl MockClient {
     /// Prepare a future response, asserting `matcher` against the request it answers.
     ///
     /// Translated from `MockClient.prepareResponse(RequestMatcher, AbstractResponse)`
-    /// (`MockClient.java:246-248`).
+    /// (`MockClient.java:445-447`), which delegates to the disconnect overload with
+    /// `disconnected = false`.
     pub fn prepare_response_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
         self.prepare_response_from(None, Some(matcher), response, false, false);
     }
@@ -481,7 +491,7 @@ impl MockClient {
     ///
     /// Translated from
     /// `MockClient.prepareResponse(RequestMatcher, AbstractResponse, boolean)`
-    /// (`MockClient.java:258-260`).
+    /// (`MockClient.java:472-474`).
     pub fn prepare_response_with_matcher_disconnected(
         &mut self,
         matcher: RequestMatcher,
@@ -643,8 +653,11 @@ impl KafkaClient for MockClient {
 
         if let Some(idx) = matched_idx {
             let future_resp = self.future_responses.remove(idx).unwrap();
-            // Java builds the request unconditionally here (`MockClient.java:495`) and
-            // then evaluates the matcher. This port builds it only when a matcher is
+            // Java builds the request unconditionally here (`MockClient.java:259`, inside
+            // `send`) and then evaluates the matcher — unconditionally because its
+            // matcher-less overloads default to `ALWAYS_TRUE` (`:49`, used at `:432` /
+            // `:458`), so there is always a matcher to run. This port builds it only when a
+            // matcher is
             // present, because `build()` on a `ProduceRequestBuilder` *moves* the
             // serialized records out of the batch (PLAN §9.18) — a side effect Java's
             // `build()` does not have. Nothing downstream of a matched future response

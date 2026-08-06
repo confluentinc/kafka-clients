@@ -1960,15 +1960,15 @@ impl TransactionManager {
     /// The current state. Visible for testing, as Java's package-private field
     /// access is.
     #[cfg(test)]
+    fn current_state(&self) -> State {
+        self.current_state
+    }
+
     /// How many times [`Self::close`] has been called — Java's
     /// `verify(transactionManager, times(n)).close()`.
     #[cfg(test)]
     pub(crate) fn close_call_count(&self) -> u32 {
         self.close_call_count
-    }
-
-    fn current_state(&self) -> State {
-        self.current_state
     }
 
     /// Enqueues an `InitProducerId` handler unconditionally and hands back its
