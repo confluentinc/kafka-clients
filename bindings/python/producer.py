@@ -28,6 +28,21 @@ class KafkaError(Exception):
         _lib.KafkaError_destroy(_id)
         return ret
 
+    @staticmethod
+    def _from_parts(code: int, message: str, is_retriable: int, is_fatal: int):
+        """Build a KafkaError from already-copied fields.
+
+        Used for *borrowed* per-key errors inside an admin result handle: those
+        die with their parent handle, so the C layer copies their fields out
+        before destroying it and there is nothing left to ``KafkaError_destroy``.
+        """
+        ret = KafkaError.__new__(KafkaError)
+        ret._code = code
+        ret._message = message
+        ret._is_retriable = bool(is_retriable)
+        ret._is_fatal = bool(is_fatal)
+        return ret
+
     @property
     def code(self):
         return self._code
