@@ -829,6 +829,109 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Commits the current positions (async; Java <c>commitSync()</c>) — the M5/P6
+    /// <b>confirming</b> commit with no explicit offsets. The returned <see cref="Task"/>
+    /// completes when the core resolves the commit (successfully for a <c>MockConsumer</c>,
+    /// which stores the current positions broker-free), or faults with a
+    /// <see cref="KafkaException"/>. Reuses the shipped void completion bridge
+    /// (<see cref="SubmitVoidOperation"/> + <see cref="ConsumerCallbacks.Operation"/>) over
+    /// <c>Consumer_commit_sync_async</c> — a one-line clone of
+    /// <see cref="UnsubscribeWithCallback"/> (the no-arg void-bridge precedent); NO new
+    /// bridge / callback this phase. A concurrent second op is rejected by the core inline
+    /// and faults the <see cref="Task"/> (ConcurrentModification, ffi §B5).
+    /// </summary>
+    /// <remarks>
+    /// <b>Async-bridged, blocks-in-Java (CLAUDE.md §4).</b> Java's <c>commitSync</c> blocks,
+    /// so the idiom map maps it to a <see cref="Task"/>; bridging it over the void
+    /// <c>op_callback_t</c> (rather than a blocking-thread <c>CommitSync</c> façade) avoids
+    /// the blocking-thread footgun. The <paramref name="cancellationToken"/> is user-initiated
+    /// cancellation → <c>wakeup()</c> (best-effort, ffi §B7), not a timeout.
+    /// </remarks>
+    /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task CommitWithCallback(CancellationToken cancellationToken = default)
+    {
+        return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+            NativeMethods.ConsumerCommitSyncAsync(consumer, callback, userData));
+    }
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/> (async; Java
+    /// <c>commitSync(Map&lt;TopicPartition, OffsetAndMetadata&gt;)</c>) — the M5/P6
+    /// <b>confirming</b> commit with explicit offsets. The returned <see cref="Task"/>
+    /// completes when the core resolves the commit (a <c>MockConsumer</c> stores them into
+    /// its committed map broker-free, so a subsequent <see cref="CommittedWithCallback"/> on
+    /// an <b>assigned</b> partition reads the exact value back), or faults with a
+    /// <see cref="KafkaException"/>. Reuses the shipped void completion bridge
+    /// (<see cref="SubmitVoidOperation"/> + <see cref="ConsumerCallbacks.Operation"/>) over
+    /// <c>Consumer_commit_sync_offsets_async</c> plus the new
+    /// <see cref="WithPinnedCommitOffsets"/> 5-array marshaller; NO new bridge / callback.
+    /// </summary>
+    /// <remarks>
+    /// Same async-bridged mapping and cancellation semantics as the no-offsets
+    /// <see cref="CommitWithCallback(CancellationToken)"/>. An <b>empty</b> map commits
+    /// nothing (<c>count == 0</c>, a valid pass-through — never a throw, §B5). The offsets are
+    /// validated + snapshotted (§B5) BEFORE any pin / P-Invoke via
+    /// <see cref="SnapshotCommitOffsets"/>.
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task CommitWithCallback(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        CancellationToken cancellationToken = default)
+    {
+        // Snapshot + validate BEFORE any pin / P-Invoke (ffi §B5): the ABI does not validate
+        // preconditions and panics/mismaps on violation. Produces the five parallel arrays.
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+
+        return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+            WithPinnedCommitOffsets(snapshot, (topics, parts, offs, epochs, meta, cnt) =>
+                NativeMethods.ConsumerCommitSyncOffsetsAsync(
+                    consumer, topics, parts, offs, epochs, meta, cnt, callback, userData)));
+    }
+
+    /// <summary>
+    /// Commits the consumed offsets fire-and-forget (Java <c>commitAsync()</c>) — the M5/P6
+    /// best-effort commit. <b>Sync-returning and non-blocking</b>: it returns the instant the
+    /// core has initiated the async commit (the ABI's <c>Consumer_commit_async</c> "returns
+    /// once the async commit is initiated"). Structurally identical to the shipped
+    /// <see cref="EnforceRebalance"/> sync-op path: <see cref="ThrowIfClosed"/>, the FFI call,
+    /// then <see cref="KafkaException.FromHandle(IntPtr)"/> throw-iff-non-null — no pin, no
+    /// <see cref="GCHandle"/>, no completion bridge, no <see cref="CancellationToken"/>
+    /// (fire-and-forget; nothing to cancel, matching Python's no-arg <c>commit_async()</c>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Concurrency (single-owner).</b> A concurrent op leaves the core's sync path
+    /// returning a non-null error handle → a thrown <see cref="KafkaException"/>
+    /// (ConcurrentModification), the sync analog of the async ops' faulted <see cref="Task"/>
+    /// (ffi §B5); there is no managed guard (M3/P2). The same check-then-use handle TOCTOU vs
+    /// a concurrent teardown as <see cref="EnforceRebalance"/> is the accepted single-owner
+    /// residual.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    internal void CommitAsync()
+    {
+        ThrowIfClosed();
+
+        // Uniform sync-op discipline (ffi §B5): FromHandle frees the handle exactly once and
+        // returns null on success. Throw only for a non-null error. Identical shape to
+        // EnforceRebalance — no pin, no GCHandle, no bridge.
+        KafkaException? failure = KafkaException.FromHandle(
+            NativeMethods.ConsumerCommitAsync(_handle.DangerousGetHandle()));
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
     /// Returns the partition metadata for <paramref name="topic"/> (async; Java
     /// <c>partitionsFor(String)</c>) — the M5/P5 owned-handle <c>PartitionInfoList_t</c>
     /// completion (Category E2). The returned <see cref="Task{TResult}"/> resolves with an
@@ -1830,6 +1933,170 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             for (int i = 0; i < pins.Length; i++)
             {
                 pins[i]?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The validated, snapshotted commit-offsets input — the five parallel arrays the ABI's
+    /// <c>commit_sync_offsets_async</c> takes, produced by <see cref="SnapshotCommitOffsets"/>
+    /// and consumed by <see cref="WithPinnedCommitOffsets"/>. <c>Topics</c> and
+    /// <c>Metadata</c> are the two string arrays (both pinned call-scoped); <c>Partitions</c>
+    /// / <c>Offsets</c> / <c>LeaderEpochs</c> are blittable and passed straight through.
+    /// <c>Count</c> is the entry count (may be 0 for an empty map).
+    /// </summary>
+    private readonly struct CommitOffsetsSnapshot
+    {
+        internal CommitOffsetsSnapshot(
+            string[] topics, int[] partitions, long[] offsets, int[] leaderEpochs, string[] metadata, int count)
+        {
+            Topics = topics;
+            Partitions = partitions;
+            Offsets = offsets;
+            LeaderEpochs = leaderEpochs;
+            Metadata = metadata;
+            Count = count;
+        }
+
+        internal string[] Topics { get; }
+
+        internal int[] Partitions { get; }
+
+        internal long[] Offsets { get; }
+
+        internal int[] LeaderEpochs { get; }
+
+        internal string[] Metadata { get; }
+
+        internal int Count { get; }
+    }
+
+    /// <summary>
+    /// Validates a commit-offsets map (§B5) and snapshots it into the five parallel arrays —
+    /// the commit analog of <see cref="SnapshotPartitions"/>, validated BEFORE any pin /
+    /// P-Invoke (the ABI does not validate preconditions and panics/mismaps on violation,
+    /// CLAUDE.md §3). A <see langword="null"/> map is rejected; an <b>empty</b> map is valid
+    /// (yields zero-length arrays, passed through as <c>Count == 0</c>). Per the Python
+    /// <c>_commit_spec</c> convention (and the ABI header contract): a null
+    /// <see cref="OffsetAndMetadata.LeaderEpoch"/> becomes the sentinel <c>-1</c> ("no
+    /// epoch"), and <see cref="OffsetAndMetadata.Metadata"/> (never null by construction —
+    /// the public ctor coerces null → <c>""</c>) is passed through, with a defensive
+    /// null-coalesce to <c>""</c>. A negative offset inside an <see cref="OffsetAndMetadata"/>
+    /// cannot reach here — the public ctor rejects <c>offset &lt; 0</c> at construction — so
+    /// no offset re-validation is needed.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// A key topic is null, or a value (<see cref="OffsetAndMetadata"/>) is null.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    private static CommitOffsetsSnapshot SnapshotCommitOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    {
+        if (offsets is null)
+        {
+            throw new ArgumentNullException(nameof(offsets));
+        }
+
+        int count = offsets.Count;
+        string[] topics = new string[count];
+        int[] partitions = new int[count];
+        long[] offsetValues = new long[count];
+        int[] leaderEpochs = new int[count];
+        string[] metadata = new string[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
+        {
+            TopicPartition tp = entry.Key;
+            if (tp.Topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(offsets));
+            }
+
+            if (tp.Partition < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(offsets), tp.Partition, "Partition must not be negative.");
+            }
+
+            OffsetAndMetadata value = entry.Value;
+            if (value is null)
+            {
+                // A reference-type dictionary value; a null OffsetAndMetadata must be
+                // rejected before deref (§B5). Java stores never-null values.
+                throw new ArgumentException("Offset value must not be null.", nameof(offsets));
+            }
+
+            topics[index] = tp.Topic;
+            partitions[index] = tp.Partition;
+            offsetValues[index] = value.Offset;
+            // Python _commit_spec convention: null leader epoch → the -1 "no epoch" sentinel
+            // (the ABI header: `leader_epoch < 0 means no epoch`).
+            leaderEpochs[index] = value.LeaderEpoch ?? -1;
+            // Metadata is never null by construction (the public ctor coerces null → "");
+            // the coalesce is defensive.
+            metadata[index] = value.Metadata ?? string.Empty;
+            index++;
+        }
+
+        return new CommitOffsetsSnapshot(topics, partitions, offsetValues, leaderEpochs, metadata, count);
+    }
+
+    /// <summary>
+    /// The commit-offsets analog of <see cref="WithPinnedTopics"/> /
+    /// <see cref="WithPinnedTopicsAndTimestamps"/> — the one marshaller with <b>two</b> string
+    /// arrays (topics + metadata). Pins <b>both</b> the topic strings and the metadata strings
+    /// <b>call-scoped</b> (the core copies them synchronously during the submit call —
+    /// <c>commit_sync_offsets_async</c>'s <c>read_offset_map</c> reads every string into an
+    /// owned <c>OffsetAndMetadata</c> before dispatching — so the pins are freed the moment
+    /// <paramref name="body"/> returns, never held across the returned <see cref="Task"/>;
+    /// ffi §A3/§A4/§B3), fills the two parallel <see cref="IntPtr"/>[] pointer arrays, passes
+    /// the three blittable numeric arrays (<c>partitions</c> / <c>offsets</c> /
+    /// <c>leader_epochs</c>) straight through, runs <paramref name="body"/>, and releases
+    /// <b>all</b> pins in a single <c>finally</c>. <b>No per-element copy beyond the UTF-8
+    /// encode</b> (§A4/§B4). A <c>Count</c> of 0 (empty map) runs <paramref name="body"/> with
+    /// empty arrays and <c>count == 0</c> — a valid pass-through, never a throw (§B5). Added
+    /// as a NEW parallel helper (rather than generalizing <see cref="WithPinnedTopics"/>) so
+    /// the shipped M5/P3–P5 partition-op / offset-query pin paths stay byte-for-byte untouched
+    /// (PLAN §3.1 — the "clone a parallel helper" discipline); the two-string-array shape has
+    /// no existing helper to reuse.
+    /// </summary>
+    /// <param name="snapshot">The validated five-array input from <see cref="SnapshotCommitOffsets"/>.</param>
+    /// <param name="body">
+    /// The P/Invoke to run with the pinned <c>(topics, partitions, offsets, leaderEpochs,
+    /// metadata, count)</c>.
+    /// </param>
+    private static void WithPinnedCommitOffsets(
+        CommitOffsetsSnapshot snapshot,
+        Action<IntPtr[], int[], long[], int[], IntPtr[], int> body)
+    {
+        int count = snapshot.Count;
+        Utf8Marshal.PinnedUtf8String?[] topicPins = new Utf8Marshal.PinnedUtf8String?[count];
+        Utf8Marshal.PinnedUtf8String?[] metadataPins = new Utf8Marshal.PinnedUtf8String?[count];
+        IntPtr[] topicPointers = new IntPtr[count];
+        IntPtr[] metadataPointers = new IntPtr[count];
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(snapshot.Topics[i]);
+                topicPins[i] = topicPin;
+                topicPointers[i] = topicPin.Pointer;
+
+                Utf8Marshal.PinnedUtf8String metadataPin = Utf8Marshal.Pin(snapshot.Metadata[i]);
+                metadataPins[i] = metadataPin;
+                metadataPointers[i] = metadataPin.Pointer;
+            }
+
+            body(topicPointers, snapshot.Partitions, snapshot.Offsets, snapshot.LeaderEpochs, metadataPointers, count);
+        }
+        finally
+        {
+            // Release ALL pins (both string arrays) in one finally — no leak.
+            for (int i = 0; i < count; i++)
+            {
+                topicPins[i]?.Dispose();
+                metadataPins[i]?.Dispose();
             }
         }
     }

@@ -769,6 +769,54 @@ internal static class NativeMethods
         IntPtr userData);
 
     /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_sync_async</c> — commits the current positions
+    /// asynchronously (Java <c>commitSync()</c>; the async dispatch of the sync
+    /// <c>commit_sync</c>). One-operation-in-flight; reuses the same void-result completion
+    /// callback as <see cref="ConsumerSubscribeAsync"/> / <see cref="ConsumerUnsubscribeAsync"/>
+    /// (null error = success), taking no offsets. <paramref name="userData"/> is a
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> over the per-op context (M5/P6).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_sync_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerCommitSyncAsync(
+        IntPtr consumer,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_sync_offsets_async</c> — commits specific offsets
+    /// asynchronously (Java <c>commitSync(Map)</c>) from the parallel input arrays
+    /// <c>(topics[], partitions[], offsets[], leader_epochs[], metadata[], count)</c>. Per
+    /// the header contract, <paramref name="metadata"/> entries may be null and a
+    /// <paramref name="leaderEpochs"/> entry <c>&lt; 0</c> means "no epoch". Both string
+    /// arrays map C's <c>const char*const*</c> (same as <see cref="ConsumerCommittedAsync"/>'s
+    /// <paramref name="topics"/>). One-operation-in-flight; reuses the void-result completion
+    /// callback (null error = success). <paramref name="userData"/> is a
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> over the per-op context (M5/P6).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_sync_offsets_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerCommitSyncOffsetsAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_async</c> — commits the consumed offsets
+    /// fire-and-forget (Java <c>commitAsync()</c>). A <b>sync</b> call that returns once the
+    /// async commit is initiated, yielding a <c>kafka_common_KafkaError_t*</c>
+    /// (<see cref="IntPtr"/>) — null = success, non-null = error (the shipped
+    /// <see cref="ConsumerEnforceRebalance"/> sync-op shape). No callback, no offsets, no
+    /// user data (M5/P6).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCommitAsync(IntPtr consumer);
+
+    /// <summary>
     /// <c>kafka_consumer_Consumer_offsets_for_times_async</c> — offsets by timestamp for
     /// the parallel <c>(topics[], partitions[], timestamps[], count)</c> arrays
     /// asynchronously (one-operation-in-flight). The completion fires via
