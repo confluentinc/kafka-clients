@@ -1099,16 +1099,16 @@ impl<K, V> KafkaProducer<K, V> {
                         // blocks, so the error class decides how the failure surfaces:
                         //
                         // - `ProducerFencedException` / `InvalidProducerEpochException`
-                        //   (`maybeFailWithError`, `TransactionManager.java:1157-1167`)
+                        //   (`maybeFailWithError`, `TransactionManager.java:1159` and `:1164`)
                         //   are `ApiException`s: `catch (ApiException e)` records the
                         //   error state and returns a failed future.
                         // - `IllegalStateException` — a send that is out of order with
-                        //   the transactional API (Java 439-448), or a previous
+                        //   the transactional API (Java 443 and 446), or a previous
                         //   operation that timed out (`throwIfPendingState`, Java
-                        //   1249-1258), or a previous invalid transition (Java 1168) —
+                        //   1249-1257), or a previous invalid transition (Java 1168) —
                         //   is not even a `KafkaException`, so it reaches
                         //   `catch (Exception e)` and is rethrown out of `send()`.
-                        // - The bare `KafkaException` of Java 1172 is not an
+                        // - The bare `KafkaException` of Java 1171 is not an
                         //   `ApiException` either, so `catch (KafkaException e)`
                         //   rethrows it as well. Neither rethrowing block calls
                         //   `maybeTransitionToErrorState`.
@@ -3399,7 +3399,7 @@ mod tests {
     ///
     /// The state `TransactionManagerTest.testFailIfNotReadyForSendNoProducerId`
     /// (Java 262-265) asserts on, surfaced through `doSend`. `maybeAddPartition` raises
-    /// `IllegalStateException` (`TransactionManager.java:439-442`), which is not a
+    /// `IllegalStateException` (`TransactionManager.java:443`), which is not a
     /// `KafkaException` at all, so it misses `catch (ApiException e)` *and*
     /// `catch (KafkaException e)`, reaches `catch (Exception e)`
     /// (`KafkaProducer.java:1077-1081`) and is rethrown out of `send()`.
@@ -3431,7 +3431,7 @@ mod tests {
     /// The state `TransactionManagerTest.testFailIfNotReadyForSendNoOngoingTransaction`
     /// (Java 282-286) asserts on, surfaced through `doSend`. Same
     /// `IllegalStateException` treatment as above, from
-    /// `TransactionManager.java:443-448`, whose message carries the state and Java's
+    /// `TransactionManager.java:446`, whose message carries the state and Java's
     /// double space before it.
     #[test]
     fn test_send_outside_transaction_returns_illegal_state() {
@@ -3459,7 +3459,7 @@ mod tests {
     /// (Java 288-294) asserts on.
     ///
     /// `maybeFailWithError` raises a **bare** `KafkaException`
-    /// (`TransactionManager.java:1172`). `ApiException extends KafkaException`, not the
+    /// (`TransactionManager.java:1171`). `ApiException extends KafkaException`, not the
     /// other way round, so `catch (ApiException e)` does not match and
     /// `catch (KafkaException e)` (`KafkaProducer.java:1073-1076`) rethrows it — a
     /// block that, unlike the `ApiException` one, never calls
@@ -3566,7 +3566,7 @@ mod tests {
     /// This is the arm that actually re-locks the manager —
     /// `handle_api_exception` → `maybe_transition_to_error_state` — so it is the direct
     /// regression test for the deadlock. `maybeFailWithError` re-raises a fenced
-    /// producer as `ProducerFencedException` (`TransactionManager.java:1157-1161`),
+    /// producer as `ProducerFencedException` (`TransactionManager.java:1159`),
     /// which IS an `ApiException`.
     #[test]
     fn test_send_after_producer_fenced_fails_the_future() {
