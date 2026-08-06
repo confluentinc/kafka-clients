@@ -217,6 +217,27 @@ unsafe fn handle_ref(consumer: *const kafka_consumer_Consumer_t) -> &'static Ffi
     unsafe { &*(consumer as *const FfiConsumerHandle) }
 }
 
+/// Clones the core [`ConsumerHandle`] captured at construction together with a
+/// [`tokio::runtime::Handle`] for the consumer's runtime — the two pieces
+/// [`super::consumer_handle::kafka_consumer_Consumer_handle`] needs to build a
+/// `kafka_consumer_ConsumerHandle_t`.
+///
+/// Deliberately does **not** acquire the access guard: every core
+/// `ConsumerHandle` method takes `&self` and the value is captured once at
+/// construction (it never changes), so there is nothing to serialize. Handing
+/// out the handle while an operation is in flight is exactly the point — see
+/// the `consumer_handle` module docs.
+///
+/// # Safety
+///
+/// `consumer` must be non-null and created by a consumer constructor.
+pub(crate) unsafe fn clone_core_handle(
+    consumer: *const kafka_consumer_Consumer_t,
+) -> (ConsumerHandle, tokio::runtime::Handle) {
+    let h = unsafe { handle_ref(consumer) };
+    (h.consumer_handle.clone(), h.runtime_handle.clone())
+}
+
 // ---------------------------------------------------------------------------
 // Opaque types
 // ---------------------------------------------------------------------------
@@ -1358,7 +1379,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 ///
 /// `topics` must point to `count` valid C strings; `partitions` to `count`
 /// `i32` values. A non-positive `count` yields an empty vec.
-unsafe fn read_topic_partitions(
+pub(crate) unsafe fn read_topic_partitions(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
@@ -1916,7 +1937,7 @@ struct OffsetMapInner {
     values: Vec<OffsetAndMetadataInner>,
 }
 
-fn box_offset_map(map: HashMap<TopicPartition, OffsetAndMetadata>) -> *mut kafka_consumer_OffsetMap_t {
+pub(crate) fn box_offset_map(map: HashMap<TopicPartition, OffsetAndMetadata>) -> *mut kafka_consumer_OffsetMap_t {
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, oam) in map {
@@ -2002,7 +2023,7 @@ struct OffsetAndTimestampMapInner {
     values: Vec<OffsetAndTimestamp>,
 }
 
-fn box_offset_and_timestamp_map(
+pub(crate) fn box_offset_and_timestamp_map(
     map: HashMap<TopicPartition, OffsetAndTimestamp>,
 ) -> *mut kafka_consumer_OffsetAndTimestampMap_t {
     let mut keys = Vec::with_capacity(map.len());
@@ -2096,7 +2117,7 @@ struct LongOffsetMapInner {
     values: Vec<i64>,
 }
 
-fn box_long_offset_map(map: HashMap<TopicPartition, i64>) -> *mut kafka_consumer_LongOffsetMap_t {
+pub(crate) fn box_long_offset_map(map: HashMap<TopicPartition, i64>) -> *mut kafka_consumer_LongOffsetMap_t {
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, offset) in map {
@@ -2640,7 +2661,9 @@ struct TopicPartitionListInner {
     items: Vec<TopicPartitionInner>,
 }
 
-fn box_topic_partition_list(tps: impl IntoIterator<Item = TopicPartition>) -> *mut kafka_consumer_TopicPartitionList_t {
+pub(crate) fn box_topic_partition_list(
+    tps: impl IntoIterator<Item = TopicPartition>,
+) -> *mut kafka_consumer_TopicPartitionList_t {
     let items = tps
         .into_iter()
         .map(|tp| {
@@ -2704,7 +2727,7 @@ struct StringListInner {
     items: Vec<std::ffi::CString>,
 }
 
-fn box_string_list(strings: impl IntoIterator<Item = String>) -> *mut kafka_consumer_StringList_t {
+pub(crate) fn box_string_list(strings: impl IntoIterator<Item = String>) -> *mut kafka_consumer_StringList_t {
     let items = strings
         .into_iter()
         .map(|s| std::ffi::CString::new(s.as_bytes()).unwrap_or_default())
@@ -3257,7 +3280,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_async(
 /// # Safety
 ///
 /// All non-null arrays must have `count` valid entries.
-unsafe fn read_offset_map(
+pub(crate) unsafe fn read_offset_map(
     topics: *const *const c_char,
     partitions: *const i32,
     offsets: *const i64,
@@ -3830,7 +3853,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
 /// # Safety
 ///
 /// All arrays must have `count` valid entries.
-unsafe fn read_timestamps_to_search(
+pub(crate) unsafe fn read_timestamps_to_search(
     topics: *const *const c_char,
     partitions: *const i32,
     timestamps: *const i64,

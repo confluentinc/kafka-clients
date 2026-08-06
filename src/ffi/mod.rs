@@ -28,4 +28,5 @@
 
 pub(crate) mod common;
 pub(crate) mod consumer;
+pub(crate) mod consumer_handle;
 pub(crate) mod producer;
