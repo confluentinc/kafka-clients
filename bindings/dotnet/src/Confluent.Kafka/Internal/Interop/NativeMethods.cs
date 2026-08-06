@@ -305,6 +305,33 @@ internal static class NativeMethods
         ConsumerCallbacks.PollCallback callback,
         IntPtr userData);
 
+    // ---- Async position (scalar completion, ffi §B6/§B7) — M5/P2 ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_position_async</c> — returns the current position of
+    /// <c>(topic, partition)</c> asynchronously (one-operation-in-flight). The completion
+    /// fires via <paramref name="callback"/> on the core's dispatcher thread with the
+    /// <b>scalar</b> shape (ffi §B6/§B7): on success the <c>int64_t</c> position is the
+    /// offset and <c>error</c> is null; on failure the position is 0 and <c>error</c> is
+    /// non-null. If the core rejects at its own access guard the callback fires inline on
+    /// the caller thread with a <c>ConcurrentModification</c> error. The scalar carries
+    /// <b>no owned result handle</b> — the callback frees only the <c>error</c> on failure
+    /// (via <see cref="KafkaException.FromHandle(IntPtr)"/>). <paramref name="topic"/> is a
+    /// pinned, NUL-terminated UTF-8 buffer read <b>synchronously</b> during the call
+    /// (call-scoped pin; the header's safety note requires only that <c>topic</c> be a
+    /// valid C string for the duration of the call — the ABI does not borrow it past the
+    /// return). <paramref name="userData"/> is a <see cref="GCHandle"/> over the per-op
+    /// context. There is no timeout parameter — the timed <c>position(tp, Duration)</c>
+    /// overload has no async ABI form yet (deferred, PLAN §2).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_position_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerPositionAsync(
+        IntPtr consumer,
+        IntPtr topic,
+        int partition,
+        ConsumerCallbacks.PositionCallback callback,
+        IntPtr userData);
+
     // ---- ConsumerRecords_t — the owned poll batch (Category 3, ffi §B2) ----
 
     /// <summary>
@@ -467,4 +494,118 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerSetPollError(IntPtr consumer, IntPtr message);
+
+    // ---- Sync consumer state reads + enforce_rebalance (M5/P1, ffi §B2/§B5) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_assignment</c> — the current assignment as an owned
+    /// (Category-3) <c>TopicPartitionList_t</c> borrow-root, or <see cref="IntPtr.Zero"/>
+    /// on a concurrent-access rejection (the core's own guard could not be acquired). Map
+    /// the null to <see cref="InvalidOperationException"/> (ffi §B5), else copy every
+    /// element out and free the root with <see cref="TopicPartitionListDestroy"/>
+    /// (<see cref="TopicPartitionListMarshal"/>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_assignment", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerAssignment(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_subscription</c> — the current topic subscription as an
+    /// owned (Category-3) <c>StringList_t</c> borrow-root, or <see cref="IntPtr.Zero"/> on
+    /// a concurrent-access rejection. Copy out then free with
+    /// <see cref="StringListDestroy"/> (<see cref="StringListMarshal"/>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscription", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSubscription(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_paused</c> — the currently paused partitions as an owned
+    /// (Category-3) <c>TopicPartitionList_t</c> borrow-root, or <see cref="IntPtr.Zero"/>
+    /// on a concurrent-access rejection. Same accessors as
+    /// <see cref="ConsumerAssignment"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_paused", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerPaused(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_enforce_rebalance</c> — triggers a rebalance (sync).
+    /// <paramref name="reason"/> is a pinned NUL-terminated UTF-8 buffer or
+    /// <see cref="IntPtr.Zero"/> (the ABI accepts a null reason). Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. Under the current KIP-848 core the
+    /// returned handle is always null — a logged no-op that returns success (Java
+    /// <c>AsyncKafkaConsumer.enforceRebalance</c> throws nothing; the core's
+    /// <c>enforce_rebalance</c> returns <c>Ok(())</c>). The still-null-checked error path
+    /// is the uniform sync-op discipline (ffi §B5) and reserves a real error for a future
+    /// classic-protocol arm without a .NET change.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_enforce_rebalance", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerEnforceRebalance(IntPtr consumer, IntPtr reason);
+
+    // ---- TopicPartitionList_t — owned borrow-root + borrowed elements (ffi §B2) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionList_count</c> — the number of topic-partitions in
+    /// the owned list.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionList_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionListCount(IntPtr list);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionList_get</c> — the topic-partition at
+    /// <paramref name="index"/>, <b>borrowed</b> (Category 4) and valid until the list is
+    /// destroyed, or <see cref="IntPtr.Zero"/> if out of range. Never freed by the binding
+    /// (the list root's <see cref="TopicPartitionListDestroy"/> invalidates it).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionList_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionListGet(IntPtr list, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartitionList_destroy</c> — frees the owned
+    /// topic-partition-list root (every borrowed element from it is invalidated).
+    /// Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartitionList_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void TopicPartitionListDestroy(IntPtr list);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartition_topic</c> — the topic of a borrowed
+    /// topic-partition element as a NUL-terminated <c>const char*</c> owned by the element
+    /// (valid until the list is destroyed). Copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy — this is the
+    /// NUL-terminated form (§B3), NOT the length-delimited receive-path form.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartition_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionTopic(IntPtr tp);
+
+    /// <summary>
+    /// <c>kafka_consumer_TopicPartition_partition</c> — the partition of a borrowed
+    /// topic-partition element.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_TopicPartition_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionPartition(IntPtr tp);
+
+    // ---- StringList_t — owned borrow-root + borrowed elements (ffi §B2/§B3) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_StringList_count</c> — the number of strings in the owned list.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_StringList_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int StringListCount(IntPtr list);
+
+    /// <summary>
+    /// <c>kafka_consumer_StringList_get</c> — the string at <paramref name="index"/> as a
+    /// NUL-terminated <c>const char*</c> owned by the list (borrowed; valid until the list
+    /// is destroyed), or <see cref="IntPtr.Zero"/> if out of range. Copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy — NUL-terminated form
+    /// (§B3), NOT the length-delimited form.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_StringList_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StringListGet(IntPtr list, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_StringList_destroy</c> — frees the owned string-list root (every
+    /// borrowed string from it is invalidated). Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_StringList_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void StringListDestroy(IntPtr list);
 }

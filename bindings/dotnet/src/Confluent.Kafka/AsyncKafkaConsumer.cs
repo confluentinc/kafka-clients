@@ -83,6 +83,10 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
         _native.SeekWithCallback(partition.Topic, partition.Partition, offset, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default) =>
+        _native.PositionWithCallback(partition, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken).AsTask();
 
@@ -91,6 +95,18 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
 
     /// <inheritdoc/>
     public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<string> Subscription() => _native.Subscription();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
