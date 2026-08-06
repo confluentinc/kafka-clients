@@ -201,6 +201,15 @@ public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord> { }  /
 public interface IConsumerCommon {               // shared sync surface (async + deferred sync mirror)
     void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
     ConsumerGroupMetadata GroupMetadata();
+
+    // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1).
+    // METHODS, not properties (M5/P1): each does a P/Invoke + marshalling, can throw, and
+    // returns a fresh owned snapshot per call (FDG method rule) — matching GroupMetadata()
+    // + Java/Python. Java returns a Set; IReadOnlySet post-dates netstandard2.0 → collection.
+    IReadOnlyCollection<TopicPartition> Assignment();
+    IReadOnlyCollection<string> Subscription();
+    IReadOnlyCollection<TopicPartition> Paused();
+    void EnforceRebalance(string? reason = null); // KIP-848 logged no-op → returns success
 }
 
 public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable {   // Java `Consumer`
@@ -213,11 +222,8 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
 
     void CommitSync();                            // Java commitSync — genuinely sync, blocks (§4 note)
-
-    // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1)
-    IReadOnlyCollection<TopicPartition> Assignment { get; }   // Java returns a Set; IReadOnlySet is
-    IReadOnlyCollection<string> Subscription { get; }         //   post-netstandard2.0, so collection
-    // Wakeup() / GroupMetadata() live on IConsumerCommon
+    // Assignment() / Subscription() / Paused() / EnforceRebalance() / Wakeup() /
+    // GroupMetadata() live on IConsumerCommon (non-blocking → stays sync)
 }
 
 // A sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is the **deferred** twin — a later milestone.
@@ -233,8 +239,9 @@ public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsume
 ```
 
 **Clipped to today's ABI**, like the producer — the fuller Java surface lands as
-each piece is wired (async/sync split per the idiom map): `Assign`/`Seek`/`Pause`/
-`Resume`, `Committed`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
+each piece is wired (async/sync split per the idiom map). Already wired:
+`Assign`/`Seek`/`SeekToBeginning`/`SeekToEnd`/`Pause`/`Resume`/`Position` (M4/M5).
+Still to come: `Committed`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
 `PartitionsFor`/`ListTopics`, headers on `ConsumerRecord`, and a
 `ConsumerRebalanceListener` argument on `Subscribe`. A typed
 `Consumer<TKey,TValue>` arrives with deserializers (§4), same as the producer.
@@ -312,12 +319,16 @@ not transfer). **If you cannot check, assume it blocks.**
 
 Any **one** trigger is enough — blocking is just the most common of the three.
 
-**Stays sync on the consumer — exactly these:** `Assignment`, `Subscription`,
-`Paused` (properties), `GroupMetadata()`, `Wakeup()`, `Metrics`,
-`Register`/`UnregisterMetricForSubscription`, and `EnforceRebalance()` (a no-op
-that only logs under KIP-848). **On the producer:** `Metrics`,
-`BeginTransaction()`, and the two metric-subscription methods. Everything else is
-async.
+**Stays sync on the consumer — exactly these:** `Assignment()`, `Subscription()`,
+`Paused()` (**methods** — shipped M5/P1; they override the generic "getter →
+property" idiom-map row on FDG grounds: each does a P/Invoke + marshalling, can
+throw, and returns a fresh owned snapshot per call, matching the shipped
+`GroupMetadata()` + Java/Python), `GroupMetadata()`, `Wakeup()`, `Metrics`,
+`Register`/`UnregisterMetricForSubscription`, and `EnforceRebalance(string? reason
+= null)` (a no-op that only logs under KIP-848 → returns success, never throws on
+that path; one method collapses Java's two overloads). **On the producer:**
+`Metrics`, `BeginTransaction()`, and the two metric-subscription methods.
+Everything else is async.
 
 ⚠ **The ABI must be able to honor it.** Where Java blocks but the ABI exposes only
 a sync entry point — `current_lag`, `seek_with_metadata` — the rule cannot be

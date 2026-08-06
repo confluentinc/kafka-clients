@@ -159,4 +159,85 @@ internal static class ConsumerCallbacks
             context?.FreeGcHandle();
         }
     }
+
+    /// <summary>
+    /// The C signature for <c>kafka_consumer_Consumer_position_callback_t</c>:
+    /// <c>void (*)(int64_t position, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — the <b>scalar</b> completion shape (ffi-marshalling.md
+    /// §B6/§B7), the third bridge shape after the void (<c>op</c>) and owned-handle
+    /// (<c>poll</c>) forms. On success <paramref name="position"/> is the offset and
+    /// <paramref name="error"/> is null; on failure (incl. the inline core-guard
+    /// rejection) <paramref name="position"/> is 0 and <paramref name="error"/> is
+    /// non-null. Position is never absent on success (no presence flag) and the result
+    /// carries <b>no owned handle</b>, so the trampoline has nothing to <c>_destroy</c>
+    /// on success — the sole structural difference from <see cref="OnPoll"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void PositionCallback(long position, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The single rooted instance passed to every <c>position_async</c> submission.
+    /// Rooted for the process lifetime, so the native thunk never dangles (ffi §B6
+    /// keep-alive).
+    /// </summary>
+    internal static readonly PositionCallback Position = OnPosition;
+
+    /// <summary>
+    /// The position completion trampoline. Runs on the core's foreign dispatcher thread
+    /// (or inline on the caller thread on a core-guard rejection). The scalar
+    /// <paramref name="position"/> is blittable, so the "marshalling" is trivial — no
+    /// copy-out, no native read — and success completes the awaiter with the offset
+    /// directly.
+    /// </summary>
+    /// <remarks>
+    /// <b>Free-exactly-once, every path (the phase's central correctness obligation).</b>
+    /// The <c>finally</c> — which also runs on the no-throw path — frees the per-op
+    /// rooting <see cref="GCHandle"/> on <b>every</b> path (success / operational
+    /// failure / inline core-rejection / no-throw; submit-threw is handled by
+    /// <c>AbandonBeforeSubmit</c> instead, since native never ran here) via
+    /// <see cref="OperationCompletionSource{TResult}.FreeGcHandle"/> (idempotent). The
+    /// <c>KafkaError</c> on the failure path is freed exactly once inside
+    /// <see cref="OperationCompletionSource{TResult}.Complete(IntPtr)"/> via
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// <para>
+    /// <b>The one structural difference from <see cref="OnPoll"/>:</b> there is
+    /// <b>no</b> <c>*Destroy</c> call in this <c>finally</c> — the scalar result carries
+    /// no owned handle, so there is nothing to destroy on success.
+    /// </para>
+    /// </remarks>
+    private static void OnPosition(long position, IntPtr error, IntPtr userData)
+    {
+        OperationCompletionSource<long>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (OperationCompletionSource<long>)handle.Target!;
+            if (error != IntPtr.Zero)
+            {
+                // Failure (position is 0). Complete maps to KafkaException /
+                // OperationCanceledException and frees the error handle via FromHandle.
+                context.Complete(error);
+            }
+            else
+            {
+                // Success: the scalar offset is the result directly — no owned handle,
+                // no copy-out, no _destroy. (Position is never absent on success.)
+                context.CompleteWithResult(position);
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary (foreign dispatcher thread): never unwind into native.
+            // Surface via the Task; the finally still frees the GCHandle if we recovered
+            // the context.
+            context?.TrySetException(exception);
+        }
+        finally
+        {
+            // Sole owner of the GCHandle free, on EVERY path (ffi §B6), incl. the inline
+            // core-guard rejection. NO batch destroy here — the scalar shape owns no
+            // result handle (the ONLY structural difference from OnPoll).
+            context?.FreeGcHandle();
+        }
+    }
 }
