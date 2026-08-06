@@ -45,7 +45,7 @@ public sealed class PublicConsumerTfmSmokeTests
         AsyncMockConsumer consumer = new AsyncMockConsumer();
         try
         {
-            consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
+            await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
             await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), 0L), s_deadline);
             consumer.AddRecord(Topic, Partition, offset: 5, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
@@ -73,6 +73,74 @@ public sealed class PublicConsumerTfmSmokeTests
         {
             await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }), s_deadline);
             await TestTimeout.Run(() => consumer.Unsubscribe(), s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
+    [Fact]
+    public async Task MockConsumer_OffsetMapQueries_MarshalOnTheTfmMatrix()
+    {
+        // The four M5/P4 offset-map queries marshal on ns2.0 / net8.0 / net10.0 (PLAN §7 case
+        // 13). BeginningOffsets / EndOffsets carry data (the shipped update helpers), Committed
+        // returns an empty map, OffsetsForTimes faults with unsupported_version — all reachable
+        // broker-free with netstandard2.0-safe APIs.
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        try
+        {
+            consumer.UpdateBeginningOffset(Topic, Partition, 5);
+            consumer.UpdateEndOffset(Topic, Partition, 99);
+            TopicPartition[] request = { new TopicPartition(Topic, Partition) };
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, long> begin = default!;
+            await TestTimeout.Run(async () => begin = await consumer.BeginningOffsets(request), s_deadline);
+            Assert.Equal(5, begin[new TopicPartition(Topic, Partition)]);
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, long> end = default!;
+            await TestTimeout.Run(async () => end = await consumer.EndOffsets(request), s_deadline);
+            Assert.Equal(99, end[new TopicPartition(Topic, Partition)]);
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> committed = default!;
+            await TestTimeout.Run(async () => committed = await consumer.Committed(request), s_deadline);
+            Assert.Empty(committed);
+
+            await Assert.ThrowsAsync<KafkaException>(() => consumer.OffsetsForTimes(
+                new System.Collections.Generic.Dictionary<TopicPartition, long>
+                {
+                    [new TopicPartition(Topic, Partition)] = 1_000L,
+                }));
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
+    [Fact]
+    public async Task MockConsumer_PartitionMetadataQueries_MarshalOnTheTfmMatrix()
+    {
+        // The two M5/P5 partition-metadata queries marshal the nested tree (list/map ->
+        // PartitionInfo -> Node) on ns2.0 / net8.0 / net10.0, using only netstandard2.0-safe
+        // APIs so the net462 build leg passes. PartitionsFor / ListTopics carry data broker-free
+        // via UpdatePartitions.
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        try
+        {
+            consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+
+            System.Collections.Generic.IReadOnlyList<PartitionInfo> partitions = default!;
+            await TestTimeout.Run(async () => partitions = await consumer.PartitionsFor(Topic), s_deadline);
+            PartitionInfo info = Assert.Single(partitions);
+            Assert.Equal(Topic, info.Topic);
+            Assert.Equal(7, info.Leader!.Id);
+            Assert.Equal("broker-1", info.Leader.Host);
+
+            System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<PartitionInfo>> map = default!;
+            await TestTimeout.Run(async () => map = await consumer.ListTopics(), s_deadline);
+            Assert.True(map.ContainsKey(Topic));
+            Assert.Single(map[Topic]);
         }
         finally
         {
