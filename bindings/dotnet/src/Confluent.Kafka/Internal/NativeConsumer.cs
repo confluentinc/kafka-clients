@@ -439,7 +439,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// bridge over <c>Consumer_assign_async</c>. On a <c>MockConsumer</c> the op resolves
     /// broker-free (<c>assign_from_user</c> is infallible).
     /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
@@ -454,7 +455,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// iterates an empty collection). Reuses the void completion bridge over
     /// <c>Consumer_pause_async</c>.
     /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
@@ -468,7 +470,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <c>resume(Collection)</c>). An <b>empty</b> collection is a no-op success. Reuses the
     /// void completion bridge over <c>Consumer_resume_async</c>.
     /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
@@ -485,7 +488,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// with no offset setup; the reset offset is consulted lazily on the next poll (from the
     /// map populated by <see cref="UpdateBeginningOffset"/>).
     /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
@@ -501,7 +505,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// of <see cref="SeekToBeginningWithCallback"/> (lazily consults the map populated by
     /// <see cref="UpdateEndOffset"/>).
     /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
@@ -611,7 +616,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <see cref="AddRecord"/> on a <c>MockConsumer</c> — a broker-free driver. The
     /// parallel <c>(topic, partition)</c> arrays are pinned call-scoped (ffi §A4).
     /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="topicPartitions"/> or a topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="topicPartitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the assignment.</exception>

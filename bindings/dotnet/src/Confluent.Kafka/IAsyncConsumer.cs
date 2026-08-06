@@ -136,7 +136,7 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// </remarks>
     /// <param name="partitions">The topic-partitions to assign (an empty collection clears the assignment).</param>
     /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
@@ -151,7 +151,7 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// <remarks>An <b>empty</b> collection is a no-op success (Java iterates an empty collection).</remarks>
     /// <param name="partitions">The topic-partitions to pause.</param>
     /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
@@ -166,7 +166,7 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// <remarks>An <b>empty</b> collection is a no-op success.</remarks>
     /// <param name="partitions">The topic-partitions to resume.</param>
     /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
@@ -186,7 +186,7 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// </remarks>
     /// <param name="partitions">The topic-partitions to seek to the beginning.</param>
     /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
@@ -206,7 +206,7 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// </remarks>
     /// <param name="partitions">The topic-partitions to seek to the end.</param>
     /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
