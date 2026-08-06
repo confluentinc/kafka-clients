@@ -80,6 +80,44 @@ public sealed class PublicConsumerTfmSmokeTests
         }
     }
 
+    [Fact]
+    public async Task MockConsumer_OffsetMapQueries_MarshalOnTheTfmMatrix()
+    {
+        // The four M5/P4 offset-map queries marshal on ns2.0 / net8.0 / net10.0 (PLAN §7 case
+        // 13). BeginningOffsets / EndOffsets carry data (the shipped update helpers), Committed
+        // returns an empty map, OffsetsForTimes faults with unsupported_version — all reachable
+        // broker-free with netstandard2.0-safe APIs.
+        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        try
+        {
+            consumer.UpdateBeginningOffset(Topic, Partition, 5);
+            consumer.UpdateEndOffset(Topic, Partition, 99);
+            TopicPartition[] request = { new TopicPartition(Topic, Partition) };
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, long> begin = default!;
+            await TestTimeout.Run(async () => begin = await consumer.BeginningOffsets(request), s_deadline);
+            Assert.Equal(5, begin[new TopicPartition(Topic, Partition)]);
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, long> end = default!;
+            await TestTimeout.Run(async () => end = await consumer.EndOffsets(request), s_deadline);
+            Assert.Equal(99, end[new TopicPartition(Topic, Partition)]);
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> committed = default!;
+            await TestTimeout.Run(async () => committed = await consumer.Committed(request), s_deadline);
+            Assert.Empty(committed);
+
+            await Assert.ThrowsAsync<KafkaException>(() => consumer.OffsetsForTimes(
+                new System.Collections.Generic.Dictionary<TopicPartition, long>
+                {
+                    [new TopicPartition(Topic, Partition)] = 1_000L,
+                }));
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
     private static async Task<ConsumerRecords> Poll(AsyncMockConsumer consumer)
     {
         ConsumerRecords result = default!;
