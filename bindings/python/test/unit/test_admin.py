@@ -69,6 +69,14 @@ def test_call_after_close_raises():
         admin.list_topics()
 
 
+def test_mock_requires_at_least_one_broker():
+    # The mock puts the controller and every partition leader on broker 0; Java
+    # throws IndexOutOfBoundsException, the FFI returns NULL, and the C extension
+    # turns that into a RuntimeError.
+    with pytest.raises(RuntimeError):
+        MockAdminClient(0)
+
+
 def test_admin_client_requires_dict_config():
     with pytest.raises(TypeError):
         AdminClient("bootstrap.servers=localhost:9092")
