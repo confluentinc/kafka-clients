@@ -2116,6 +2116,10 @@ static void admin_list_topics_trampoline(kafka_admin_ListTopicsResult_t* r,
                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_topics_trampoline(kafka_admin_DescribeTopicsResult_t* r,
                                             kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_create_partitions_trampoline(kafka_admin_CreatePartitionsResult_t* r,
+                                              kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_delete_records_trampoline(kafka_admin_DeleteRecordsResult_t* r,
+                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- constructors / lifecycle ----------------------------------------------
 
@@ -2386,6 +2390,138 @@ static PyObject* py_Admin_describe_topics_by_ids_async(PyObject* self, PyObject*
     Py_RETURN_NONE;
 }
 
+// ---- createPartitions / deleteRecords --------------------------------------
+
+// Frees `count` NewPartitions handles plus the array itself.
+static void free_new_partitions(kafka_admin_NewPartitions_t** specs, Py_ssize_t count) {
+    for (Py_ssize_t i = 0; i < count; i++) {
+        kafka_admin_NewPartitions_destroy(specs[i]);
+    }
+    PyMem_Free(specs);
+}
+
+// Builds parallel (topic name, NewPartitions handle) arrays from a sequence of
+// (topic:str, total_count:int, [[broker_id]]) tuples. The name pointers borrow
+// from the spec sequence's str objects, which the caller keeps alive for the
+// duration of the submit (as topics_to_array does).
+// Returns the count, or -1 with a Python exception set.
+static Py_ssize_t build_new_partitions(PyObject* spec, const char*** out_topics,
+                                       kafka_admin_NewPartitions_t*** out_specs) {
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return -1;
+    const char** topics = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    kafka_admin_NewPartitions_t** specs =
+        PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(kafka_admin_NewPartitions_t*));
+    if (topics == NULL || specs == NULL) {
+        PyMem_Free(topics); PyMem_Free(specs); PyErr_NoMemory(); return -1;
+    }
+    Py_ssize_t built = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        const char* name = NULL; int total_count = 0; PyObject* assignments = Py_None;
+        if (!item || !PyArg_ParseTuple(item, "siO", &name, &total_count, &assignments)) {
+            Py_XDECREF(item);
+            free_new_partitions(specs, built);
+            PyMem_Free(topics);
+            return -1;
+        }
+        kafka_admin_NewPartitions_t* np = kafka_admin_NewPartitions_new(total_count);
+        specs[built] = np;
+        topics[built] = name;
+        built++;
+        int ok = 1;
+        if (assignments != Py_None) {
+            Py_ssize_t an = PySequence_Size(assignments);
+            if (an < 0) {
+                ok = 0;
+            }
+            for (Py_ssize_t j = 0; ok && j < an; j++) {
+                PyObject* brokers = PySequence_GetItem(assignments, j);  // new ref
+                Py_ssize_t bn = brokers ? PySequence_Size(brokers) : -1;
+                if (bn < 0) { Py_XDECREF(brokers); ok = 0; break; }
+                int32_t* ids = bn > 0 ? PyMem_Malloc((size_t)bn * sizeof(int32_t)) : NULL;
+                if (bn > 0 && ids == NULL) { Py_DECREF(brokers); PyErr_NoMemory(); ok = 0; break; }
+                for (Py_ssize_t k = 0; k < bn; k++) {
+                    PyObject* b = PySequence_GetItem(brokers, k);  // new ref
+                    if (b == NULL) { ok = 0; break; }
+                    long id = PyLong_AsLong(b);
+                    Py_DECREF(b);
+                    if (id == -1 && PyErr_Occurred()) { ok = 0; break; }
+                    ids[k] = (int32_t)id;
+                }
+                if (ok) kafka_admin_NewPartitions_add_assignment(np, ids, (int32_t)bn);
+                PyMem_Free(ids);
+                Py_DECREF(brokers);
+            }
+        }
+        Py_DECREF(item);
+        if (!ok) {
+            free_new_partitions(specs, built);
+            PyMem_Free(topics);
+            return -1;
+        }
+    }
+    *out_topics = topics;
+    *out_specs = specs;
+    return built;
+}
+
+static PyObject* py_Admin_create_partitions_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms;
+    int validate_only; int retry_on_quota_violation; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOippO", &h, &spec, &timeout_ms, &validate_only,
+                          &retry_on_quota_violation, &cb))
+        return NULL;
+    const char** topics = NULL;
+    kafka_admin_NewPartitions_t** specs = NULL;
+    Py_ssize_t count = build_new_partitions(spec, &topics, &specs);
+    if (count < 0) return NULL;
+    Py_INCREF(cb);
+    // The Rust side copies the NewPartitions into owned values before returning,
+    // so the handles can be freed as soon as the call returns.
+    kafka_admin_AdminClient_create_partitions_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, topics,
+        (const kafka_admin_NewPartitions_t* const*)specs, (int32_t)count,
+        timeout_ms, validate_only ? true : false, retry_on_quota_violation ? true : false,
+        admin_create_partitions_trampoline, cb);
+    free_new_partitions(specs, count);
+    PyMem_Free(topics);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_delete_records_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &spec, &timeout_ms, &cb)) return NULL;
+
+    // spec is a sequence of (topic:str, partition:int, before_offset:int).
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    const char** topics = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    int32_t* partitions = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    int64_t* offsets = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
+    if (topics == NULL || partitions == NULL || offsets == NULL) {
+        PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
+        PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        const char* t = NULL; int p = 0; long long off = 0;
+        int ok = item && PyArg_ParseTuple(item, "siL", &t, &p, &off);
+        Py_XDECREF(item);
+        if (!ok) {
+            PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
+            return NULL;
+        }
+        topics[i] = t; partitions[i] = p; offsets[i] = (int64_t)off;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_delete_records_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
+        topics, partitions, offsets, (int32_t)n, timeout_ms,
+        admin_delete_records_trampoline, cb);
+    PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
+    Py_RETURN_NONE;
+}
+
 // ---- result drains ---------------------------------------------------------
 
 // Copies a *borrowed* per-key error into (code, message, is_retriable, is_fatal),
@@ -2585,6 +2721,55 @@ static PyObject* py_DescribeTopicsResult_drain(PyObject* self, PyObject* args) {
     return d;
 }
 
+// {topic_name: error_or_None} -- no per-key value (Java's future is
+// KafkaFuture<Void>, as for deleteTopics)
+static PyObject* py_CreatePartitionsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_CreatePartitionsResult_t* r = (kafka_admin_CreatePartitionsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_CreatePartitionsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_CreatePartitionsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = PyUnicode_FromString(kafka_admin_CreatePartitionsResult_get_key(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_CreatePartitionsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_CreatePartitionsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_CreatePartitionsResult_destroy(r);
+    return d;
+}
+
+// {(topic, partition): (error, low_watermark)}
+static PyObject* py_DeleteRecordsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DeleteRecordsResult_t* r = (kafka_admin_DeleteRecordsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DeleteRecordsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DeleteRecordsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = Py_BuildValue("(si)", kafka_admin_DeleteRecordsResult_get_topic(r, i),
+                                      kafka_admin_DeleteRecordsResult_get_partition(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_DeleteRecordsResult_get_error(r, i));
+        PyObject* val = (key && err)
+            ? Py_BuildValue("(NL)", err,
+                            (long long)kafka_admin_DeleteRecordsResult_get_low_watermark(r, i))
+            : NULL;
+        if (val == NULL) Py_XDECREF(err);
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_DeleteRecordsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_DeleteRecordsResult_destroy(r);
+    return d;
+}
+
 // Method definitions
 static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
@@ -2685,11 +2870,15 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_list_topics_async", py_Admin_list_topics_async, METH_VARARGS, "Async listTopics; cb(result_int, error_int)"},
     {"Admin_describe_topics_async", py_Admin_describe_topics_async, METH_VARARGS, "Async describeTopics by name; cb(result_int, error_int)"},
     {"Admin_describe_topics_by_ids_async", py_Admin_describe_topics_by_ids_async, METH_VARARGS, "Async describeTopics by id; cb(result_int, error_int)"},
+    {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; cb(result_int, error_int)"},
+    {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; cb(result_int, error_int)"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock: time out the next N requests; returns error_int"},
     {"CreateTopicsResult_drain", py_CreateTopicsResult_drain, METH_VARARGS, "Drain+destroy a CreateTopicsResult handle into a dict"},
     {"DeleteTopicsResult_drain", py_DeleteTopicsResult_drain, METH_VARARGS, "Drain+destroy a DeleteTopicsResult handle into a dict"},
     {"ListTopicsResult_drain", py_ListTopicsResult_drain, METH_VARARGS, "Drain+destroy a ListTopicsResult handle into a dict"},
     {"DescribeTopicsResult_drain", py_DescribeTopicsResult_drain, METH_VARARGS, "Drain+destroy a DescribeTopicsResult handle into a dict"},
+    {"CreatePartitionsResult_drain", py_CreatePartitionsResult_drain, METH_VARARGS, "Drain+destroy a CreatePartitionsResult handle into a dict"},
+    {"DeleteRecordsResult_drain", py_DeleteRecordsResult_drain, METH_VARARGS, "Drain+destroy a DeleteRecordsResult handle into a dict"},
     {NULL, NULL, 0, NULL}
 };
 

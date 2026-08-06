@@ -24,6 +24,7 @@ void tearDown(void) {}
 
 // Numeric `Errors` codes asserted below (src/common/protocol/errors.rs).
 #define UNKNOWN_TOPIC_OR_PARTITION_CODE (3)
+#define UNSUPPORTED_VERSION_CODE (35)
 #define TOPIC_ALREADY_EXISTS_CODE (36)
 #define INVALID_REPLICATION_FACTOR_CODE (38)
 
@@ -883,6 +884,323 @@ static void test_mock_admin_delete_topics_by_ids_async(void) {
 }
 
 // ---------------------------------------------------------------------------
+// createPartitions
+//
+// Java's MockAdminClient.createPartitions throws
+// UnsupportedOperationException("Not implemented yet")
+// (MockAdminClient.java:626-628 at kafka a18251bae0b8). Per
+// .claude/rules/admin-client.md §9 the Rust mock represents that as a per-key
+// KafkaError::unsupported_version("Not implemented yet") rather than a panic,
+// which must not unwind across the C boundary. So the mock can exercise the
+// full marshaling + result-flattening path, and the outcome asserted below is
+// that faithful "unsupported" error rather than a created partition.
+// ---------------------------------------------------------------------------
+
+static void test_mock_admin_create_partitions_reports_unsupported_per_topic(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
+    create_one(admin, "grow-me", 1, 1);
+
+    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(4);
+    TEST_ASSERT_NOT_NULL(np);
+    const char *topics[1] = {"grow-me"};
+    const kafka_admin_NewPartitions_t *specs[1] = {np};
+
+    kafka_admin_CreatePartitionsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_create_partitions(
+        admin, topics, specs, 1, 5000, false, true, &result);
+    /* A per-topic failure is NOT a call failure. */
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_CreatePartitionsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("grow-me",
+                             kafka_admin_CreatePartitionsResult_get_key(result, 0));
+
+    const kafka_common_KafkaError_t *e =
+        kafka_admin_CreatePartitionsResult_get_error(result, 0);
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, kafka_common_KafkaError_code(e));
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+
+    /* Out-of-range indices are null / no crash. */
+    TEST_ASSERT_NULL(kafka_admin_CreatePartitionsResult_get_key(result, 1));
+    TEST_ASSERT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, 1));
+    TEST_ASSERT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, -1));
+
+    kafka_admin_CreatePartitionsResult_destroy(result);
+    kafka_admin_CreatePartitionsResult_destroy(NULL);
+    kafka_admin_NewPartitions_destroy(np);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Replica assignments switch the entry to Java's
+ * NewPartitions.increaseTo(totalCount, newAssignments) form. The mock rejects
+ * the RPC either way, so this pins the marshaling path: the assignment is
+ * accepted, entries stay sorted by topic name, and every key gets an outcome. */
+static void test_mock_admin_create_partitions_with_assignments_and_sorting(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
+
+    kafka_admin_NewPartitions_t *plain = kafka_admin_NewPartitions_new(2);
+    kafka_admin_NewPartitions_t *assigned = kafka_admin_NewPartitions_new(3);
+    int32_t brokers0[] = {0, 1};
+    int32_t brokers1[] = {1, 2};
+    kafka_admin_NewPartitions_add_assignment(assigned, brokers0, 2);
+    kafka_admin_NewPartitions_add_assignment(assigned, brokers1, 2);
+    /* Null handle / null broker array are no-ops, not crashes. */
+    kafka_admin_NewPartitions_add_assignment(NULL, brokers0, 2);
+    kafka_admin_NewPartitions_add_assignment(assigned, NULL, 2);
+
+    /* Deliberately unsorted input; the result is sorted by topic name. */
+    const char *topics[2] = {"zeta", "alpha"};
+    const kafka_admin_NewPartitions_t *specs[2] = {plain, assigned};
+
+    kafka_admin_CreatePartitionsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_partitions(admin, topics, specs, 2,
+                                                               -1, false, true, &result));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_CreatePartitionsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("alpha", kafka_admin_CreatePartitionsResult_get_key(result, 0));
+    TEST_ASSERT_EQUAL_STRING("zeta", kafka_admin_CreatePartitionsResult_get_key(result, 1));
+    TEST_ASSERT_NOT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, 0));
+    TEST_ASSERT_NOT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, 1));
+
+    kafka_admin_CreatePartitionsResult_destroy(result);
+    kafka_admin_NewPartitions_destroy(plain);
+    kafka_admin_NewPartitions_destroy(assigned);
+    kafka_admin_NewPartitions_destroy(NULL);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* An empty batch, and pairs where either side is NULL: the pair is skipped as a
+ * unit so the two parallel arrays cannot drift out of step. */
+static void test_mock_admin_create_partitions_null_and_empty_handling(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    kafka_admin_CreatePartitionsResult_t *empty = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_partitions(admin, NULL, NULL, 0, -1,
+                                                               false, true, &empty));
+    TEST_ASSERT_NOT_NULL(empty);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_CreatePartitionsResult_count(empty));
+    kafka_admin_CreatePartitionsResult_destroy(empty);
+
+    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(2);
+    /* Entry 0 has a NULL spec, entry 1 a NULL name: both pairs are dropped,
+     * leaving only entry 2. */
+    const char *topics[3] = {"dropped-spec", NULL, "kept"};
+    const kafka_admin_NewPartitions_t *specs[3] = {NULL, np, np};
+
+    kafka_admin_CreatePartitionsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_partitions(admin, topics, specs, 3,
+                                                               -1, false, true, &result));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_CreatePartitionsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("kept", kafka_admin_CreatePartitionsResult_get_key(result, 0));
+
+    kafka_admin_CreatePartitionsResult_destroy(result);
+    kafka_admin_NewPartitions_destroy(np);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+    int32_t error_code_for_first;
+} create_partitions_async_result_t;
+
+static void on_create_partitions(kafka_admin_CreatePartitionsResult_t *result,
+                                 kafka_common_KafkaError_t *error, void *user_data) {
+    create_partitions_async_result_t *r = (create_partitions_async_result_t *)user_data;
+    if (result != NULL) {
+        r->had_result = 1;
+        r->count = kafka_admin_CreatePartitionsResult_count(result);
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_CreatePartitionsResult_get_error(result, 0);
+        r->error_code_for_first = e ? kafka_common_KafkaError_code(e) : 0;
+        kafka_admin_CreatePartitionsResult_destroy(result);
+    }
+    if (error != NULL) {
+        r->had_error = 1;
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_create_partitions_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(6);
+    const char *topics[1] = {"async-grow"};
+    const kafka_admin_NewPartitions_t *specs[1] = {np};
+
+    create_partitions_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_create_partitions_async(admin, topics, specs, 1, -1, false,
+                                                    true, on_create_partitions, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_TRUE(r.had_result);
+    TEST_ASSERT_FALSE(r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, r.error_code_for_first);
+
+    kafka_admin_NewPartitions_destroy(np);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A NULL handle must still honor the callback obligation, with an error. */
+static void test_mock_admin_create_partitions_async_null_handle(void) {
+    create_partitions_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_create_partitions_async(NULL, NULL, NULL, 0, -1, false, true,
+                                                    on_create_partitions, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_TRUE(r.had_error);
+    TEST_ASSERT_FALSE(r.had_result);
+}
+
+// ---------------------------------------------------------------------------
+// deleteRecords
+//
+// Java's MockAdminClient.deleteRecords returns an empty result for an empty
+// request and otherwise throws UnsupportedOperationException("Not implemented
+// yet") (MockAdminClient.java:630-638 at kafka a18251bae0b8). The Rust mock
+// mirrors both halves: an empty map yields an empty result, and each requested
+// partition otherwise gets an "unsupported" per-key error.
+// ---------------------------------------------------------------------------
+
+static void test_mock_admin_delete_records_reports_unsupported_per_partition(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "trimmed", 2, 1);
+
+    /* Deliberately unsorted; entries come back sorted by (topic, partition).
+     * -1 is Java's documented "truncate to the high watermark". */
+    const char *topics[3] = {"trimmed", "another", "trimmed"};
+    const int32_t partitions[3] = {1, 0, 0};
+    const int64_t offsets[3] = {5, -1, 10};
+
+    kafka_admin_DeleteRecordsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_delete_records(
+        admin, topics, partitions, offsets, 3, 5000, &result);
+    /* A per-partition failure is NOT a call failure. */
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DeleteRecordsResult_count(result));
+
+    TEST_ASSERT_EQUAL_STRING("another", kafka_admin_DeleteRecordsResult_get_topic(result, 0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DeleteRecordsResult_get_partition(result, 0));
+    TEST_ASSERT_EQUAL_STRING("trimmed", kafka_admin_DeleteRecordsResult_get_topic(result, 1));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DeleteRecordsResult_get_partition(result, 1));
+    TEST_ASSERT_EQUAL_STRING("trimmed", kafka_admin_DeleteRecordsResult_get_topic(result, 2));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DeleteRecordsResult_get_partition(result, 2));
+
+    for (int32_t i = 0; i < 3; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DeleteRecordsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, kafka_common_KafkaError_code(e));
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+        /* A failed partition has no low watermark. */
+        TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_DeleteRecordsResult_get_low_watermark(result, i));
+    }
+
+    /* Out-of-range indices: null / -1, no crash. */
+    TEST_ASSERT_NULL(kafka_admin_DeleteRecordsResult_get_topic(result, 3));
+    TEST_ASSERT_NULL(kafka_admin_DeleteRecordsResult_get_topic(result, -1));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_DeleteRecordsResult_get_partition(result, 3));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_DeleteRecordsResult_get_partition(result, -1));
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_DeleteRecordsResult_get_low_watermark(result, 3));
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_DeleteRecordsResult_get_low_watermark(result, -1));
+    TEST_ASSERT_NULL(kafka_admin_DeleteRecordsResult_get_error(result, 3));
+    TEST_ASSERT_NULL(kafka_admin_DeleteRecordsResult_get_error(result, -1));
+
+    kafka_admin_DeleteRecordsResult_destroy(result);
+    kafka_admin_DeleteRecordsResult_destroy(NULL);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Java returns an empty DeleteRecordsResult for an empty request instead of
+ * throwing (MockAdminClient.java:632-635), so the empty call succeeds with no
+ * per-key errors at all. NULL topic entries are skipped. */
+static void test_mock_admin_delete_records_empty_and_null_handling(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    kafka_admin_DeleteRecordsResult_t *empty = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_records(admin, NULL, NULL, NULL, 0,
+                                                            -1, &empty));
+    TEST_ASSERT_NOT_NULL(empty);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DeleteRecordsResult_count(empty));
+    kafka_admin_DeleteRecordsResult_destroy(empty);
+
+    const char *topics[2] = {NULL, "kept"};
+    const int32_t partitions[2] = {0, 3};
+    const int64_t offsets[2] = {1, 2};
+    kafka_admin_DeleteRecordsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_records(admin, topics, partitions,
+                                                            offsets, 2, -1, &result));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DeleteRecordsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("kept", kafka_admin_DeleteRecordsResult_get_topic(result, 0));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DeleteRecordsResult_get_partition(result, 0));
+    kafka_admin_DeleteRecordsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+    int32_t error_code_for_first;
+} delete_records_async_result_t;
+
+static void on_delete_records(kafka_admin_DeleteRecordsResult_t *result,
+                              kafka_common_KafkaError_t *error, void *user_data) {
+    delete_records_async_result_t *r = (delete_records_async_result_t *)user_data;
+    if (result != NULL) {
+        r->had_result = 1;
+        r->count = kafka_admin_DeleteRecordsResult_count(result);
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DeleteRecordsResult_get_error(result, 0);
+        r->error_code_for_first = e ? kafka_common_KafkaError_code(e) : 0;
+        kafka_admin_DeleteRecordsResult_destroy(result);
+    }
+    if (error != NULL) {
+        r->had_error = 1;
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_delete_records_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *topics[1] = {"async-trim"};
+    const int32_t partitions[1] = {0};
+    const int64_t offsets[1] = {7};
+
+    delete_records_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_delete_records_async(admin, topics, partitions, offsets, 1,
+                                                 -1, on_delete_records, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_TRUE(r.had_result);
+    TEST_ASSERT_FALSE(r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, r.error_code_for_first);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A NULL handle must still honor the callback obligation, with an error. */
+static void test_mock_admin_delete_records_async_null_handle(void) {
+    delete_records_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_delete_records_async(NULL, NULL, NULL, NULL, 0, -1,
+                                                 on_delete_records, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_TRUE(r.had_error);
+    TEST_ASSERT_FALSE(r.had_result);
+}
+
+// ---------------------------------------------------------------------------
 // A NULL out_result means the caller does not want the result, so the handle is
 // never built (see finish_sync). It must not leak or crash.
 // ---------------------------------------------------------------------------
@@ -926,6 +1244,15 @@ int main(void) {
     RUN_TEST(test_mock_admin_delete_topics_by_ids);
     RUN_TEST(test_mock_admin_delete_topics_async);
     RUN_TEST(test_mock_admin_delete_topics_by_ids_async);
+    RUN_TEST(test_mock_admin_create_partitions_reports_unsupported_per_topic);
+    RUN_TEST(test_mock_admin_create_partitions_with_assignments_and_sorting);
+    RUN_TEST(test_mock_admin_create_partitions_null_and_empty_handling);
+    RUN_TEST(test_mock_admin_create_partitions_async);
+    RUN_TEST(test_mock_admin_create_partitions_async_null_handle);
+    RUN_TEST(test_mock_admin_delete_records_reports_unsupported_per_partition);
+    RUN_TEST(test_mock_admin_delete_records_empty_and_null_handling);
+    RUN_TEST(test_mock_admin_delete_records_async);
+    RUN_TEST(test_mock_admin_delete_records_async_null_handle);
     RUN_TEST(test_mock_admin_null_out_result);
     return UNITY_END();
 }
