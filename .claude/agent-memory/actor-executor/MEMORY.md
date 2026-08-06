@@ -95,3 +95,4 @@
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
 - [M11 bindings B0+B1](m11_bindings_b0_b1_notes.md) — admin FFI no guard; opaque-handle free trap; cbindgen skips module docs; ffi-archive clobbering; deadline clamp twice; clock-advancing test client
+- [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims
