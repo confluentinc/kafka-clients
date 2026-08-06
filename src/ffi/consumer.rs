@@ -52,6 +52,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
+
 use crate::common::header::{Header, RecordHeader};
 use crate::common::metrics::KafkaMetric;
 use crate::common::serialization::BytesDeserializer;
@@ -62,12 +64,12 @@ use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
 // is an unrelated concept.
 use crate::consumer::{
     AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRecord,
-    ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp,
+    ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
 };
 
 use super::common::{
-    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
+    self, CallbackTarget, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
+    dispatch_and_wait, enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
 
 // The byte-array consumer is monomorphized over refcounted `bytes::Bytes` keys
@@ -3348,8 +3350,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
 }
 
 /// Commits the consumed offsets asynchronously (sync call, returns once the
-/// async commit is initiated; the listener-taking variant is not exposed —
-/// decision #4).
+/// async commit is initiated). The callback-taking variants are
+/// [`kafka_consumer_Consumer_commit_async_with_callback`] and
+/// [`kafka_consumer_Consumer_commit_async_offsets_with_callback`].
 ///
 /// # Safety
 ///
@@ -3359,6 +3362,207 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_KafkaError_t {
     unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_async())) }
+}
+
+// ── commit_async with an OffsetCommitCallback ──
+
+/// Completion callback for [`kafka_consumer_Consumer_commit_async_with_callback`]
+/// and [`kafka_consumer_Consumer_commit_async_offsets_with_callback`] — the C
+/// equivalent of Java's `OffsetCommitCallback.onComplete(offsets, exception)`.
+///
+/// `offsets` is the (always non-null) map of offsets the commit applies to, and
+/// `error` is null on success / non-null on failure — mirroring Java's
+/// "exception == null means success". **The callee owns both handles** and must
+/// free them with [`kafka_consumer_OffsetMap_destroy`] /
+/// [`kafka_common_KafkaError_destroy`] (matching the "callbacks own the handles
+/// delivered to them" convention of the async consumer callbacks).
+///
+/// Invoked on the consumer's callback dispatcher thread, exactly once per
+/// registration, when the commit completes. See
+/// [`kafka_consumer_Consumer_commit_async_with_callback`] for the full contract.
+///
+/// Named after the **Java** method it carries the callback for
+/// (`commitAsync(OffsetCommitCallback)`) rather than after either C entry point,
+/// since one typedef serves both (C has no overloading, so the Java overloads
+/// become `..._commit_async_with_callback` and
+/// `..._commit_async_offsets_with_callback`); the CLAUDE.md §3 spelling would be
+/// the doubly-suffixed `..._commit_async_with_callback_callback_t`. It also
+/// deliberately does not reuse the identically-shaped
+/// [`kafka_consumer_Consumer_committed_callback_t`], whose map is a *query
+/// result* rather than the offsets a commit applied to.
+pub type kafka_consumer_Consumer_commit_async_callback_t =
+    unsafe extern "C" fn(*mut kafka_consumer_OffsetMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Release hook for the `user_data` handed to
+/// [`kafka_consumer_Consumer_commit_async_with_callback`] /
+/// [`kafka_consumer_Consumer_commit_async_offsets_with_callback`].
+///
+/// Fired exactly once, after the registration is dropped by the consumer (i.e.
+/// after the commit completed and the callback returned, or immediately if the
+/// call failed before the callback could be registered). May run on **any**
+/// thread — the app thread making the call, a consumer worker, or the dispatcher
+/// thread — so it must be thread-agnostic.
+///
+/// The two `_with_callback` entry points spell this signature out inline as
+/// `Option<unsafe extern "C" fn(*mut c_void)>` (a nullable function pointer)
+/// rather than naming this alias: cbindgen only recognizes `Option<...>` as a
+/// nullable function pointer when the bare `fn` type is written literally, and
+/// emits an un-compilable `Option<...>` for an aliased one. The C signature is
+/// identical either way — this typedef is the name C callers should use.
+pub type kafka_consumer_Consumer_commit_async_user_data_destroy_t = unsafe extern "C" fn(*mut c_void);
+
+/// Adapts a C commit-callback triple to the core [`OffsetCommitCallback`] trait.
+///
+/// Holds the `user_data` inside a [`CallbackTarget`], so the optional
+/// `user_data_destroy` hook fires exactly once when the core drops the
+/// registration (the trait object is stored as `Arc<dyn OffsetCommitCallback>`).
+struct FfiOffsetCommitCallback {
+    callback: kafka_consumer_Consumer_commit_async_callback_t,
+    /// Owns `user_data` (and fires the destroy hook on drop).
+    target: CallbackTarget,
+    /// Sender for the consumer's completion-dispatch queue.
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+}
+
+#[async_trait]
+impl OffsetCommitCallback for FfiOffsetCommitCallback {
+    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+        // Clone the borrowed inputs into owned, `Send` values *before* the job:
+        // the C handles themselves are built inside the job, on the dispatcher
+        // thread, so no raw pointer is ever held across an `.await` (the same
+        // reason `async_value_op` builds its handles in `complete`).
+        let offsets = offsets.clone();
+        let error = error.cloned();
+        let callback = self.callback;
+        // Capture the whole `Send` wrapper rather than the raw pointer field
+        // (Rust 2021 disjoint closure capture would otherwise grab the latter).
+        let user_data = SendUserData(self.target.user_data);
+        // Wait for the C callback to return before returning from `on_complete`:
+        // Java runs `onComplete` on the thread calling `poll()`/`commitSync()`,
+        // so the FFI call must not return first — and firing-and-forgetting
+        // would let the C caller release `user_data` while the job is queued.
+        dispatch_and_wait(&self.completion_tx, move || {
+            let user_data = user_data;
+            let map = box_offset_map(offsets);
+            let error = error.map(box_error).unwrap_or(std::ptr::null_mut());
+            // SAFETY: `callback` was supplied by the C caller along with
+            // `user_data`; both handles are freshly allocated and handed over.
+            unsafe { callback(map, error, user_data.into_ptr()) };
+        })
+        .await;
+    }
+}
+
+/// Builds the core-side commit callback from the C triple.
+///
+/// Constructing the adapter **transfers ownership of `user_data`** to it, so
+/// simply dropping the returned `Arc` (instead of handing it to the consumer)
+/// fires `user_data_destroy` — which is what makes the "the destroy hook runs
+/// even when the call fails before registering the callback" contract hold
+/// without any explicit cleanup path.
+fn make_commit_callback(
+    callback: kafka_consumer_Consumer_commit_async_callback_t,
+    user_data: *mut c_void,
+    // Same type the entry points spell out inline; named here so the C-facing
+    // alias is tied to the Rust code that consumes it.
+    user_data_destroy: Option<kafka_consumer_Consumer_commit_async_user_data_destroy_t>,
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+) -> Arc<dyn OffsetCommitCallback> {
+    Arc::new(FfiOffsetCommitCallback {
+        callback,
+        target: CallbackTarget { user_data, destroy: user_data_destroy },
+        completion_tx,
+    })
+}
+
+/// Commits the consumed offsets asynchronously, notifying `callback` when the
+/// commit completes — Java's `commitAsync(OffsetCommitCallback)`.
+///
+/// Like [`kafka_consumer_Consumer_commit_async`] this call is synchronous and
+/// returns as soon as the commit has been initiated (null on success, a non-null
+/// error handle on failure).
+///
+/// # Callback contract
+///
+/// - Fires **exactly once** per successful call, on the consumer's callback
+///   dispatcher thread, when the commit completes.
+/// - `offsets` and a non-null `error` are owned by the callee (see
+///   [`kafka_consumer_Consumer_commit_async_callback_t`]).
+/// - The callback must **not** call back into this consumer: the access guard is
+///   held for the duration of the commit, so any consumer op would fail with a
+///   `ConcurrentModification` error, and a callback that block-waits on consumer
+///   progress deadlocks the dispatcher queue.
+/// - On a `MockConsumer` the core invokes the callback inline during the commit
+///   (with `error` always null), so the callback has already run by the time this
+///   function returns. Against a real broker the commit completes later, on a
+///   consumer task, and the callback fires then.
+///
+/// # `user_data` ownership
+///
+/// `user_data` is handed to the consumer for the lifetime of the registration.
+/// Pass a non-null `user_data_destroy` to be notified when it is released; the
+/// hook fires exactly once, on an unspecified thread, and fires **even when this
+/// function returns an error** (the transfer is unconditional). Pass null to
+/// retain ownership on the C side.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `callback` must be a valid function
+/// pointer and `user_data` must stay valid until `user_data_destroy` fires (or,
+/// with no destroy hook, until the callback has run).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
+    consumer: *const kafka_consumer_Consumer_t,
+    callback: kafka_consumer_Consumer_commit_async_callback_t,
+    user_data: *mut c_void,
+    user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+) -> *mut kafka_common_KafkaError_t {
+    let h = unsafe { handle_ref(consumer) };
+    let cb = make_commit_callback(callback, user_data, user_data_destroy, h.completion_tx.clone());
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_with_callback(cb))) }
+}
+
+/// Commits specific offsets asynchronously, notifying `callback` when the commit
+/// completes — Java's
+/// `commitAsync(Map<TopicPartition, OffsetAndMetadata>, OffsetCommitCallback)`.
+///
+/// Offsets are passed as the same parallel arrays as
+/// [`kafka_consumer_Consumer_commit_sync_offsets`]: `metadata` may be null (whole
+/// array or individual entries) and a `leader_epoch` entry `< 0` means no epoch.
+///
+/// The callback and `user_data` contracts are identical to
+/// [`kafka_consumer_Consumer_commit_async_with_callback`]. In particular, if the
+/// offsets fail to marshal (e.g. a negative offset) this returns the error
+/// **without registering the callback** — the callback never fires, but
+/// `user_data_destroy` still does.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; the arrays must have `count` valid
+/// entries; see [`kafka_consumer_Consumer_commit_async_with_callback`] for the
+/// `callback` / `user_data` requirements.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callback(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    callback: kafka_consumer_Consumer_commit_async_callback_t,
+    user_data: *mut c_void,
+    user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+) -> *mut kafka_common_KafkaError_t {
+    let h = unsafe { handle_ref(consumer) };
+    // Build the adapter (which takes ownership of `user_data`) BEFORE anything
+    // that can fail, so every early return drops it and fires the destroy hook.
+    let cb = make_commit_callback(callback, user_data, user_data_destroy, h.completion_tx.clone());
+    let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_offsets_with_callback(map, cb))) }
 }
 
 // ── enforce_rebalance ──
