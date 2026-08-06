@@ -62,6 +62,17 @@ rationale; and check whether the case asserts the error *code*, which is usually
 discriminator that actually works (a broker `MessageTooLarge` vs a local
 `RecordTooLarge`, whose `error()` degrades to `UnknownServerError`).
 
+**Pass 3 — how to verify a discriminator claim, rather than accept it.** The fix
+asserted `error.error() == Errors::MessageTooLarge` as proof the record reached the
+broker. To check that, grep every *constructor* of the asserted code and walk each
+caller's reachability: here the only client-side producer is
+`KafkaError::record_batch_too_large` (`kafka_error.rs:438`), whose sole caller is
+`producer_batch.rs`'s `finalize_split_batches`, reachable only from the split path that
+`sender.rs` gates on a broker `MESSAGE_TOO_LARGE` response *and* `record_count > 1`. So
+every observable `Generic(MessageTooLarge)` is downstream of a broker response and the
+claim holds. An assertion on an error code is only as strong as the set of sites that
+can mint that code.
+
 **Sweep technique.** For guard-in-scrutinee re-locks, use a multi-line regex
 (`rg -U '(?s)(if let|while let|match)[^;{]{0,400}?\.lock\(\)[^;{]{0,400}?\{'`) —
 scrutinees span lines and a line grep under-reports. Then read each arm: log-only /
