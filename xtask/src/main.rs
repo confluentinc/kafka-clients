@@ -321,6 +321,24 @@ fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
 /// CLAUDE.md §6 puts repeatable checks in xtask rather than in shell scripts, and
 /// because a check nobody is obliged to run is a check that finds the next instance
 /// one review round late.
+///
+/// # Two known edge cases, both zero-hit in this repo
+///
+/// Recorded so the next reader has the repro rather than re-deriving it (found by
+/// Critic 48 pass 3, which tested this binary against a synthetic tree):
+///
+/// - **False positive on the conditional-doc idiom.** `/// doc` /
+///   `#[cfg_attr(docsrs, doc = "..")]` / `/// doc` is legitimate and would be flagged
+///   as shape 1, as would a bare `#[doc = ".."]` between doc lines. Exposure is nil and
+///   checkable — `grep -rn 'cfg_attr' src/`, `grep -rn '#\[doc' src/` and `docsrs`
+///   anywhere all return 0, and `cargo doc` is in neither CLAUDE.md's workflow list nor
+///   `make verify`. If it ever fires, skip attributes whose content starts `doc` or
+///   `cfg_attr(..., doc`.
+/// - **False negative on multi-line attributes.** The skip loop consumes only lines that
+///   *start* with `#[`, so `/// doc` / `#[cfg(all(` / `feature = "a",` / `))]` /
+///   `/// doc` is not flagged. The two multi-line attribute sites in `src/`
+///   (`consumer_group_metadata.rs:54` and `:67`, both `#[deprecated(`) were each read
+///   and are ordinary doc → attribute → `pub fn`, so nothing is hiding behind the gap.
 fn doc_hygiene() -> anyhow::Result<()> {
     println!("🔍 Checking doc-comment hygiene...");
 

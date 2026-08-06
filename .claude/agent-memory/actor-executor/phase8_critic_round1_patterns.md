@@ -114,6 +114,28 @@ generalising them was not.
 line actually holds) and paste the output. Prose summarising a mechanical fact is the part that
 rots.
 
+**Pass 3 sharpened this into the milestone's whole record-defect taxonomy, in the Critic's
+words: *each rewrite derived the part it had been faulted on and hand-wrote the part it
+added.*** Pass 3's table had a derived Δ column and a hand-transcribed classification column,
+wrong in 5 of 10 cells — all "(body statement)" where four were **blank lines** (the set's
+largest class, and the one shape with a one-line detector) and one was a token in the next
+test's `@EnumSource`. The buggy classifier had no branch for either case, so everything
+unmatched fell through to the default label.
+
+So the rule is not "derive the column you were faulted on" but **derive every column, or ship
+none of it**:
+
+  - Derive the *inputs* too. The `cited` column came from `git show <pre-fix>:<file>`, so even
+    the historical values are machine-read rather than recalled.
+  - Give the classifier an explicit branch per outcome, including the boring ones (blank,
+    out-of-range). A default arm is where wrong labels hide.
+  - Paste the program next to its output, and make it *literally runnable* — an early draft
+    abbreviated the file paths, which is the same sin one layer up.
+  - Then verify the "pasted output" claim instead of asserting it: extract the program back
+    out of the comment, run it, diff against the table. That claim was falsified once, so it
+    has to be checked. Re-run the check after `cargo xtask format`, in case rustfmt reflows
+    the comment.
+
 **8. Check that a rule you cite actually reaches your case — read its scope note.**
 
 **Why:** §9.28 justified a design conclusion with "CLAUDE.md §11 warns against per-message

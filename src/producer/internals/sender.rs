@@ -7643,39 +7643,130 @@ mod tests {
     //     ask what M excludes. All nine are corrected; the alternation is what keeps them
     //     corrected.
     //
-    //     The nine, classified by re-deriving each end against the Java file rather than
-    //     described in prose — because the prose form of this taxonomy was wrong twice, once
-    //     per review round (Critic 48 issues 10 and 13). `Δstart` / `Δend` are cited minus
-    //     true, and the parenthesis is what the *cited* line actually holds:
+    //     The nine, with **every column derived** — cited from git, true from the Java
+    //     file, and the label from a content test on the cited line. The program is below
+    //     and the table under it is its stdout, re-indented by four spaces and otherwise
+    //     unedited. Checked rather than asserted, because "pasted derivation output" is
+    //     precisely the claim that was false last round: extract the program back out of
+    //     this comment (strip the `    //     ` prefix from each line), run it, and diff its
+    //     stdout against the table below — **no content differences**, the only artifact
+    //     being whether the slice you cut keeps a trailing newline.
     //
-    //       testDuplicateSequenceAfterProducerReset            748-810   749-810   start -1 (annotation)
-    //       testHealthyPartitionRetriesDuringEpochBump         3599-3692 3601-3692 start -2 (annotation)
-    //       testSenderShutdownWithPendingTransactions          228-247   228-246   end   +1 (body statement)
-    //       testFatalErrorWhenProduceResponse..InvalidPidMapping 1435-1449 1435-1448 end +1 (body statement)
-    //       testSendOffsetWithGroupMetadataFailAsAutoDowngrade.. 2666-2681 2666-2682 end -1 (body statement)
-    //       testTransitionToFatalErrorWhenRetriedBatchIsExpired 2979-3037 2979-3036 end +1 (body statement)
-    //       testBumpTransactionalEpochOnRecoverableAddOffsets.. 3567-3598 3567-3597 end +1 (body statement)
-    //       testMultipleAddPartitionsPerForOneProduce          1932-1976 1932-1970 end   +6 (body statement)
-    //       testFailedInflightBatchAfterEpochBump              3727-3810 3726-3816 start +1 (body comment),
-    //                                                                              end  -6 (body statement)
+    //     This is the third revision of this taxonomy, and the first with nothing typed by
+    //     hand. Pass 1 gave one cause for two corrections and it held for one. Pass 2 said
+    //     "eight of the nine" and "three cited the annotation", both wrong about the same
+    //     entry. Pass 3 got the numbers right and hand-wrote the classification column,
+    //     which was wrong in five of ten cells — every one of them "(body statement)" where
+    //     four were **blank lines** and one was a token in the *next* test's `@EnumSource`.
+    //     The through-line, which is this milestone's record-defect taxonomy in one
+    //     sentence: **each rewrite derived the part it had been faulted on and hand-wrote
+    //     the part it added.** Hence: derive the whole table or ship none of it.
     //
-    //     So **seven** of the nine were ±1 or ±2 at a single end, and **two** were large:
+    //     # save as /tmp/taxonomy.py and run from the repo root
+    //     import re, subprocess
+    //     PREFIX = '8356e80'   # the commit before these ranges were corrected
+    //     RUST   = 'src/producer/internals/sender.rs'
+    //     BASE   = 'kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals'
+    //     JAVA   = {c: f'{BASE}/{c}.java' for c in ('SenderTest', 'TransactionManagerTest')}
+    //     java = {k: open(v).read().split('\n') for k, v in JAVA.items()}
     //
-    //       - `testMultipleAddPartitionsPerForOneProduce` over-ran by six lines past its own
+    //     def headers(text):                      # wrap- and paren-tolerant, as the sweep is
+    //         blocks, cur = [], []
+    //         for line in text.split('\n'):
+    //             st = line.strip()
+    //             if st.startswith('///'): cur.append(st[3:].strip())
+    //             else:
+    //                 if cur: blocks.append(' '.join(cur)); cur = []
+    //         if cur: blocks.append(' '.join(cur))
+    //         pat = re.compile(r'Translated from\s+`(SenderTest|TransactionManagerTest)\.'
+    //                          r'([A-Za-z0-9_]+)`.*?\(Java\s+(\d+)\s*[-–]\s*(\d+)')
+    //         out = {}
+    //         for b in blocks:
+    //             m = pat.search(b)
+    //             if m: out[(m.group(1), m.group(2))] = (int(m.group(3)), int(m.group(4)))
+    //         return out
+    //
+    //     def true_range(cls, name):
+    //         lines = java[cls]
+    //         decl = next(i + 1 for i, l in enumerate(lines) if f' void {name}(' in l)
+    //         return decl, next(k + 1 for k in range(decl, len(lines)) if lines[k] == '    }')
+    //
+    //     def label(cls, line_no, close):         # THE column pass 3 hand-wrote
+    //         body = java[cls][line_no - 1].strip()
+    //         if body == '':              return 'blank line'
+    //         if body.startswith('@'):    return 'annotation'
+    //         if body.startswith('//'):   return 'comment'
+    //         if body == '}':             return 'closing brace'
+    //         if line_no > close:         return 'next-method token'
+    //         return 'body statement'
+    //
+    //     cited = headers(subprocess.run(['git', 'show', f'{PREFIX}:{RUST}'],
+    //                                    capture_output=True, text=True, check=True).stdout)
+    //     now   = headers(open(RUST).read())
+    //     rows = []
+    //     for (cls, name), (cs, ce) in sorted(cited.items()):
+    //         decl, close = true_range(cls, name)
+    //         if (cs, ce) == (decl, close): continue      # was already correct
+    //         cells = []
+    //         if cs != decl:  cells.append(f'start {cs - decl:+d} ({label(cls, cs, close)})')
+    //         if ce != close: cells.append(f'end {ce - close:+d} ({label(cls, ce, close)})')
+    //         rows.append((name, cs, ce, decl, close, cells))
+    //     rows.sort(key=lambda r: (len(r[5]), max(abs(int(c.split()[1])) for c in r[5])))
+    //     for name, cs, ce, decl, close, cells in rows:
+    //         print(f'//   {name}')
+    //         print(f'//     cited {cs}-{ce}   true {decl}-{close}   {"; ".join(cells)}')
+    //     print('//')
+    //     from collections import Counter
+    //     counts = Counter(re.search(r'\((.*)\)', c).group(1) for r in rows for c in r[5])
+    //     tally = ', '.join(f'{v} {k}' for k, v in sorted(counts.items(),
+    //                                                     key=lambda kv: (-kv[1], kv[0])))
+    //     print(f'//   {len(rows)} rows, {sum(len(r[5]) for r in rows)} cells: {tally}')
+    //     assert all(now[(c, n)] == true_range(c, n) for c, n in cited), 'a range regressed'
+    //     print('//   every one of the nine is correct in the working tree')
+    //
+    //   testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError
+    //     cited 3567-3598   true 3567-3597   end +1 (blank line)
+    //   testDuplicateSequenceAfterProducerReset
+    //     cited 748-810   true 749-810   start -1 (annotation)
+    //   testFatalErrorWhenProduceResponseWithInvalidPidMapping
+    //     cited 1435-1449   true 1435-1448   end +1 (blank line)
+    //   testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled
+    //     cited 2666-2681   true 2666-2682   end -1 (body statement)
+    //   testSenderShutdownWithPendingTransactions
+    //     cited 228-247   true 228-246   end +1 (blank line)
+    //   testTransitionToFatalErrorWhenRetriedBatchIsExpired
+    //     cited 2979-3037   true 2979-3036   end +1 (blank line)
+    //   testHealthyPartitionRetriesDuringEpochBump
+    //     cited 3599-3692   true 3601-3692   start -2 (annotation)
+    //   testMultipleAddPartitionsPerForOneProduce
+    //     cited 1932-1976   true 1932-1970   end +6 (next-method token)
+    //   testFailedInflightBatchAfterEpochBump
+    //     cited 3727-3810   true 3726-3816   start +1 (comment); end -6 (body statement)
+    //
+    //   9 rows, 10 cells: 4 blank line, 2 annotation, 2 body statement, 1 comment, 1 next-method token
+    //   every one of the nine is correct in the working tree
+    //
+    //     So **seven** of the nine were ±1 or ±2 at a single end and **two** were large, and
+    //     the dominant shape is the one the hand-written column erased: **four of the nine
+    //     cited the blank line after the closing brace** — an off-by-one that lands outside
+    //     the method entirely, in the gap before the next `@Test`. It has a one-line
+    //     detector ("does the cited end line have content?"), which is exactly the kind of
+    //     thing this table exists to hand a future sweeper.
+    //
+    //     The two large ones:
+    //
+    //       - `testMultipleAddPartitionsPerForOneProduce` over-ran six lines past its own
     //         closing brace at 1970, into `testRetriableErrors`'s `@EnumSource` list — it
-    //         spanned two methods.
+    //         spanned two methods, which is why its label is `next-method token`.
     //       - `testFailedInflightBatchAfterEpochBump` was wrong at **both** ends: it started
     //         one line *inside* its own body (3727 is `// Use a custom Sender to allow
-    //         multiple inflight requests`, not an annotation) and ended six lines short of
-    //         its closing brace, mid-body. Only a both-ends check finds it, which is this
-    //         bullet's own stated rule applied to itself.
+    //         multiple inflight requests`) and ended six lines short of its closing brace,
+    //         mid-body. Only a both-ends check finds it, which is this bullet's own stated
+    //         rule applied to itself.
     //
     //     And of the three pre-existing start-line slips, **two** cited the
     //     `@ParameterizedTest` / `@ValueSource` annotation (the shape Critic 46 pass 2
-    //     found); the third is the body-comment start above. An earlier revision of this
-    //     bullet said "eight of the nine" and "three … citing the annotation", i.e. it
-    //     halved the large-deviation class and made every pre-existing slip look like an
-    //     annotation habit. The table is pasted derivation output so it cannot drift again.
+    //     found); the third is the body-comment start above.
     //
     //     Re-running the sweep is not ceremony on the `SenderTest` side either: it caught two
     //     of Phase 8's own ranges off by one at the *end*

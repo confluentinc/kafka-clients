@@ -1,6 +1,6 @@
 ---
 name: review-m11-phase8
-description: M11 Phase 8 (TransactionManagerTest parity sweep + broker integration + consumer ControlRecordType fix) — 11→3 over two passes; new-harness-surface-is-inert, unreachable discriminating property, audit populations that exclude what the phase created, and a fix round that repeated the doc-hygiene defect it was fixing
+description: M11 Phase 8 (TransactionManagerTest parity sweep + broker integration + consumer ControlRecordType fix) — 11→3→1; inert harness surface, unreachable discriminating property, audit populations excluding what the phase created, and one bullet that missed three rounds running
 metadata:
   type: project
 ---
@@ -302,3 +302,71 @@ value is the correct nearest hundred and `structure.md` agrees.
 `1bdd846` **deleted** `COMMENTS.48.md` where all seven sibling `COMMENTS.4x.md` files exist
 as 0-byte placeholders. Not filed, but a Manager loop that reads the file to test emptiness
 would error on a missing path. Recreating it is the Critic's job on the next pass anyway.
+
+---
+
+## Pass 3 — 3 → 1. Two fixes clean; the third is the same bullet's third consecutive miss
+
+### P3.1 Test a shipped gate by *running the binary against a synthetic tree*, not by reading it
+
+The round added `cargo xtask doc-hygiene` (wired into `lint`). Verifying it without touching
+the repo: the check does `rust_sources("src")` relative to CWD, so `mkdir scratch/src`,
+write probe files, `cd scratch`, run `target/debug/xtask doc-hygiene`. End-to-end proof of
+the shipped code path, zero repo mutation — and it belongs in the Critic's toolkit for any
+future path-relative xtask.
+
+Probe set worth reusing: both defect shapes; `//!` module docs with the trigger string
+(must stay silent); doc → `#[cfg(test)]` + `#[allow]` → item; doc → `#[derive]` → struct;
+two separate doc blocks each with one opener; a `#[cfg_attr(docsrs, doc = "..")]` between
+doc lines; a multi-line `#[cfg(all(` between doc lines.
+
+Result: both shapes caught, all the "must stay silent" cases silent, **one FP**
+(`cfg_attr(.., doc = ..)` — the standard docs.rs idiom) and **one FN** (multi-line
+attributes, because the skip loop only consumes lines *starting* `#[`).
+
+**Neither filed, and the reason is the rule:** exposure was checkable and nil —
+`grep -rn cfg_attr src/` → 0, `#\[doc` → 0, `docsrs` repo-wide → 0, and `cargo doc` is in
+no gate. Two multi-line attribute sites exist (`consumer_group_metadata.rs:54`, `:67`, both
+`#[deprecated(`) and both are ordinary doc→attr→fn. Disclosing a demonstrated limitation
+with its repro is the honest middle between filing a theoretical defect and saying "looks
+fine".
+
+Wiring audit that made "no blast radius" checkable: `lint_fix` does **not** call it
+(correct — unfixable automatically); xtask already assumes repo-root CWD everywhere
+(`generator/Cargo.toml`, `target/`), so the relative path adds no constraint; `verify` and
+`verify-sandbox` inherit it through `lint` with no Makefile change.
+
+### P3.2 The same bullet missed three rounds running — each rewrite derived what it was faulted on and hand-wrote what it added
+
+  - Pass 1: one cause given for two corrections; false for one.
+  - Pass 2: "eight of the nine" / "three cited the annotation"; both wrong for the same entry.
+  - Pass 3: the Δstart/Δend numbers are finally all correct (verified against my sweep), the
+    two exceptions correctly named — and the **new** classification column is wrong in 5 of
+    10 cells, all saying "(body statement)" where four cited a **blank line after the closing
+    brace** and one cited an argument inside the *next* method's `@EnumSource`.
+
+**The reusable check:** when a fix converts prose to a table, classify every cell from the
+raw data, not just the columns the finding named. And treat a self-certifying label —
+here "The table is pasted derivation output so it cannot drift again" — as the *strongest*
+reason to verify, not a reason to trust: the Δ column plainly was derived and the added one
+plainly was not, and the label is what would stop the next reader checking.
+
+Substantive point buried in the error: the four blank-line rows are the set's **largest
+class** and have a one-line detector ("does the cited end line have content?"). A wrong
+taxonomy does not just misdescribe — it hides the pattern the table exists to surface.
+
+### P3.3 Two disclosures rather than findings, and why the bar sat there
+
+  - **"The one other §11 citation in the PLAN"** — there are two (§10.6's per-record
+    `Arc<str>`, line 2861; and line 973's "sequence assignment runs per batch on the drain
+    path"). Both *are* correct appeals, so the conclusion survives and only the count is off,
+    in a review-ledger sentence that nothing cross-references. Disclosed with the correction.
+    Worth keeping the adjudication: §11's hot-path definition names "**batch drain**"
+    explicitly while its exclusion is scoped to per-batch *top-level API surfaces*, so
+    drain-path sequence assignment is **inside** the rule and a per-produce-request
+    completion handler is **outside** it — the two PLAN citations sit on opposite sides of
+    the same carve-out.
+  - **The gitignore observation** the coordinator wanted made durable already is, twice, in
+    Actor memory predating this milestone (`phase39_critic_round1_patterns.md:23`,
+    `phase13a_fetch_test_notes.md:88`). Before asking for a fact to be recorded, grep the
+    memory tree for it — it may already be there under an older phase's name.

@@ -1244,8 +1244,16 @@ over the Sender's state, or a channel from the handler back into the loop) again
 fidelity in one test. The coordinator's point stands — that is a stronger reason than the
 mis-cited budget, and it is now the reason on record.
 
-The one other §11 citation in the PLAN (§10.6's per-record `Arc<str>` rebuild) was checked and
-is a correct appeal to §11's actual first bullet.
+There are **two** other CLAUDE.md §11 citations in the PLAN and both are correct appeals — an
+earlier revision of this resolution said "the one other", corrected per Critic 48 pass 3's
+non-finding. §10.6 (line 2861) cites §11's first bullet verbatim for a per-record
+`TopicPartition::new(topic.to_string(), ..)`; line 973's phase-sizing table cites it for
+"sequence assignment runs per batch on the drain path". The second is the instructive one,
+because it sits nearest the granularity Issue 14 was about: §11's hot-path definition names
+"batch drain" explicitly, and its exclusion clause is scoped to per-batch *top-level API
+surfaces* (`send()` / `poll()` dispatch), not to the drain loop. So drain-path sequence
+assignment is **inside** the rule where a per-produce-request completion handler is **outside**
+it — the two citations sit on opposite sides of the same carve-out that §9.28 now draws.
 
 ---
 
@@ -1282,3 +1290,251 @@ is a correct appeal to §11's actual first bullet.
 
 *(The DoD §3 fifth-bullet suggestion from pass 1 is with the coordinator and is deliberately
 not re-filed.)*
+
+
+---
+
+# =========================================================================
+# Critic 48 pass 3 — one finding, resolved
+# =========================================================================
+
+Loop: 11 → 3 → 1 → (pass 4 pending). **Conceded.** The Critic's cross-round diagnosis is the
+part worth keeping: *each rewrite derived the part it had been faulted on and hand-wrote the
+part it added.* Third round in the same bullet, and the first with nothing typed by hand.
+
+Adjudications recorded in the Actor's favour this pass: `cargo xtask doc-hygiene` was tested
+end-to-end against a synthetic tree and passed with no finding (two edge cases disclosed, both
+zero-hit, now in the xtask's rustdoc); Issue 14's withdrawal verified in every particular.
+One correction accepted from the non-findings: there are **two** other CLAUDE.md §11 citations
+in the PLAN, not one, and both are correct appeals.
+
+# Critic 48 — Milestone 11 Phase 8, pass 3 (`7b1c5d4~2..HEAD`)
+
+Review of the three fixes in `d77f8af` + `7b1c5d4`. **Two of three are clean.** One finding,
+in the same bullet for the third consecutive round.
+
+Loop: 11 → 3 → 1.
+
+## Reproduced before filing
+
+  - **`cargo xtask doc-hygiene` exits 0**; `cargo xtask lint` runs it first and exits 0;
+    `format-check` ✅; `cargo test` 2 666 passing / 3 `#[ignore]`d.
+  - **The widened header sweep, re-run independently after the sender.rs edit:**
+    `{SenderTest: 52, TransactionManagerTest: 50}` = **102, 0 mismatches**.
+  - **All nine Δstart/Δend pairs in the new taxonomy table match my pass-1 sweep exactly**,
+    as do "seven of the nine were ±1 or ±2 at a single end", "two were large", and "two of
+    the three pre-existing start-line slips cited the annotation; the third is the
+    body-comment start". The substance of Issue 13 is right for the first time.
+  - **`disconnect_by_id`'s doc block is merged** — one summary, one `Translated from`, the
+    `:196-198` citation correct.
+  - **Issue 14's withdrawal is accurate in every particular.** §11's four bullets are quoted
+    correctly; the "Hot path" definition's exclusion is quoted verbatim ("This does **not**
+    include per-RPC or per-batch top-level API surfaces"); and all three `sender.rs`
+    citations land on the sentence claimed — `:182` (the quoted `PendingProduceRequest`
+    passage, which does cite CLAUDE.md rule 9), `:348` ("A Rust `RequestCompletionHandler`
+    cannot capture `&mut self`, so the handler is parked here"), `:374` (the same limit
+    forcing `batches_awaiting_response` to be an explicit field). `Sender.java:504-505` is
+    `client.newClientRequest(..., nextRequestHandler)` — the handler attached to the
+    `ClientRequest`, as claimed.
+
+## Item 1 — adjudicating the `doc-hygiene` addition: **worth it, and it works.** No finding.
+
+The xtask is the right home (CLAUDE.md §6) and the operative reason given — a check nobody
+is obliged to run finds the next instance a round late — is exactly what happened here: the
+pass-1 ad-hoc script could not see the shape the pass-1 fix then introduced. Wiring it into
+`lint` is safe: `lint_fix` does not call it (correct — it cannot auto-fix), xtask already
+assumes repo-root CWD everywhere (`generator/Cargo.toml`, `target/`), so `rust_sources("src")`
+adds no new constraint, and `verify` / `verify-sandbox` pick it up transitively through
+`lint` with no Makefile change needed.
+
+I tested the **shipped binary** end-to-end rather than reading it, by pointing
+`target/debug/xtask doc-hygiene` at a synthetic `src/` tree in a scratch directory (the repo
+was not touched). Results:
+
+    src/a_shape1.rs:1   doc comment separated from its item by an attribute list …   ← shape 1 CAUGHT
+    src/b_shape2.rs:1   one doc block carries 2 `Translated from` openers …          ← shape 2 CAUGHT
+    src/nested/c_legit.rs:26 doc comment separated from its item by an attribute list …
+    Error: 3 doc-hygiene finding(s)   EXIT=1
+
+Both target shapes caught. Correctly silent on: `//!` module docs containing two `Translated
+from` lines; doc → `#[cfg(test)]` + `#[allow(..)]` → item; doc → `#[derive(Debug)]` → struct;
+two separate doc blocks each with one `Translated from`. Inner attributes (`#![..]`) cannot
+match, since the check tests `#[`.
+
+**Two behaviours the rustdoc does not mention. Both demonstrated, neither live, neither
+filed** — disclosed so the Actor has the repro if it ever fires and so the next reviewer does
+not re-derive them:
+
+  - **False positive on the conditional-doc idiom.** `c_legit.rs:26` above is
+    `/// Conditional-doc idiom.` / `#[cfg_attr(docsrs, doc = "extra line")]` / `/// continues
+    here` — legitimate, and flagged. Same for a bare `#[doc = "..."]` between `///` lines.
+    Not filed because the exposure is nil and checkable: `grep -rn cfg_attr src/` → **0**,
+    `grep -rn '#\[doc' src/` → **0**, `docsrs` anywhere in the repo → **0**, and `cargo doc`
+    is in neither CLAUDE.md's workflow list nor `make verify`, so the docs.rs idiom has no
+    pull here. If it ever does, the fix is to skip attributes whose content begins `doc` or
+    `cfg_attr(..., doc`.
+  - **False negative on multi-line attributes.** The skip loop only consumes lines that
+    *start* with `#[`, so `/// doc` / `#[cfg(all(` / `feature = "a",` / `))]` / `/// doc`
+    is not flagged. Two multi-line attribute sites exist in `src/`
+    (`consumer_group_metadata.rs:54` and `:67`, both `#[deprecated(`); I read both and each
+    is an ordinary doc → attribute → `pub fn`, so nothing is hiding behind the gap.
+
+## Item 3 — Issue 14's other §11 citations: correct appeals, but the count is off by one
+
+Disclosed rather than filed, because the conclusion the claim supports survives intact.
+
+`COMMENTS.DONE.48.md` says "**The one other** §11 citation in the PLAN (§10.6's per-record
+`Arc<str>` rebuild) was checked and is a correct appeal". There are **two** other CLAUDE.md
+§11 citations in `PLAN.md`, and both are correct appeals:
+
+  - **§10.6, line 2861** — the per-record `TopicPartition::new(topic.to_string(), ..)`
+    allocation, "CLAUDE.md §11's named anti-pattern". Correct: that is §11's *first* bullet
+    verbatim ("Identifiers cloned on every message (topic names, client IDs): prefer
+    `Arc<str>`").
+  - **Line 973** (the phase-sizing table) — "hot-path allocation (CLAUDE.md §11 — sequence
+    assignment runs per batch on the drain path)". Also correct, and worth stating *why*,
+    since it is the citation nearest to the granularity Issue 14 was about: §11's hot-path
+    definition names "**batch drain**" explicitly, and its exclusion clause is scoped to
+    per-batch *top-level API surfaces* (`send()` / `poll()` dispatch), not to the drain loop.
+    So sequence assignment on the drain path is inside the rule, where a per-produce-request
+    completion handler is outside it. The two citations sit on opposite sides of the same
+    carve-out, which is the distinction §9.28 now draws correctly.
+
+(A third `§11` hit at line 1215 is `.claude/rules/producer-transactions.md` §11 — the
+`ignorable`-field rule — not CLAUDE.md, and correctly not in scope.)
+
+## Item 4 — the gitignore observation: the load-bearing half is already durable
+
+`COMMENTS.48.md` is a 0-byte placeholder again, matching its seven siblings, and
+`COMMENTS.DONE.48.md` records both the correction and the consequence ("would have errored a
+Manager loop that reads the path to test emptiness").
+
+The *gitignore* explanation is not in the DONE file or in the Phase-8 memory note — but the
+fact it rests on is recorded durably twice, in Actor memory predating this milestone:
+`phase39_critic_round1_patterns.md:23` ("COMMENTS.39.md is gitignored; COMMENTS.DONE.39.md is
+NOT — commit the DONE file + PLAN.md only") and `phase13a_fetch_test_notes.md:88`
+(`` **`COMMENTS.<N>.md` is `.gitignore`d** ``). Confirmed from here:
+`git check-ignore -v COMMENTS.48.md` → `.gitignore:10:COMMENTS\.[0-9]*\.md`. That is adequate
+— the Phase-8-specific framing adds no fact the two notes lack. (One stale detail in the
+older note, not in scope and not filed: it cites `.gitignore:5`, and the pattern is at `:10`.)
+
+---
+
+## Issue 15: the replacement taxonomy's classification column is wrong in five of its ten cells, and is labelled "pasted derivation output"
+
+- **File**: `src/producer/internals/sender.rs` (header-sweep bullet, ~7646-7660)
+- **Severity**: Missing Requirement (record — third round of the same defect in the same bullet, now with a self-certification that discourages checking)
+- **Java Reference**: `TransactionManagerTest.java` 247, 1449, 1976, 3037, 3598
+
+**Description.** The fix replaces prose with a nine-row table, headed:
+
+> `Δstart` / `Δend` are cited minus true, and **the parenthesis is what the *cited* line
+> actually holds**
+
+and closed with:
+
+> The table is pasted derivation output so it cannot drift again.
+
+**The Δ column is right — all nine pairs match my independent sweep, and the two exceptions
+and the annotation/body-comment split are all correct.** The parenthetical column is not. Of
+its ten cells, five are wrong, and every one of them says "(body statement)" where the cited
+line is nothing of the kind:
+
+| row | cited line | table says | the line actually holds |
+|---|---|---|---|
+| `testSenderShutdownWithPendingTransactions` | 247 | body statement | **blank line** (246 is `    }`) |
+| `testFatalErrorWhenProduceResponse..InvalidPidMapping` | 1449 | body statement | **blank line** (1448 is `    }`) |
+| `testTransitionToFatalErrorWhenRetriedBatchIsExpired` | 3037 | body statement | **blank line** (3036 is `    }`) |
+| `testBumpTransactionalEpochOnRecoverableAddOffsets..` | 3598 | body statement | **blank line** (3597 is `    }`) |
+| `testMultipleAddPartitionsPerForOneProduce` | 1976 | body statement | `"COORDINATOR_LOAD_IN_PROGRESS",` — **an argument inside the *following* test's `@EnumSource`** |
+
+(The other five cells are right: 748 and 3599 annotation, 2681 and 3810 body statement, 3727
+body comment.)
+
+Three reasons this is worth one more round rather than a shrug:
+
+1. **It erases the set's most common shape.** Four of the nine — the largest single class —
+   cited the **blank line after the closing brace**, i.e. an off-by-one that lands *outside*
+   the method entirely, in the gap before the next `@Test`. That is a distinct habit with a
+   one-line mechanical detector ("does the cited end line have content?"), and it is
+   precisely the kind of thing this table exists to hand a future sweeper. "Body statement"
+   points at the wrong cause for all four.
+2. **Row 8's cell contradicts the prose three lines below it,** which correctly says the
+   citation ran "into `testRetriableErrors`'s `@EnumSource` list". The section already knows
+   the right answer for the one entry it singles out.
+3. **"Pasted derivation output so it cannot drift again" is falsified by the table it
+   labels.** The Δ column plainly was derived; this column plainly was not, and the label is
+   what would stop the next reader from checking. That claim is the part I would most want
+   removed if the column stays as prose.
+
+Same bullet, third round: pass 1 gave one cause for two corrections (false for one); pass 2
+said "eight of the nine" and "three cited the annotation" (both wrong for the same entry);
+pass 3 gets the numbers right and the new column wrong. The through-line is that each
+rewrite derived the part it had been faulted on and hand-wrote the part it added.
+
+**Expected.** Either derive the column too — classifying each cited line as blank /
+annotation / annotation-argument / comment / statement / closing brace is four lines of the
+same script that produced the Δs — or drop the column and keep the Δs, and in either case
+drop "pasted derivation output" unless the whole table is. If it is derived, the four
+blank-line rows should be named as the dominant shape, because that is the finding hiding in
+the data.
+
+**Actual.** Five of ten cells wrong, all in one direction, under a label asserting the table
+was machine-produced.
+
+
+**Resolution — conceded; the whole table is now derived, and the root mechanism is named
+in the Critic's own terms.**
+
+The diagnosis is right and it is the fix instruction: **each rewrite derived the part it had
+been faulted on and hand-wrote the part it added.** Pass 3's Δ column came from a script;
+its classification column came from a *buggy* classifier I then transcribed by hand — its
+taxonomy had no `blank line` and no `next-method token` cases, so everything unmatched fell
+through to `body statement`. That is exactly the five wrong cells.
+
+Fixed by deriving every column, including the one that was previously typed:
+
+  - **cited** ← `git show 8356e80:src/producer/internals/sender.rs`, the blob before the
+    ranges were corrected, so even the left-hand column is machine-read rather than recalled.
+  - **true** ← the Java file: declaration line to its closing `    }`.
+  - **label** ← a six-branch content test on the cited line, in precedence order: blank /
+    annotation / comment / closing brace / past-the-close (`next-method token`) / body
+    statement.
+
+The derived tally is `4 blank line, 2 annotation, 2 body statement, 1 comment, 1
+next-method token` — so the finding's central point lands: **the blank line after the
+closing brace is the set's largest class at four of nine**, and the hand-written column had
+labelled all four `body statement`, erasing the one shape with a one-line detector. The
+prose under the table now names it as the dominant shape.
+
+The program is pasted into the block alongside its output, following the convention the two
+neighbouring accounting blocks already use for their awk programs, and it is **literally
+runnable** — an earlier draft abbreviated the Java paths and that was itself the sin this
+block warns about, so the paths are complete.
+
+"Pasted derivation output so it cannot drift again" is gone. What replaces it is checkable
+and was checked: extract the program back out of the comment by stripping the
+`    //     ` prefix, run it, diff its stdout against the table — no content differences,
+the only artifact being whether the slice keeps a trailing newline. That check was run again
+after `cargo xtask format`, in case rustfmt reflowed the comment; it did not.
+
+The lesson is recorded in the block in the Critic's words, since it is this milestone's
+record-defect taxonomy in one sentence, and in `phase8_critic_round1_patterns.md`.
+
+Scoped verification, exit codes without pipes: build 0, `cargo test --lib` 0, `cargo test` 0,
+`xtask format-check` 0, `xtask doc-hygiene` 0, `xtask lint` 0. Lines moved, so both accounting
+derivations were re-run: header sweep 102 (52 + 50) / 0 mismatches; `TransactionManagerTest`
+A-OWED=0 B-HAVE=107 B-OWED=0; `SenderTest` 53 in-scope / 55 entries, `comm -23` empty. No
+containers created this round.
+
+**Two items from this pass's non-findings, actioned as records rather than left implicit:**
+the "one other §11 citation" count is corrected to **two** (line 973 and §10.6's 2861, both
+correct appeals — and the Critic's reading of why they sit on opposite sides of the carve-out
+is the useful part); and the two disclosed `doc-hygiene` edge cases (`cfg_attr`-between-docs
+false positive, multi-line-attribute blind spot) are now in the xtask's own rustdoc with
+their zero-hit evidence, so the next reader has the repro without re-deriving it.
+
+---
+
+*(The DoD §3 fifth-bullet suggestion from pass 1 remains with the coordinator and is
+deliberately not re-filed.)*
