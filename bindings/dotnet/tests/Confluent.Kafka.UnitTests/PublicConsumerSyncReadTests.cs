@@ -56,7 +56,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </item>
 /// </list>
 /// </remarks>
-public sealed class ConsumerSyncReadTests
+public sealed class PublicConsumerSyncReadTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
