@@ -35,3 +35,17 @@ resolving that is its own piece of work.
 authority on which class each state raises: `assertThrows(KafkaException.class)`
 for abortable/fatal, `IllegalStateException.class` for no-producer-id and
 no-ongoing-transaction.
+
+**Corollary — sync-vs-future does NOT tell local from remote.** I got this wrong
+once and a Critic caught it. Every *client-side* rejection on the send path is an
+`ApiException` too (`RecordTooLargeException` from `ensureValidRecordSize`,
+`InvalidTopicException` from `waitOnMetadata`), so it is delivered through the
+**future**, exactly like a broker error — in Java as much as here. To prove a
+record actually reached the broker, assert the wire **error code**: a broker
+`MESSAGE_TOO_LARGE` gives `Errors::MessageTooLarge`, whereas the local
+`KafkaError::RecordTooLarge` carries no `KafkaGenericError` and its `error()`
+degrades to `UnknownServerError`. Generally: `KafkaError::error()` returns
+`UnknownServerError` for every variant without a `KafkaGenericError`
+(`IllegalArgument`, `IllegalState`, `Timeout`, `RecordTooLarge`, `Serialization`,
+`Wakeup`, `ConcurrentModification`, `TransactionAborted`), so that code means
+"no wire code", not "the broker said UNKNOWN_SERVER_ERROR".
