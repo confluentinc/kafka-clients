@@ -24,6 +24,7 @@ fn main() -> anyhow::Result<()> {
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
         Some("lint") => lint()?,
+        Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
         Some("coverage") => coverage()?,
         Some("coverage-lcov") => coverage_lcov()?,
@@ -133,6 +134,11 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 }
 
 fn lint() -> anyhow::Result<()> {
+    // Structural doc defects clippy cannot see: an item's attributes or doc
+    // comment migrated onto a neighbour. Run first, because it is instant and its
+    // failures are always real.
+    doc_hygiene()?;
+
     println!("🔍 Running clippy lints...");
 
     // Lint main crate
@@ -295,13 +301,121 @@ fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Checks for two structural doc defects that neither `rustfmt` nor clippy reports,
+/// both of which occurred in Milestone 11 Phase 8 — and the second of which occurred
+/// *in the fix for* the first.
+///
+/// 1. **A migrated attribute or doc comment.** An item inserted into a preceding
+///    item's attribute list silently steals the attributes and doc between them, so
+///    the earlier item loses (for example) its `#[cfg(test)]` and ships in release
+///    builds. Signature: a `///` line, then one or more `#[..]` lines, then another
+///    `///` line. Rust accepts it, so only a shape check finds it.
+///
+/// 2. **A doc block stacked on a doc block.** An item's doc left in place while a
+///    rewritten block was added below it, giving two summaries and two
+///    `Translated from` lines that rustdoc runs into one paragraph. Signature: one
+///    contiguous `///` run containing two or more `Translated from` openers.
+///
+/// Shape 1's check was shipped for Phase 8 as an ad-hoc script and could not see
+/// shape 2 — an attribute-free stack. Both live here now, and in `lint`, because
+/// CLAUDE.md §6 puts repeatable checks in xtask rather than in shell scripts, and
+/// because a check nobody is obliged to run is a check that finds the next instance
+/// one review round late.
+fn doc_hygiene() -> anyhow::Result<()> {
+    println!("🔍 Checking doc-comment hygiene...");
+
+    let mut findings: Vec<String> = Vec::new();
+    for path in rust_sources("src")? {
+        let text = fs::read_to_string(&path)?;
+        let lines: Vec<&str> = text.lines().collect();
+
+        for (index, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("///") {
+                continue;
+            }
+            // Shape 1: doc line -> attribute line(s) -> doc line.
+            let mut cursor = index + 1;
+            let mut saw_attribute = false;
+            while cursor < lines.len() && lines[cursor].trim_start().starts_with("#[") {
+                saw_attribute = true;
+                cursor += 1;
+            }
+            if saw_attribute && cursor < lines.len() && lines[cursor].trim_start().starts_with("///") {
+                findings.push(format!(
+                    "{}:{} doc comment separated from its item by an attribute list — an item \
+                     was probably inserted into the preceding item's attributes",
+                    path.display(),
+                    index + 1
+                ));
+            }
+        }
+
+        // Shape 2: one contiguous `///` run with two or more `Translated from` openers.
+        let mut run_start: Option<usize> = None;
+        let mut openers = 0;
+        for (index, line) in lines.iter().enumerate().chain(std::iter::once((lines.len(), &""))) {
+            if line.trim_start().starts_with("///") {
+                if run_start.is_none() {
+                    run_start = Some(index);
+                    openers = 0;
+                }
+                if line.contains("Translated from") {
+                    openers += 1;
+                }
+            } else {
+                if let Some(start) = run_start.filter(|_| openers > 1) {
+                    findings.push(format!(
+                        "{}:{} one doc block carries {} `Translated from` openers — a doc block \
+                         was probably stacked on another",
+                        path.display(),
+                        start + 1,
+                        openers
+                    ));
+                }
+                run_start = None;
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!("✅ Doc-comment hygiene clean!");
+        return Ok(());
+    }
+    for finding in &findings {
+        eprintln!("  {finding}");
+    }
+    Err(anyhow::anyhow!("{} doc-hygiene finding(s)", findings.len()))
+}
+
+/// Every `.rs` file under `root`, recursively, in a deterministic order.
+fn rust_sources(root: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut stack = vec![PathBuf::from(root)];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<_, _>>()?;
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 fn print_help() {
     eprintln!(
         "Tasks:
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
   check-generated Check generated code formatting only (no changes)
-  lint            Run clippy lints (warnings are errors)
+  lint            Run doc-hygiene plus clippy lints (warnings are errors)
+  doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
   coverage        Run unit test coverage (HTML report)
   coverage-lcov   Run unit test coverage (lcov for CI)
@@ -314,6 +428,7 @@ Usage:
   cargo xtask format-check
   cargo xtask check-generated
   cargo xtask lint
+  cargo xtask doc-hygiene
   cargo xtask lint-fix
   cargo xtask coverage
   cargo xtask coverage-lcov

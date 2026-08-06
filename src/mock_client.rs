@@ -285,11 +285,8 @@ impl MockClient {
         self.connection_state(node.id_string()).ready_delayed_until_ms = now + duration_ms;
     }
 
-    /// Disconnect a node by ID string, creating disconnect responses for all
-    /// pending requests to that node.
-    ///
-    /// Translated from `MockClient.disconnect(String)`.
-    /// Disconnects `node_id`, failing its in-flight requests.
+    /// Disconnects `node_id`, creating disconnect responses for all pending requests to
+    /// that node.
     ///
     /// Translated from `MockClient.disconnect(String)` (`MockClient.java:196-198`), which
     /// delegates to the two-argument overload with `allowLateResponses = false`.
