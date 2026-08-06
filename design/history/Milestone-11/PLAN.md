@@ -2586,6 +2586,30 @@ a channel from the handler back into the loop), weighed against Java fidelity in
 This entry records the consequence rather than proposing the reversal, but a later phase
 weighing it should weigh *that* trade-off.
 
+### 9.29 Critic review of Phase 8 — the milestone's final loop
+
+**Status:** DONE — **closed 2026-08-06 on a clean fourth pass** (11→3→1→0).
+Archived at `design/history/Milestone-11/Phase-8/COMMENTS.DONE.48.md`.
+
+Fifteen findings, all real, none disputed. The phase's one production change — the
+consumer abort-marker fix, forced by the first real abort marker this repo ever
+produced — was correct on arrival and survived Phase-4-depth review; the milestone's
+defect surface stayed in the records to the end. Two findings were
+**under**-statements corrected in the Actor's favour (the fixed consumer defect was
+worse than recorded: `read_committed` unusable on any partition that ever had an
+abort; §9.25's batch is dropped outright).
+
+Every account is closed: `TransactionManagerTest` 140/140; `SenderTest` 10/11 with
+the last genuinely §9.18-blocked (re-verified); four real-broker transaction
+scenarios green with non-vacuous negatives. Open items handed out of the milestone:
+§9.25 (can_retry's empty pool), §9.26 (three consumer tests, owed with owner),
+§9.18 (the split panic), plus the §9.14 wire-test gap and the §9.17 container leak —
+all with owners and evidence.
+
+The milestone's closing lesson, in the Critic's words: *"Each rewrite derived the
+part it had been faulted on and hand-wrote the part it added. It ended when the
+artifact stopped containing anything typed by hand."*
+
 ---
 
 ## 10. Recorded translation deviations

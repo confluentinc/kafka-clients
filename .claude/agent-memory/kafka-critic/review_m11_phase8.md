@@ -1,6 +1,6 @@
 ---
 name: review-m11-phase8
-description: M11 Phase 8 (TransactionManagerTest parity sweep + broker integration + consumer ControlRecordType fix) — 11→3→1; inert harness surface, unreachable discriminating property, audit populations excluding what the phase created, and one bullet that missed three rounds running
+description: M11 Phase 8 (TransactionManagerTest parity sweep + broker integration + consumer ControlRecordType fix) — CLOSED 11→3→1→0, closing Milestone 11; inert harness surface, unreachable discriminating property, audit populations excluding what the phase created, and one bullet that missed three rounds until nothing in it was typed by hand
 metadata:
   type: project
 ---
@@ -370,3 +370,60 @@ taxonomy does not just misdescribe — it hides the pattern the table exists to 
     Actor memory predating this milestone (`phase39_critic_round1_patterns.md:23`,
     `phase13a_fetch_test_notes.md:88`). Before asking for a fact to be recorded, grep the
     memory tree for it — it may already be there under an older phase's name.
+
+---
+
+## Pass 4 — CLEAN. Phase 8 closed 11 → 3 → 1 → 0, and with it Milestone 11's review lifecycle
+
+The fix made the whole taxonomy program-derived. Verified by doing literally what the comment
+invites: extract the pasted program, run it, `diff` its stdout against the pasted table —
+**byte-identical, no output at all**, not even the trailing-newline artifact the comment
+allows for. Ten labels re-derived with my own six-branch implementation: all ten agree,
+including the five cells the round existed to fix (four genuine blank lines, each `close + 1`;
+one content-bearing token past the close → `next-method token`).
+
+### P4.1 What a fully-derived artifact looks like, and why it ends a loop
+
+The properties that made this verifiable in one command instead of ten:
+
+  - every column has a *source* named in the program — `cited` from `git show <pre-fix>:file`,
+    `true` from the Java file, `label` from a content test on the cited line;
+  - the row **order** comes from a sort key in the program (`(len(cells), max|Δ|)`), so even
+    the ordering is derived rather than curated;
+  - the tally is `Counter` output, not a hand count;
+  - the closing `assert` is *broader than the table* — it re-checks every header in the
+    pre-fix blob (all 102), not just the nine rows, so it catches a regression the table
+    would not show.
+
+**Reusable standard:** when an artifact has been wrong three rounds running, the fix is not a
+better sentence — it is removing everything typed by hand. Ask of any pasted table: which
+column has no named source? That is the one that will be wrong.
+
+### P4.2 The root cause was worth extracting, and it generalises
+
+Pass 3's classifier had **no `blank line` branch and no past-the-close branch**, so both
+shapes fell through to the `body statement` default. That is why all five wrong cells were
+wrong *in the same direction* — a uniform error direction in a classification column is the
+fingerprint of a missing branch plus a permissive default. Worth checking for directly:
+if every wrong cell says the same thing, look for the default, not for five mistakes.
+
+### P4.3 Calibration: the non-finding I declined on the closing pass
+
+The extraction hint ("strip the `    //     ` prefix from each line") is incomplete — four
+bare `    //` separators inside the program range are its blank lines, and applied literally
+the recipe yields `IndentationError` at line 8. **Not filed**, and the reasoning matters more
+than the case: the "only artifact" clause scopes to the *diff*, where the claim is
+conservative rather than false; the artifact's machine-checkable contract (program + pasted
+output) reproduces exactly; and I had declined comparable extraction friction seven times this
+milestone, including hunting `scope.awk`'s start line myself in pass 1 of this same phase.
+**Moving a bar on the last pass is arbitrary even when the finding would be technically
+defensible.** Disclose with the repro and the one-clause fix instead.
+
+### P4.4 Phase 8 in one line, and the milestone
+
+15 findings over four passes, none disputed, no FPs recorded against me. **Zero behavioural
+defects in production code in passes 2–4** — the phase's single production change (the
+consumer `ControlRecordType` / `contains_abort_marker` fix) was correct on arrival and it was
+its *record* that needed three artifacts corrected. The through-line, which is the whole
+milestone's record-defect taxonomy: **each rewrite derived the part it had been faulted on and
+hand-wrote the part it added.** Watch for it in any fix that both corrects and extends.
