@@ -79,4 +79,51 @@ everywhere.
 
 **Also:** a number measured mid-phase will be invalidated by the same phase's later commits.
 Round it, ship the command to re-derive it, and say the rounding is deliberate — rather than
-re-writing an exact figure that resets the trap.
+re-writing an exact figure that resets the trap. The Critic generalised this and it is now the
+standing rule: **ask for exactness only where the number cannot be re-derived**; where a
+derivation can be shipped, ship it and round the display.
+
+---
+
+## Pass 2 added two more (loop 11 → 3), both about the *fix* rather than the code
+
+**6. A sweep written for one shape will miss its sibling shape — so put it in `xtask`, not in
+a commit message.**
+
+**Why:** pass 1's fix for a migrated-attribute defect shipped a sweep for "doc → attributes →
+doc" and reported 0 suspects. Pass 2 found that the *same fix* had created a **stacked doc
+block** (two summaries, two `Translated from` lines, no separator), which that shape
+structurally cannot see — and it was the only instance in the tree. Two consecutive rounds
+where the fix for a doc-hygiene finding introduced one.
+
+**How to apply:** when a defect's signature is structural, enumerate the *family* before
+writing the check, and put it where the gate runs it — `cargo xtask doc-hygiene`, called from
+`cargo xtask lint`, per CLAUDE.md §6. An ad-hoc script quoted in a commit message is a check
+nobody is obliged to run, which means it finds the next instance one review round late.
+Mutation-check each shape separately and record the exit codes.
+
+**7. A taxonomy written as prose beside correct corrections drifts. Paste the derivation
+instead.**
+
+**Why:** the header-sweep bullet mis-classified the same entry in both rounds — pass 1 gave
+one cause for two corrections, pass 2 called a both-ends-wrong entry "±1 at one end" and a
+body-comment start an annotation. The nine *corrections* were right both times; the sentence
+generalising them was not.
+
+**How to apply:** if a record classifies a set, generate the table (deltas plus what the cited
+line actually holds) and paste the output. Prose summarising a mechanical fact is the part that
+rots.
+
+**8. Check that a rule you cite actually reaches your case — read its scope note.**
+
+**Why:** §9.28 justified a design conclusion with "CLAUDE.md §11 warns against per-message
+callbacks on the hot path". §11 says nothing about callbacks, and its own "Hot path" definition
+*excludes* per-RPC surfaces — which is exactly what a `RequestCompletionHandler` is (one per
+produce request). The true obstacle was ownership: a Rust completion handler cannot capture
+`&mut self`, documented three times in the same file (`sender.rs:182`, `:348`, `:374`). A
+structural obstacle is a *stronger* reason than a performance budget, so the mis-citation
+weakened the record it was meant to support.
+
+**How to apply:** before appealing to a numbered rule, read the rule and its scope note. If the
+real reason is structural, say so — a later phase weighing the trade-off needs the actual
+constraint, not a rule that does not apply.
