@@ -27,7 +27,7 @@
 - [Phase 10 consolidated patterns](phase10_consolidated_patterns.md) — Phase 10 close-out: pending-followup mpsc, PollResult.try_connect, Arc<Mutex<RequestManagers>>
 - [Phase 11 commits 4-7 notes](phase11_commit_4-7_notes.md) — AsyncKafkaConsumer poll/commit/seek/close + Consumer trait impl + Phase 10 auto-commit carry-over closed
 - [Phase 11 Critic batch-2 patterns](phase11_critic_batch2_patterns.md) — submit_and_drain helper, per-API wakeup matrix, MemberStateListener bridge
-- [Phase 11 commits 8-10 notes](phase11_commit_8-10_notes.md) — AsyncKafkaConsumerTest translation; drainer-task pattern; @ParameterizedTest split; exact-message assertions
+- [Phase 11 commits 8-10 notes](phase11_commit_8-10_notes.md) — AsyncKafkaConsumerTest translation;drainer-task pattern;@ParameterizedTest split;exact-message assertions
 - [Phase 11 consolidated patterns](phase11_consolidated_patterns.md) — Phase 11 close-out: submit_and_drain universal primitive, per-API wakeup matrix incl Issue 22, §31
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
@@ -86,4 +86,4 @@
 - [Phase 6 public txn API](phase6_public_txn_api_notes.md) — shared PendingRequests (rules §2 premise false for app-side enqueue)
 - [Phase 7 MockProducer txn surface](phase7_mock_producer_notes.md) — reentrant-Java-monitor → inner-type body split
 - [Phase 8 parity sweep](phase8_parity_sweep_notes.md) — MockClient RequestMatcher unlocked the 140-method sweep; blockage notes expire (re-verify)
-- [Phase 8 Critic round-1 patterns](phase8_critic_round1_patterns.md) — inert translated mock surface (check routing not signature); unreachable discriminating claims; derive a defect's trigger from the guard
+- [Phase 8 Critic round-1 patterns](phase8_critic_round1_patterns.md) — inert translated mock surface (check routing not signature);unreachable discriminating claims
