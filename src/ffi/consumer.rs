@@ -162,13 +162,8 @@ struct FfiConsumerHandle {
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Core [`ConsumerHandle`] captured at construction. Its `wakeup()` is
     /// fired by [`kafka_consumer_Consumer_wakeup`] without acquiring the guard,
-    /// which is the whole point — it must work while another thread holds it.
-    ///
-    /// Only `wakeup()` is used today. The handle also carries the
-    /// reentrant-safe consumer ops (`assign` / `seek` / `commit_*` / …), but the
-    /// C surface deliberately does not expose them yet — that would mean a
-    /// `_callback_t` typedef per async op (CLAUDE.md §3) with no caller asking
-    /// for it. Adding them later is purely additive to the C ABI.
+    /// which is the whole point of the handle: every method takes `&self`, so
+    /// it bypasses the single-owner guard by design.
     consumer_handle: ConsumerHandle,
     /// Whether this handle wraps a [`MockConsumer`].
     #[allow(dead_code)]
@@ -480,9 +475,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     };
     let consumer: MockConsumer<Bytes, Bytes> = MockConsumer::new(strategy);
     // `MockConsumer` exposes a `ConsumerHandle` through the `Consumer` trait
-    // (backed by a shared `AtomicBool` flag observed by the next `poll`), so we
-    // capture it here just like the async arm — no no-op handle is needed. Only
-    // its `wakeup()` is meaningful; the mock's async ops are not wired.
+    // (its `wakeup()` is backed by a shared flag observed by the next `poll`),
+    // so we capture it here just like the async arm — no no-op handle is needed.
     let consumer_handle = consumer.handle();
     build_consumer_handle(ConsumerKind::Mock(Box::new(consumer)), consumer_handle, true)
 }
