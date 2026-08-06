@@ -70,7 +70,7 @@ public sealed class PublicConsumerSyncReadTests
     }
 
     [Fact]
-    public void Assignment_ReflectsAssign_ExactlyTheAssignedPartitions()
+    public async Task Assignment_ReflectsAssign_ExactlyTheAssignedPartitions()
     {
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
         TopicPartition[] assigned =
@@ -78,7 +78,7 @@ public sealed class PublicConsumerSyncReadTests
             new TopicPartition("t1", 0),
             new TopicPartition("t2", 3),
         };
-        consumer.Assign(assigned);
+        await TestTimeout.Run(() => consumer.Assign(assigned), s_deadline);
 
         IReadOnlyCollection<TopicPartition> result = consumer.Assignment();
 
@@ -90,13 +90,13 @@ public sealed class PublicConsumerSyncReadTests
     }
 
     [Fact]
-    public void Assignment_ReturnsFreshSnapshotEachCall()
+    public async Task Assignment_ReturnsFreshSnapshotEachCall()
     {
         // Each call materializes a fresh owned snapshot (the FDG "fresh collection per
         // call → method" rationale). Two reads are equal by value but not the same
         // instance.
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
-        consumer.Assign(new[] { new TopicPartition("t", 0) });
+        await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("t", 0) }), s_deadline);
 
         IReadOnlyCollection<TopicPartition> first = consumer.Assignment();
         IReadOnlyCollection<TopicPartition> second = consumer.Assignment();
@@ -141,12 +141,13 @@ public sealed class PublicConsumerSyncReadTests
     }
 
     [Fact]
-    public void Paused_AfterAssign_IsStillEmpty()
+    public async Task Paused_AfterAssign_IsStillEmpty()
     {
-        // Assigning does not pause; a non-empty Paused() is unreachable until a public
-        // Pause lands (later phase — recorded in the type remarks / COMMENTS.DONE.10).
+        // Assigning does not pause; a non-empty Paused() only becomes reachable once a
+        // record is paused (the M5/P3 public Pause — covered in
+        // PublicConsumerPartitionOpsTests). Here Assign alone leaves Paused() empty.
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
-        consumer.Assign(new[] { new TopicPartition("t", 0) });
+        await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("t", 0) }), s_deadline);
 
         Assert.Empty(consumer.Paused());
     }
@@ -169,14 +170,14 @@ public sealed class PublicConsumerSyncReadTests
     }
 
     [Fact]
-    public void Assignment_NonAsciiTopic_RoundTripsByteForByte()
+    public async Task Assignment_NonAsciiTopic_RoundTripsByteForByte()
     {
         // Guards TopicPartitionListMarshal → TopicPartition_topic (the NUL-terminated
         // getter form, §B3), byte-for-byte.
         const string nonAscii = "topic-grüße-Ω-🎉";
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
         TopicPartition tp = new TopicPartition(nonAscii, 7);
-        consumer.Assign(new[] { tp });
+        await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
         TopicPartition only = Assert.Single(consumer.Assignment());
         Assert.Equal(nonAscii, only.Topic);
@@ -195,10 +196,10 @@ public sealed class PublicConsumerSyncReadTests
     // each read round-trips.
 
     [Fact]
-    public void SyncReads_OnFreeGuard_RoundTrip()
+    public async Task SyncReads_OnFreeGuard_RoundTrip()
     {
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
-        consumer.Assign(new[] { new TopicPartition("t", 0) });
+        await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("t", 0) }), s_deadline);
 
         // No op in flight → the core guard is free → every read succeeds (no throw).
         Assert.Single(consumer.Assignment());
@@ -306,17 +307,24 @@ public sealed class ConsumerSyncReadAllocationTests
 {
     private const string Topic = "sync-read-alloc-topic";
 
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
     [Fact]
-    public void Assignment_RepeatedRead_DoesNotAllocateUnboundedlyPerCall()
+    public async Task Assignment_RepeatedRead_DoesNotAllocateUnboundedlyPerCall()
     {
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
-        consumer.Assign(new[]
-        {
-            new TopicPartition(Topic, 0),
-            new TopicPartition(Topic, 1),
-            new TopicPartition(Topic, 2),
-            new TopicPartition(Topic, 3),
-        });
+
+        // Setup (before the measured window below): the async Assign runs entirely here,
+        // so it does not perturb the per-read allocation measurement.
+        await TestTimeout.Run(
+            () => consumer.Assign(new[]
+            {
+                new TopicPartition(Topic, 0),
+                new TopicPartition(Topic, 1),
+                new TopicPartition(Topic, 2),
+                new TopicPartition(Topic, 3),
+            }),
+            s_deadline);
 
         // Warm up the JIT / any first-call caching so the measured window is steady-state.
         for (int i = 0; i < 100; i++)

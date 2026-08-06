@@ -45,7 +45,8 @@ public sealed class PublicConsumerPositionTests
         long seekOffset, string topic = Topic, int partition = Partition)
     {
         AsyncMockConsumer consumer = new AsyncMockConsumer();
-        consumer.Assign(new[] { new TopicPartition(topic, partition) });
+        await TestTimeout.Run(
+            () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         await TestTimeout.Run(
             () => consumer.Seek(new TopicPartition(topic, partition), seekOffset), s_deadline);
         return consumer;

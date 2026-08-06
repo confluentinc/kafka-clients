@@ -45,7 +45,7 @@ public sealed class PublicConsumerTfmSmokeTests
         AsyncMockConsumer consumer = new AsyncMockConsumer();
         try
         {
-            consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
+            await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
             await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), 0L), s_deadline);
             consumer.AddRecord(Topic, Partition, offset: 5, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 

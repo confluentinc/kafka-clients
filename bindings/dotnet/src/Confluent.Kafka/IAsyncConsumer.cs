@@ -52,10 +52,11 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Additive-growth surface.</b> This is a deliberate <em>subset</em> of Java's
 /// <c>Consumer</c> — the operations proven and wired so far (subscribe → poll →
-/// seek → position → group metadata → close), enough for a complete broker loop with auto-commit
-/// (<c>enable.auto.commit</c>). The remaining Java members (commit family,
-/// <c>committed</c>, the owned-handle query siblings, pattern
-/// subscribe, pause / resume, …) arrive in later phases as <b>additive</b> members on
+/// assign / seek / seekToBeginning / seekToEnd / pause / resume → position → group
+/// metadata → close), enough for a complete broker loop with auto-commit
+/// (<c>enable.auto.commit</c>) plus manual partition management. The remaining Java
+/// members (commit family, <c>committed</c>, the owned-handle query siblings, pattern
+/// subscribe, …) arrive in later phases as <b>additive</b> members on
 /// this same interface and new public types — they do not change this shape. No
 /// throwing stubs for not-yet-wired ops. The surface is safe to grow additively because
 /// the binding is pre-publish with no external implementers; a typed generic sibling
@@ -121,6 +122,96 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Manually assigns <paramref name="partitions"/> to this consumer (Java
+    /// <c>assign(Collection)</c>). Blocks in Java (a cross-thread event round-trip), so it
+    /// returns a <see cref="Task"/> here.
+    /// </summary>
+    /// <remarks>
+    /// An <b>empty</b> collection <b>clears</b> the assignment (Java parity —
+    /// <c>assign(emptyList)</c> assigns to the empty set), NOT a no-op error. A
+    /// <see langword="null"/> collection is rejected (null ≠ empty, matching Java's
+    /// NPE-on-null vs clear-on-empty).
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions to assign (an empty collection clears the assignment).</param>
+    /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Suspends fetching for <paramref name="partitions"/> (Java <c>pause(Collection)</c>).
+    /// Blocks in Java (a cross-thread event round-trip), so it returns a <see cref="Task"/>
+    /// here. The paused set is observable via <see cref="IConsumerCommon.Paused"/>.
+    /// </summary>
+    /// <remarks>An <b>empty</b> collection is a no-op success (Java iterates an empty collection).</remarks>
+    /// <param name="partitions">The topic-partitions to pause.</param>
+    /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task Pause(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resumes fetching for <paramref name="partitions"/> paused by <see cref="Pause"/>
+    /// (Java <c>resume(Collection)</c>). Blocks in Java (a cross-thread event round-trip),
+    /// so it returns a <see cref="Task"/> here.
+    /// </summary>
+    /// <remarks>An <b>empty</b> collection is a no-op success.</remarks>
+    /// <param name="partitions">The topic-partitions to resume.</param>
+    /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task Resume(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Seeks <paramref name="partitions"/> to their first available offset (Java
+    /// <c>seekToBeginning(Collection)</c>). Blocks in Java (a cross-thread event round-trip),
+    /// so it returns a <see cref="Task"/> here. The reset is applied on the next
+    /// <see cref="Poll"/>.
+    /// </summary>
+    /// <remarks>
+    /// Under KIP-848 this requests an <c>earliest</c> offset reset for the given partitions;
+    /// the effective reset offset is resolved lazily on the next <see cref="Poll"/>. An
+    /// <b>empty</b> collection is a no-op success.
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions to seek to the beginning.</param>
+    /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Seeks <paramref name="partitions"/> to their last offset (Java
+    /// <c>seekToEnd(Collection)</c>). Blocks in Java (a cross-thread event round-trip), so it
+    /// returns a <see cref="Task"/> here. The reset is applied on the next
+    /// <see cref="Poll"/>.
+    /// </summary>
+    /// <remarks>
+    /// Under KIP-848 this requests a <c>latest</c> offset reset for the given partitions;
+    /// the effective reset offset is resolved lazily on the next <see cref="Poll"/>. An
+    /// <b>empty</b> collection is a no-op success.
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions to seek to the end.</param>
+    /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null, or an element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task SeekToEnd(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the current offset position of <paramref name="partition"/> (Java

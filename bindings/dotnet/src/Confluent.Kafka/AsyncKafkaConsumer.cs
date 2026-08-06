@@ -83,6 +83,26 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
         _native.SeekWithCallback(partition.Topic, partition.Partition, offset, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.AssignWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Pause(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.PauseWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Resume(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.ResumeWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.SeekToBeginningWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SeekToEnd(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.SeekToEndWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
     public Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default) =>
         _native.PositionWithCallback(partition, cancellationToken);
 
