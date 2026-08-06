@@ -1,6 +1,6 @@
 ---
 name: review-m11-phase8
-description: M11 Phase 8 (TransactionManagerTest parity sweep + broker integration + consumer ControlRecordType fix) — 11 findings pass 1; new-harness-surface-is-inert, unreachable discriminating property, and audit populations that exclude what the phase created
+description: M11 Phase 8 (TransactionManagerTest parity sweep + broker integration + consumer ControlRecordType fix) — 11→3 over two passes; new-harness-surface-is-inert, unreachable discriminating property, audit populations that exclude what the phase created, and a fix round that repeated the doc-hygiene defect it was fixing
 metadata:
   type: project
 ---
@@ -193,3 +193,112 @@ nonsense two-paragraph doc, `current_state` is undocumented **and loses its
 `#[cfg(test)]`**, and only the file-level `#![allow(dead_code)]` keeps `cargo xtask lint`
 green. **Check the item *after* any inserted method for orphaned attributes** — an insert
 between an attribute list and its `fn` is invisible to build, test, format and lint here.
+
+---
+
+## Pass 2 — 11 → 3. Nine fixes clean; all three findings are in the fixes' own records, two created by the fix round
+
+Fixes across `a49d060`, `fe253e0`, `1bdd846`; nothing disputed, and the Actor re-derived
+both flagged analyses before conceding (its numbers matched mine exactly, including the
+nine header deviations).
+
+### P2.1 A fix for a doc-hygiene finding repeated the defect, in a shape the sweep shipped in the same round cannot see
+
+Pass-1 issue 8 was "an inserted method stole the next item's doc + `#[cfg(test)]`". The fix
+was right *and* shipped a crate-wide sweep: **doc line → one or more `#[..]` lines → doc
+line**, 0 suspects (I reproduced it). Meanwhile the fix for issue 1 deleted
+`disconnect_by_id`'s body, moved its `pub fn` below a rewritten doc block, and left the old
+doc block above — two summaries and two `Translated from` lines on one item, no `///`
+separator, so rustdoc runs them together. The sweep's shape requires an attribute between
+the two doc runs, so it structurally cannot see it.
+
+**The discriminating sweep, worth keeping:** join each contiguous `///` block and count
+`^Translated from` openers; ≥2 is the hit. One hit across all of `src/`
+(`mock_client.rs:288`). More generally — when a round ships a mechanical check for a defect
+family, ask which *members of that family* the check's shape excludes, then run one for the
+excluded shape. Two rounds in a row here the fix commit was the new defect surface.
+
+### P2.2 Verifying a "harness surface is inert" fix: check the *substitute* mechanism, not just the deletion
+
+The Actor removed the inert overload and re-translated the test through a different
+mechanism. What made that verifiable in three greps:
+
+  - `pending_produce_responses` has **exactly one insert** (at send) and **exactly one
+    removal** (keyed on the response's correlation id);
+  - `fail_expired_batches(expired_inflight, now, **false**)` → `retain = true` → the batch
+    is pushed to `batches_awaiting_response` **without** touching the routing map;
+  - `batches_awaiting_response`'s only other drain is in `run`'s shutdown tail.
+
+Those three facts make the four new assertions non-vacuous *and* prove the mutation claim in
+both directions: delete the response and assertion 1 fails; the previous revision's
+disconnect pushed a `ClientResponse` with the **same** correlation id, so it would have
+passed. **Single-writer/single-remover counts are what turn an assertion into a pin** —
+check them before crediting or faulting any "drains only by X" claim.
+
+Also: Java's own sequence here is expiry-fails-the-batch (inside `sendProducerData`, before
+`client.poll`) then *two* response handlings; the port has expiry plus *one*. The property
+(a response for an already-failed batch stays ABORTABLE) survives; the doubling does not.
+Documented in three places, so accepted — but note that "receive … twice" tests can lose
+their doubling and still keep their property.
+
+### P2.3 An appeal to CLAUDE.md §11 is checkable against §11's own scope note — and this one failed it
+
+§9.28 dismissed the faithful alternative with "CLAUDE.md §11 warns against per-message
+callbacks on the hot path". §11 has no callback bullet (it has `Arc<str>` identifiers,
+atomics over `Mutex<i64>`, no per-call `Pin<Box<dyn Future>>`, no per-message
+`tokio::spawn`), and its **"Hot path" definition** explicitly excludes "per-RPC or per-batch
+top-level API surfaces". A `RequestCompletionHandler` on the produce path is **one per
+produce request** — per-RPC by construction, exactly the carve-out. So the rule cited does
+not reach the case, and calling it a "per-message callback" mis-states the alternative.
+
+The conclusion was still right, for a reason the same file already documents three times:
+**a Rust `RequestCompletionHandler` cannot capture `&mut self`** (`sender.rs:182`, `:348`,
+`:374`) — ownership, not performance. **Whenever a record cites a CLAUDE.md rule to close a
+design question, read the rule *and its scope paragraph*; §11's carve-out is the one most
+likely to be skipped.** Fourth instance this milestone of a justification proving a weaker
+or different claim than it states.
+
+### P2.4 A corrected taxonomy is as checkable as the corrections it describes
+
+Pass-1 issue 10 fixed a mis-attributed cause; the rewritten bullet then mis-classified a
+*different* entry twice. `testFailedInflightBatchAfterEpochBump` was cited `3727-3810`
+against `3726-3816`, so it was (a) not "±1 or ±2 at one end" — both ends wrong, the end by
+**six**, landing mid-body — making it seven of nine in that class and **two**
+large-deviation entries, not one; and (b) not an annotation-line slip — 3727 is the first
+*body comment* line, one past the declaration, whereas the other two pre-existing slips
+really did cite `@ParameterizedTest` / `@ValueSource`.
+
+**Method: after a taxonomy sentence is rewritten, re-classify every member from the raw
+data rather than reading the sentence.** The sweep output already had the numbers; the
+sentence summarising it was written from memory of "the interesting one".
+
+### P2.5 Ruling on "exact figure" vs "rounded + shipped derivation" — the derivation wins
+
+I asked for the exact `47 649`; the Actor rounded all line counts to the nearest hundred,
+kept file counts exact, and shipped the `find | wc -l` command. **Ruled in the Actor's
+favour and recorded as the general rule: ask for exactness only where the number cannot be
+re-derived.** An exact figure that a later commit in the same phase invalidates is a trap;
+a rounded display plus a shipped command is true and stays true, and it is the same move I
+have endorsed for accounting blocks since Phase 4 pass 3. Re-ran the command: every rounded
+value is the correct nearest hundred and `structure.md` agrees.
+
+### P2.6 Cheap verifications that settled adjudications this pass
+
+  - **"A different `ClusterConfig` would fork the pooled container"** — true:
+    `cluster_pool::get_or_create` keys its `OnceCell` map on `config.clone()`, i.e. the whole
+    `ClusterConfig` including `server_properties`. One grep settles any "we'd need a separate
+    cluster" argument in this repo.
+  - **"Named unit tests cover the path"** — open each and check the *instance identity*, not
+    just the assertion: all three named for the client-side sequence reset keep **one**
+    manager across the bump, which is what makes the reset observable (the integration test's
+    fresh producer is what made it unobservable there).
+  - **`fe253e0` supersedes an immutable commit message in its own body** ("the original
+    commit message cannot be rewritten, so this message carries the correction and supersedes
+    it") — the right handling when a finding lands on a published commit message, and worth
+    accepting rather than pressing for something impossible.
+
+### P2.7 Housekeeping observation
+
+`1bdd846` **deleted** `COMMENTS.48.md` where all seven sibling `COMMENTS.4x.md` files exist
+as 0-byte placeholders. Not filed, but a Manager loop that reads the file to test emptiness
+would error on a missing path. Recreating it is the Critic's job on the next pass anyway.
