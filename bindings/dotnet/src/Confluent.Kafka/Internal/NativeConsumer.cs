@@ -712,8 +712,155 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </summary>
     private IntPtr GetGroupMetadataHandleOrThrow()
     {
-        IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle());
-        if (metadata == IntPtr.Zero)
+        return ThrowIfConcurrentNull(NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle()));
+    }
+
+    /// <summary>
+    /// Returns the current assignment (Java <c>assignment()</c>) — a <b>synchronous state
+    /// read</b>. Marshals an owned (Category-3) <c>TopicPartitionList_t</c> borrow-root
+    /// into an owned <see cref="TopicPartition"/> snapshot and frees the root exactly once
+    /// (§B2/§B3 via <see cref="TopicPartitionListMarshal"/>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Concurrency (single-owner).</b> If the core's own access guard rejects concurrent
+    /// access it returns a <b>null</b> list handle; this maps to
+    /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
+    /// multi-threaded access.") via <see cref="ThrowIfConcurrentNull"/> — the exact shipped
+    /// <see cref="GroupMetadata"/> mapping (ffi §B5, CLAUDE.md §3). <b>Accepted residual:</b>
+    /// the same check-then-use handle TOCTOU vs teardown as <see cref="Wakeup"/> /
+    /// <see cref="GroupMetadata"/> (accepted-by-design under the not-thread-safe contract).
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for multi-threaded
+    /// access).
+    /// </exception>
+    internal IReadOnlyCollection<TopicPartition> Assignment()
+    {
+        ThrowIfClosed();
+
+        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerAssignment(_handle.DangerousGetHandle()));
+
+        // The marshaller copies every element out then frees the root exactly once in its
+        // own finally (even if a read throws).
+        return TopicPartitionListMarshal.CopyOutAndDestroy(list);
+    }
+
+    /// <summary>
+    /// Returns the current topic subscription (Java <c>subscription()</c>) — a
+    /// <b>synchronous state read</b>. Marshals an owned (Category-3) <c>StringList_t</c>
+    /// borrow-root into an owned <see cref="string"/> snapshot and frees the root exactly
+    /// once (§B2/§B3 via <see cref="StringListMarshal"/>).
+    /// </summary>
+    /// <remarks>
+    /// Same concurrency contract and accepted residual as <see cref="Assignment"/> (null
+    /// handle → <see cref="InvalidOperationException"/>).
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for multi-threaded
+    /// access).
+    /// </exception>
+    internal IReadOnlyCollection<string> Subscription()
+    {
+        ThrowIfClosed();
+
+        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerSubscription(_handle.DangerousGetHandle()));
+        return StringListMarshal.CopyOutAndDestroy(list);
+    }
+
+    /// <summary>
+    /// Returns the currently paused partitions (Java <c>paused()</c>) — a <b>synchronous
+    /// state read</b>. Marshals an owned (Category-3) <c>TopicPartitionList_t</c>
+    /// borrow-root into an owned <see cref="TopicPartition"/> snapshot and frees the root
+    /// exactly once (§B2/§B3 via <see cref="TopicPartitionListMarshal"/>).
+    /// </summary>
+    /// <remarks>
+    /// Same concurrency contract and accepted residual as <see cref="Assignment"/>. A
+    /// <b>non-empty</b> result is not reachable broker-free until a public <c>Pause</c>
+    /// lands (a later phase): the mock's <c>paused()</c> starts empty and nothing can add
+    /// to it yet, so the reachable states are empty / assigned-but-not-paused.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for multi-threaded
+    /// access).
+    /// </exception>
+    internal IReadOnlyCollection<TopicPartition> Paused()
+    {
+        ThrowIfClosed();
+
+        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerPaused(_handle.DangerousGetHandle()));
+        return TopicPartitionListMarshal.CopyOutAndDestroy(list);
+    }
+
+    /// <summary>
+    /// Triggers a rebalance (Java <c>enforceRebalance()</c> / <c>enforceRebalance(String)</c>
+    /// collapsed to one method with an optional <paramref name="reason"/>). A
+    /// <b>synchronous</b> non-blocking action (CLAUDE.md §4 "stays sync").
+    /// </summary>
+    /// <remarks>
+    /// <b>KIP-848 logged no-op (returns success, never throws a
+    /// <see cref="KafkaException"/> on this path).</b> Java's
+    /// <c>AsyncKafkaConsumer.enforceRebalance</c> is a pure logged no-op that throws
+    /// nothing, and the Rust core's <c>enforce_rebalance</c> returns <c>Ok(())</c> — so the
+    /// ABI returns a null error handle under the current group protocol. The uniform
+    /// sync-op error discipline (<see cref="KafkaException.FromHandle(IntPtr)"/>, throw iff
+    /// non-null; ffi §B5) is still applied because a future classic-protocol arm could
+    /// return a real error here without a .NET change; under KIP-848 the handle is always
+    /// null, so this is observably a no-op that returns normally.
+    /// <para>
+    /// ⚠ The header/Rust-FFI doc comment on <c>enforce_rebalance</c> claims it "returns an
+    /// unsupported-version error"; that comment is <b>stale</b> — the code it wraps returns
+    /// <c>Ok(())</c> and Java throws nothing. The mapping follows the actual behavior
+    /// (no-op success), not the stale comment. (A one-line Rust-core doc fix is a separate
+    /// dependency, out of scope for the C#-only binding.)
+    /// </para>
+    /// <paramref name="reason"/> is pinned call-scoped when non-null; a
+    /// <see langword="null"/> maps to <see cref="IntPtr.Zero"/> (the ABI accepts a null
+    /// reason).
+    /// </remarks>
+    /// <param name="reason">An optional human-readable reason, or <see langword="null"/>.</param>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a rebalance failure (not reachable under the current KIP-848
+    /// no-op; reserved for a future protocol arm).
+    /// </exception>
+    internal void EnforceRebalance(string? reason)
+    {
+        ThrowIfClosed();
+
+        IntPtr error;
+        if (reason is null)
+        {
+            error = NativeMethods.ConsumerEnforceRebalance(_handle.DangerousGetHandle(), IntPtr.Zero);
+        }
+        else
+        {
+            using Utf8Marshal.PinnedUtf8String reasonPin = Utf8Marshal.Pin(reason);
+            error = NativeMethods.ConsumerEnforceRebalance(_handle.DangerousGetHandle(), reasonPin.Pointer);
+        }
+
+        // Uniform sync-op discipline (ffi §B5): FromHandle frees the handle and returns
+        // null on success (the KIP-848 no-op path). Throw only for a non-null error.
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Maps the core's concurrent-access rejection (a null owned-result handle) to
+    /// <see cref="InvalidOperationException"/> (ffi §B5, CLAUDE.md §3), shared by every
+    /// synchronous state read (<see cref="GroupId"/> / <see cref="GroupMetadata"/> /
+    /// <see cref="Assignment"/> / <see cref="Subscription"/> / <see cref="Paused"/>). The
+    /// caller owns the returned non-null handle and must destroy it exactly once. This is
+    /// the one concurrency contract for all sync reads — do not introduce a new one.
+    /// </summary>
+    private static IntPtr ThrowIfConcurrentNull(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero)
         {
             // The core's own access guard rejected concurrent access (null handle).
             // Surface it the Python way: a concurrent sync state read is an
@@ -722,7 +869,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                 "KafkaConsumer is not safe for multi-threaded access.");
         }
 
-        return metadata;
+        return handle;
     }
 
     /// <summary>
