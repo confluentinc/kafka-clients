@@ -541,3 +541,67 @@ is the faithful translation. Documented in the type's rustdoc.
 tests, 0 failures); `cargo xtask lint` clean; `cargo xtask format-check` clean.
 Commit `fixup! Milestone 11 Phase 1: review-only Admin API skeleton` referencing
 POJO commit `60f7977` (wire encode/decode noted against `c6c7a31`).
+
+---
+
+# M11 bindings B0 + B1 (Critic round 1)
+
+## Issue: `join_map_short_circuits_on_first_error` does not discriminate short-circuiting from collect-all
+
+**Fixed.** The test completed the failing key first and a succeeding key second,
+then asserted only that the error surfaced — which a collect-all-then-return-the-
+first-error implementation satisfies identically.
+
+Rewritten with three entries: `bad` (fails, first), `ok` (succeeds), and
+`never`, whose `KafkaFutureImpl` is **never completed**. `joined.get()` is driven
+under `tokio::time::timeout(5s)`, so a short-circuiting implementation abandons
+`never` and returns the error at once, while any collect-all implementation
+awaits it and trips the timeout. `join_map_results`' counterpart test was already
+discriminating (failing key first); the asymmetry is gone.
+
+**Teeth verified:** with `JoinMapFuture::get` temporarily rewritten to
+collect-all-then-return-the-first-error, the test fails with
+`join_map must abandon the keys after the failing one, not await them: Elapsed(())`
+after 5.01s; it passes again once reverted.
+
+Commit: `fixup! Milestone 11 bindings B0: add KafkaFuture::join_map_results`
+(`2823cc27`).
+
+## Issue: `test_mock_admin.c`'s NULL-`out_result` banner still describes the pre-`aebb75f2` (leaking) design
+
+**Fixed.** The banner claimed "the handle is freed internally", which is exactly
+the behaviour `aebb75f2` removed as a bug — the handle cannot be freed from
+`finish_sync`'s generic context, because `R` is the opaque `[u8; 0]` marker
+rather than the inner state. Replaced with the actual contract: a NULL
+`out_result` means the caller does not want the result, so the handle is never
+built (pointing the reader at `finish_sync`).
+
+Commit: `fixup! Milestone 11 bindings B1: fix finish_sync leak on a NULL out_result`
+(`aebb75f2`).
+
+## Issue: `_async` callbacks are documented as firing on the dispatcher thread, but three paths fire inline on the caller's thread
+
+**Fixed.** The behaviour was right (an inline fire is what keeps the callback
+obligation total); the documented contract was wrong, and cbindgen copies it into
+`target/include/confluent_kafka.h`, so it is what a C consumer reads.
+
+- The module doc's API-shape bullet no longer asserts a thread; it points at a
+  new **`# Callback thread`** section that states all three cases: normally the
+  handle's dispatcher thread; **synchronously on the calling thread, before the
+  entry point returns**, when `admin` is NULL or argument marshaling fails before
+  submission (explicitly noting this is reachable on plain bad input via an
+  unparseable base64 topic id, not only on a programming error); and a tokio
+  worker thread once the dispatcher has been torn down. It spells out the two
+  consequences the old wording hid: do not hold a lock across `..._async(...)`
+  and re-acquire it in the callback, and publish `user_data` before the submit.
+- `kafka_admin_AdminClient_close_async` and `_create_topics_async` — the two
+  entry points that made the unqualified claim — now say "normally on the
+  handle's dispatcher thread, but **synchronously on the calling thread** if
+  `admin` is NULL", and cross-reference the section.
+- `_delete_topics_by_ids_async` / `_describe_topics_by_ids_async` gained an
+  explicit note that an unparseable or NULL id fires the callback synchronously
+  before the function returns, since that is the production-reachable case.
+- The internal helper docs on `admin_async_void_op` / `admin_async_value_op` were
+  corrected the same way, so the next slice copies accurate wording.
+
+Commit: `fixup! Milestone 11 bindings B0: admin C FFI foundation` (`bb01dbc1`).
