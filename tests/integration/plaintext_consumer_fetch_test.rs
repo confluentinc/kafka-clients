@@ -93,6 +93,10 @@ use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
+
+/// Consumed records bucketed by their (topic, partition), borrowed from the
+/// `Vec<ConsumerRecord>` a test collected.
+type RecordsByPartition<'a> = HashMap<TopicPartition, Vec<&'a ConsumerRecord<Vec<u8>, Vec<u8>>>>;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::wait_for_all_partitions_metadata_with_context;
 
