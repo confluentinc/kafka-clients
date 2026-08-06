@@ -519,11 +519,16 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// Closes the admin client asynchronously. See
 /// [`kafka_admin_AdminClient_close`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So do not hold a
-/// lock across this call and re-acquire it in the callback, and publish everything
-/// the callback needs (including `user_data`) before calling rather than after.
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -2781,11 +2786,16 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
 
 /// Creates topics asynchronously. See [`kafka_admin_AdminClient_create_topics`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So do not hold a
-/// lock across this call and re-acquire it in the callback, and publish everything
-/// the callback needs (including `user_data`) before calling rather than after.
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -2874,10 +2884,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// Deletes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
-/// do not hold a lock across this call and re-acquire it in the callback, and
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
@@ -2945,11 +2959,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// Deletes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics_by_ids`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle, or an unparseable or NULL base64 topic id). So do not hold a
-/// lock across this call and re-acquire it in the callback, and publish everything
-/// the callback needs (including `user_data`) before calling rather than after.
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or an unparseable or NULL
+/// base64 topic id). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -3025,10 +3045,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
 /// Lists the cluster's topics asynchronously. See
 /// [`kafka_admin_AdminClient_list_topics`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
-/// do not hold a lock across this call and re-acquire it in the callback, and
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
@@ -3124,10 +3148,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// Describes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
-/// do not hold a lock across this call and re-acquire it in the callback, and
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
@@ -3197,11 +3225,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// Describes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics_by_ids`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle, or an unparseable or NULL base64 topic id). So do not hold a
-/// lock across this call and re-acquire it in the callback, and publish everything
-/// the callback needs (including `user_data`) before calling rather than after.
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or an unparseable or NULL
+/// base64 topic id). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -3310,10 +3344,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
 /// Increases the partition count of the given topics asynchronously. See
 /// [`kafka_admin_AdminClient_create_partitions`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
-/// do not hold a lock across this call and re-acquire it in the callback, and
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
@@ -3410,10 +3448,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
 /// Deletes records asynchronously. See
 /// [`kafka_admin_AdminClient_delete_records`].
 ///
-/// The callback fires exactly once. It normally runs on the handle's dispatcher
-/// thread, but runs **synchronously on the calling thread, before this function
-/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
-/// do not hold a lock across this call and re-acquire it in the callback, and
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** when the handle's dispatcher has already been torn down by the time
+/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
+/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
