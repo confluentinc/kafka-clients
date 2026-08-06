@@ -395,6 +395,13 @@ type BatchCallbackFn = unsafe extern "C" fn(
 /// [`kafka_producer_Producer_send_with_callback`] (the delivery-report shape is
 /// identical, so the latter reuses this typedef rather than adding a
 /// `..._send_with_callback_callback_t` alias of the same signature).
+///
+/// `metadata` is non-null on success, `error` is non-null on failure. Note that
+/// a real (non-mock) producer rejecting the record before it reaches the
+/// accumulator delivers **both**: a placeholder `metadata` (offset and partition
+/// `-1`) alongside the `error`, mirroring Java's
+/// `callback.onCompletion(nullMetadata, e)` in `KafkaProducer.send`. Test
+/// `error` first. The callee owns, and must destroy, every non-null handle.
 pub type kafka_producer_Producer_send_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].
@@ -1035,9 +1042,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// - `callback`: Delivery callback, invoked exactly once on the producer's
 ///   dedicated dispatcher thread with a non-null
 ///   [`kafka_producer_RecordMetadata_t`] on success or a non-null
-///   [`kafka_common_KafkaError_t`] on failure (the other argument is null). The
-///   callee owns whichever handle is non-null and must free it with the matching
-///   `*_destroy`.
+///   [`kafka_common_KafkaError_t`] on failure — see
+///   [`kafka_producer_Producer_send_callback_t`] for the one case that delivers
+///   both. The callee owns whichever handles are non-null and must free them
+///   with the matching `*_destroy`.
 /// - `user_data`: Opaque pointer passed back to `callback`.
 /// - `out_error`: Pointer where an error handle will be written on failure,
 ///   or null if the caller does not need error details.
