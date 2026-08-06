@@ -138,6 +138,29 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'sta
     unsafe { &*(error as *const KafkaErrorInner) }
 }
 
+/// Takes ownership of an error handle **returned by a C callback** and converts
+/// it back into a [`KafkaError`], freeing the handle. A null pointer means
+/// success and yields `None`.
+///
+/// This is the inbound counterpart of [`box_error`]: it is how a callback whose
+/// Rust signature returns `Result<(), KafkaError>` (the rebalance-listener
+/// methods) reports failure across the boundary. The handle is consumed exactly
+/// as [`kafka_common_KafkaError_destroy`] would consume it, so the C callback
+/// must not free it itself.
+///
+/// # Safety
+///
+/// `error` must be null or a handle created by [`box_error`] (i.e. by
+/// [`kafka_common_KafkaError_new`] or returned from a fallible FFI function and
+/// not yet destroyed). After this call the pointer is invalid.
+pub(crate) unsafe fn take_error(error: *mut kafka_common_KafkaError_t) -> Option<KafkaError> {
+    if error.is_null() {
+        return None;
+    }
+    let inner = unsafe { Box::from_raw(error as *mut KafkaErrorInner) };
+    Some(inner.error)
+}
+
 /// Returns the error code from a [`kafka_common_KafkaError_t`] handle.
 ///
 /// # Parameters
