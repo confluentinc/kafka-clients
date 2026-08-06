@@ -51,10 +51,10 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// <b>Additive-growth surface.</b> This is a deliberate <em>subset</em> of Java's
-/// <c>Consumer</c> — the operations proven and wired this phase (subscribe → poll →
-/// seek → group metadata → close), enough for a complete broker loop with auto-commit
-/// (<c>enable.auto.commit</c>). The remaining Java members (commit family, position,
-/// assignment / subscription getters, the owned-handle query siblings, pattern
+/// <c>Consumer</c> — the operations proven and wired so far (subscribe → poll →
+/// seek → position → group metadata → close), enough for a complete broker loop with auto-commit
+/// (<c>enable.auto.commit</c>). The remaining Java members (commit family,
+/// <c>committed</c>, the owned-handle query siblings, pattern
 /// subscribe, pause / resume, …) arrive in later phases as <b>additive</b> members on
 /// this same interface and new public types — they do not change this shape. No
 /// throwing stubs for not-yet-wired ops. The surface is safe to grow additively because
@@ -121,6 +121,40 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the current offset position of <paramref name="partition"/> (Java
+    /// <c>position(TopicPartition)</c>). Blocks in Java (a cross-thread event round-trip /
+    /// <c>updateFetchPositions</c>), so it returns a <see cref="Task"/> here, resolving with
+    /// the offset — or faulting with a <see cref="KafkaException"/> on failure (the
+    /// canonical broker-free failure is a query for an <b>unassigned</b> partition).
+    /// </summary>
+    /// <remarks>
+    /// <b>One method, no <c>TimeSpan</c> overload this phase.</b> Java's timed
+    /// <c>position(TopicPartition, Duration)</c> overload is <b>deferred</b> until the C ABI
+    /// exposes a timed <c>position_async</c> — at which point a faithful
+    /// <c>Position(TopicPartition, TimeSpan)</c> lands as an additive overload (the shipped
+    /// <see cref="Close"/> precedent for a missing timed ABI). We do not add a
+    /// <c>TimeSpan</c> overload that silently ignores it, nor simulate the deadline
+    /// binding-side.
+    /// <para>
+    /// <b>The <paramref name="cancellationToken"/> is user-initiated cancellation, not a
+    /// timeout.</b> It maps to <c>wakeup()</c> (best-effort) so the caller can cancel the
+    /// request when <em>they</em> decide to; the binding neither derives nor documents a
+    /// deadline from it. A pre-canceled token throws
+    /// <see cref="OperationCanceledException"/> synchronously (before any native call).
+    /// </para>
+    /// </remarks>
+    /// <param name="partition">The topic-partition whose position to read.</param>
+    /// <param name="cancellationToken">
+    /// User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.
+    /// </param>
+    /// <returns>The current offset position of <paramref name="partition"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Closes the consumer gracefully (Java <c>close()</c>), joining the background task,

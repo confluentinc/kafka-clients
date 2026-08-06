@@ -305,6 +305,33 @@ internal static class NativeMethods
         ConsumerCallbacks.PollCallback callback,
         IntPtr userData);
 
+    // ---- Async position (scalar completion, ffi §B6/§B7) — M5/P2 ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_position_async</c> — returns the current position of
+    /// <c>(topic, partition)</c> asynchronously (one-operation-in-flight). The completion
+    /// fires via <paramref name="callback"/> on the core's dispatcher thread with the
+    /// <b>scalar</b> shape (ffi §B6/§B7): on success the <c>int64_t</c> position is the
+    /// offset and <c>error</c> is null; on failure the position is 0 and <c>error</c> is
+    /// non-null. If the core rejects at its own access guard the callback fires inline on
+    /// the caller thread with a <c>ConcurrentModification</c> error. The scalar carries
+    /// <b>no owned result handle</b> — the callback frees only the <c>error</c> on failure
+    /// (via <see cref="KafkaException.FromHandle(IntPtr)"/>). <paramref name="topic"/> is a
+    /// pinned, NUL-terminated UTF-8 buffer read <b>synchronously</b> during the call
+    /// (call-scoped pin; the header's safety note requires only that <c>topic</c> be a
+    /// valid C string for the duration of the call — the ABI does not borrow it past the
+    /// return). <paramref name="userData"/> is a <see cref="GCHandle"/> over the per-op
+    /// context. There is no timeout parameter — the timed <c>position(tp, Duration)</c>
+    /// overload has no async ABI form yet (deferred, PLAN §2).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_position_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerPositionAsync(
+        IntPtr consumer,
+        IntPtr topic,
+        int partition,
+        ConsumerCallbacks.PositionCallback callback,
+        IntPtr userData);
+
     // ---- ConsumerRecords_t — the owned poll batch (Category 3, ffi §B2) ----
 
     /// <summary>

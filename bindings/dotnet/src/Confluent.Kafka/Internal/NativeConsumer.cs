@@ -149,6 +149,19 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr userData);
 
     /// <summary>
+    /// The submit shape shared by every <b>scalar</b> (result-in-callback) async op —
+    /// the <c>position</c> analog of <see cref="NativeResultSubmit"/> (M5/P2). Takes the
+    /// scalar completion callback (ffi §B6/§B7), whose unmanaged signature
+    /// (<c>(int64_t, error*, ud)</c>) differs from the poll callback's
+    /// (<c>(records*, error*, ud)</c>), so it needs its own delegate type rather than
+    /// reusing <see cref="NativeResultSubmit"/>.
+    /// </summary>
+    private delegate void NativeScalarSubmit(
+        IntPtr consumer,
+        ConsumerCallbacks.PositionCallback callback,
+        IntPtr userData);
+
+    /// <summary>
     /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> once
     /// closed (the use-after-dispose guard). Exposed for the interop tests, which
     /// drive the raw ABI against it; the public client will not expose the handle.
@@ -435,6 +448,67 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         return SubmitOperation<ConsumerRecords>(cancellationToken, (consumer, callback, userData) =>
             NativeMethods.ConsumerPollAsync(consumer, timeoutMs, callback, userData));
+    }
+
+    /// <summary>
+    /// Returns the current position of <paramref name="partition"/> (async) — the M5/P2
+    /// proof of the <b>scalar</b> completion bridge (ffi §B6/§B7), the third bridge shape
+    /// after the void and owned-handle forms. The returned <see cref="Task{TResult}"/>
+    /// resolves with the offset (an <see cref="long"/> carried directly in the callback —
+    /// no owned handle, no copy-out), or faults with a <see cref="KafkaException"/> on
+    /// failure. The canonical broker-free failure is a position query for an
+    /// <b>unassigned</b> partition — the mock core returns an <c>illegal_argument</c> error
+    /// (<c>"You can only check the position for partitions assigned to this consumer."</c>).
+    /// A concurrent second op is rejected by the core inline and faults the
+    /// <see cref="Task"/> with a <see cref="KafkaException"/> (ConcurrentModification,
+    /// ffi §B5).
+    /// </summary>
+    /// <remarks>
+    /// <b>Async, blocks-in-Java (CLAUDE.md §4 idiom map).</b> Java's
+    /// <c>AsyncKafkaConsumer.position</c> blocks — it does a cross-thread event round-trip
+    /// (<c>updateFetchPositions</c>) — so it maps to a <see cref="Task"/>. Only the async
+    /// ABI form (<c>position_async</c>, no timeout param) is used; the sync
+    /// <c>Consumer_position</c> is deliberately NOT declared (wrapping it in
+    /// <c>Task.Run</c> would be the forbidden sync-over-async, ffi §B7). Java's
+    /// <c>position(tp, Duration)</c> timeout overload is deferred until a timed
+    /// <c>position_async</c> ABI exists (the shipped <c>Close</c> precedent). The
+    /// <paramref name="cancellationToken"/> is <b>user-initiated cancellation only, not a
+    /// timeout</b> — it maps to <c>wakeup()</c> (best-effort, ffi §B7), mirroring
+    /// <see cref="PollWithCallback"/>.
+    /// </remarks>
+    /// <param name="partition">The topic-partition whose position to read.</param>
+    /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<long> PositionWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
+    {
+        // Preconditions BEFORE any pin / P-Invoke (ffi §B5): the ABI does not validate
+        // them, and a null topic / negative partition are programmer errors, not Kafka
+        // outcomes. Match the shipped Seek / Assign precedent exactly.
+        if (partition.Topic is null)
+        {
+            throw new ArgumentNullException(nameof(partition), "TopicPartition.Topic must not be null.");
+        }
+
+        if (partition.Partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition.Partition, "Partition must not be negative.");
+        }
+
+        return SubmitScalarOperation<long>(cancellationToken, (consumer, callback, userData) =>
+        {
+            // Call-scoped pin: position_async reads/copies the topic string synchronously
+            // during the submit call (the header's safety note requires only a valid C
+            // string for the call's duration — no borrow past the return), so the buffer
+            // is freed once the native call returns (ffi §A3/§B3 call-scoped pin), matching
+            // the shipped Seek topic marshalling.
+            using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(partition.Topic);
+            NativeMethods.ConsumerPositionAsync(
+                consumer, topicPin.Pointer, partition.Partition, callback, userData);
+        });
     }
 
     /// <summary>
@@ -1097,6 +1171,47 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         {
             context.RegisterCancellation(cancellationToken, Wakeup);
             submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Poll, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback will never fire → we own cleanup.
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
+    /// Submits a <b>scalar</b> (result-in-callback) async op — the <c>position</c> analog
+    /// of <see cref="SubmitOperation{TResult}"/> (M5/P2). Roots the per-op context via a
+    /// <see cref="GCHandle"/> (invariant #1), wires cancellation, then runs
+    /// <paramref name="submit"/> (which pins its args call-scoped and P/Invokes with the
+    /// scalar callback). Ownership of the <see cref="GCHandle"/> transfers to the
+    /// completion callback (the sole owner of its free, invariant #2) the moment native is
+    /// entered; if <paramref name="submit"/> throws before that, the context is abandoned
+    /// (handle freed) here. A line-for-line clone of <see cref="SubmitOperation{TResult}"/>
+    /// with <see cref="ConsumerCallbacks.Poll"/> → <see cref="ConsumerCallbacks.Position"/>
+    /// — added as a parallel helper (rather than generalizing
+    /// <see cref="SubmitOperation{TResult}"/> to take the callback type as a parameter) so
+    /// the proven poll / void submit paths are left byte-for-byte untouched (PLAN §1.3).
+    /// The scalar result needs no marshalling in the callback (it is blittable), unlike the
+    /// owned-handle path's copy-out.
+    /// </summary>
+    private Task<TResult> SubmitScalarOperation<TResult>(
+        CancellationToken cancellationToken,
+        NativeScalarSubmit submit)
+    {
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        try
+        {
+            context.RegisterCancellation(cancellationToken, Wakeup);
+            submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Position, GCHandle.ToIntPtr(gcHandle));
         }
         catch
         {
