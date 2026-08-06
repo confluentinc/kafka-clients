@@ -294,12 +294,19 @@ pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>,
 
 /// Runs `f` on the dispatcher thread and awaits its return value.
 ///
-/// This is how an **async** FFI adapter invokes a C callback that produces a
-/// result the Rust core needs: the rebalance-listener callbacks return
-/// `Result<(), KafkaError>` (a `kafka_common_KafkaError_t*` in C), so the
-/// adapter cannot fire-and-forget — it has to wait for the return value. `f`
-/// therefore builds the owned C handles, calls the C function pointer, and maps
-/// the result; all of that happens on the dispatcher thread, upholding the
+/// This is how an **async** FFI adapter invokes a C callback whose *completion*
+/// the Rust core must observe, rather than firing and forgetting it:
+///
+/// - the rebalance-listener callbacks return `Result<(), KafkaError>` (a
+///   `kafka_common_KafkaError_t*` in C), so the adapter has to wait for the
+///   return value;
+/// - the commit callback returns nothing, but Java runs `onComplete` on the
+///   thread inside `poll()` / `commitSync()`, so the adapter must not let that
+///   call return before the C callback has (and must not let the C caller
+///   release `user_data` while the job is still queued).
+///
+/// `f` therefore builds the owned C handles, calls the C function pointer, and
+/// maps the result; all of that happens on the dispatcher thread, upholding the
 /// invariant that user code never runs on a tokio worker. The awaiting task
 /// yields its worker meanwhile, and because the dispatcher is a plain OS thread
 /// the user callback may legally `block_on` a nested consumer operation.
@@ -315,9 +322,6 @@ pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>,
 /// [`enqueue_or_run_inline`] runs the job inline on the calling task instead —
 /// so the returned value is still produced, but on a tokio worker, where a
 /// nested `block_on` inside the user callback would panic.
-// Exercised by the unit tests below; the production callers are the commit-callback
-// and rebalance-listener adapters in `consumer.rs`.
-#[allow(dead_code)]
 pub(crate) async fn dispatch_and_wait<T, F>(tx: &std::sync::mpsc::Sender<CompletionJob>, f: F) -> T
 where
     T: Send + 'static,
@@ -394,9 +398,6 @@ unsafe impl Send for OperationCallbackTarget {}
 /// or the C thread calling `_destroy`). It must therefore be thread-agnostic
 /// (Python: `PyGILState_Ensure`) and must not assume the calling thread already
 /// holds any of the binding's locks.
-// Exercised by the unit tests below; the production owners are the
-// commit-callback and rebalance-listener adapters in `consumer.rs`.
-#[allow(dead_code)]
 pub(crate) struct CallbackTarget {
     /// Opaque pointer owned by this target for the lifetime of the registration.
     pub(crate) user_data: *mut std::ffi::c_void,
