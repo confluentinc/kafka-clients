@@ -54,10 +54,10 @@ namespace Confluent.Kafka;
 /// <c>Consumer</c> — the operations proven and wired so far (subscribe → poll →
 /// assign / seek / seekToBeginning / seekToEnd / pause / resume → position →
 /// committed / beginningOffsets / endOffsets / offsetsForTimes → partitionsFor /
-/// listTopics → group metadata → close), enough for a complete broker loop with
-/// auto-commit (<c>enable.auto.commit</c>) plus manual partition management, offset
-/// queries, and partition-metadata queries. The remaining Java members (the commit
-/// family, pattern subscribe, the rebalance listener, …) arrive in later phases as
+/// listTopics → commit / commitAsync → group metadata → close), enough for a complete
+/// broker loop with confirming and fire-and-forget commits, manual partition management,
+/// offset queries, and partition-metadata queries. The remaining Java members (pattern
+/// subscribe, the rebalance listener, …) arrive in later phases as
 /// <b>additive</b> members on this same interface and new public types — they do not
 /// change this shape. No
 /// throwing stubs for not-yet-wired ops. The surface is safe to grow additively because
@@ -248,6 +248,52 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Commits the current fetch positions for all assigned partitions (Java
+    /// <c>commitSync()</c>) — the <b>confirming</b> commit. Blocks in Java, so it returns a
+    /// <see cref="Task"/> here (async-bridged over the void completion callback, not a
+    /// blocking-thread façade); the <see cref="Task"/> completes on success or faults with a
+    /// <see cref="KafkaException"/> on failure.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync"/> (Java
+    /// <c>commitAsync()</c>): this one confirms — you can <c>await</c> it to know the commit
+    /// landed. The <paramref name="cancellationToken"/> is user-initiated cancellation
+    /// (mapped to <c>wakeup()</c>), <b>not</b> a timeout; a pre-canceled token throws
+    /// <see cref="OperationCanceledException"/> synchronously. No <c>TimeSpan</c> overload
+    /// this phase (Python-parity scope); Java's timed <c>commitSync(Duration)</c> is deferred.
+    /// </remarks>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task Commit(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/> (Java
+    /// <c>commitSync(Map&lt;TopicPartition, OffsetAndMetadata&gt;)</c>) — the <b>confirming</b>
+    /// commit with explicit offsets. Blocks in Java, so it returns a <see cref="Task"/> here
+    /// (async-bridged); the <see cref="Task"/> completes on success or faults with a
+    /// <see cref="KafkaException"/> on failure.
+    /// </summary>
+    /// <remarks>
+    /// Construct each <see cref="OffsetAndMetadata"/> via its public constructor
+    /// (<c>new OffsetAndMetadata(offset, metadata, leaderEpoch)</c>). An <b>empty</b> map
+    /// commits nothing (a valid no-op, not a fault). The <paramref name="cancellationToken"/>
+    /// is user-initiated cancellation (mapped to <c>wakeup()</c>), <b>not</b> a timeout; a
+    /// pre-canceled token throws <see cref="OperationCanceledException"/> synchronously. No
+    /// <c>TimeSpan</c> overload this phase (Python-parity scope).
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="cancellationToken">User-initiated cancellation (mapped to <c>wakeup()</c>); <b>not</b> a timeout.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    Task Commit(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the last committed offset (and its metadata / leader epoch) for each of

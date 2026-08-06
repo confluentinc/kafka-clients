@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace Confluent.Kafka;
 
@@ -25,6 +26,17 @@ namespace Confluent.Kafka;
 /// future sync <c>IConsumer</c> surface, so both carry these members with the
 /// same signatures.
 /// </summary>
+/// <remarks>
+/// Mostly non-blocking <em>local</em> reads and actions (<see cref="Wakeup"/>,
+/// <see cref="GroupMetadata"/>, <see cref="Assignment"/>, <see cref="Subscription"/>,
+/// <see cref="Paused"/>, <see cref="EnforceRebalance"/>), plus one non-blocking
+/// <em>data-plane</em> member — the fire-and-forget <see cref="CommitAsync"/> (M5/P6). It
+/// belongs here because it is <b>flavor-independent</b> (always a synchronous
+/// <see langword="void"/>, whether the consumer is async or sync), a mild widening of the
+/// base's charter from "non-blocking <em>local</em>" to "non-blocking regardless of network
+/// semantics" — accepted for the flavor-independence it buys (a future sync
+/// <c>IConsumer</c> inherits the identical member).
+/// </remarks>
 /// <remarks>
 /// The three state getters (<see cref="Assignment"/> / <see cref="Subscription"/> /
 /// <see cref="Paused"/>) are plain <c>()</c> <b>methods, not properties</b> — matching
@@ -115,4 +127,31 @@ public interface IConsumerCommon
     /// no-op).
     /// </exception>
     void EnforceRebalance(string? reason = null);
+
+    /// <summary>
+    /// Commits the current fetch positions <b>fire-and-forget</b> (Java <c>commitAsync()</c>)
+    /// — best-effort, no completion to await. Non-blocking in Java (it returns once the
+    /// commit is <em>initiated</em>, not once it lands), so it stays synchronous with a
+    /// <see langword="void"/> return, mirroring the Python sibling's <c>commit_async()</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The <b>fire-and-forget</b> commit is flavor-independent — it returns nothing to await
+    /// in either an async or a sync consumer — so it lives on this shared non-blocking base
+    /// (a future sync <c>IConsumer</c> inherits the identical member for free). The
+    /// <b>confirming</b> commit is flavor-dependent (async <see cref="Task"/> vs a sync
+    /// blocking mirror), so it lives on the flavor-specific surface
+    /// (<see cref="IAsyncConsumer.Commit(System.Threading.CancellationToken)"/>). Takes no
+    /// <see cref="System.Threading.CancellationToken"/>: there is nothing to cancel once the
+    /// commit has been handed off.
+    /// </para>
+    /// <para>
+    /// A concurrent op surfaces the core's way — a thrown <see cref="KafkaException"/>
+    /// (ConcurrentModification), the sync analog of the async ops' faulted <see cref="Task"/>
+    /// (the consumer is single-owner; there is no managed guard).
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    void CommitAsync();
 }

@@ -107,6 +107,15 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
         _native.PositionWithCallback(partition, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Commit(CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(offsets, cancellationToken);
+
+    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
         _native.CommittedWithCallback(partitions, cancellationToken);
@@ -155,6 +164,9 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
 
     /// <inheritdoc/>
     public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+
+    /// <inheritdoc/>
+    public void CommitAsync() => _native.CommitAsync();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
