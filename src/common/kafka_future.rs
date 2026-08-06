@@ -770,14 +770,26 @@ mod tests {
 
     /// `join_map` short-circuits on the first error — the behavior
     /// `join_map_results` exists to complement. Pinned so the two stay distinct.
+    ///
+    /// The discriminator is the third entry, which is **never completed**: a
+    /// short-circuiting implementation abandons it and returns the error at
+    /// once, whereas any collect-all implementation (even one that returned the
+    /// first error afterwards) would await it and hang past the timeout below.
+    /// Asserting only that the error surfaces would pass for both.
     #[tokio::test]
     async fn join_map_short_circuits_on_first_error() {
-        let h1: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let joined = KafkaFuture::join_map(vec![("a", h1.future()), ("b", h2.future())]);
-        h1.complete_exceptionally(KafkaError::IllegalArgument("a failed".to_string()));
-        h2.complete(2);
-        match joined.get().await {
+        let bad: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let ok: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let never: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let joined = KafkaFuture::join_map(vec![("bad", bad.future()), ("ok", ok.future()), ("never", never.future())]);
+        bad.complete_exceptionally(KafkaError::IllegalArgument("a failed".to_string()));
+        ok.complete(2);
+        // `never` is deliberately left pending.
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), joined.get())
+            .await
+            .expect("join_map must abandon the keys after the failing one, not await them");
+        match outcome {
             Err(KafkaError::IllegalArgument(msg)) => assert_eq!(msg, "a failed"),
             other => panic!("expected IllegalArgument, got {other:?}"),
         }
