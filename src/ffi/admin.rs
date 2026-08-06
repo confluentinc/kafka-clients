@@ -60,9 +60,12 @@
 //!   `_describe_topics_by_ids_async`). This is plain bad input, not only a
 //!   programming error, so a caller must not assume the entry point has returned
 //!   by the time the callback runs.
-//! - On a **tokio worker thread**, if the dispatcher has already been torn down
-//!   when the result arrives (only reachable while the handle is being
-//!   destroyed).
+//! - On a **tokio worker thread**, if the dispatcher's completion queue can no
+//!   longer be reached when the result arrives. Handle destruction does not
+//!   cause this: each async operation clones the sender before spawning and
+//!   holds it for the whole life of its task, so the dispatcher cannot exit
+//!   while an operation is outstanding. What remains is a dispatcher thread that
+//!   terminated abnormally, i.e. a panic inside an earlier callback.
 //!
 //! Firing inline keeps the callback obligation total — no path drops it — but it
 //! means a caller must not hold a lock across `..._async(...)` and re-acquire it
@@ -488,8 +491,10 @@ fn close_timeout(timeout_ms: i64) -> Duration {
 }
 
 /// Closes the admin client, awaiting the background task up to `timeout_ms`
-/// (synchronous). Pass a negative `timeout_ms` for Java's no-argument
-/// `close()` semantics (wait indefinitely).
+/// (synchronous). The wait is bounded: this returns after `timeout_ms` whatever
+/// the background task is doing, as Java's `thread.join(waitTimeMs)` does. Pass
+/// a negative `timeout_ms` for Java's no-argument `close()` semantics — wait
+/// indefinitely, which like Java means "capped at a year".
 ///
 /// Returns nothing: Java's `Admin.close(Duration)` is `void`, and the Rust
 /// `Admin::close` likewise returns `()`.
@@ -523,9 +528,12 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -2790,9 +2798,12 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -2888,9 +2899,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -2964,9 +2978,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle, or an unparseable or NULL
 /// base64 topic id). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3049,9 +3066,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3152,9 +3172,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3230,9 +3253,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle, or an unparseable or NULL
 /// base64 topic id). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3348,9 +3374,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3452,9 +3481,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
 /// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** when the handle's dispatcher has already been torn down by the time
-/// the result arrives — reachable only while `kafka_admin_AdminClient_destroy` is
-/// running — so callbacks are not guaranteed to be serialised on one thread.
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.

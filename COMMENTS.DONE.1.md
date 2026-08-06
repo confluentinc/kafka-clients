@@ -764,3 +764,163 @@ Case 3 was re-verified before documenting it: `enqueue_or_run_inline`
 
 Verified in the **generated** header, not the source:
 `grep -c "tokio worker" target/include/confluent_kafka.h` → 9.
+
+---
+
+# Bindings B0 + B1 — Critic round 3
+
+## RESOLVED — `close(timeout)` is not bounded by `timeout` (Java's `thread.join(waitTimeMs)` is)
+- **File**: `src/admin/kafka_admin_client.rs` (`KafkaAdminClient::close`),
+  `src/admin/mod.rs` (`Admin::close` rustdoc), `src/ffi/admin.rs`
+  (`kafka_admin_AdminClient_close` rustdoc → generated header)
+- **Java Reference**: `KafkaAdminClient.java:698-707`
+
+**Fixed** by translating the *timed* join, which the round-2 clamp had left as
+the missing half of the contract:
+
+```rust
+let mut handle = self.shared.bg_handle.lock().unwrap().take();
+if let Some(join_handle) = handle.as_mut() {
+    let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle)
+        .await
+        .is_ok();
+    if !joined {
+        *self.shared.bg_handle.lock().unwrap() = handle;
+    }
+}
+```
+
+The hard-shutdown deadline is only a hint to the I/O loop; the timed join is the
+caller's guarantee, and it matters more here than in Java for exactly the reason
+the Critic identified: Java's `sendEligibleCalls` calls the non-blocking NIO
+`client.ready(...)`, while ours awaits `NetworkClient::ready` →
+`initiate_connect` → `Selector::connect` → `socket.connect(address).await`, which
+no shutdown deadline can interrupt. `client.close().await` after the loop is a
+second such segment. Both `Admin::close`'s rustdoc and the exported header
+promised the bound, so this was a broken documented contract that the FFI's
+`block_on` handed to C and Python callers.
+
+On expiry the task is left running (as Java leaves the I/O thread running after
+an expired join) and the `JoinHandle` is put back, so a later `close()` can still
+join it — which also narrows, without closing, the Critic's related note that a
+second `close()` returns immediately where Java's second `close()` also joins.
+Two *concurrent* `close()` calls still race for the handle and one sees `None`;
+closing that would need a separate completion signal, which is beyond these three
+findings.
+
+Two points the Critic asked to be answered explicitly:
+
+- **Java's `Thread.currentThread() != thread` self-deadlock guard has no Rust
+  analogue, and none is added.** The I/O task owns no `Admin` handle (only the
+  `AdminClientRunnable`), and every per-`Call` hook it runs — `create_request` /
+  `handle_response` / `handle_failure` — is a sync closure (`admin-client.md` §2),
+  so no callback can re-enter `close()` from it. Should that ever change, the
+  timed join bounds the wait instead of deadlocking, where Java skips the join
+  entirely — i.e. the failure mode is strictly better than Java's, not worse.
+- **Deliberate divergence on `Duration::ZERO`.** Java's `Thread.join(0)` means
+  "wait forever", so Java's `close(Duration.ZERO)` is formally unbounded (in
+  practice near-immediate, because its loop reaches `threadShouldExit` at once).
+  We treat 0 as 0: the rustdoc and the header both promise a return within
+  `timeout`, and with the uninterruptible connect await above the Java reading
+  would be a genuine hang rather than Java's prompt return. Documented at the
+  call site.
+
+Also translated `Math.min(TimeUnit.DAYS.toMillis(365), waitTimeMs)`
+(`KafkaAdminClient.java:673`, "Limit the timeout to a year") as
+`MAX_CLOSE_WAIT_TIME_MS`. The Critic had marked the missing clamp a non-defect
+because it was unobservable; it stops being unobservable once the timeout drives
+a `tokio::time::Sleep`, and it keeps the derived deadline finite for the FFI's
+negative → `i64::MAX` ms mapping. Java's `waitTimeMs < 0`
+→ `IllegalArgumentException` stays unrepresentable: `Duration` cannot be negative.
+
+**Tests** (both in `src/admin/kafka_admin_client.rs`):
+
+- `close_returns_within_its_timeout_even_when_the_io_task_cannot_exit` — arms a
+  new `WaitingClient::stuck` flag so `poll` never returns (standing in for the
+  uninterruptible connect await), spawns the real background task, puts an
+  external `listTopics` call in flight so `should_exit` cannot short-circuit on
+  "all work has been completed" either, then asserts `close(50ms)` returns in
+  under a second. The assertion is wrapped in a 5 s `tokio::time::timeout` so a
+  regression fails rather than hangs the suite.
+- `close_clamps_the_wait_to_a_year` — `close(i64::MAX ms)` installs
+  `now + MAX_CLOSE_WAIT_TIME_MS`.
+
+Teeth verified by reverting the timed join to `let _ = join_handle.await`:
+`close(50ms) must return even though the I/O task can never exit; it was still
+blocked after 5s`.
+
+## RESOLVED — `close()` extends an existing hard-shutdown deadline; Java only ever moves it earlier
+- **File**: `src/admin/kafka_admin_client.rs` (`KafkaAdminClient::close`),
+  `src/admin/internals/admin_client_runnable.rs` (`NO_HARD_SHUTDOWN` visibility)
+- **Java Reference**: `KafkaAdminClient.java:680-694`
+
+**Fixed** by translating Java's compare-and-set loop, whose whole purpose is
+monotonicity, in place of the plain `store`:
+
+```rust
+let mut prev = NO_HARD_SHUTDOWN;
+loop {
+    match self.shared.shutdown.hard_shutdown_deadline_ms.compare_exchange(
+        prev, new_hard_shutdown_time_ms, Ordering::AcqRel, Ordering::Acquire,
+    ) {
+        Ok(_) => break,
+        Err(actual) => {
+            if actual < new_hard_shutdown_time_ms {
+                break;      // an earlier (more urgent) deadline is installed
+            }
+            prev = actual;
+        },
+    }
+}
+```
+
+`NO_HARD_SHUTDOWN` (`i64::MIN`) is now `pub(crate)` and documented as playing
+Java's `INVALID_SHUTDOWN_TIME` role: it is lower than every reachable deadline,
+so the "is an earlier deadline already installed?" comparison orders the same way
+as Java's `-1`. Java's `newHardShutdownTimeMs = prev` reassignment on the
+already-earlier branch has no counterpart because it only feeds a debug log, and
+`Shared` carries no `LogContext`.
+
+Ordering note: Java calls `client.wakeup()` inside the successful CAS arm. Here
+the wakeup follows the `closing` store, so a woken I/O task is guaranteed to
+observe both, and it is issued on the already-earlier-deadline path too — a
+harmless no-op there, since the `close()` that installed that deadline has
+already woken the task.
+
+**Test**: `close_never_widens_an_existing_hard_shutdown_deadline` —
+`close(100ms)` installs `now + 100`; a following `close(60s)` leaves it at
+`now + 100`; a following `close(10ms)` moves it to `now + 10`. Teeth verified by
+restoring the plain store: `a later, more relaxed close() must keep the earlier
+deadline — left: 61000, right: 1100`.
+
+## RESOLVED — the header states an unreachable trigger for the tokio-worker callback case
+- **File**: `src/ffi/admin.rs` (module doc + the 9 `_async` entry points),
+  `src/ffi/common.rs` (adjacent pre-existing comment)
+
+**Fixed** by taking the Critic's second option — stating the real trigger rather
+than dropping the parenthetical, since the *consequence* (callbacks are not
+serialised on one thread) is true and worth keeping. The reachability claim was
+wrong in the direction that ties the case to teardown, which is precisely what a
+C reader must not conclude: `enqueue_or_run_inline` takes the inline branch only
+when the **receiver** is gone, and both admin async helpers clone the sender
+*before* `spawn` and hold it inside the task for its whole life, so
+`kafka_admin_AdminClient_destroy` dropping the handle's `completion_tx` cannot
+disconnect the queue while an operation is outstanding. All 9 blocks now read:
+
+> …if the dispatcher's completion queue can no longer be reached when the result
+> arrives. Destroying the handle does not cause that — an outstanding operation
+> holds its own sender, so it cannot disconnect the queue; what remains is a
+> dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+> callback.
+
+Verified in the **generated** header, not the source:
+`grep -c "terminated abnormally" target/include/confluent_kafka.h` → 9, and
+`grep -c "kafka_admin_AdminClient_destroy is" …` → 0.
+
+The adjacent pre-existing claim in `src/ffi/common.rs` ("user callbacks run on one
+predictable thread and **never on a tokio worker**"), which the same analysis
+contradicts, was reconciled in the same pass: it now states that the dispatcher
+thread is the normal path rather than a guarantee, names the inline fallbacks as
+the reason, and says callbacks can run on a tokio worker. Blast radius: that file
+is shared with the producer and consumer FFIs, so their internal rustdoc changes
+too — it is an internal comment (not `///`), so no generated header text moves.
