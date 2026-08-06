@@ -289,22 +289,47 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
 
     let mut ok = true;
     let giant = "x".repeat(1_500_000);
-    // `expect_via_future`: the client cap is raised to 5 MB above precisely so this
-    // record is *accepted* locally and rejected by the broker. A synchronous failure
-    // would mean it never left the client, so the case would no longer be testing
-    // the end-to-end path its comment claims.
+    // The error **code** is what pins the end-to-end path, not the surface.
+    // `Errors::MessageTooLarge` can only come from a broker response: the client cap
+    // is raised to 5 MB above so this record is accepted locally, and a local
+    // rejection would be `KafkaError::RecordTooLarge`, which carries no wire code and
+    // whose `error()` therefore degrades to `UnknownServerError`. A broker that never
+    // answered gives a `Timeout`. So without this assertion, dropping the
+    // `max.request.size` override would leave the case green while the record never
+    // left the client.
+    //
+    // `expect_via_future` is kept because it states the surface Java specifies —
+    // `RecordTooLargeException` is an `ApiException`, so `catch (ApiException e)`
+    // returns a `FutureFailure` rather than throwing (`KafkaProducer.java:1056-1068`)
+    // — but it does NOT separate local from remote. A local `ensure_valid_record_size`
+    // rejection takes that same route (`kafka_producer.rs`'s `handle_api_exception`
+    // returns `Ok(failed future)`), in Java as much as here. An earlier version of
+    // this comment claimed otherwise; it was wrong.
+    let poison_label = "the 1.5 MB record was rejected by the broker";
     match send_expect_failure(&producer, POISON_TOPIC, &giant)
         .await
         .and_then(|failure| failure.expect_via_future("the 1.5 MB record"))
     {
-        Ok(error) => {
+        Ok(error) if error.error() == Errors::MessageTooLarge => {
             ok &= report(
                 true,
-                "the 1.5 MB record was rejected",
+                poison_label,
                 format!("{:?}: {}", error.error(), first_line(&error.to_string())),
             );
         },
-        Err(unexpected) => ok &= report(false, "the 1.5 MB record was rejected", unexpected),
+        Ok(error) => {
+            ok &= report(
+                false,
+                poison_label,
+                format!(
+                    "expected MessageTooLarge from a broker response, got {:?}: {} \
+                     (UnknownServerError here means max.request.size rejected it locally)",
+                    error.error(),
+                    first_line(&error.to_string())
+                ),
+            );
+        },
+        Err(unexpected) => ok &= report(false, poison_label, unexpected),
     }
     ok &= expect_error(
         "commit_transaction refuses to commit the poisoned transaction",
