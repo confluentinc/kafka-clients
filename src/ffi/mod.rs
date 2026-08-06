@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! C FFI layer for the Kafka producer API.
+//! C FFI layer for the Kafka producer, consumer and admin APIs.
 //!
-//! This module exposes the Producer API via C-callable `extern "C"` functions,
+//! This module exposes those APIs via C-callable `extern "C"` functions,
 //! allowing non-Rust code (C, C++, Python via ctypes, etc.) to use the Kafka
-//! producer.
+//! client.
 //!
 //! All types exposed across the FFI boundary use fixed-width types (`i32`,
 //! `i64`, `bool`, pointers) for cross-platform portability. Lengths and counts
@@ -26,6 +26,7 @@
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
 
+pub(crate) mod admin;
 pub(crate) mod common;
 pub(crate) mod consumer;
 pub(crate) mod consumer_handle;
