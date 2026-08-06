@@ -127,6 +127,15 @@ static void test_mock_admin_create_close_destroy(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* At least one broker is required: the mock puts the controller and every
+ * partition leader on broker 0. Java throws IndexOutOfBoundsException there
+ * (MockAdminClient.java:210/:412); the FFI returns NULL instead, because a Rust
+ * panic must not unwind across the C boundary. */
+static void test_mock_admin_rejects_zero_brokers(void) {
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_new(0));
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_new(-1));
+}
+
 /* Async close: the callback fires exactly once, with a null error (Java's
  * Admin.close(Duration) is void). */
 typedef struct {
@@ -891,6 +900,7 @@ static void test_mock_admin_null_out_result(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
+    RUN_TEST(test_mock_admin_rejects_zero_brokers);
     RUN_TEST(test_mock_admin_close_async);
     RUN_TEST(test_mock_admin_close_async_null_handle_fires_error);
     RUN_TEST(test_admin_properties_lifecycle);
