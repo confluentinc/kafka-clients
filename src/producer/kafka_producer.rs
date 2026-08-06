@@ -3568,24 +3568,35 @@ mod tests {
     /// regression test for the deadlock. `maybeFailWithError` re-raises a fenced
     /// producer as `ProducerFencedException` (`TransactionManager.java:1159`),
     /// which IS an `ApiException`.
+    ///
+    /// The manager is seeded **abortable**, not fatal, so that
+    /// `maybeTransitionToErrorState` has somewhere to move it: `ProducerFenced` is in
+    /// that method's fatal set (Java `TransactionManager.java:765-772`), so the
+    /// `ApiException` block drives `ABORTABLE_ERROR -> FATAL_ERROR`. Seeding
+    /// `FATAL_ERROR` up front — as this test first did — makes the state assertion
+    /// tautological: it would hold even if the arm were changed to `return Err(error)`
+    /// and never call `maybe_transition_to_error_state` at all. Both `has_error()`
+    /// arms reach the same `maybeFailWithError` branch, which keys on
+    /// `last_error`'s code, so the error the send observes is unchanged.
     #[test]
     fn test_send_after_producer_fenced_fails_the_future() {
-        let (send_result, state_is_fatal) = bounded_block_on("send after being fenced", || async {
+        let (send_result, fatal_before, fatal_after) = bounded_block_on("send after being fenced", || async {
             let mut ctx = TxnProducerContext::transactional();
             init_transactions(&mut ctx).await;
+            ctx.producer.begin_transaction().expect("beginTransaction");
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_fatal_error(KafkaError::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
-                .expect("FATAL_ERROR is always reachable");
+                .transition_to_abortable_error(KafkaError::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
+                .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+            let fatal_before = ctx.transaction_manager.lock().unwrap().has_fatal_error();
 
-            let send_result = ctx.producer.send(misuse_record()).await;
-            let future = match send_result {
+            let send_result = match ctx.producer.send(misuse_record()).await {
                 Ok(future) => Ok(future.get().await.expect_err("the fenced send cannot be acked")),
                 Err(error) => Err(error),
             };
-            let state_is_fatal = ctx.transaction_manager.lock().unwrap().has_fatal_error();
-            (future, state_is_fatal)
+            let fatal_after = ctx.transaction_manager.lock().unwrap().has_fatal_error();
+            (send_result, fatal_before, fatal_after)
         });
 
         let error = send_result.expect("an ApiException is reported through the future, not the call");
@@ -3594,9 +3605,25 @@ mod tests {
             Errors::ProducerFenced,
             "ProducerFencedException is an ApiException, so doSend returns a failed future; got {error:?}"
         );
+        // `maybeFailWithError` re-raises rather than re-throwing `lastError`, so the
+        // message is the fresh one built at Java 1159-1161 — not the "fenced" text the
+        // test seeded.
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Producer with transactionalId '{TRANSACTIONAL_ID}' and \
+                 (producerId={PRODUCER_ID}, epoch={EPOCH}) has been fenced by another producer \
+                 with the same transactionalId"
+            )
+        );
         assert!(
-            state_is_fatal,
-            "the ApiException block runs maybeTransitionToErrorState, which keeps a fenced producer fatal"
+            !fatal_before,
+            "the manager starts abortable, so the transition below is observable"
+        );
+        assert!(
+            fatal_after,
+            "the ApiException block runs maybeTransitionToErrorState, which moves a fenced \
+             producer from ABORTABLE_ERROR to FATAL_ERROR; the rethrow path would not"
         );
     }
 
