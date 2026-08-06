@@ -7,6 +7,90 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 6 — "Consumer commit" (Category D): DONE (2026-08-06).**
+  The commit family — the three public members plus one public constructor. **Mode A (no
+  Rust authored):** all three ABI fns (`commit_sync_async` / `commit_sync_offsets_async` /
+  `commit_async`) verified present in the header; no ABI change. **Python-parity scope: NO
+  `OffsetCommitCallback` variant, NO `TimeSpan` overload** (both Python out-of-scope).
+  Delivered:
+  - **Two confirming `Task Commit(...)` overloads on `IAsyncConsumer`** (Java `commitSync` /
+    `commitSync(Map)`; Python `commit()`): `Commit(CancellationToken)` →
+    `commit_sync_async`, and `Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>,
+    CancellationToken)` → `commit_sync_offsets_async`. Both are **async-bridged over the void
+    `op_callback_t`**, reusing `SubmitVoidOperation` + `ConsumerCallbacks.Operation`
+    **verbatim** (the subscribe/seek precedent — **NO new bridge / callback**; `ConsumerCallbacks.cs`
+    byte-for-byte unchanged, diff-verified).
+  - **`void CommitAsync()` on `IConsumerCommon`** (user-resolved placement, PLAN §5; Java
+    `commitAsync`; Python `commit_async()`): the fire-and-forget commit is **flavor-independent**
+    (always sync `void`), so it lives on the shared non-blocking base a future sync `IConsumer`
+    inherits for free. **Sync-returning** over `commit_async` (`KafkaError*`), **structurally
+    identical to the shipped `EnforceRebalance`** — `ThrowIfClosed()` then
+    `KafkaException.FromHandle(...)` throw-iff-non-null; no pin, no `GCHandle`, no bridge, **no
+    `CancellationToken`** (nothing to cancel). `IConsumerCommon`'s first data-plane member (a
+    documented, accepted mild widening of its charter).
+  - **`OffsetAndMetadata` public constructor** `(long offset, string? metadata = null, int?
+    leaderEpoch = null)` — mirrors Java's canonical ctor validation exactly: **negative offset
+    → `ArgumentOutOfRangeException` with Java's message `"Invalid negative offset"`** (asserted,
+    DoD §3), null metadata coerced to `""` (Java `NO_METADATA`), `leaderEpoch` passed through.
+    Param order matches Java's 2-arg `(offset, metadata)` + Python's `(offset, metadata="",
+    leader_epoch=None)`.
+  - **Offsets-input marshaller `WithPinnedCommitOffsets`** (the new work): the 5-parallel-array
+    shape (`topics` / `partitions` / `offsets` / `leader_epochs` / `metadata` + `count`) with
+    **two** string arrays (topics + metadata) — both pinned **call-scoped**, all pins released
+    in **one `finally`** (no leak); the three numeric arrays blittable, passed straight through;
+    **no per-element copy beyond the UTF-8 encode**. A **new parallel helper** (the "clone, don't
+    generalize" discipline) so the shipped M5/P3–P5 `WithPinnedTopics` pin paths stay untouched.
+    Fed by **`SnapshotCommitOffsets`** (validate + snapshot before any pin/P-Invoke): null map →
+    `ArgumentNullException`; null element topic → `ArgumentException`; negative partition →
+    `ArgumentOutOfRangeException`; null value → `ArgumentException`; null `LeaderEpoch` → the
+    `-1` "no epoch" sentinel (Python `_commit_spec` convention); metadata never-null.
+  - **`NativeConsumer`**: `CommitWithCallback(CT)`, `CommitWithCallback(offsets, CT)`,
+    `CommitAsync()` + the two helpers. **`NativeMethods`**: three new `[DllImport]`s
+    (`Consumer_commit_sync_async` / `_commit_sync_offsets_async` / `_commit_async`, full ABI
+    `EntryPoint`s). Both client classes forward all three.
+  - **The marquee test — the non-empty `Committed` round-trip** (unblocks E1's deferred
+    assertion): `Assign([tp]) → Commit({tp: new OffsetAndMetadata(42, "meta-x", 7)}) →
+    Committed({tp})` reads offset 42, metadata `"meta-x"`, **and leader epoch 7** back — the
+    epoch round-trips **faithfully** (verified against `src/ffi/consumer.rs` `read_offset_map`
+    building `with_leader_epoch(offset, Some(7), meta)` + `src/consumer/mock_consumer.rs` storing
+    and cloning it back for an assigned TP). Not a documented limit — a true 7-in-7-out. Plus:
+    the null-metadata/null-epoch variant (`""` / `null` read-back); `Commit()`/`Commit(empty)` /
+    `CommitAsync()` broker-free; preconditions (null offsets, `default(TopicPartition)` null
+    topic, negative partition via the `TopicPartition` ctor, null value); the ctor (negative
+    offset message, null-metadata coercion, all-set, zero boundary); post-dispose on all three;
+    pre-canceled → `OperationCanceledException` on both `Commit` overloads.
+    **`PublicConsumerCommitTests.cs`** (20 tests, **241 → 261**), all green on net10.0.
+  - **Doc-sync (PLAN §7):** CLAUDE.md §4 "Exception — Java sync/async pairs" note **rewritten**
+    to the new mapping (`Task Commit(...)` = confirming/async-bridged; `void CommitAsync()` =
+    fire-and-forget/sync `void`; the idiom-map reads Java's *blocking behavior*, not its name —
+    `commitSync` blocks → `Task`, `commitAsync` non-blocking → sync `void`; exact Python parity;
+    the old `CommitSync` blocking-façade member removed); §3 sketch updated (the two `Commit`
+    overloads on `IAsyncConsumer`, `CommitAsync` on `IConsumerCommon`) + the commit family moved
+    from "Still to come" to "Already wired"; the shipped `IAsyncConsumer.cs` not-yet-wired
+    doc-comment dropped the commit family (pattern-subscribe + rebalance-listener remain).
+  - **Deviations (recorded, COMMENTS.DONE.15):** (a) `OffsetAndMetadata` **collapsed to ONE
+    public ctor** — the planned public `(long, string?, int?)` + shipped internal `(long,
+    string, int?)` collide under CS0111 (`string`/`string?` are the same overload type); the
+    public ctor is the single field-assignment site and the receive-path marshaller now calls it
+    (safe — it always passes non-null metadata + non-negative offset, for which validate/coerce
+    is a no-op); (b) an **operational `KafkaException` commit fault is NOT reachable broker-free**
+    on the mock (`commit_async_impl` only fails on a closed consumer, intercepted as
+    `ObjectDisposedException` before native) — a documented D-Q4 reachability limit, the
+    faulted-`Task` mechanism already proven by E1; (c) negative-partition precondition asserted
+    via the `TopicPartition` ctor guard (a negative partition cannot reach `SnapshotCommitOffsets`
+    through a constructed struct — the shipped offset-query precedent).
+  - **No-new-bridge audit:** `ConsumerCallbacks.cs` and the shipped void/owned/scalar/E1/E2
+    bridges **byte-for-byte unchanged** (diff-verified); both commit-offsets string arrays pinned
+    call-scoped + released in `finally`; the sync `CommitAsync` frees the error handle exactly
+    once via `FromHandle`; no per-element byte copy beyond the UTF-8 encode.
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all library
+    (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests green (net8.0 *run*
+    + net462 are CI/Windows-only; all three *build* legs pass locally) → `dotnet format
+    --verify-no-changes` clean. CS1591 on the 2 `Commit` overloads + `CommitAsync` + the ctor;
+    Apache-2.0 header on the new test file; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P6-consumer-commit/`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P6. N=15.
+
 - **Milestone 5 / Phase 5 — "Consumer partition-metadata queries" (Category E2): DONE
   (2026-08-06).** The two async partition-metadata queries on `IAsyncConsumer` —
   `PartitionsFor(string)` (`IReadOnlyList<PartitionInfo>`) and `ListTopics()`
