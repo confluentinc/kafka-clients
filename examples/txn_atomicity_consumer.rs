@@ -160,9 +160,20 @@ async fn run() -> Result<(), String> {
 }
 
 /// Number of complete producer runs on a topic, inferred from how often its
-/// first expected value appears. Zero means `repeated(...)` expects an empty
-/// topic, so an unwritten topic fails its sequence check loudly instead of
-/// passing by accident — except genuinely empty, which check 1 already gates.
+/// first expected value appears — **floored at one**.
+///
+/// The floor is load-bearing, not defensive. `sequence_check` compares against
+/// `base` repeated `runs` times, so a `runs` of 0 makes the expectation *empty*,
+/// an empty topic compares equal to it, and the verdict prints
+/// `✅ … — 0 records, exactly as expected`. That is the precise symptom cases 2
+/// and 3 exist to detect: a `commit_transaction` that returns `Ok` while dropping
+/// the records still buffered behind it leaves exactly an empty topic. Flooring
+/// at one makes that case fail against a full expected run instead.
+///
+/// An earlier version of this comment claimed check 1 already gated the empty
+/// case. It does not: check 1 counts `multi-committed-1` on `txn-multi-a` — a
+/// different topic, written by a different producer in a different case — so its
+/// early return says nothing about `txn-large` or `txn-flush`.
 fn runs_for(values: &[String], first_expected: &str) -> usize {
-    values.iter().filter(|v| v.as_str() == first_expected).count()
+    values.iter().filter(|v| v.as_str() == first_expected).count().max(1)
 }

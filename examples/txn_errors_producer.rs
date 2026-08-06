@@ -26,7 +26,13 @@
 //!    must fail with clear errors and leave the topic untouched.
 //! 3. **Timeout above the broker ceiling** — `transaction.timeout.ms` of
 //!    20 min exceeds the broker's `transaction.max.timeout.ms` (default
-//!    15 min); `init_transactions` must fail with `InvalidTransactionTimeout`.
+//!    15 min); `init_transactions` must fail fatally, reporting the broker's
+//!    `INVALID_TRANSACTION_TIMEOUT` text. Java does *not* surface
+//!    `InvalidTxnTimeoutException` for this: the code matches none of
+//!    `InitProducerIdHandler.handleResponse`'s arms and falls through to
+//!    `fatalError(new KafkaException("Unexpected error in InitProducerIdResponse; " +
+//!    error.message()))` (`TransactionManager.java:1535-1536`) — a *bare*
+//!    `KafkaException`, which carries no wire code.
 //! 4. **Server-side transaction timeout** — a transaction opened with a 5 s
 //!    timeout and then left idle is aborted by the coordinator; the late
 //!    commit must fail, and the records stay invisible forever (consumer
@@ -49,6 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use confluent_kafka::common::protocol::Errors;
 use txn_common::report;
 use txn_common::send_expect_failure;
 use txn_common::send_value_printed;
@@ -138,7 +145,18 @@ async fn misuse_case(bootstrap: &str) -> Result<bool, String> {
     let sender = Arc::clone(&producer);
     let guarded_send = tokio::spawn(async move { send_expect_failure(&sender, MISUSE_TOPIC, "misuse-never-1").await });
     match tokio::time::timeout(Duration::from_secs(20), guarded_send).await {
-        Ok(Ok(Ok(error))) => ok &= report(true, "send outside a transaction", format!("{error}")),
+        // `expect_synchronous`: Java throws `IllegalStateException` here, which is
+        // not even a `KafkaException`, so it reaches `catch (Exception e)` and is
+        // rethrown out of `send()` rather than reported through the future
+        // (`KafkaProducer.java:1077-1081`). Accepting either path would let a client
+        // misfile this into the `ApiException` block and still print ✅ — and that
+        // block additionally runs `maybeTransitionToErrorState`, which would poison
+        // a producer Java leaves usable. The three later calls in this case prove
+        // it stays usable; this line is what pins *how* the error arrived.
+        Ok(Ok(Ok(failure))) => match failure.expect_synchronous("the send outside a transaction") {
+            Ok(error) => ok &= report(true, "send outside a transaction", format!("{error}")),
+            Err(wrong_path) => ok &= report(false, "send outside a transaction", wrong_path),
+        },
         Ok(Ok(Err(unexpected))) => ok &= report(false, "send outside a transaction", unexpected),
         Ok(Err(join_error)) => ok &= report(false, "send outside a transaction", format!("panicked: {join_error}")),
         Err(_) => {
@@ -197,11 +215,36 @@ async fn ceiling_case(bootstrap: &str) -> Result<bool, String> {
         "txn-manual-errors-ceiling",
         &[("transaction.timeout.ms", "1200000")], // 20 min
     )?;
-    let result = producer.init_transactions().await;
-    Ok(expect_error(
-        "init_transactions with a 20 min transaction timeout (expect InvalidTransactionTimeout)",
-        result.err().map(|e| format!("{:?}: {e}", e.error())),
-    ))
+    // Assert the shape Java produces, not merely that something failed. Three
+    // different outcomes used to print the same ✅ here: today's correct one, an
+    // `InvalidTransactionTimeout` (which would be the real divergence), and a plain
+    // network timeout that never reached the coordinator. The message prefix is what
+    // separates the third from the first two, and the error code separates the second.
+    const PREFIX: &str = "Unexpected error in InitProducerIdResponse;";
+    let label = "init_transactions is refused with the broker's INVALID_TRANSACTION_TIMEOUT text, \
+                 wrapped as a bare KafkaException the way Java does";
+    Ok(match producer.init_transactions().await {
+        Ok(()) => report(false, label, "it unexpectedly succeeded".to_string()),
+        Err(error) => {
+            let text = error.to_string();
+            // `UnknownServerError` is how this crate spells Java's bare
+            // `KafkaException`, which has no wire code of its own.
+            let shape_ok = error.error() == Errors::UnknownServerError && text.starts_with(PREFIX);
+            report(
+                shape_ok,
+                label,
+                if shape_ok {
+                    format!("{:?}: {}", error.error(), first_line(&text))
+                } else {
+                    format!(
+                        "expected UnknownServerError whose message starts {PREFIX:?}, got {:?}: {}",
+                        error.error(),
+                        first_line(&text)
+                    )
+                },
+            )
+        },
+    })
 }
 
 /// Case 4: the coordinator aborts an idle transaction after its timeout; the
@@ -246,7 +289,14 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
 
     let mut ok = true;
     let giant = "x".repeat(1_500_000);
-    match send_expect_failure(&producer, POISON_TOPIC, &giant).await {
+    // `expect_via_future`: the client cap is raised to 5 MB above precisely so this
+    // record is *accepted* locally and rejected by the broker. A synchronous failure
+    // would mean it never left the client, so the case would no longer be testing
+    // the end-to-end path its comment claims.
+    match send_expect_failure(&producer, POISON_TOPIC, &giant)
+        .await
+        .and_then(|failure| failure.expect_via_future("the 1.5 MB record"))
+    {
         Ok(error) => {
             ok &= report(
                 true,

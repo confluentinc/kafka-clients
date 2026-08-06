@@ -163,15 +163,75 @@ pub async fn send_value_printed(producer: &StringProducer, topic: &str, value: &
     Ok(())
 }
 
-/// Sends one record that is *expected to fail*, either synchronously or via
-/// its ack future. Returns the error; `Err(..)` means the send unexpectedly
-/// succeeded.
-pub async fn send_expect_failure(producer: &StringProducer, topic: &str, value: &str) -> Result<KafkaError, String> {
+/// Which half of `doSend`'s contract delivered a send failure.
+///
+/// Java splits this by exception class, and the split is a guarantee in its own
+/// right: `catch (ApiException e)` returns `new FutureFailure(e)`
+/// (`KafkaProducer.java:1056-1068`), while `catch (KafkaException e)` and
+/// `catch (Exception e)` rethrow out of `send()` (`:1073-1081`). A probe that
+/// collapses the two can only report *that* a send failed, so it would stay
+/// green if a client moved an error from one path to the other — which is half of
+/// what a transactional `send` in the wrong state is supposed to prove.
+pub enum SendFailure {
+    /// `send()` itself returned `Err` — Java's rethrowing catch blocks. This is
+    /// how a misuse of the transactional API surfaces.
+    Synchronous(KafkaError),
+    /// `send()` returned a future that then resolved to an error — Java's
+    /// `catch (ApiException e)`, or a broker-side rejection of a record the
+    /// client accepted.
+    ViaFuture(KafkaError),
+}
+
+impl SendFailure {
+    /// The error, whichever path carried it.
+    pub fn error(&self) -> &KafkaError {
+        match self {
+            Self::Synchronous(error) | Self::ViaFuture(error) => error,
+        }
+    }
+
+    /// Unwraps a failure that must have come back from `send()` itself.
+    ///
+    /// `Err(..)` — reported as a ❌ by the caller — when the error arrived through
+    /// the future instead, because that means the client routed a
+    /// non-`ApiException` into Java's `ApiException` block.
+    pub fn expect_synchronous(self, what: &str) -> Result<KafkaError, String> {
+        match self {
+            Self::Synchronous(error) => Ok(error),
+            Self::ViaFuture(error) => Err(format!(
+                "{what} failed through the ack future, but Java rethrows this one out of send() \
+                 (KafkaProducer.java:1073-1081): {error}"
+            )),
+        }
+    }
+
+    /// Unwraps a failure that must have come back through the ack future.
+    ///
+    /// `Err(..)` when `send()` returned it synchronously instead — for a record
+    /// the client accepted, that would mean it never reached the broker.
+    pub fn expect_via_future(self, what: &str) -> Result<KafkaError, String> {
+        match self {
+            Self::ViaFuture(error) => Ok(error),
+            Self::Synchronous(error) => Err(format!(
+                "{what} failed synchronously out of send(), but this error is only reachable \
+                 through the ack future (KafkaProducer.java:1056-1068): {error}"
+            )),
+        }
+    }
+}
+
+/// Sends one record that is *expected to fail*, and reports which path failed it.
+///
+/// `Err(..)` means the send unexpectedly succeeded. Callers must then require the
+/// path Java mandates via [`SendFailure::expect_synchronous`] /
+/// [`SendFailure::expect_via_future`] — accepting either would make the verdict
+/// weaker than the guarantee its label names.
+pub async fn send_expect_failure(producer: &StringProducer, topic: &str, value: &str) -> Result<SendFailure, String> {
     let record = string_record(topic, value)?;
     match producer.send(record).await {
-        Err(error) => Ok(error),
+        Err(error) => Ok(SendFailure::Synchronous(error)),
         Ok(future) => match future.get_timeout(SEND_ACK_TIMEOUT).await {
-            Err(error) => Ok(error),
+            Err(error) => Ok(SendFailure::ViaFuture(error)),
             Ok(metadata) => Err(format!(
                 "the send of {value} was unexpectedly acked at {}-{}@{}",
                 metadata.topic(),

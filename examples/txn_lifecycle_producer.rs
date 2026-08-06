@@ -117,7 +117,15 @@ async fn fencing_case(bootstrap: &str) -> Result<bool, String> {
     // later call must fail fast — the fatal state is sticky.
     println!("  now poking the zombie A — every call must fail:");
     let mut ok = true;
-    match send_expect_failure(&producer_a, FENCING_TOPIC, "zombie-never-1").await {
+    // `expect_via_future`: A does not yet know it is fenced — its own state machine
+    // is still IN_TRANSACTION with no error, so the record is accepted locally and
+    // the fencing verdict comes back from the coordinator on the batch's future. A
+    // synchronous failure here would mean A rejected its own send before asking,
+    // which is a different (and weaker) test than "the broker fences the zombie".
+    match send_expect_failure(&producer_a, FENCING_TOPIC, "zombie-never-1")
+        .await
+        .and_then(|failure| failure.expect_via_future("A.send"))
+    {
         Ok(error) => {
             let fenced = matches!(error.error(), Errors::InvalidProducerEpoch | Errors::ProducerFenced);
             ok &= report(
