@@ -241,11 +241,13 @@ public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsume
 **Clipped to today's ABI**, like the producer — the fuller Java surface lands as
 each piece is wired (async/sync split per the idiom map). Already wired:
 `Assign`/`Seek`/`SeekToBeginning`/`SeekToEnd`/`Pause`/`Resume`/`Position`/`Committed`/
-`BeginningOffsets`/`EndOffsets`/`OffsetsForTimes` (M4/M5), with the public value types
+`BeginningOffsets`/`EndOffsets`/`OffsetsForTimes` (M4/M5), plus
+`PartitionsFor`/`ListTopics` (M5/P5, with the nested public value types
+`PartitionInfo`/`Node`), with the public value types
 `OffsetAndMetadata`/`OffsetAndTimestamp` (M5/P4). Still to come: the commit family,
-`PartitionsFor`/`ListTopics` (with `PartitionInfo`/`Node`), headers on `ConsumerRecord`,
-and a `ConsumerRebalanceListener` argument on `Subscribe`. A typed
-`Consumer<TKey,TValue>` arrives with deserializers (§4), same as the producer.
+headers on `ConsumerRecord`, and a `ConsumerRebalanceListener` argument on
+`Subscribe`. A typed `Consumer<TKey,TValue>` arrives with deserializers (§4), same
+as the producer.
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
 ABI lands (§6.3).

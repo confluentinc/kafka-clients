@@ -7,6 +7,120 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 5 — "Consumer partition-metadata queries" (Category E2): DONE
+  (2026-08-06).** The two async partition-metadata queries on `IAsyncConsumer` —
+  `PartitionsFor(string)` (`IReadOnlyList<PartitionInfo>`) and `ListTopics()`
+  (`IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>`, no input) — plus the binding's
+  **first NESTED public value types** `PartitionInfo` / `Node`. **Completes Category E** (the
+  consumer query family). **Mode A (no Rust authored):** the two `_async` fns, both container
+  types (`PartitionInfoList_t` / `TopicPartitionInfoMap_t`) + accessors, the `PartitionInfo_t`
+  accessors, the `Node_t` (`kafka_common_Node`) accessors, the two callbacks, and the
+  `MockConsumer_update_partitions` mock helper all already ship; no ABI change. Reused the E1
+  owned-handle bridge; the only new dimension is the **depth** of the copy-out (a 2-to-3-level
+  tree vs E1's flat map). Delivered:
+  - **Two NESTED public value types** (`Confluent.Kafka` root, `public sealed class`,
+    getter-props, full XML docs, the `OffsetAndTimestamp` precedent): `Node
+    { int Id; string Host; int Port; string? Rack }` (Java `org.apache.kafka.common.Node`,
+    `ToString` = `"host:port (id: N rack: R)"`, absent rack → `"null"`) and `PartitionInfo
+    { string Topic; int Partition; Node? Leader; IReadOnlyList<Node> Replicas / InSyncReplicas
+    / OfflineReplicas }` (Java `org.apache.kafka.common.PartitionInfo`, `ToString` mirrors
+    Java's `Partition(topic=…, partition=…, leader=…, replicas=[ids], isr=[ids],
+    offlineReplicas=[ids])`). **`ToString` only, NO `IEquatable`** (E1 value-type precedent —
+    query-result values, not dict keys; recorded deviation). `Leader` nullable (ABI `_leader`
+    may be null); `Rack` nullable (ABI `_rack` returns `(null, -1)` when absent).
+    `PartitionInfo` is the binding's **first public type composed of another public type**.
+  - **Four layered copy-out marshallers** (`Internal/Interop/`): shared **`NodeMarshal`**
+    (`Node_t` → `Node`) → **`PartitionInfoMarshal`** (reuses `NodeMarshal` for the leader + 3
+    replica lists) → reused by **`PartitionInfoListMarshal`** (→ `IReadOnlyList<PartitionInfo>`)
+    and **`TopicPartitionInfoMapMarshal`** (→ `IReadOnlyDictionary<string,
+    IReadOnlyList<PartitionInfo>>`, reusing `PartitionInfoListMarshal` per entry — the nested
+    borrowed list copied out too). The whole tree is copied into owned managed values on the
+    dispatcher thread BEFORE the single root `_destroy`; empty results →
+    `Array.Empty<PartitionInfo>()` (lists) / the E1 `EmptyReadOnlyDictionary` singleton (map).
+  - **Borrow discipline (§B2 Cat-3/4 — the central memory-safety risk):** every `PartitionInfo`
+    / `Node` / nested list is a **borrowed Category-4 view** and is **NEVER freed**; only the
+    ROOT container is `_destroy`d, exactly once, in the trampoline `finally`. Structurally
+    enforced: **no `Node_destroy` exists**, and `PartitionInfo_destroy` is **deliberately NOT
+    declared** in `NativeMethods` — so a borrowed-element free is not even expressible.
+  - **String forms (§B3 — the one shape difference from E1):** `Node.host` / `Node.rack` are
+    **LENGTH-DELIMITED** (`const char*` + `out int32_t len`) → `Utf8Marshal.PtrToString(ptr,
+    len)`, **never NUL-scan** (the over-read trap); `rack` absent `(null, -1)` → `Node.Rack ==
+    null`. `PartitionInfo.topic` and `TopicPartitionInfoMap_get_topic` are **NUL-terminated** →
+    `Utf8Marshal.PtrToString(ptr)`. Both forms coexist in one tree — the matching overload per
+    accessor.
+  - **Two `OnPoll`-clone trampolines** in `ConsumerCallbacks` (`OnPartitionsFor` /
+    `OnListTopics`) — differing from `OnCommitted` only in the result type, the copy-out
+    marshaller, and which root `_destroy` runs in the `finally`. Every `OnPoll` invariant
+    verbatim (no-throw boundary, copy-out on the dispatcher thread BEFORE `_destroy`, root
+    `_destroy` null-safe in the `finally`, error via `Complete` freeing the error handle, per-op
+    `GCHandle` freed once, `RunContinuationsAsync`). Each ABI callback typedef gets its own
+    delegate type (self-documenting DllImports).
+  - **`NativeConsumer`**: `PartitionsForWithCallback(string, CT)` (pins its one topic
+    call-scoped via `Utf8Marshal.Pin` — not the array-shaped `WithPinnedTopics`) and
+    `ListTopicsWithCallback(CT)` (no input), both over the E1 `SubmitOwnedHandleOperation<T>`
+    helper (the proven poll / void / scalar / E1 submit paths left **byte-for-byte untouched** —
+    diff-verified zero deletions to `ConsumerCallbacks` / `NativeConsumer` / `NativeMethods`).
+    Plus the `UpdatePartitions` mock forwarder.
+  - **Mock wire (`MockConsumer_update_partitions`, the last Python-parity mock gap):** a
+    `NativeMethods` DllImport + a `NativeConsumer.UpdatePartitions` + an inherent
+    `AsyncMockConsumer.UpdatePartitions(topic, partitionCount, leaderId, leaderHost,
+    leaderPort)` (the M5/P3 `Update*Offset` pattern) so `PartitionsFor` / `ListTopics` return
+    data broker-free.
+  - **`IAsyncConsumer`**: the two members with full XML docs (CS1591); both `AsyncKafkaConsumer`
+    + `AsyncMockConsumer` forward. Doc-sync: dropped `partitionsFor` / `listTopics` from the
+    additive-growth "not-yet-wired" remark (only the commit family + pattern subscribe + the
+    rebalance listener remain); added `UpdatePartitions` to the `AsyncMockConsumer`
+    mock-only-helpers remark; CLAUDE.md §3 sketch updated (these + the two value types now
+    wired).
+  - **API shape (PLAN §1/§3, user-locked):** names mirror Java (no `Async` suffix); Java `List`
+    → `IReadOnlyList`, `Map<String,List>` → `IReadOnlyDictionary<string,
+    IReadOnlyList<PartitionInfo>>`. **One method each, NO `TimeSpan` overload** (the async ABI
+    has no timeout — the `Position`/`Close` precedent); the `CancellationToken` is **user
+    cancellation → `wakeup()`, NOT a deadline**; pre-canceled → `OperationCanceledException`
+    synchronously. Preconditions BEFORE any pin/P-Invoke (§B5): `PartitionsFor(null)` →
+    `ArgumentNullException`; **`PartitionsFor("")` is FORWARDED to the core, NOT rejected**
+    (Java/Python-faithful — Python does zero topic validation; the binding guards only `null`
+    for FFI panic-safety, PLAN §8.2); `UpdatePartitions` null topic/host →
+    `ArgumentNullException`, negative count → `ArgumentOutOfRangeException`.
+  - **Reachability (PLAN §6, documented not silently skipped):** with `update_partitions` wired,
+    the mock builds each partition with a single leader `Node` that is also its sole replica +
+    in-sync replica (`offline=[]`, no rack). **Data-testable broker-free:** `Topic`,
+    `Partition`, `Leader` (id/host/port), `Replicas[0]`, `InSyncReplicas[0]`. **Documented-empty
+    (mock limit, not a silent gap):** `OfflineReplicas` (always empty), `Node.Rack` (always
+    null) — their marshaller paths still exercised structurally (empty list / null). **No clean
+    broker-free operational-failure path** (the mock's queries always return a valid list/map; a
+    real consumer against an unreachable broker retries past the 30 s hang guard — not
+    deterministic), so the faulted-`Task` assertion for E2 is a **documented reachability
+    limit**: the faulted-`Task` MECHANISM is identical to the E1 offset-map bridges and already
+    proven there (`BeginningOffsets`/`EndOffsets` unset-partition + `OffsetsForTimes`
+    unsupported-version faults). Concurrent-op fault is the D-Q4 non-blockable-mock ceiling.
+  - **Tests:** `PublicConsumerPartitionMetadataTests.cs` (public surface: reachable data direct
+    + via interface; empty list / empty map; empty-topic-forwarded; non-ASCII topic via the
+    NUL-scan form + non-ASCII leader host via the length-delimited form on both leader and
+    replica; preconditions; post-dispose; pre-canceled; wakeup-usable; reusable-after-op;
+    per-op alloc sanity net8+ via process-wide `GetTotalAllocatedBytes` + marginal measurement)
+    + `PublicConsumerPartitionMetadataValueTypeTests.cs` (field storage, nullable Rack/Leader at
+    the value level, Java-mirroring `ToString` incl. absent-rack `"null"` / null-leader
+    `"none"`) + a `PartitionsFor`/`ListTopics` leg folded into `PublicConsumerTfmSmokeTests`.
+    **214 → 241 tests**, all green on net10.0 across **5/5** full serial runs (D8.8 gate
+    stable); the alloc-budget test stable 6/6 in isolation. All 6 TFM build legs (library
+    ns2.0/net8.0/net10.0 + tests net462/net8.0/net10.0) clean, 0 warnings; `dotnet format
+    --verify-no-changes` clean.
+  - **Deviations (recorded, COMMENTS.DONE.14):** (a) the value types carry `ToString` but no
+    `IEquatable` (query-result values, not keys — PLAN §8.1); (b) the operational-failure
+    faulted-`Task` end-to-end assertion is a documented reachability limit (no broker-free fault
+    path; mechanism proven by E1) — the planned real-consumer fault test was removed because it
+    hangs past the 30 s guard against an unreachable broker; (c) `PartitionsFor("")` forwarded,
+    not rejected (PLAN §8.2, user-locked); (d) `SubmitOwnedHandleOperation<T>` reused verbatim
+    (no new submit helper this phase); (e) each callback typedef its own delegate type
+    (self-documenting), as in E1.
+  - **DoD:** `cargo build --features ffi` (no ABI change) → `dotnet build` 0/0 across all
+    library + test TFMs → net10.0 tests green (net8.0 *run* + net462 are CI/Windows-only; all
+    three *build* legs pass locally) → `dotnet format --verify-no-changes` clean. CS1591 on the
+    2 members + 2 value types; Apache-2.0 header on every new file; no TODO/FIXME.
+  - Approved plan + closed record: `design/history/M5/P5-consumer-partition-metadata/`. Commits
+    on `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P5. N=14.
+
 - **Milestone 5 / Phase 4 — "Consumer offset-map query siblings" (Category E1): DONE
   (2026-08-06).** The four async offset-map queries on `IAsyncConsumer` — `Committed`
   (`IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>`), `OffsetsForTimes`
