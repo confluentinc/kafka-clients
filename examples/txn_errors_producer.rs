@@ -128,10 +128,13 @@ async fn misuse_case(bootstrap: &str) -> Result<bool, String> {
         "begin_transaction before init_transactions",
         producer.begin_transaction().err().map(|e| e.to_string()),
     );
-    // The misused send runs on its own task with a join timeout: Java fails it
-    // synchronously with IllegalStateException, and a correct port errors just
-    // as fast, but a deadlock in the error path would otherwise wedge this
-    // whole program inside a single `poll` where no async timeout can fire.
+    // The misused send runs on its own task with a join timeout. Java fails it
+    // synchronously with IllegalStateException and this client does the same, in
+    // microseconds — the guard is not for slowness. It is for the failure mode
+    // this case found once already: a send that re-acquires a lock it is holding
+    // wedges its task inside a single `poll`, and a task blocked in
+    // `std::sync::Mutex::lock` never yields, so no `tokio::time::timeout` around
+    // the send itself could ever fire. Only a second task can observe it.
     let sender = Arc::clone(&producer);
     let guarded_send = tokio::spawn(async move { send_expect_failure(&sender, MISUSE_TOPIC, "misuse-never-1").await });
     match tokio::time::timeout(Duration::from_secs(20), guarded_send).await {
@@ -142,10 +145,12 @@ async fn misuse_case(bootstrap: &str) -> Result<bool, String> {
             report(
                 false,
                 "send outside a transaction",
-                "DEADLOCK — the send never returned. Known client bug: kafka_producer.rs's \
-                 maybe_add_partition error path calls handle_api_exception while the \
-                 TransactionManager mutex guard from the `if let` scrutinee is still held, \
-                 and maybe_transition_to_error_state re-locks the same mutex."
+                "DEADLOCK — the send never returned, so the producer has re-acquired a lock \
+                 it was already holding. This is a regression: the send path must release the \
+                 TransactionManager guard before handling an error, because \
+                 maybe_transition_to_error_state re-locks the same non-reentrant mutex. \
+                 `sample <pid>` names the two frames; start at do_send_bytes's \
+                 maybe_add_partition arm."
                     .to_string(),
             );
             println!("   (skipping the rest of the misuse case — this producer's lock is permanently wedged)");

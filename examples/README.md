@@ -70,15 +70,24 @@ sequences show the first divergence). A **hang** is itself a finding — every
 wait in these programs is bounded, so a stuck program means the client
 deadlocked; `sample <pid>` (macOS) shows where.
 
-**Known failure, real bug (found by `txn_errors_producer`, case 2):** a
-transactional `send` outside a transaction deadlocks instead of returning the
-`IllegalState` error Java throws. `kafka_producer.rs`'s `do_send_bytes` holds
-the `TransactionManager` mutex guard from the `if let` scrutinee around
-`maybe_add_partition` while the error path re-locks the same mutex in
-`maybe_transition_to_error_state`. The test bounds the probe with a spawned
-task + join timeout, reports the ❌, and hard-exits (the wedged task would
-otherwise block runtime shutdown). Until the bug is fixed, run 4 exiting `1`
-with exactly that one ❌ is the expected outcome.
+All six programs are expected to exit `0`. There are no known failures.
+
+**The one bug this suite has caught so far**, and why case 2 of
+`txn_errors_producer` still looks different from its neighbours: a transactional
+`send` outside a transaction used to deadlock instead of returning the
+`IllegalState` error Java throws. `kafka_producer.rs`'s `do_send_bytes` held the
+`TransactionManager` mutex guard from the `if let` scrutinee around
+`maybe_add_partition` while the error path re-locked the same mutex in
+`maybe_transition_to_error_state`. Fixed, with six bounded unit tests in
+`src/producer/kafka_producer.rs` (`test_send_outside_transaction_returns_illegal_state`
+and its siblings).
+
+Case 2 keeps its spawned task + join timeout around that one send. It is the
+tripwire, not a workaround: no `tokio::time::timeout` can bound a task blocked
+in `std::sync::Mutex::lock`, because the future never yields and the runtime
+never reaches its timers. Only a second task can see it. If that branch ever
+fires again, a send has re-acquired a lock it was already holding — start at
+`sample <pid>` and the `maybe_add_partition` error arm.
 
 ## Interrupted paired runs
 
