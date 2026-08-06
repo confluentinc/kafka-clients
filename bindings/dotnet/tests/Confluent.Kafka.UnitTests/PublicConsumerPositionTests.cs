@@ -251,8 +251,11 @@ public sealed class PublicConsumerPositionTests
 
         // Generous ceiling: a Task<long> + GCHandle + OperationCompletionSource +
         // cancellation registration per op is well under this, while an accidental
-        // per-op topic copy or an unbounded allocation would push it over.
-        const long PerOpBudgetBytes = 2048;
+        // per-op topic copy or an unbounded allocation would push it over. Budgeted at
+        // 4096 B (~2x margin over the observed per-op cost) to absorb the process-wide
+        // GC.GetTotalAllocatedBytes(precise) measurement jitter shared across the serial
+        // suite — a 2048 B ceiling flaked ~1-in-40 (matches the M5/P4 offset-query budget).
+        const long PerOpBudgetBytes = 4096;
         Assert.True(
             perOp <= PerOpBudgetBytes,
             $"Per-op Position allocation {perOp} B exceeded the per-RPC sanity budget " +
