@@ -34,6 +34,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::backend_factory::ProducerBackendFactory;
+use crate::common::callback_log::KIND_DELIVERY;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 
@@ -788,6 +789,67 @@ async fn test_wrong_serializer_errors_send() {
     Producer::close(&producer).await.expect("close should succeed");
 }
 
+/// Test: a delivery callback registered through each backend's own binding is
+/// invoked exactly once, with metadata matching the send future's.
+///
+/// This is the producer half of the callback-bridging coverage; the consumer
+/// half (rebalance listener / commit callback) lives in
+/// multilanguage_consumer_test.rs. See
+/// [`crate::common::callback_log`] for why the assertion goes through a
+/// server-side log rather than a closure handed across the wire.
+async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("delivery_callback");
+    let (producer, log) = factory
+        .create_with_callback_log(make_config(&bootstrap_for(factory, ctx)))
+        .await
+        .expect("create producer with callback log");
+
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("dk")), Some(b("dv")));
+    let future = log
+        .send_with_logging_callback(&producer, record)
+        .await
+        .expect("send with logging callback");
+    let metadata = future
+        .get_timeout(Duration::from_secs(30))
+        .await
+        .expect("produce should succeed");
+    // Flush so a backend that batches has certainly run its completion path.
+    producer.flush().await.expect("flush should succeed");
+
+    let entries = log.wait_for_kind(KIND_DELIVERY, Duration::from_secs(20)).await;
+    let deliveries: Vec<_> = entries.iter().filter(|e| e.kind == KIND_DELIVERY).collect();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "{} backend: expected exactly one {KIND_DELIVERY} entry (callbacks fire once per record); log = {entries:?}",
+        factory.name()
+    );
+    let delivery = deliveries[0];
+    assert!(
+        delivery.error.is_empty(),
+        "{} backend: delivery callback saw an error: {}",
+        factory.name(),
+        delivery.error
+    );
+    assert!(
+        delivery.has_partition(&topic, metadata.partition()),
+        "{} backend: delivery entry does not name {topic}-{}; entry = {delivery:?}",
+        factory.name(),
+        metadata.partition()
+    );
+    assert_eq!(
+        delivery.offset_for(&topic, metadata.partition()),
+        Some(metadata.offset()),
+        "{} backend: delivery callback offset disagrees with the send future's",
+        factory.name()
+    );
+
+    producer.close().await.expect("close should succeed");
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_delivery_callback_logs_metadata, delivery_callback_logs_metadata_inner);
+
 #[cfg(all(feature = "integration-tests", not(feature = "multilanguage-tests")))]
 mod rust_only_fallback {
     use super::*;
@@ -872,5 +934,9 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_non_blocking_max_block_zero() {
         produce_non_blocking_max_block_zero_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_delivery_callback_logs_metadata() {
+        delivery_callback_logs_metadata_inner(&mut ctx().await, &RustNativeFactory).await;
     }
 }
