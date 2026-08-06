@@ -28,8 +28,8 @@
 //! was `#[ignore]`-gated on Issue 5 (`auto.offset.reset=by_duration:PT1H`
 //! never landing on a position). Issue 5 was resolved transitively by the
 //! Issue 7 fix (transient-state skip in `fetch_collector` /
-//! `abstract_fetch`) and the Issue 9 fix (KIP-848 `GroupIdNotFound` retry
-//! + poll-timer init): once these fixes let the consumer ride out the
+//! `abstract_fetch`) and the Issue 9 fix (KIP-848 `GroupIdNotFound` retry +
+//! poll-timer init): once these fixes let the consumer ride out the
 //! transient "Missing position" / fence-rejoin states, the `by_duration`
 //! `ListOffsetsByTimestamp` reset path — which was already wired in
 //! `AutoOffsetResetStrategy::timestamp()` and consumed by
@@ -93,6 +93,10 @@ use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
+
+/// Consumed records bucketed by their (topic, partition), borrowed from the
+/// `Vec<ConsumerRecord>` a test collected.
+type RecordsByPartition<'a> = HashMap<TopicPartition, Vec<&'a ConsumerRecord<Vec<u8>, Vec<u8>>>>;
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
@@ -333,8 +337,7 @@ async fn consume_and_verify_records_bytes(
         1
     };
     let collected = consume_records_bytes(consumer, num_records).await;
-    for i in 0..num_records {
-        let record = &collected[i];
+    for (i, record) in collected.iter().enumerate().take(num_records) {
         let offset = starting_offset + i as i64;
 
         assert_eq!(record.topic(), tp.topic(), "record topic should match tp.topic()");
@@ -983,7 +986,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     // Bucket consumed records by (topic, partition); assert per-partition
     // counts and per-record fields (topic / partition / key / value /
     // timestamp).
-    let mut consumed_by_partition: HashMap<TopicPartition, Vec<&ConsumerRecord<Vec<u8>, Vec<u8>>>> = HashMap::new();
+    let mut consumed_by_partition: RecordsByPartition<'_> = HashMap::new();
     for record in &consumed {
         let tp = TopicPartition::new(record.topic().to_string(), record.partition());
         consumed_by_partition.entry(tp).or_default().push(record);
