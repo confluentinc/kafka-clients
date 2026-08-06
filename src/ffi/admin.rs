@@ -383,21 +383,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 ///
 /// # Parameters
 ///
-/// - `num_brokers`: Number of brokers to simulate. Values below 0 are treated
-///   as 0.
+/// - `num_brokers`: Number of brokers to simulate; must be at least 1.
 ///
 /// # Returns
 ///
 /// A non-null admin-client handle, or null if the tokio runtime cannot be
-/// created. The caller must free it with [`kafka_admin_AdminClient_destroy`].
+/// created or `num_brokers < 1`. The caller must free a non-null handle with
+/// [`kafka_admin_AdminClient_destroy`].
+///
+/// At least one broker is required because the mock places every partition
+/// leader and the controller on broker 0. Java rejects it the same way, by
+/// throwing: `MockAdminClient.Builder.build()` reads `brokers.get(0)` for the
+/// controller and `createTopics` does likewise for each partition leader
+/// (`MockAdminClient.java:210` / `:412` at kafka `a18251bae0b8`). Returning null
+/// here is that throw expressed in the FFI's idiom — a Rust panic must not
+/// unwind across the C boundary (CLAUDE.md §10.1).
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
+    if num_brokers < 1 {
+        return std::ptr::null_mut();
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(_) => return std::ptr::null_mut(),
     };
-    let mock = MockAdminClient::create(num_brokers.max(0));
+    let mock = MockAdminClient::create(num_brokers);
     build_admin_handle(AdminKind::Mock(Box::new(mock)), runtime, true)
 }
 
@@ -2161,6 +2172,11 @@ fn submit_describe_topics_by_ids(
 /// boxed error and leaves `*out_result` untouched — the ownership contract every
 /// sync FFI entry point in this crate follows.
 ///
+/// A null `out_result` means the caller does not want the result, so the handle
+/// is never built. (It must not be built and then freed here: `R` is the opaque
+/// `#[repr(C)]` marker type, not the inner state, so there is no way to drop it
+/// correctly from this generic context.)
+///
 /// # Safety
 ///
 /// `out_result` must be null or a valid, writable pointer.
@@ -2171,13 +2187,8 @@ unsafe fn finish_sync<T, R>(
 ) -> *mut kafka_common_KafkaError_t {
     match outcome {
         Ok(value) => {
-            let handle = box_result(value);
-            if out_result.is_null() {
-                // The caller does not want the result; free it rather than leak.
-                // (`box_result` already allocated by the time we know.)
-                unsafe { drop(Box::from_raw(handle)) };
-            } else {
-                unsafe { *out_result = handle };
+            if !out_result.is_null() {
+                unsafe { *out_result = box_result(value) };
             }
             std::ptr::null_mut()
         },
