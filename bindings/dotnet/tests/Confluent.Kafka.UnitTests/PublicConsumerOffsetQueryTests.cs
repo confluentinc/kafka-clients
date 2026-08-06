@@ -178,8 +178,11 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         // The mock omits TPs with no committed offset (it loops the requested TPs and includes
         // only those in self.committed). With nothing committed, the result is an empty — but
-        // valid, non-null — map (success, not a fault). The non-empty end-to-end assertion is
-        // deferred to the commit-family phase (Option A); the non-empty copy-out is proven by
+        // valid, non-null — map (success, not a fault). The non-empty end-to-end assertion,
+        // once deferred here to the commit-family phase, is now UNBLOCKED and lives in
+        // PublicConsumerCommitTests.Commit_ThenCommitted_RoundTripsOffsetMetadataAndEpoch
+        // (M5/P6): Commit(offsets) populates the mock's committed map, then Committed reads
+        // the exact value back. The non-empty copy-out in isolation is also proven by
         // OffsetMapMarshalTests.
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
 
