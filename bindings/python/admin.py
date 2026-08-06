@@ -35,6 +35,9 @@ dict whose values are either the result object or a :class:`KafkaError`:
 * ``describe_topics`` -> ``{topic_name: TopicDescription | KafkaError}``
 * ``list_topics`` -> ``{topic_name: TopicListing}`` (Java has a single future
   here, so a failure raises instead of appearing per key)
+* ``create_partitions`` -> ``{topic_name: None | KafkaError}`` (per-topic future
+  is ``KafkaFuture<Void>``, so ``None`` means success)
+* ``delete_records`` -> ``{(topic, partition): DeletedRecords | KafkaError}``
 
 A per-key failure therefore does **not** raise; iterate the dict and check for
 ``KafkaError`` values. Only a whole-call failure raises.
@@ -89,6 +92,66 @@ class NewTopic:
     def __repr__(self):
         return (f"NewTopic(name={self.name!r}, num_partitions={self.num_partitions}, "
                 f"replication_factor={self.replication_factor})")
+
+
+class NewPartitions:
+    """A request to increase a topic's partition count (Java ``NewPartitions``).
+
+    ``total_count`` is the total number of partitions *after* the operation, not
+    the number added. Leave ``new_assignments`` as ``None`` to let the broker
+    decide the replica assignment (Java's ``NewPartitions.increaseTo(int)``);
+    supplying it selects ``increaseTo(int, List<List<Integer>>)``, in which case
+    it should hold one list of broker ids per *new* partition (existing
+    partitions are not reassigned) and the first id in a list is the preferred
+    leader.
+    """
+
+    __slots__ = ("total_count", "new_assignments")
+
+    def __init__(self, total_count, new_assignments=None):
+        self.total_count = total_count
+        self.new_assignments = (None if new_assignments is None
+                                else [list(a) for a in new_assignments])
+
+    def _to_spec(self, topic):
+        """The tuple shape the C layer parses (see ``build_new_partitions``)."""
+        assignments = (None if self.new_assignments is None
+                       else [[int(b) for b in a] for a in self.new_assignments])
+        return (str(topic), int(self.total_count), assignments)
+
+    def __repr__(self):
+        return (f"NewPartitions(total_count={self.total_count}, "
+                f"new_assignments={self.new_assignments})")
+
+
+class RecordsToDelete:
+    """Records to delete from one partition (Java ``RecordsToDelete``).
+
+    Java exposes only the static factory ``beforeOffset(long)``; the constructor
+    here is the same thing. Pass ``-1`` to truncate the partition to its high
+    watermark.
+    """
+
+    __slots__ = ("before_offset",)
+
+    def __init__(self, before_offset):
+        self.before_offset = before_offset
+
+    def __repr__(self):
+        return f"RecordsToDelete(before_offset={self.before_offset})"
+
+
+class DeletedRecords:
+    """The outcome of deleting records from one partition (Java
+    ``DeletedRecords``): the partition's low watermark afterwards."""
+
+    __slots__ = ("low_watermark",)
+
+    def __init__(self, low_watermark):
+        self.low_watermark = low_watermark
+
+    def __repr__(self):
+        return f"DeletedRecords(low_watermark={self.low_watermark})"
 
 
 class ConfigEntry:
@@ -268,6 +331,24 @@ def _to_describe_topics(raw):
     return out
 
 
+def _to_create_partitions(raw):
+    """{topic: error} -> {topic: None | KafkaError}
+
+    Same shape as ``delete_topics``: Java's per-topic future is
+    ``KafkaFuture<Void>``, so ``None`` means success.
+    """
+    return {topic: _to_error(error) for topic, error in raw.items()}
+
+
+def _to_delete_records(raw):
+    """{(topic, partition): (error, low_watermark)}
+    -> {(topic, partition): DeletedRecords | KafkaError}"""
+    out = {}
+    for key, (error, low_watermark) in raw.items():
+        out[key] = _to_error(error) if error is not None else DeletedRecords(low_watermark)
+    return out
+
+
 def _ms(timeout):
     """Convert a timeout (seconds float, ``timedelta``, or None) to int32 ms.
 
@@ -380,6 +461,26 @@ class _AdminBase:
         return (lambda cb: _lib.Admin_list_topics_async(
                     self._h, ms, bool(list_internal), cb),
                 self._resolve_value(drain, _to_list_topics),
+                self._free_value(drain))
+
+    def _create_partitions_spec(self, new_partitions, timeout, validate_only,
+                                retry_on_quota_violation):
+        spec = [np._to_spec(topic) for topic, np in new_partitions.items()]
+        ms = _ms(timeout)
+        drain = _lib.CreatePartitionsResult_drain
+        return (lambda cb: _lib.Admin_create_partitions_async(
+                    self._h, spec, ms, bool(validate_only),
+                    bool(retry_on_quota_violation), cb),
+                self._resolve_value(drain, _to_create_partitions),
+                self._free_value(drain))
+
+    def _delete_records_spec(self, records_to_delete, timeout):
+        spec = [(str(topic), int(partition), int(rtd.before_offset))
+                for (topic, partition), rtd in records_to_delete.items()]
+        ms = _ms(timeout)
+        drain = _lib.DeleteRecordsResult_drain
+        return (lambda cb: _lib.Admin_delete_records_async(self._h, spec, ms, cb),
+                self._resolve_value(drain, _to_delete_records),
                 self._free_value(drain))
 
     def _describe_topics_spec(self, topics, timeout, include_authorized_operations,
@@ -497,6 +598,21 @@ class Admin(_AdminBase):
             topic_ids, timeout, include_authorized_operations, partition_size_limit,
             by_ids=True))
 
+    def create_partitions(self, new_partitions, timeout=None, validate_only=False,
+                          retry_on_quota_violation=True):
+        """Increase the partition counts of ``{topic_name: NewPartitions}``.
+        Returns ``{topic_name: None | KafkaError}`` (``None`` means success)."""
+        self._check_closed()
+        return self._run_sync(*self._create_partitions_spec(
+            new_partitions, timeout, validate_only, retry_on_quota_violation))
+
+    def delete_records(self, records_to_delete, timeout=None):
+        """Delete records before the given offsets of
+        ``{(topic, partition): RecordsToDelete}``. Returns
+        ``{(topic, partition): DeletedRecords | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._delete_records_spec(records_to_delete, timeout))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -583,6 +699,16 @@ class AsyncAdmin(_AdminBase):
         return await self._run_async(*self._describe_topics_spec(
             topic_ids, timeout, include_authorized_operations, partition_size_limit,
             by_ids=True))
+
+    async def create_partitions(self, new_partitions, timeout=None, validate_only=False,
+                                retry_on_quota_violation=True):
+        self._check_closed()
+        return await self._run_async(*self._create_partitions_spec(
+            new_partitions, timeout, validate_only, retry_on_quota_violation))
+
+    async def delete_records(self, records_to_delete, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._delete_records_spec(records_to_delete, timeout))
 
     async def close(self, timeout=None):
         if self.closed:

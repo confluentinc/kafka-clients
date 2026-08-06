@@ -69,6 +69,11 @@
 //! in the callback, and must publish anything the callback needs (including
 //! `user_data`) *before* the submit rather than after it.
 //!
+//! cbindgen does **not** copy this module documentation into
+//! `target/include/confluent_kafka.h` — only per-item rustdoc. So every `_async`
+//! entry point below restates the rule in full rather than pointing here; a
+//! cross-reference to this section would dangle for a C reader.
+//!
 //! A flattened `kafka_admin_*Result_t` exposes `_count` / `_get_key(i)` /
 //! `_get_value(i)` / `_get_error(i)` / `_destroy`, so per-key data *and* per-key
 //! errors survive the boundary; only independent per-key *timing* is lost (which
@@ -89,10 +94,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::{
-    Admin, AdminClientConfig, Config, CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions,
-    ListTopicsOptions, MockAdminClient, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AdminClientConfig, Config, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions,
+    DeleteTopicsOptions, DeletedRecords, DescribeTopicsOptions, ListTopicsOptions, MockAdminClient, NewPartitions,
+    NewTopic, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
-use crate::common::{KafkaError, KafkaFuture, Node, TopicCollection, TopicPartitionInfo, Uuid};
+use crate::common::{KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
 
 use super::common::{
     self, CompletionJob, KafkaErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
@@ -513,9 +519,11 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// Closes the admin client asynchronously. See
 /// [`kafka_admin_AdminClient_close`].
 ///
-/// The callback fires exactly once: normally on the handle's dispatcher thread,
-/// but **synchronously on the calling thread** if `admin` is NULL (see the
-/// module-level *Callback thread* section).
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So do not hold a
+/// lock across this call and re-acquire it in the callback, and publish everything
+/// the callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -551,7 +559,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
 /// Async dispatch for a **void-returning** admin operation (currently only
 /// `close`). `op` runs on the runtime and the callback fires on the dispatcher
 /// thread — except for a NULL `admin`, which fires the callback inline on the
-/// calling thread (module docs, *Callback thread*).
+/// calling thread (see the module docs, *Callback thread*).
 ///
 /// # Safety
 ///
@@ -986,6 +994,182 @@ unsafe fn read_new_topics(topics: *const *const kafka_admin_NewTopic_t, count: i
             continue;
         }
         out.push(unsafe { new_topic_ref(ptr) }.build());
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// NewPartitions (input handle)
+// ---------------------------------------------------------------------------
+
+/// Opaque, mutable builder for a `NewPartitions` request entry.
+///
+/// Java offers two static factories (`NewPartitions.increaseTo(int)` and
+/// `increaseTo(int, List<List<Integer>>)`); C cannot express overloads, so this
+/// handle starts as the first form and switches to the second as soon as any
+/// assignment is appended — exactly as [`kafka_admin_NewTopic_t`] does.
+#[repr(C)]
+pub struct kafka_admin_NewPartitions_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_NewPartitions_t`].
+struct NewPartitionsBuilder {
+    total_count: i32,
+    /// One inner list of broker ids per *new* partition, in insertion order.
+    new_assignments: Vec<Vec<i32>>,
+}
+
+impl NewPartitionsBuilder {
+    /// Builds the [`NewPartitions`], choosing the same factory Java would.
+    fn build(&self) -> NewPartitions {
+        if self.new_assignments.is_empty() {
+            NewPartitions::increase_to(self.total_count)
+        } else {
+            NewPartitions::increase_to_with_assignments(self.total_count, self.new_assignments.clone())
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_NewPartitions_t` to a reference.
+///
+/// # Safety
+///
+/// `partitions` must be a valid handle from [`kafka_admin_NewPartitions_new`].
+unsafe fn new_partitions_ref(partitions: *const kafka_admin_NewPartitions_t) -> &'static NewPartitionsBuilder {
+    unsafe { &*(partitions as *const NewPartitionsBuilder) }
+}
+
+/// Casts a `*mut kafka_admin_NewPartitions_t` to a mutable reference.
+///
+/// # Safety
+///
+/// `partitions` must be a valid handle from [`kafka_admin_NewPartitions_new`].
+unsafe fn new_partitions_mut(partitions: *mut kafka_admin_NewPartitions_t) -> &'static mut NewPartitionsBuilder {
+    unsafe { &mut *(partitions as *mut NewPartitionsBuilder) }
+}
+
+/// Creates a new-partitions request entry: increase the topic's partition count
+/// to `total_count`, letting the broker decide the replica assignment.
+///
+/// Mirrors Java's `NewPartitions.increaseTo(int totalCount)`. `total_count` is
+/// the total number of partitions *after* the operation, not the number added.
+///
+/// # Returns
+///
+/// A non-null handle. Free it with [`kafka_admin_NewPartitions_destroy`].
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_admin_NewPartitions_new(total_count: i32) -> *mut kafka_admin_NewPartitions_t {
+    let builder = NewPartitionsBuilder { total_count, new_assignments: Vec::new() };
+    Box::into_raw(Box::new(builder)) as *mut kafka_admin_NewPartitions_t
+}
+
+/// Appends the replica assignment (broker ids) for one *new* partition.
+///
+/// Appending any assignment switches this entry to Java's
+/// `NewPartitions.increaseTo(int totalCount, List<List<Integer>> newAssignments)`
+/// form. The number of appended lists should equal `total_count` minus the
+/// topic's current partition count (existing partitions are not reassigned), and
+/// each list should have `replication_factor` entries; the first broker id in a
+/// list is the preferred leader. No-op if `partitions` or `broker_ids` is null.
+///
+/// # Safety
+///
+/// `partitions` must be a valid handle; `broker_ids` must have `count` valid
+/// entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
+    partitions: *mut kafka_admin_NewPartitions_t,
+    broker_ids: *const i32,
+    count: i32,
+) {
+    if partitions.is_null() || broker_ids.is_null() {
+        return;
+    }
+    let builder = unsafe { new_partitions_mut(partitions) };
+    let n = count.max(0) as usize;
+    let mut replicas = Vec::with_capacity(n);
+    for i in 0..n {
+        replicas.push(unsafe { *broker_ids.add(i) });
+    }
+    builder.new_assignments.push(replicas);
+}
+
+/// Destroys a new-partitions handle. Safe to call with a null pointer (no-op).
+///
+/// # Safety
+///
+/// `partitions` must be null or a valid handle from
+/// [`kafka_admin_NewPartitions_new`]. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_NewPartitions_destroy(partitions: *mut kafka_admin_NewPartitions_t) {
+    if !partitions.is_null() {
+        unsafe { drop(Box::from_raw(partitions as *mut NewPartitionsBuilder)) };
+    }
+}
+
+/// Builds the owned `Map<String, NewPartitions>` for a `createPartitions` call
+/// from two parallel C arrays.
+///
+/// Entry `i` pairs `topics[i]` with `new_partitions[i]`. A pair is skipped when
+/// *either* side is NULL, so the two arrays cannot drift out of step (skipping
+/// only one side would shift every later pairing).
+///
+/// # Safety
+///
+/// `topics` and `new_partitions` must be null or have `count` entries each,
+/// every entry NULL or valid.
+unsafe fn read_new_partitions(
+    topics: *const *const c_char,
+    new_partitions: *const *const kafka_admin_NewPartitions_t,
+    count: i32,
+) -> HashMap<String, NewPartitions> {
+    let mut out = HashMap::new();
+    if topics.is_null() || new_partitions.is_null() {
+        return out;
+    }
+    for i in 0..count.max(0) as usize {
+        let name_ptr = unsafe { *topics.add(i) };
+        let spec_ptr = unsafe { *new_partitions.add(i) };
+        if name_ptr.is_null() || spec_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        out.insert(name, unsafe { new_partitions_ref(spec_ptr) }.build());
+    }
+    out
+}
+
+/// Builds the owned `Map<TopicPartition, RecordsToDelete>` for a `deleteRecords`
+/// call from three parallel C arrays.
+///
+/// Entry `i` is `(topics[i], partitions[i]) -> RecordsToDelete::before_offset(
+/// before_offsets[i])`. `RecordsToDelete` carries only that offset, so it needs
+/// no input handle of its own. An entry with a NULL topic is skipped.
+///
+/// # Safety
+///
+/// `topics`, `partitions` and `before_offsets` must be null or have `count`
+/// entries each; every `topics` entry NULL or a valid C string.
+unsafe fn read_records_to_delete(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    before_offsets: *const i64,
+    count: i32,
+) -> HashMap<TopicPartition, RecordsToDelete> {
+    let mut out = HashMap::new();
+    if topics.is_null() || partitions.is_null() || before_offsets.is_null() {
+        return out;
+    }
+    for i in 0..count.max(0) as usize {
+        let name_ptr = unsafe { *topics.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let partition = unsafe { *partitions.add(i) };
+        let offset = unsafe { *before_offsets.add(i) };
+        out.insert(TopicPartition::new(name, partition), RecordsToDelete::before_offset(offset));
     }
     out
 }
@@ -2114,6 +2298,279 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_destroy(result: *mut k
     }
 }
 
+/// Opaque handle to a flattened `CreatePartitionsResult`, keyed by topic name.
+#[repr(C)]
+pub struct kafka_admin_CreatePartitionsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_CreatePartitionsResult_t`].
+///
+/// There is no per-key value: Java's per-topic future is `KafkaFuture<Void>`, so
+/// a null error *is* the success value (as for `deleteTopics`).
+struct CreatePartitionsResultInner {
+    keys: Vec<CString>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-topic `createPartitions` outcomes into the C handle.
+fn box_create_partitions_result(
+    outcomes: HashMap<String, Result<(), KafkaError>>,
+) -> *mut kafka_admin_CreatePartitionsResult_t {
+    let entries = sorted_entries(outcomes);
+    let mut keys = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (name, outcome) in entries {
+        keys.push(to_cstring(&name));
+        errors.push(outcome.err().map(error_inner));
+    }
+    Box::into_raw(Box::new(CreatePartitionsResultInner { keys, errors })) as *mut kafka_admin_CreatePartitionsResult_t
+}
+
+/// Casts a `*const kafka_admin_CreatePartitionsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `create_partitions` call.
+unsafe fn create_partitions_result_ref(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+) -> &'static CreatePartitionsResultInner {
+    unsafe { &*(result as *const CreatePartitionsResultInner) }
+}
+
+/// Returns the number of requested topics.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_partitions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_count(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+) -> i32 {
+    unsafe { create_partitions_result_ref(result) }.keys.len() as i32
+}
+
+/// Returns the topic name at `index` (borrowed), or null if out of range.
+/// Entries are sorted by topic name.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_partitions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_key(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { create_partitions_result_ref(result) }.keys, index)
+}
+
+/// Returns the error for the topic at `index` (borrowed), or null if that
+/// topic's partitions were created successfully or `index` is out of range. Do
+/// not destroy it.
+///
+/// There is no `_get_value`: Java's per-topic future is `KafkaFuture<Void>`, so
+/// a null error *is* the success value.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_partitions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { create_partitions_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `create_partitions` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `create_partitions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_destroy(result: *mut kafka_admin_CreatePartitionsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut CreatePartitionsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DeleteRecordsResult`, keyed by topic partition.
+#[repr(C)]
+pub struct kafka_admin_DeleteRecordsResult_t {
+    _private: [u8; 0],
+}
+
+/// The low-watermark value reported for a partition whose deletion failed, or
+/// for an out-of-range index. Real low watermarks are never negative.
+const UNKNOWN_LOW_WATERMARK: i64 = -1;
+
+/// Backing state for [`kafka_admin_DeleteRecordsResult_t`].
+///
+/// The key is a `TopicPartition`, which C reads as a topic name plus a partition
+/// id (`_get_topic(i)` / `_get_partition(i)`) rather than through a dedicated
+/// handle type. The per-key value is Java's `DeletedRecords`, whose only field is
+/// the low watermark.
+struct DeleteRecordsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    low_watermarks: Vec<i64>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `deleteRecords` outcomes into the C handle.
+///
+/// Entries are sorted by `(topic, partition)`: `TopicPartition` is not `Ord`
+/// (matching Java, where the map is unordered), but C addresses entries by index
+/// so the order must be reproducible.
+fn box_delete_records_result(
+    outcomes: HashMap<TopicPartition, Result<DeletedRecords, KafkaError>>,
+) -> *mut kafka_admin_DeleteRecordsResult_t {
+    let mut entries: Vec<(TopicPartition, Result<DeletedRecords, KafkaError>)> = outcomes.into_iter().collect();
+    entries.sort_by(|a, b| a.0.topic().cmp(b.0.topic()).then(a.0.partition().cmp(&b.0.partition())));
+
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut low_watermarks = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (tp, outcome) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        match outcome {
+            Ok(deleted) => {
+                low_watermarks.push(deleted.low_watermark());
+                errors.push(None);
+            },
+            Err(e) => {
+                low_watermarks.push(UNKNOWN_LOW_WATERMARK);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DeleteRecordsResultInner {
+        topics,
+        partitions,
+        low_watermarks,
+        errors,
+    })) as *mut kafka_admin_DeleteRecordsResult_t
+}
+
+/// Casts a `*const kafka_admin_DeleteRecordsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `delete_records` call.
+unsafe fn delete_records_result_ref(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+) -> &'static DeleteRecordsResultInner {
+    unsafe { &*(result as *const DeleteRecordsResultInner) }
+}
+
+/// Returns the number of requested partitions.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_records` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_count(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+) -> i32 {
+    unsafe { delete_records_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_records` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_topic(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { delete_records_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_records` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_partition(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { delete_records_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the partition's low watermark after the deletion (Java's
+/// `DeletedRecords.lowWatermark()`), or -1 if that partition failed (see
+/// [`kafka_admin_DeleteRecordsResult_get_error`]) or `index` is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_records` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+    index: i32,
+) -> i64 {
+    if index < 0 {
+        return UNKNOWN_LOW_WATERMARK;
+    }
+    unsafe { delete_records_result_ref(result) }
+        .low_watermarks
+        .get(index as usize)
+        .copied()
+        .unwrap_or(UNKNOWN_LOW_WATERMARK)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if that
+/// partition succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_records` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { delete_records_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `delete_records` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `delete_records` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(result: *mut kafka_admin_DeleteRecordsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DeleteRecordsResultInner)) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RPC submission helpers
 //
@@ -2128,6 +2585,10 @@ type CreateTopicsOutcomes = HashMap<String, Result<TopicMetadataAndConfig, Kafka
 type DeleteTopicsOutcomes<K> = HashMap<K, Result<(), KafkaError>>;
 /// Per-key outcomes of `describeTopics`, keyed by `K` (topic name or topic id).
 type DescribeTopicsOutcomes<K> = HashMap<K, Result<TopicDescription, KafkaError>>;
+/// Per-topic outcomes of `createPartitions`.
+type CreatePartitionsOutcomes = HashMap<String, Result<(), KafkaError>>;
+/// Per-partition outcomes of `deleteRecords`.
+type DeleteRecordsOutcomes = HashMap<TopicPartition, Result<DeletedRecords, KafkaError>>;
 
 /// Submits `createTopics` and returns the collect-all future over its per-topic
 /// futures.
@@ -2183,6 +2644,32 @@ fn submit_describe_topics_by_names(
     let entries: Vec<(String, KafkaFuture<TopicDescription>)> =
         values.iter().map(|(name, f)| (name.clone(), f.clone())).collect();
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `createPartitions` and returns the collect-all future over its
+/// per-topic futures.
+fn submit_create_partitions(
+    admin: &dyn Admin,
+    new_partitions: &HashMap<String, NewPartitions>,
+    options: CreatePartitionsOptions,
+) -> KafkaFuture<CreatePartitionsOutcomes> {
+    let result = admin.create_partitions(new_partitions, options);
+    let entries: Vec<(String, KafkaFuture<()>)> =
+        result.values().iter().map(|(name, f)| (name.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `deleteRecords` and returns the collect-all future over its
+/// per-partition futures.
+fn submit_delete_records(
+    admin: &dyn Admin,
+    records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
+    options: DeleteRecordsOptions,
+) -> KafkaFuture<DeleteRecordsOutcomes> {
+    let result = admin.delete_records(records_to_delete, options);
+    let entries: Vec<(TopicPartition, KafkaFuture<DeletedRecords>)> =
+        result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
 }
 
 /// Submits `describeTopics(TopicCollection.ofTopicIds(...))`.
@@ -2294,9 +2781,11 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
 
 /// Creates topics asynchronously. See [`kafka_admin_AdminClient_create_topics`].
 ///
-/// The callback fires exactly once: normally on the handle's dispatcher thread,
-/// but **synchronously on the calling thread** if `admin` is NULL (see the
-/// module-level *Callback thread* section).
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So do not hold a
+/// lock across this call and re-acquire it in the callback, and publish everything
+/// the callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -2385,6 +2874,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// Deletes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics`].
 ///
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
+/// do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
 /// # Safety
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings.
@@ -2449,9 +2945,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// Deletes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics_by_ids`].
 ///
-/// An unparseable or NULL id fires the callback with that error **synchronously,
-/// on the calling thread, before this function returns**, because the RPC is
-/// never submitted (module docs, *Callback thread*).
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle, or an unparseable or NULL base64 topic id). So do not hold a
+/// lock across this call and re-acquire it in the callback, and publish everything
+/// the callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -2526,6 +3024,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
 
 /// Lists the cluster's topics asynchronously. See
 /// [`kafka_admin_AdminClient_list_topics`].
+///
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
+/// do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -2619,6 +3124,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// Describes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics`].
 ///
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
+/// do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
 /// # Safety
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings.
@@ -2685,9 +3197,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// Describes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics_by_ids`].
 ///
-/// An unparseable or NULL id fires the callback with that error **synchronously,
-/// on the calling thread, before this function returns**, because the RPC is
-/// never submitted (module docs, *Callback thread*).
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle, or an unparseable or NULL base64 topic id). So do not hold a
+/// lock across this call and re-acquire it in the callback, and publish everything
+/// the callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -2713,6 +3227,221 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids_async(
             move |outcome, ud| {
                 let (result, error) = match outcome {
                     Ok(outcomes) => (box_describe_topics_result(outcomes, Uuid::to_string), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// createPartitions
+// ---------------------------------------------------------------------------
+
+/// Builds `CreatePartitionsOptions` from the flat C option parameters. A negative
+/// `timeout_ms` leaves `timeoutMs` unset so `default.api.timeout.ms` applies.
+fn create_partitions_options(
+    timeout_ms: i32,
+    validate_only: bool,
+    retry_on_quota_violation: bool,
+) -> CreatePartitionsOptions {
+    CreatePartitionsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .validate_only(validate_only)
+        .retry_on_quota_violation(retry_on_quota_violation)
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_create_partitions_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_CreatePartitionsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-topic failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_create_partitions_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_CreatePartitionsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Increases the partition count of the given topics, blocking until every
+/// per-topic future has resolved (synchronous).
+///
+/// This is `createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)`.
+/// Java's map becomes two parallel arrays: entry `i` pairs `topics[i]` with
+/// `new_partitions[i]`. A pair is skipped when either side is NULL, so the arrays
+/// cannot drift out of step.
+///
+/// On success writes a [`kafka_admin_CreatePartitionsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_CreatePartitionsResult_destroy`]) and returns
+/// null. **A per-topic failure is not a call failure**: it is reported by
+/// [`kafka_admin_CreatePartitionsResult_get_error`] for that key, so a partially
+/// failed batch still returns null here with a non-null result handle. A non-null
+/// return means the request could not be submitted at all.
+///
+/// # Parameters
+///
+/// - `topics` / `new_partitions`: parallel arrays of `count` entries; the caller
+///   retains ownership of the [`kafka_admin_NewPartitions_t`] handles.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `validate_only`: `CreatePartitionsOptions.validateOnly` — validate without
+///   creating the partitions.
+/// - `retry_on_quota_violation`:
+///   `CreatePartitionsOptions.retryOnQuotaViolation`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics` and `new_partitions` must have
+/// `count` valid entries each; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    new_partitions: *const *const kafka_admin_NewPartitions_t,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    retry_on_quota_violation: bool,
+    out_result: *mut *mut kafka_admin_CreatePartitionsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
+    let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_partitions(a, &specs, options))) };
+    unsafe { finish_sync(outcome, out_result, box_create_partitions_result) }
+}
+
+/// Increases the partition count of the given topics asynchronously. See
+/// [`kafka_admin_AdminClient_create_partitions`].
+///
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
+/// do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics` and `new_partitions` must have
+/// `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    new_partitions: *const *const kafka_admin_NewPartitions_t,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    retry_on_quota_violation: bool,
+    callback: kafka_admin_AdminClient_create_partitions_callback_t,
+    user_data: *mut c_void,
+) {
+    let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
+    let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_create_partitions(a, &specs, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_create_partitions_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// deleteRecords
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_delete_records_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DeleteRecordsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_delete_records_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DeleteRecordsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Deletes the records before the given offset of each partition, blocking until
+/// every per-partition future has resolved (synchronous).
+///
+/// This is `deleteRecords(Map<TopicPartition, RecordsToDelete>,
+/// DeleteRecordsOptions)`. Java's map becomes three parallel arrays: entry `i` is
+/// `(topics[i], partitions[i]) -> RecordsToDelete.beforeOffset(
+/// before_offsets[i])`. `RecordsToDelete` carries only that offset, so it needs
+/// no input handle. An entry with a NULL topic is skipped. Pass `-1` as a
+/// `before_offsets` entry to truncate that partition to its high watermark
+/// (Java's documented `RecordsToDelete.beforeOffset(-1)` behavior).
+///
+/// On success writes a [`kafka_admin_DeleteRecordsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_DeleteRecordsResult_destroy`]) and returns null.
+/// Per-partition failures are reported by
+/// [`kafka_admin_DeleteRecordsResult_get_error`], not by the return value.
+///
+/// # Parameters
+///
+/// - `topics` / `partitions` / `before_offsets`: parallel arrays of `count`
+///   entries.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///   `DeleteRecordsOptions` has no other field in Java.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics`, `partitions` and `before_offsets`
+/// must have `count` valid entries each; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    before_offsets: *const i64,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DeleteRecordsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
+    let options = DeleteRecordsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_records(a, &records, options))) };
+    unsafe { finish_sync(outcome, out_result, box_delete_records_result) }
+}
+
+/// Deletes records asynchronously. See
+/// [`kafka_admin_AdminClient_delete_records`].
+///
+/// The callback fires exactly once. It normally runs on the handle's dispatcher
+/// thread, but runs **synchronously on the calling thread, before this function
+/// returns**, when the RPC cannot be submitted at all (a NULL `admin` handle). So
+/// do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics`, `partitions` and `before_offsets`
+/// must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    before_offsets: *const i64,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_delete_records_callback_t,
+    user_data: *mut c_void,
+) {
+    let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
+    let options = DeleteRecordsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_delete_records(a, &records, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_delete_records_result(outcomes), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
