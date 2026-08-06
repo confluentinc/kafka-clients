@@ -17,9 +17,11 @@
 //!
 //! Only the consumer is the system-under-test on the backend; setup records
 //! are produced with a native in-process Rust producer (the producer is
-//! incidental fixture). Scope is the supported consumer surface — no rebalance
-//! listeners, commit callbacks, or regex pattern subscription (those tests stay
-//! native-Rust-only; see plaintext_consumer_*.rs).
+//! incidental fixture). Scope is the supported consumer surface, including the
+//! two user callbacks — the rebalance listener and the offset-commit callback —
+//! observed through [`ConsumerCallbackLog`] rather than by handing an
+//! in-process `dyn` object across the wire. Regex pattern subscription stays
+//! native-Rust-only (see plaintext_consumer_*.rs).
 //!
 //! Requires `--features multilanguage-tests`.
 
@@ -32,6 +34,7 @@ use confluent_kafka::consumer::Consumer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::callback_log::{CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED, KIND_COMMIT, KIND_REVOKED};
 use crate::common::test_context::TestContext;
 use crate::multilanguage_consumer_test;
 
@@ -102,6 +105,36 @@ async fn collect(
         }
     }
     out
+}
+
+/// Poll the consumer until its callback log contains an entry of `kind`, or
+/// `deadline` elapses. Returns the last snapshot either way, so callers can
+/// assert and print the whole log on failure.
+///
+/// Polling is what makes progress: per `consumer-threading.md` §31 both the
+/// rebalance listener and the offset-commit callback run on the *caller's* task
+/// inside `poll` / `commit_*` / `close`, so a test that only sleeps would never
+/// see them. For the gRPC backends each poll is a `Poll` RPC on the server-side
+/// consumer, and the log is one further RPC behind.
+async fn poll_until_kind(
+    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    log: &ConsumerCallbackLog,
+    kind: &str,
+    deadline: Duration,
+) -> Vec<CallbackLogEntry> {
+    let start = Instant::now();
+    loop {
+        let entries = log.entries().await.expect("read consumer callback log");
+        if entries.iter().any(|e| e.kind == kind) || start.elapsed() >= deadline {
+            return entries;
+        }
+        consumer.poll(Duration::from_millis(500)).await.expect("poll");
+    }
+}
+
+/// All log entries of one `kind`.
+fn of_kind<'a>(entries: &'a [CallbackLogEntry], kind: &str) -> Vec<&'a CallbackLogEntry> {
+    entries.iter().filter(|e| e.kind == kind).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +380,118 @@ async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContex
     consumer.close().await.expect("close");
 }
 
+// ---------------------------------------------------------------------------
+// Callback coverage (rebalance listener / offset-commit callback)
+// ---------------------------------------------------------------------------
+
+/// A rebalance listener registered through each backend's own binding is
+/// invoked with the right partitions, for both `on_partitions_assigned` and
+/// `on_partitions_revoked`.
+///
+/// The revoke is forced by *changing* the subscription (topic_a -> topic_b):
+/// the group then hands back a target assignment without topic_a-0, and
+/// reconciliation revokes it. `unsubscribe()` would not do — it fires
+/// `on_partitions_lost`, not `revoked` (see `consumer-threading.md` §31).
+async fn rebalance_listener_logs_assigned_and_revoked<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic_a = ctx.topic("ml_listener_a");
+    let topic_b = ctx.topic("ml_listener_b");
+    produce(ctx, &topic_a, &[("k", "va")]).await;
+    produce(ctx, &topic_b, &[("k", "vb")]).await;
+
+    let (mut consumer, log) = factory
+        .create_with_callback_log(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic_a}-grp")))
+        .await
+        .expect("create consumer with callback log");
+
+    log.subscribe_with_logging_listener(&mut consumer, vec![topic_a.clone()])
+        .await
+        .expect("subscribe with logging listener");
+    let entries = poll_until_kind(&mut consumer, &log, KIND_ASSIGNED, Duration::from_secs(30)).await;
+    let assigned = of_kind(&entries, KIND_ASSIGNED);
+    assert!(
+        !assigned.is_empty(),
+        "{} backend: no {KIND_ASSIGNED} entry logged; log = {entries:?}",
+        factory.name()
+    );
+    assert!(
+        assigned.iter().any(|e| e.has_partition(&topic_a, 0)),
+        "{} backend: no {KIND_ASSIGNED} entry naming {topic_a}-0; log = {entries:?}",
+        factory.name()
+    );
+    assert!(
+        assigned.iter().all(|e| e.error.is_empty()),
+        "{} backend: listener reported an error; log = {entries:?}",
+        factory.name()
+    );
+
+    // Re-register the listener with the new subscription: a *replacing*
+    // subscribe releases the previous registration (SubscriptionState only
+    // clears the listener on subscribe, never on unsubscribe), and it is the
+    // listener registered when the revocation happens that gets invoked.
+    log.subscribe_with_logging_listener(&mut consumer, vec![topic_b.clone()])
+        .await
+        .expect("re-subscribe with logging listener");
+    let entries = poll_until_kind(&mut consumer, &log, KIND_REVOKED, Duration::from_secs(30)).await;
+    let revoked = of_kind(&entries, KIND_REVOKED);
+    assert!(
+        revoked.iter().any(|e| e.has_partition(&topic_a, 0)),
+        "{} backend: no {KIND_REVOKED} entry naming {topic_a}-0 after switching subscription; log = {entries:?}",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+/// An offset-commit callback registered through each backend's own binding is
+/// invoked with the committed offsets and no error.
+async fn commit_async_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_commit_cb");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let (mut consumer, log) = factory
+        .create_with_callback_log(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer with callback log");
+    // assign() rather than subscribe() so no rebalance interleaves with the
+    // commit — this test is about the commit callback only.
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+    assert_eq!(
+        collect(&mut consumer, 2, Duration::from_secs(20)).await.len(),
+        2,
+        "{} backend",
+        factory.name()
+    );
+
+    log.commit_async_with_logging_callback(&mut consumer)
+        .await
+        .expect("commit_async with logging callback");
+    // §31: the callback runs on the app task during a later poll/commit/close.
+    let entries = poll_until_kind(&mut consumer, &log, KIND_COMMIT, Duration::from_secs(20)).await;
+    let commits = of_kind(&entries, KIND_COMMIT);
+    assert!(
+        !commits.is_empty(),
+        "{} backend: no {KIND_COMMIT} entry logged; log = {entries:?}",
+        factory.name()
+    );
+    assert!(
+        commits.iter().any(|e| e.offset_for(&topic, 0) == Some(2)),
+        "{} backend: expected a {KIND_COMMIT} entry with {topic}-0 -> 2; log = {entries:?}",
+        factory.name()
+    );
+    assert!(
+        commits.iter().all(|e| e.error.is_empty()),
+        "{} backend: commit callback reported an error; log = {entries:?}",
+        factory.name()
+    );
+
+    // The callback's offsets must match what was actually committed.
+    let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
+    assert_eq!(committed.get(&tp).map(|o| o.offset()), Some(2), "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
 multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);
 multilanguage_consumer_test!(test_ml_subscribe_and_consume, subscribe_and_consume);
 multilanguage_consumer_test!(test_ml_commit_and_committed, commit_and_committed);
@@ -358,3 +503,8 @@ multilanguage_consumer_test!(test_ml_partitions_for, partitions_for_metadata);
 multilanguage_consumer_test!(test_ml_offsets_for_times, offsets_for_times_lookup);
 multilanguage_consumer_test!(test_ml_list_topics, list_topics_contains);
 multilanguage_consumer_test!(test_ml_commit_explicit_offsets, commit_explicit_offsets);
+multilanguage_consumer_test!(
+    test_ml_rebalance_listener_logs_assigned_and_revoked,
+    rebalance_listener_logs_assigned_and_revoked
+);
+multilanguage_consumer_test!(test_ml_commit_async_callback_logs_offsets, commit_async_callback_logs_offsets);

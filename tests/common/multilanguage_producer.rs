@@ -24,7 +24,12 @@
 //!
 //!   2. `send_with_callback`'s closure stays Rust-side. After awaiting the
 //!      RPC we synchronously invoke the user's callback with the decoded
-//!      `RecordMetadata` or `KafkaError` reference.
+//!      `RecordMetadata` or `KafkaError` reference. Passing a callback also
+//!      sets the proto `with_callback` flag, which makes the *server* register
+//!      a real delivery callback through its own binding and record each
+//!      invocation in a log readable via `GetCallbackLog` — that log, not this
+//!      local closure, is what
+//!      [`crate::common::callback_log::ProducerCallbackLog`] asserts on.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
 
@@ -80,6 +85,13 @@ impl MultilanguageProducer {
             return Err(kafka_error_from_proto(err));
         }
         Ok(Self { producer_id: response.producer_id, client, backend })
+    }
+
+    /// The server-local producer id. Needed by
+    /// [`crate::common::callback_log::grpc::ProducerLog`], which reads the
+    /// server-side delivery-callback log for the same producer.
+    pub fn producer_id(&self) -> u64 {
+        self.producer_id
     }
 }
 

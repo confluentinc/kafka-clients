@@ -63,6 +63,13 @@ pub mod test_context;
 #[allow(dead_code)]
 pub mod backend_factory;
 
+// Backend-agnostic observation of the user callbacks (delivery / commit /
+// rebalance). Native-only pieces work with just integration-tests; the
+// GetCallbackLog client is gated inside on multilanguage-tests.
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
+pub mod callback_log;
+
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod backend_pool;

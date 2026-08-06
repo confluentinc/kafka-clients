@@ -126,10 +126,10 @@ impl KafkaAllProtocols {
     ///
     /// - `node_id`: 1-based broker/controller node ID
     /// - `container_names`: ordered list of all broker container names
-    ///    (index 0 = node 1, index 1 = node 2, etc.)
+    ///   (index 0 = node 1, index 1 = node 2, etc.)
     /// - `ports`: pre-reserved host ports for this broker's client listeners
     /// - `certs`: shared SSL certificates (CA + broker cert with all
-    ///    container hostnames in SANs)
+    ///   container hostnames in SANs)
     fn new(
         node_id: u16,
         container_names: &[String],

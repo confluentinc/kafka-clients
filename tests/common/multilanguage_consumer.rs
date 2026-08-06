@@ -19,10 +19,17 @@
 //! Scope: only the surface the C FFI / Python binding support is bridged
 //! (poll, subscribe(topics), assign, commit_sync, committed, position, seek,
 //! pause/resume, *_offsets, offsets_for_times, partitions_for, list_topics,
-//! the non-blocking state reads, wakeup, close). The binding bridges no
-//! callbacks, so listener/commit-callback/pattern-subscription methods return
-//! an `illegal_state` error — tests needing those are native-Rust-only and are
-//! never routed through this client.
+//! the non-blocking state reads, wakeup, close).
+//!
+//! The callback-taking trait methods (`subscribe_with_listener`,
+//! `commit_async_*_with_callback`) return an `illegal_state` error, and
+//! deliberately keep doing so even though the bindings *do* bridge those
+//! callbacks now: a `dyn ConsumerRebalanceListener` living in this process
+//! cannot be handed to a server in another one. Callback coverage for the gRPC
+//! backends goes through [`crate::common::callback_log::ConsumerCallbackLog`]
+//! instead, which asks the server to register a listener built by its own
+//! binding and reads back what it observed. Regex pattern subscription remains
+//! unbridged entirely; tests needing it are native-Rust-only.
 //!
 //! The trait's blocking-in-Java methods are `async` and forward to a unary RPC
 //! that the server awaits. The handful of methods that are *sync* in the trait
@@ -41,8 +48,9 @@ use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{KafkaError, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
-    OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern, WakeupHandle,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecords, KafkaMetric, MetricName, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
+    SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -84,9 +92,17 @@ impl MultilanguageConsumer {
         Ok(Self { consumer_id: response.consumer_id, client, backend, client_id })
     }
 
+    /// The server-local consumer id. Needed by
+    /// [`crate::common::callback_log::grpc::ConsumerLog`], which drives the
+    /// callback-registering RPCs and `GetCallbackLog` against the same
+    /// server-side consumer.
+    pub fn consumer_id(&self) -> u64 {
+        self.consumer_id
+    }
+
     fn unsupported(&self, method: &str) -> KafkaError {
         KafkaError::illegal_state(format!(
-            "{} is not supported on the {} gRPC multilanguage backend (the binding bridges no callbacks / pattern subscription)",
+            "{} is not supported on the {} gRPC multilanguage backend (an in-process callback cannot cross the wire — use ConsumerCallbackLog; pattern subscription is unbridged)",
             method, self.backend
         ))
     }
@@ -106,7 +122,10 @@ impl MultilanguageConsumer {
 
     async fn subscribe_rpc(&self, topics: Vec<String>) -> Result<(), KafkaError> {
         let mut client = self.client.clone();
-        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics };
+        // with_listener stays false here: this is the plain subscribe(topics).
+        // The listener-registering variant lives on ConsumerCallbackLog, since
+        // the listener must be created by the server's own binding.
+        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics, with_listener: false };
         self.status_rpc(client.subscribe(req)).await
     }
 
@@ -318,8 +337,21 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         });
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        unimplemented!("wakeup_handle is not supported on the gRPC multilanguage backend")
+    /// The server-side consumer owns the real handle; there is no RPC that
+    /// could hand a `Clone + Send + Sync` reentrancy handle across the wire.
+    /// `Consumer::wakeup` above is bridged (as a Wakeup RPC), which is the only
+    /// part of the handle the multilanguage tests need.
+    ///
+    /// (Replaces the pre-Phase-41 `wakeup_handle` method, which no longer
+    /// exists on the trait.)
+    fn handle(&self) -> ConsumerHandle {
+        unimplemented!("handle is not supported on the gRPC multilanguage backend")
+    }
+
+    /// The consumer metrics live in the server process and are not modeled on
+    /// the wire; no multilanguage test asserts on them.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        unimplemented!("metrics is not supported on the gRPC multilanguage backend")
     }
 
     // ── subscription / assignment ──
@@ -696,8 +728,11 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
     )
 }
 
+/// The by-partition record map `ConsumerRecords::new` takes.
+type RecordsByPartition = IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>>;
+
 fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecords<Vec<u8>, Vec<u8>> {
-    let mut by_partition: IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>> = IndexMap::new();
+    let mut by_partition: RecordsByPartition = IndexMap::new();
     for proto_rec in list.records {
         let tp = TopicPartition::new(proto_rec.topic.clone(), proto_rec.partition);
         by_partition.entry(tp).or_default().push(consumer_record_from_proto(proto_rec));
@@ -706,10 +741,10 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
     // multilanguage tests assert on the records, not next_offsets()).
     let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
     for (tp, recs) in &by_partition {
-        if let Some(last) = recs.last() {
-            if let Ok(oam) = OffsetAndMetadata::new(last.offset() + 1) {
-                next_offsets.insert(tp.clone(), oam);
-            }
+        if let Some(last) = recs.last()
+            && let Ok(oam) = OffsetAndMetadata::new(last.offset() + 1)
+        {
+            next_offsets.insert(tp.clone(), oam);
         }
     }
     ConsumerRecords::new(by_partition, next_offsets)
