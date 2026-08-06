@@ -605,3 +605,75 @@ obligation total); the documented contract was wrong, and cbindgen copies it int
   corrected the same way, so the next slice copies accurate wording.
 
 Commit: `fixup! Milestone 11 bindings B0: admin C FFI foundation` (`bb01dbc1`).
+
+## Issue: B1 is missing two of its six RPCs, with no recorded deferral
+
+**Fixed by landing both RPCs.** Manager resolution: `PLAN-bindings.md` §4's B1 row
+is the source of truth (`createTopics, deleteTopics, listTopics, describeTopics,
+createPartitions, deleteRecords`) and the slice is titled "Topics & partitions",
+so `createPartitions` belongs in it. The task brief named only the four topic
+RPCs — a brief error, not a deferral.
+
+`createPartitions` and `deleteRecords` now have the same surface as the other
+four: sync + `_async` entry points, a per-key result handle with `_get_error(i)`,
+a callback typedef, cbindgen allowlist entries, C tests, Python bindings and
+Python tests.
+
+- `kafka_admin_NewPartitions_t` mirrors `NewTopic`'s two-constructor handling:
+  `_new(total_count)` is `NewPartitions.increaseTo(int)` and `_add_assignment`
+  switches to `increaseTo(int, List<List<Integer>>)`.
+- `createPartitions`' `Map<String, NewPartitions>` becomes two parallel arrays;
+  a pair is skipped when **either** side is NULL, because skipping one side alone
+  would shift every later pairing.
+- `deleteRecords` needs no input handle (`RecordsToDelete` carries only
+  `beforeOffset`): three parallel arrays. Its result exposes
+  `_get_topic` / `_get_partition` / `_get_low_watermark` / `_get_error`;
+  `TopicPartition` is not `Ord`, so entries sort by `(topic, partition)`
+  explicitly to keep index addressing reproducible.
+- `CreatePartitionsResult` has no `_get_value`, matching `DeleteTopicsResult`:
+  Java's per-topic future is `KafkaFuture<Void>`, so a null error *is* success.
+
+**Mock coverage is thin by Java parity, as anticipated.** Java's
+`MockAdminClient.createPartitions` throws
+`UnsupportedOperationException("Not implemented yet")`
+(MockAdminClient.java:626-628, verified against the in-tree Java source) and
+`deleteRecords` returns an empty result for an empty request but otherwise throws
+the same (:630-638). Per `admin-client.md` §9 the Rust mock returns a per-key
+`KafkaError::unsupported_version("Not implemented yet")` instead of panicking,
+which the tests assert exactly (code 35, exact message) with the Java lines
+cited. The mock therefore still exercises the whole marshaling + flattening path;
+only the success outcome is unavailable, which is why the issue below matters more
+for these two RPCs.
+
+Commit `ce295635`.
+
+## Issue: the production `AdminClient` success path has no test in any language
+
+**Fixed.** New `bindings/c/tests/test_kafka_admin.c` (11 tests) registered in
+`CMakeLists.txt` as the `kafka_admin` CTest target, plus 6 Python counterparts in
+`test_admin.py`. Broker-less, following `test_kafka_consumer.c:15-22`. Covers
+exactly the B0 code the Critic identified as uncovered:
+
+- runtime construction **and** `runtime.enter()` so `new_admin_client` can spawn
+  the admin background task (three construction variants: `_from_configs`,
+  `_put`, and a NULL `out_error`);
+- `close` / `_close_async` / `_destroy` against `AdminKind::Kafka`, including
+  close idempotence and the negative (Java no-argument) timeout;
+- `mock_ref`'s rejection arm, asserting the exact message
+  `"this operation is only supported on a MockAdminClient"` (DoD #3), plus its
+  null-handle message.
+
+Where an outcome depends on whether anything is listening on localhost:9092, both
+outcomes are accepted and freed, so the test asserts termination and the ownership
+contract rather than a round-trip.
+
+**This suite found a real production bug** (commit `21e9c3f0`):
+`AdminClientRunnable::should_exit` counted *every* outstanding call, whereas
+Java's `threadShouldExit` consults `hasActiveExternalCalls()`, which skips calls
+with `internal == true` (KafkaAdminClient.java:1419-1441). The internal metadata
+refresh is re-created on every backoff expiry, so `close(timeout)` blocked for the
+full timeout and `close()` with no timeout (`Duration::from_millis(i64::MAX)`)
+never returned at all. Fixed to mirror Java, with two regression tests whose teeth
+were verified by reverting the predicate.
+
+Commit `afeeff35` (tests), `21e9c3f0` (the bug it found).
