@@ -70,3 +70,4 @@
 - [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→1→0, closes Phase 5. Caller both-reachable grep per entry point; builder snapshots defeat "retry carries only X"; state reachability = grep the writers' Caller
 - [M11 Phase 6 public txn API](review_m11_phase6.md) — CLOSED 7→4→1→1→0, 0 behavioural. A documented escape shape is adversarial input for the next checker; sweep blind spots incl. two of mine
 - [M11 Phase 7 MockProducer txn](review_m11_phase7.md) — CLOSED 4→0. Artifacts agreeing on "three" can name different threes; normalisation diffs need every swap + a rename map
+- [M11 Phase 8 parity sweep + broker tests](review_m11_phase8.md) — 11 findings pass 1. New harness surface can be inert; fresh-instance tests can't cover recovery paths; 78/78 mismatch = wrong yardstick
