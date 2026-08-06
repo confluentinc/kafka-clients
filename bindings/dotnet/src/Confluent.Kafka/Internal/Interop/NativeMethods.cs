@@ -466,6 +466,140 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_assign", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerAssign(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
 
+    // ---- Async void ops on partition collections (op_callback_t, ffi §B6/§B7) — M5/P3 ----
+    //
+    // Five identically-shaped void-result async ops (assign / pause / resume /
+    // seekToBeginning / seekToEnd), each over the parallel (topics[], partitions[], count)
+    // arrays. All reuse the SAME void-result completion callback as
+    // ConsumerSubscribeAsync (op_callback_t = (KafkaError*, void*)) — NO new callback type
+    // this phase. The core reads the topic strings + partition ints SYNCHRONOUSLY during the
+    // call (into an owned Vec<TopicPartition>, via read_topic_partitions in src/ffi/consumer.rs)
+    // BEFORE spawning the op, so the pinned buffers + the partitions int[] are call-scoped —
+    // freed once each returns (ffi §A4/§B4 call-scoped pin), matching ConsumerSubscribeAsync.
+    // A count == 0 (empty collection) is a valid pass-through: assign([]) clears the
+    // assignment, the others are a no-op — the binding never spuriously rejects empty (§B5).
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_assign_async</c> — assigns the consumer to
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs from the parallel arrays
+    /// <paramref name="topics"/> (pinned NUL-terminated UTF-8 <c>const char*</c> =
+    /// <c>const char* const*</c>) and <paramref name="partitions"/>. Read synchronously
+    /// during the call (call-scoped pin, ffi §A4). The completion fires via
+    /// <paramref name="callback"/> (the shared <c>op_callback_t</c>: null error = success)
+    /// on the core's dispatcher thread, or inline on the caller thread if the core rejects
+    /// at its own access guard. <paramref name="userData"/> is a
+    /// <see cref="GCHandle"/> over the per-op context. An empty collection
+    /// (<paramref name="count"/> <c>== 0</c>) clears the assignment (Java parity).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_assign_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerAssignAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_pause_async</c> — pauses fetching for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (parallel arrays, as
+    /// <see cref="ConsumerAssignAsync"/>). Same shared <c>op_callback_t</c> completion; an
+    /// empty collection is a no-op success (Java iterates an empty collection).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_pause_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerPauseAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_resume_async</c> — resumes fetching for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (parallel arrays, as
+    /// <see cref="ConsumerAssignAsync"/>). Same shared <c>op_callback_t</c> completion; an
+    /// empty collection is a no-op success.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_resume_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerResumeAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek_to_beginning_async</c> — requests an EARLIEST offset
+    /// reset for the <paramref name="count"/> <c>(topic, partition)</c> pairs (parallel
+    /// arrays, as <see cref="ConsumerAssignAsync"/>). Same shared <c>op_callback_t</c>
+    /// completion. On the mock this sets only the reset <em>strategy</em> (it does NOT read
+    /// the beginning offsets), so it resolves broker-free with no offset setup; the actual
+    /// reset offset is consulted lazily on the next <c>poll</c> (from the map populated by
+    /// <see cref="MockConsumerUpdateBeginningOffsets"/>). An empty collection is a no-op.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_beginning_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSeekToBeginningAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek_to_end_async</c> — requests a LATEST offset reset for
+    /// the <paramref name="count"/> <c>(topic, partition)</c> pairs (parallel arrays, as
+    /// <see cref="ConsumerAssignAsync"/>). Same shared <c>op_callback_t</c> completion; the
+    /// LATEST analog of <see cref="ConsumerSeekToBeginningAsync"/> (lazily consults the map
+    /// populated by <see cref="MockConsumerUpdateEndOffsets"/> on the next <c>poll</c>). An
+    /// empty collection is a no-op.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_end_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSeekToEndAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    // ---- MockConsumer offset-update helpers (mock only, ffi §B2) — M5/P3 ----
+    //
+    // Per-(topic, partition, offset) — a single offset each, NOT a map. Populate the
+    // mock's beginning/end offset maps that poll's reset_offset_position consults after a
+    // SeekToBeginning/SeekToEnd, so the seek is observable end-to-end via a follow-up poll
+    // (§6.6). One DllImport each + one loop over the caller's collection on the forwarder.
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_update_beginning_offsets</c> — sets the beginning
+    /// (EARLIEST) offset used by a subsequent <c>seekToBeginning</c> reset on a mock consumer
+    /// (mock only; mirrors Java <c>updateBeginningOffsets(Map)</c>, one entry at a time).
+    /// <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerUpdateBeginningOffsets(
+        IntPtr consumer,
+        IntPtr topic,
+        int partition,
+        long offset);
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_update_end_offsets</c> — sets the end (LATEST) offset
+    /// used by a subsequent <c>seekToEnd</c> reset on a mock consumer (mock only; mirrors Java
+    /// <c>updateEndOffsets(Map)</c>, one entry at a time). Same shape as
+    /// <see cref="MockConsumerUpdateBeginningOffsets"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_end_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerUpdateEndOffsets(
+        IntPtr consumer,
+        IntPtr topic,
+        int partition,
+        long offset);
+
     /// <summary>
     /// <c>kafka_consumer_MockConsumer_add_record</c> — queues a record on a mock
     /// consumer (mock only; errors on a real consumer). The record's partition must
