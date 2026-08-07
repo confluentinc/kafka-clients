@@ -97,16 +97,10 @@ public sealed class ConsumerAsyncOperationTests
             () => consumer.SubscribeWithCallback(ProofTopic(), cts.Token));
     }
 
-    [Fact]
-    public async Task SeekWithCallback_PreCanceledToken_ThrowsOperationCanceled()
-    {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        using CancellationTokenSource cts = new CancellationTokenSource();
-        cts.Cancel();
-
-        await Assert.ThrowsAsync<OperationCanceledException>(
-            () => consumer.SeekWithCallback("proof-topic", 0, 0L, cts.Token));
-    }
+    // NOTE (M5/P7): the Seek-specific pre-canceled-token test was removed — Seek is now
+    // SYNC with no CancellationToken. The pre-canceled → OperationCanceledException path
+    // stays covered by SubscribeWithCallback_PreCanceledToken_ThrowsOperationCanceled above
+    // (the shared SubmitVoidOperation ThrowIfCancellationRequested gate).
 
     [Fact]
     public void GroupId_WhenIdle_ReturnsConfiguredId()

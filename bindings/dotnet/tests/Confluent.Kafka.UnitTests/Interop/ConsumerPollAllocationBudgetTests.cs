@@ -117,7 +117,7 @@ public sealed class ConsumerPollAllocationBudgetTests
         try
         {
             consumer.Assign(new[] { (Topic, Partition) });
-            await consumer.SeekWithCallback(Topic, Partition, offset: 0);
+            consumer.Seek(Topic, Partition, offset: 0); // sync (M5/P7)
             for (int i = 0; i < recordCount; i++)
             {
                 consumer.AddRecord(Topic, Partition, offset: i, key, value);

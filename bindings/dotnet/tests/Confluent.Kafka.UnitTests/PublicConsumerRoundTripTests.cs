@@ -49,8 +49,8 @@ public sealed class PublicConsumerRoundTripTests
         AsyncMockConsumer consumer = new AsyncMockConsumer();
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
-        await TestTimeout.Run(
-            () => consumer.Seek(new TopicPartition(topic, partition), offset: 0), s_deadline);
+        // Seek is now SYNC (M5/P7) — a direct sync ABI call, no await / hang guard needed.
+        consumer.Seek(new TopicPartition(topic, partition), offset: 0);
         return consumer;
     }
 
