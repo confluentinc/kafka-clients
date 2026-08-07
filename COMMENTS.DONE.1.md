@@ -2118,3 +2118,157 @@ used the nix 1.97.1 clippy/cargo/rustc triple in a separate target dir.
 `byte_char_slices` has been stable since 1.85, so the four findings are real
 under the pinned toolchain too; a 1.95-only lint that 1.97 dropped would not be
 visible here.
+
+# Slice B6 — producers and transactions (self-review)
+
+The last slice. `describeProducers`, `describeTransactions`, `abortTransaction`,
+`forceTerminateTransaction`, `listTransactions`, `fenceProducers` — sync plus
+`_async` per RPC in C, both `Admin` and `AsyncAdmin` in Python. **All 46 admin
+RPCs are now bound on both surfaces.** Commits `68e6db50` (C FFI + C tests) and
+`e83837b1` (Python + Python tests).
+
+## D2 classification, checked against the Java types
+
+The Critic's round-10 table was right on all six; nothing changed after reading
+the Java sources.
+
+| RPC | Java per-key value | Shape shipped |
+|---|---|---|
+| `describeProducers` | `PartitionProducerState` = one `List<ProducerState>`; `ProducerState` = 4 scalars + `OptionalInt` + `OptionalLong` | flattened to `(i, j)`; the two Optionals are `bool fn(..., T *out)` present-flags, not index levels. 11 accessors. |
+| `describeTransactions` | 5 scalars + `OptionalLong` + `Set<TopicPartition>` | scalars at `i`, partitions at `(i, j)` — clarification #2, which is exactly why it needed the "whose element is scalar-only" qualifier first |
+| `fenceProducers` | `ProducerIdAndEpoch` = `long` + `short` | both fields at `i`; not the collection case |
+| `listTransactions` | `byBrokerId()` → per-broker future over `Collection<TransactionListing>`; the listing is 3 scalars | broker-keyed with listings at `(i, j)` |
+| `abortTransaction`, `forceTerminateTransaction` | `KafkaFuture<Void>`, nothing else on the result | **no result handle** — new fifth D2 row, recorded in the plan |
+
+Two decisions worth stating explicitly, because both are places a reviewer would
+reasonably expect the opposite:
+
+**`listTransactions` is driven from `byBrokerId()`, not `all()`.** Java has three
+views and only `byBrokerId()` keeps a *per-broker* future, hence a per-broker
+error. `all()` and `allByBrokerId()` both fail wholesale, so a listing that
+succeeded on broker 1 and failed on broker 2 would lose the successful half. The
+broker-keyed handle is a strict superset: Java's `all()` is one flatten away, and
+the Python docstring gives that one-liner. A failure of the top-level
+broker-discovery future is still the call's error, which is what all three Java
+views do in that case.
+
+**`abortTransaction` / `forceTerminateTransaction` get no result handle.** This
+is a deliberate deviation from "one opaque result handle per RPC" and is recorded
+in `PLAN-bindings.md` §7 D2 as a fifth row rather than left as an implementation
+choice. `AbortTransactionResult` exposes exactly one method,
+`all() -> KafkaFuture<Void>`; `TerminateTransactionResult` exposes
+`result() -> KafkaFuture<Void>`. Neither carries data, and neither exposes
+per-key granularity a caller could reach — the abort result's per-partition map
+is private and the RPC takes one spec, so there is one key by construction. A
+handle whose only method is `_destroy` is ceremony plus a leak to get wrong. It
+is **not** the same call as B5b's two `KafkaFuture<Long>` results, which do have
+a value to deliver and correctly got a handle each. The shape reuses
+`close_async`'s error-only callback and `admin_op_trampoline`.
+
+## `fenceProducers` needed the same future twice, without a new combinator
+
+Java never exposes the `ProducerIdAndEpoch`: `producerId(id)` and `epochId(id)`
+are two `thenApply` projections of one per-id future, and `fencedProducers()` is
+a third that discards both. One C row needs both scalars.
+`submit_fence_producers` joins each projection over the requested key set and
+merges them. Both resolve from the same future, so neither join can observe a
+state the other cannot, and `KafkaFuture::get` is re-callable so awaiting twice
+is not a second request. A `KafkaFuture::zip` would have been shorter and is
+**not** added: Java's `KafkaFuture` has none, and inventing one is a type the
+Java client does not have (DoD #7). The unreachable "no outcome for this key"
+arm is an explicit `illegal_state` rather than a silent drop (CLAUDE.md §5).
+
+## Request direction, pinned as written
+
+All six mocks throw (`MockAdminClient.java:1368-1395`). Applying round 10's
+sharpened rule per RPC:
+
+| RPC | mock echoes | dead payload, pinned by |
+|---|---|---|
+| `describeProducers` | the requested `(topic, partition)` keys | `broker_id` + its flag → `describe_producers_options_keeps_the_broker_id_apart_from_its_absence`, checked with 0 and -3 as ids so no sentinel could stand in |
+| `describeTransactions` | the requested ids | timeout only → `single_field_transaction_options_carry_only_the_timeout` |
+| `fenceProducers` | the requested ids | timeout only, same test |
+| `abortTransaction` | **nothing** (one void future) | the whole spec → `read_abort_transaction_spec_maps_each_column_and_narrows_the_epoch` |
+| `forceTerminateTransaction` | nothing | timeout only, same test |
+| `listTransactions` | **nothing** (whole call fails) | all four filters → `list_transactions_options_maps_each_filter_to_its_own_field` (Rust) and `test_list_transactions_filters_keep_each_column_apart` (Python) |
+
+Applied the field-level corollary too — "mock implemented" does not mean
+"request observable" — but it does not bite here: all six mocks throw, so every
+option field is discarded and each got a direct test regardless.
+
+Two Java details the tests pin because getting them wrong is silent:
+
+  - `TransactionState.parse` is **case-sensitive** (`NAME_TO_ENUM.getOrDefault`),
+    unlike `GroupState.parse`, which upper-cases first. `read_group_states`'
+    rustdoc advertises case-insensitivity, so copying it would have accepted
+    names Java rejects. `read_transaction_states_is_case_sensitive_unlike_group_states`
+    asserts `"ongoing"` → UNKNOWN.
+  - `AbortTransactionSpec.producerEpoch` is a Java `short` crossing as `int32_t`.
+    65537 truncates to 1 under a bare cast, which is a legal epoch, so it is
+    rejected by name and value. No `as i8` / `as i16` anywhere in the slice
+    (`grep -rn "as i8\|as i16" src/ffi/` → prose only).
+
+## Teeth
+
+Five Rust call-site swaps. Four fail exactly one test each:
+`producerEpoch`/`lastSequence` in `ProducerStateRows::from_state`;
+`producerId`/`transactionTimeoutMs` in `box_describe_transactions_result`;
+`transactionalId`/`state` in `box_list_transactions_result`;
+`partition`/`coordinatorEpoch` at the `AbortTransactionSpec::new` call site. Two
+transpositions I wanted to try do **not compile** — the two `Optional`s in
+`ProducerState` are `OptionalInt`/`OptionalLong` and the two scalars in
+`ProducerIdAndEpoch` are `long`/`short` — which is a better guarantee than a
+test.
+
+Three Python call-site swaps, each caught: `producer_id`/`producer_epoch` in
+`_to_describe_transactions` (1 test), `states`/`producer_ids` in
+`_list_transactions_filters` (2), dropping the error branch in
+`_to_describe_producers` (2).
+
+**One residual mutation passes everything, reported rather than hidden.**
+Swapping `state_count` and `producer_id_count` where the two `listTransactions`
+entry points forward to `list_transactions_options` is invisible: the Rust test
+calls the builder directly, and the mock fails the whole call so no suite can
+observe the filters end to end. Hand-verified that both call sites forward the
+seven values in the declared order with each count immediately following its
+array. This is the same class of residual the Critic accepted in round 10 for
+the `describeUserScramCredentials` C drain.
+
+## Two environment traps that each made a mutation silently do nothing
+
+Both are worth recording because a green teeth run under either is meaningless:
+
+  1. An in-place `_confluentkafka*.so` left in `bindings/python/` by an earlier
+     `make` **shadows** the freshly `pip install`ed extension, because pytest's
+     cwd precedes site-packages. The symptom is
+     `AttributeError: module '_confluentkafka' has no attribute
+     'DescribeProducersResult_drain'` *after* a successful build. Removing the
+     stale `.so` and `build/` fixed it.
+  2. A pure *swap* mutation keeps `admin.py` the same size, so if the rewrite
+     lands in the same second as the cached `.pyc`'s recorded mtime, Python
+     reuses the stale bytecode — `shutil.copy` does not preserve mtime but the
+     second-resolution check still matched. Two mutations reported "all passed"
+     for this reason before the harness started clearing `__pycache__` per run.
+     Same family as the round-8 "restore then `touch`" gotcha, one layer up.
+
+## Verification
+
+`cargo build` and `cargo build --features ffi`; `cargo test --workspace` (14
+suites green); `cargo test --features ffi` → 3217 + 102 + 38 + 8 + 4; `cargo
+xtask format-check`; clippy `--all-targets`, `--features ffi --all-targets`,
+`-p xtask`, `--workspace`, and `generator`, all `-D warnings` clean; `cargo xtask
+check-bindings` → 59 / 8 / 192, no mismatches; all **six** ctest binaries pass
+(161 mock-admin, 26 kafka-admin); Python suite **257 passed, 2 skipped** in one
+`docker run`.
+
+cbindgen: 10 new entries (4 result types + 6 callbacks), all confirmed present in
+`target/include/confluent_kafka.h`. The six-clause `_async` callback contract is
+verified in the generated header for all six RPCs, with ` * ` prefixes stripped
+and whitespace normalised. All new sync results go through `finish_sync`.
+
+**DoD #10 (hot-path allocation audit) is N/A** per `admin-client.md` §10 — admin
+calls are batch/administrative with no per-record path. **DoD #11 does not
+apply** to the Admin trait, but its spirit holds: every per-RPC entry point is a
+plain `extern "C" fn`, and no `#[async_trait]` reaches the `Call` / driver types.
+No TODO or FIXME. No core `src/admin/` bug was found in this slice, so no scope
+escalation.
