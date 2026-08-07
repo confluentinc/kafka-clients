@@ -47,6 +47,17 @@ dict whose values are either the result object or a :class:`KafkaError`:
   ``{TopicPartitionReplica: None | KafkaError}``
 * ``describe_replica_log_dirs`` ->
   ``{TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}``
+* ``elect_leaders`` -> ``{(topic, partition): None | KafkaError}`` (Java's
+  per-partition value is an ``Optional<Throwable>``, so ``None`` means that
+  partition's election succeeded)
+* ``alter_partition_reassignments`` ->
+  ``{(topic, partition): None | KafkaError}`` (per-partition future is
+  ``KafkaFuture<Void>``, so ``None`` means success)
+* ``list_partition_reassignments`` ->
+  ``{(topic, partition): PartitionReassignment}`` (Java has a single future
+  here, so a failure raises instead of appearing per key)
+* ``list_offsets`` ->
+  ``{(topic, partition): ListOffsetsResultInfo | KafkaError}``
 * ``describe_cluster`` -> a single :class:`ClusterDescription` (Java's result is
   four independent futures, not a map, so a failure raises)
 * ``list_config_resources`` -> ``[ConfigResource]``, and
@@ -399,6 +410,149 @@ class ReplicaLogDirInfo:
                 f"future={self.future_replica_log_dir!r})")
 
 
+class ElectionType:
+    """Leader-election types (Java ``ElectionType``). The values are Java's
+    public ``byte value`` field."""
+
+    PREFERRED = 0
+    UNCLEAN = 1
+
+
+class IsolationLevel:
+    """Read isolation levels (Java ``IsolationLevel``). The values are Java's
+    ``id()`` wire codes."""
+
+    READ_UNCOMMITTED = 0
+    READ_COMMITTED = 1
+
+
+class NewPartitionReassignment:
+    """A target replica set for one partition (Java
+    ``NewPartitionReassignment``).
+
+    To *cancel* an ongoing reassignment pass ``None`` in place of this object,
+    which is Java's empty ``Optional`` (``Admin.java:1142-1143``). An empty
+    ``target_replicas`` is an error, not a cancellation — Java's constructor
+    throws ``IllegalArgumentException``.
+    """
+
+    __slots__ = ("target_replicas",)
+
+    def __init__(self, target_replicas):
+        self.target_replicas = [int(r) for r in target_replicas]
+
+    def __repr__(self):
+        return f"NewPartitionReassignment(target_replicas={self.target_replicas})"
+
+
+class PartitionReassignment:
+    """An ongoing reassignment of one partition (Java
+    ``PartitionReassignment``): the current replicas, plus those being added and
+    removed. All three are broker ids."""
+
+    __slots__ = ("replicas", "adding_replicas", "removing_replicas")
+
+    def __init__(self, replicas, adding_replicas, removing_replicas):
+        self.replicas = list(replicas)
+        self.adding_replicas = list(adding_replicas)
+        self.removing_replicas = list(removing_replicas)
+
+    def __repr__(self):
+        return (f"PartitionReassignment(replicas={self.replicas}, "
+                f"adding_replicas={self.adding_replicas}, "
+                f"removing_replicas={self.removing_replicas})")
+
+
+class OffsetSpec:
+    """Which offset ``list_offsets`` should return for a partition (Java
+    ``OffsetSpec``).
+
+    Java models the variants as subclasses with static factories; the same
+    factories are class methods here. Internally each one is the
+    ``ListOffsets`` wire sentinel Java's ``KafkaAdminClient.getOffsetFromSpec``
+    emits for it, plus a flag separating ``for_timestamp`` from the rest — the
+    projection is not injective (``for_timestamp(-2)`` and ``earliest()`` both
+    give ``-2``), so the flag is what keeps them apart.
+    """
+
+    __slots__ = ("is_timestamp", "value")
+
+    # `ListOffsetsRequest` sentinels (src/common/requests/list_offsets_request.rs).
+    _LATEST = -1
+    _EARLIEST = -2
+    _MAX_TIMESTAMP = -3
+    _EARLIEST_LOCAL = -4
+    _LATEST_TIERED = -5
+    _EARLIEST_PENDING_UPLOAD = -6
+
+    def __init__(self, is_timestamp, value):
+        self.is_timestamp = bool(is_timestamp)
+        self.value = int(value)
+
+    @classmethod
+    def latest(cls):
+        return cls(False, cls._LATEST)
+
+    @classmethod
+    def earliest(cls):
+        return cls(False, cls._EARLIEST)
+
+    @classmethod
+    def max_timestamp(cls):
+        return cls(False, cls._MAX_TIMESTAMP)
+
+    @classmethod
+    def earliest_local(cls):
+        return cls(False, cls._EARLIEST_LOCAL)
+
+    @classmethod
+    def latest_tiered(cls):
+        return cls(False, cls._LATEST_TIERED)
+
+    @classmethod
+    def earliest_pending_upload(cls):
+        return cls(False, cls._EARLIEST_PENDING_UPLOAD)
+
+    @classmethod
+    def for_timestamp(cls, timestamp):
+        """The earliest offset whose timestamp is at least ``timestamp``
+        (epoch milliseconds). Java ``OffsetSpec.forTimestamp(long)``."""
+        return cls(True, timestamp)
+
+    def __eq__(self, other):
+        return (isinstance(other, OffsetSpec)
+                and self.is_timestamp == other.is_timestamp
+                and self.value == other.value)
+
+    def __hash__(self):
+        return hash((self.is_timestamp, self.value))
+
+    def __repr__(self):
+        if self.is_timestamp:
+            return f"OffsetSpec.for_timestamp({self.value})"
+        return f"OffsetSpec(sentinel={self.value})"
+
+
+class ListOffsetsResultInfo:
+    """One partition's offset (Java
+    ``ListOffsetsResult.ListOffsetsResultInfo``).
+
+    ``timestamp`` is ``-1`` when the broker reported none, and ``leader_epoch``
+    is ``None`` for Java's empty ``Optional``.
+    """
+
+    __slots__ = ("offset", "timestamp", "leader_epoch")
+
+    def __init__(self, offset, timestamp, leader_epoch):
+        self.offset = offset
+        self.timestamp = timestamp
+        self.leader_epoch = leader_epoch
+
+    def __repr__(self):
+        return (f"ListOffsetsResultInfo(offset={self.offset}, "
+                f"timestamp={self.timestamp}, leader_epoch={self.leader_epoch})")
+
+
 class ClientMetricsResourceListing:
     """A client-metrics resource (Java ``ClientMetricsResourceListing``)."""
 
@@ -699,6 +853,36 @@ def _to_describe_replica_log_dirs(raw):
     return out
 
 
+def _to_elect_leaders(raw):
+    """{(topic, partition): error} -> {(topic, partition): None | KafkaError}
+
+    Java's ``ElectLeadersResult.partitions()`` is
+    ``Map<TopicPartition, Optional<Throwable>>``: there is no per-partition
+    value, so ``None`` means the election succeeded for that partition.
+    """
+    return {key: _to_error(error) for key, error in raw.items()}
+
+
+def _to_alter_partition_reassignments(raw):
+    """{(topic, partition): error} -> {(topic, partition): None | KafkaError}"""
+    return {key: _to_error(error) for key, error in raw.items()}
+
+
+def _to_list_partition_reassignments(raw):
+    """{(topic, partition): (replicas, adding, removing)}
+    -> {(topic, partition): PartitionReassignment}"""
+    return {key: PartitionReassignment(*value) for key, value in raw.items()}
+
+
+def _to_list_offsets(raw):
+    """{(topic, partition): (error, info)}
+    -> {(topic, partition): ListOffsetsResultInfo | KafkaError}"""
+    out = {}
+    for key, (error, info) in raw.items():
+        out[key] = _to_error(error) if error is not None else ListOffsetsResultInfo(*info)
+    return out
+
+
 def _ms(timeout):
     """Convert a timeout (seconds float, ``timedelta``, or None) to int32 ms.
 
@@ -909,6 +1093,55 @@ class _AdminBase:
                 self._resolve_value(drain, _to_describe_replica_log_dirs),
                 self._free_value(drain))
 
+    def _elect_leaders_spec(self, election_type, partitions, timeout):
+        # `partitions is None` is Java's null Set: elect for every partition.
+        # It crosses as an explicit flag so it cannot be confused with an empty
+        # selection (`Admin.java:1096-1097`).
+        all_partitions = partitions is None
+        spec = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
+        ms = _ms(timeout)
+        drain = _lib.ElectLeadersResult_drain
+        return (lambda cb: _lib.Admin_elect_leaders_async(
+                    self._h, int(election_type), all_partitions, spec, ms, cb),
+                self._resolve_value(drain, _to_elect_leaders),
+                self._free_value(drain))
+
+    def _alter_partition_reassignments_spec(self, reassignments, timeout,
+                                            allow_replication_factor_change):
+        # A None value is Java's empty Optional, which *reverts* the
+        # reassignment; it crosses as a separate flag so it stays distinct from
+        # an empty replica list, which Java rejects.
+        spec = [(str(topic), int(partition), r is None,
+                 [] if r is None else [int(x) for x in r.target_replicas])
+                for (topic, partition), r in reassignments.items()]
+        ms = _ms(timeout)
+        drain = _lib.AlterPartitionReassignmentsResult_drain
+        return (lambda cb: _lib.Admin_alter_partition_reassignments_async(
+                    self._h, spec, ms, bool(allow_replication_factor_change), cb),
+                self._resolve_value(drain, _to_alter_partition_reassignments),
+                self._free_value(drain))
+
+    def _list_partition_reassignments_spec(self, partitions, timeout):
+        # `partitions is None` is Java's Optional.empty(): list everything.
+        all_partitions = partitions is None
+        spec = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
+        ms = _ms(timeout)
+        drain = _lib.ListPartitionReassignmentsResult_drain
+        return (lambda cb: _lib.Admin_list_partition_reassignments_async(
+                    self._h, all_partitions, spec, ms, cb),
+                self._resolve_value(drain, _to_list_partition_reassignments),
+                self._free_value(drain))
+
+    def _list_offsets_spec(self, topic_partition_offsets, timeout, isolation_level):
+        spec = [(str(topic), int(partition), spec_.is_timestamp, int(spec_.value))
+                for (topic, partition), spec_ in topic_partition_offsets.items()]
+        ms = _ms(timeout)
+        drain = _lib.ListOffsetsResult_drain
+        return (lambda cb: _lib.Admin_list_offsets_async(
+                    self._h, spec, ms, int(isolation_level), cb),
+                self._resolve_value(drain, _to_list_offsets),
+                self._free_value(drain))
+
     def _describe_topics_spec(self, topics, timeout, include_authorized_operations,
                               partition_size_limit, by_ids):
         names = [str(t) for t in topics]
@@ -930,6 +1163,27 @@ class _MockAdminClientMixin:
         """Make the next ``number_of_requests`` RPCs fail with a timeout
         (Java ``MockAdminClient.timeoutNextRequest``)."""
         e = _lib.MockAdminClient_timeout_next_request(self._h, number_of_requests)
+        if e:
+            raise KafkaError._from_c(e)
+
+    def update_beginning_offsets(self, offsets):
+        """Seed the offsets ``list_offsets`` reports for
+        ``OffsetSpec.earliest()``, from ``{(topic, partition): offset}``
+        (Java ``MockAdminClient.updateBeginningOffsets``). Merges into, rather
+        than replaces, what was seeded before."""
+        spec = [(str(t), int(p), int(o)) for (t, p), o in offsets.items()]
+        e = _lib.MockAdminClient_update_beginning_offsets(self._h, spec)
+        if e:
+            raise KafkaError._from_c(e)
+
+    def update_end_offsets(self, offsets):
+        """Seed the offsets ``list_offsets`` reports for every ``OffsetSpec``
+        other than ``earliest()`` and ``for_timestamp()``, from
+        ``{(topic, partition): offset}`` (Java
+        ``MockAdminClient.updateEndOffsets``). Merges into, rather than
+        replaces, what was seeded before."""
+        spec = [(str(t), int(p), int(o)) for (t, p), o in offsets.items()]
+        e = _lib.MockAdminClient_update_end_offsets(self._h, spec)
         if e:
             raise KafkaError._from_c(e)
 
@@ -1108,6 +1362,43 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._describe_replica_log_dirs_spec(replicas, timeout))
 
+    def elect_leaders(self, election_type, partitions=None, timeout=None):
+        """Elect leaders for ``partitions`` (an iterable of ``(topic,
+        partition)``), or for **every** partition when ``partitions`` is
+        ``None`` — Java's null ``Set``. Returns
+        ``{(topic, partition): None | KafkaError}``, where ``None`` means the
+        election succeeded for that partition.
+        """
+        self._check_closed()
+        return self._run_sync(*self._elect_leaders_spec(election_type, partitions, timeout))
+
+    def alter_partition_reassignments(self, reassignments, timeout=None,
+                                      allow_replication_factor_change=True):
+        """Apply ``{(topic, partition): NewPartitionReassignment | None}``. A
+        ``None`` value **reverts** that partition's reassignment (Java's empty
+        ``Optional``). Returns ``{(topic, partition): None | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._alter_partition_reassignments_spec(
+            reassignments, timeout, allow_replication_factor_change))
+
+    def list_partition_reassignments(self, partitions=None, timeout=None):
+        """List ongoing reassignments, restricted to ``partitions`` (an
+        iterable of ``(topic, partition)``) or over the whole cluster when it is
+        ``None`` — Java's ``Optional.empty()``. Returns
+        ``{(topic, partition): PartitionReassignment}``; partitions with no
+        ongoing reassignment are omitted, so the result can be smaller than the
+        request."""
+        self._check_closed()
+        return self._run_sync(*self._list_partition_reassignments_spec(partitions, timeout))
+
+    def list_offsets(self, topic_partition_offsets, timeout=None,
+                     isolation_level=IsolationLevel.READ_UNCOMMITTED):
+        """Look up ``{(topic, partition): OffsetSpec}``. Returns
+        ``{(topic, partition): ListOffsetsResultInfo | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._list_offsets_spec(
+            topic_partition_offsets, timeout, isolation_level))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -1244,6 +1535,28 @@ class AsyncAdmin(_AdminBase):
         self._check_closed()
         return await self._run_async(*self._describe_replica_log_dirs_spec(
             replicas, timeout))
+
+    async def elect_leaders(self, election_type, partitions=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._elect_leaders_spec(
+            election_type, partitions, timeout))
+
+    async def alter_partition_reassignments(self, reassignments, timeout=None,
+                                            allow_replication_factor_change=True):
+        self._check_closed()
+        return await self._run_async(*self._alter_partition_reassignments_spec(
+            reassignments, timeout, allow_replication_factor_change))
+
+    async def list_partition_reassignments(self, partitions=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._list_partition_reassignments_spec(
+            partitions, timeout))
+
+    async def list_offsets(self, topic_partition_offsets, timeout=None,
+                           isolation_level=IsolationLevel.READ_UNCOMMITTED):
+        self._check_closed()
+        return await self._run_async(*self._list_offsets_spec(
+            topic_partition_offsets, timeout, isolation_level))
 
     async def close(self, timeout=None):
         if self.closed:
