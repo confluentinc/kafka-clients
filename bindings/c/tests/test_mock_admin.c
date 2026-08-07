@@ -1500,7 +1500,7 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
 
     /* 4. BROKER_LOGGER hits `getResourceDescription`'s default branch, which
      * throws UnsupportedOperationException("Not implemented yet")
-     * (MockAdminClient.java:895). */
+     * (MockAdminClient.java:885 at kafka a18251bae0b8). */
     i = find_describe_configs_key(result, RESOURCE_TYPE_BROKER_LOGGER, "0");
     TEST_ASSERT_TRUE(i >= 0);
     e = kafka_admin_DescribeConfigsResult_get_error(result, i);

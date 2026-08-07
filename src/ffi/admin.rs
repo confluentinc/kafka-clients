@@ -6337,9 +6337,18 @@ unsafe fn describe_replica_log_dirs_result_ref(
 
 /// Returns the number of described replicas.
 ///
-/// Replicas of a topic the broker does not know are silently omitted, mirroring
-/// Java's `describeReplicaLogDirs`, so this can be smaller than the number
-/// requested.
+/// Against a real broker this equals the number of replicas requested:
+/// `KafkaAdminClient.describeReplicaLogDirs` seeds one future per requested
+/// replica (`KafkaAdminClient.java:3066-3068`) and completes every one of them
+/// (`:3141-3145`). A replica whose topic the broker does not know is therefore
+/// still *present*, holding a default `ReplicaLogDirInfo`: its
+/// [`kafka_admin_ReplicaLogDirInfo_current_replica_log_dir`] is null and its
+/// offset lags are `-1`. Absence from the result is not the signal for an
+/// unknown topic; a null current log dir is.
+///
+/// `MockAdminClient.describeReplicaLogDirs` diverges: it skips replicas whose
+/// topic it does not know (`MockAdminClient.java:1112`), so against the mock
+/// this can be smaller than the number requested.
 ///
 /// # Safety
 ///
@@ -6635,5 +6644,354 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
             std::ptr::null_mut()
         },
         Err(e) => box_error(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// These exercise the pure marshaling helpers directly rather than end-to-end
+// through `MockAdminClient`, because the mock cannot reach most of them:
+//
+//   - It never reads its `options` argument (`MockAdminClient.java:340-360` for
+//     `describeCluster`, `:897-916` for `incrementalAlterConfigs`), so an
+//     end-to-end test cannot tell two boolean option flags apart. Every option
+//     builder below is therefore called with *asymmetric* flag values, so that
+//     transposing any two of them fails an assertion here.
+//   - It builds config entries with the two-argument `ConfigEntry(name, value)`
+//     constructor (`MockAdminClient.java:889-895`), so `source` and `type` are
+//     always `UNKNOWN`, `documentation` is always null and `synonyms` is always
+//     empty. 17 of the 19 enum constant names and the whole synonym flattening
+//     path are unreachable from it.
+//   - It reports no volume sizes and no `LogDirDescription.error`.
+//
+// The helpers are pure functions of their inputs, so hand-built fixtures cover
+// what the mock cannot.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::{ConfigSynonym, ReplicaInfo};
+    use crate::common::{Errors, KafkaGenericError};
+
+    fn text(value: &CString) -> &str {
+        value.to_str().expect("CString holds UTF-8")
+    }
+
+    fn opt_text(value: &Option<CString>) -> Option<&str> {
+        value.as_ref().map(text)
+    }
+
+    // -- option_timeout -----------------------------------------------------
+
+    #[test]
+    fn option_timeout_maps_negative_to_unset() {
+        // Negative means "unset" so the client's default.api.timeout.ms applies
+        // (Java leaves `timeoutMs` null); zero is a real timeout, not unset.
+        assert_eq!(option_timeout(-1), None);
+        assert_eq!(option_timeout(i32::MIN), None);
+        assert_eq!(option_timeout(0), Some(0));
+        assert_eq!(option_timeout(30_000), Some(30_000));
+    }
+
+    // -- Option builders ----------------------------------------------------
+    //
+    // Each flag is set to a value distinct from its neighbours so that swapping
+    // two parameters, or wiring one to the wrong `*Options` setter, is caught.
+
+    #[test]
+    fn describe_cluster_options_maps_each_flag_to_its_own_field() {
+        let options = describe_cluster_options(1_000, true, false);
+        assert_eq!(options.timeout(), Some(1_000));
+        assert!(options.should_include_authorized_operations());
+        assert!(!options.should_include_fenced_brokers());
+
+        // Reversed, so a transposition cannot satisfy both cases.
+        let options = describe_cluster_options(-1, false, true);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_include_authorized_operations());
+        assert!(options.should_include_fenced_brokers());
+    }
+
+    #[test]
+    fn describe_configs_options_maps_each_flag_to_its_own_field() {
+        let options = describe_configs_options(2_000, true, false);
+        assert_eq!(options.timeout(), Some(2_000));
+        assert!(options.should_include_synonyms());
+        assert!(!options.should_include_documentation());
+
+        let options = describe_configs_options(-1, false, true);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_include_synonyms());
+        assert!(options.should_include_documentation());
+    }
+
+    #[test]
+    fn describe_topics_options_maps_each_flag_to_its_own_field() {
+        let options = describe_topics_options(3_000, true, 25);
+        assert_eq!(options.timeout(), Some(3_000));
+        assert!(options.should_include_authorized_operations());
+        assert_eq!(options.partition_size_limit(), 25);
+
+        // A negative partition-size limit leaves Java's default in place rather
+        // than forwarding the sentinel to the setter.
+        let default_limit = DescribeTopicsOptions::new().partition_size_limit();
+        let options = describe_topics_options(-1, false, -1);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_include_authorized_operations());
+        assert_eq!(options.partition_size_limit(), default_limit);
+    }
+
+    #[test]
+    fn create_topics_options_maps_each_flag_to_its_own_field() {
+        let options = create_topics_options(4_000, true, false);
+        assert_eq!(options.timeout(), Some(4_000));
+        assert!(options.should_validate_only());
+        assert!(!options.should_retry_on_quota_violation());
+
+        let options = create_topics_options(-1, false, true);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_validate_only());
+        assert!(options.should_retry_on_quota_violation());
+    }
+
+    #[test]
+    fn create_partitions_options_maps_each_flag_to_its_own_field() {
+        let options = create_partitions_options(5_000, true, false);
+        assert_eq!(options.timeout(), Some(5_000));
+        assert!(options.should_validate_only());
+        assert!(!options.should_retry_on_quota_violation());
+
+        let options = create_partitions_options(-1, false, true);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_validate_only());
+        assert!(options.should_retry_on_quota_violation());
+    }
+
+    #[test]
+    fn delete_topics_options_maps_each_flag_to_its_own_field() {
+        let options = delete_topics_options(6_000, true);
+        assert_eq!(options.timeout(), Some(6_000));
+        assert!(options.should_retry_on_quota_violation());
+
+        let options = delete_topics_options(-1, false);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_retry_on_quota_violation());
+    }
+
+    // -- Enum constant names ------------------------------------------------
+
+    #[test]
+    fn config_source_name_matches_java_enum_constant_names() {
+        // Java's `ConfigEntry.ConfigSource` has no `id()`, so the constant name
+        // is the C contract. Asserted exhaustively because the mock only ever
+        // produces UNKNOWN.
+        let expected = [
+            (ConfigSource::DynamicTopicConfig, "DYNAMIC_TOPIC_CONFIG"),
+            (ConfigSource::DynamicBrokerLoggerConfig, "DYNAMIC_BROKER_LOGGER_CONFIG"),
+            (ConfigSource::DynamicBrokerConfig, "DYNAMIC_BROKER_CONFIG"),
+            (ConfigSource::DynamicDefaultBrokerConfig, "DYNAMIC_DEFAULT_BROKER_CONFIG"),
+            (ConfigSource::DynamicClientMetricsConfig, "DYNAMIC_CLIENT_METRICS_CONFIG"),
+            (ConfigSource::DynamicGroupConfig, "DYNAMIC_GROUP_CONFIG"),
+            (ConfigSource::StaticBrokerConfig, "STATIC_BROKER_CONFIG"),
+            (ConfigSource::DefaultConfig, "DEFAULT_CONFIG"),
+            (ConfigSource::Unknown, "UNKNOWN"),
+        ];
+        for (source, name) in expected {
+            assert_eq!(config_source_name(source), name, "wrong name for {source:?}");
+        }
+    }
+
+    #[test]
+    fn config_type_name_matches_java_enum_constant_names() {
+        let expected = [
+            (ConfigType::Unknown, "UNKNOWN"),
+            (ConfigType::Boolean, "BOOLEAN"),
+            (ConfigType::String, "STRING"),
+            (ConfigType::Int, "INT"),
+            (ConfigType::Short, "SHORT"),
+            (ConfigType::Long, "LONG"),
+            (ConfigType::Double, "DOUBLE"),
+            (ConfigType::List, "LIST"),
+            (ConfigType::Class, "CLASS"),
+            (ConfigType::Password, "PASSWORD"),
+        ];
+        for (config_type, name) in expected {
+            assert_eq!(config_type_name(config_type), name, "wrong name for {config_type:?}");
+        }
+    }
+
+    // -- ConfigEntryC -------------------------------------------------------
+
+    #[test]
+    fn config_entry_c_carries_every_field_including_synonyms() {
+        let entry = ConfigEntry::with_metadata(
+            "retention.ms".to_string(),
+            Some("604800000".to_string()),
+            ConfigSource::DynamicTopicConfig,
+            true,
+            false,
+            vec![
+                // Ordered by precedence in Java; the flattener must not sort.
+                ConfigSynonym::new(
+                    "retention.ms".to_string(),
+                    Some("604800000".to_string()),
+                    ConfigSource::DynamicTopicConfig,
+                ),
+                ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
+            ],
+            ConfigType::Long,
+            Some("The retention window.".to_string()),
+        );
+
+        let flat = ConfigEntryC::new(&entry);
+
+        assert_eq!(text(&flat.name_c), "retention.ms");
+        assert_eq!(opt_text(&flat.value_c), Some("604800000"));
+        // `isDefault()` is derived from the source, not stored separately.
+        assert!(!flat.is_default);
+        assert!(flat.is_sensitive);
+        assert!(!flat.is_read_only);
+        assert_eq!(text(&flat.source_c), "DYNAMIC_TOPIC_CONFIG");
+        assert_eq!(text(&flat.config_type_c), "LONG");
+        assert_eq!(opt_text(&flat.documentation_c), Some("The retention window."));
+
+        assert_eq!(flat.synonyms.len(), 2);
+        assert_eq!(text(&flat.synonyms[0].name_c), "retention.ms");
+        assert_eq!(opt_text(&flat.synonyms[0].value_c), Some("604800000"));
+        assert_eq!(text(&flat.synonyms[0].source_c), "DYNAMIC_TOPIC_CONFIG");
+        assert_eq!(text(&flat.synonyms[1].name_c), "log.retention.ms");
+        assert_eq!(opt_text(&flat.synonyms[1].value_c), None);
+        assert_eq!(text(&flat.synonyms[1].source_c), "STATIC_BROKER_CONFIG");
+    }
+
+    #[test]
+    fn config_entry_c_preserves_null_value_and_documentation() {
+        // Java's `ConfigEntry.value()` and `.documentation()` are both nullable;
+        // C must see null, not an empty string.
+        let flat = ConfigEntryC::new(&ConfigEntry::new("sensitive.config".to_string(), None));
+        assert_eq!(opt_text(&flat.value_c), None);
+        assert_eq!(opt_text(&flat.documentation_c), None);
+        assert!(flat.synonyms.is_empty());
+        assert_eq!(text(&flat.source_c), "UNKNOWN");
+        assert_eq!(text(&flat.config_type_c), "UNKNOWN");
+    }
+
+    #[test]
+    fn config_entry_c_is_default_tracks_the_default_config_source() {
+        let flat = ConfigEntryC::new(&ConfigEntry::with_metadata(
+            "k".to_string(),
+            Some("v".to_string()),
+            ConfigSource::DefaultConfig,
+            false,
+            true,
+            Vec::new(),
+            ConfigType::String,
+            None,
+        ));
+        assert!(flat.is_default);
+        assert!(flat.is_read_only);
+        assert_eq!(text(&flat.source_c), "DEFAULT_CONFIG");
+    }
+
+    #[test]
+    fn config_entry_c_from_config_sorts_by_name_for_stable_indexing() {
+        // `Config.entries()` iterates a HashMap; C addresses entries by index.
+        let config = Config::new(vec![
+            ConfigEntry::new("zzz".to_string(), Some("3".to_string())),
+            ConfigEntry::new("aaa".to_string(), Some("1".to_string())),
+            ConfigEntry::new("mmm".to_string(), Some("2".to_string())),
+        ]);
+        let entries = ConfigEntryC::from_config(&config);
+        let names: Vec<&str> = entries.iter().map(|e| text(&e.name_c)).collect();
+        assert_eq!(names, ["aaa", "mmm", "zzz"]);
+    }
+
+    // -- LogDirDescriptionInner ---------------------------------------------
+
+    #[test]
+    fn log_dir_description_carries_error_and_volume_bytes() {
+        let mut replicas = HashMap::new();
+        replicas.insert(TopicPartition::new("t".to_string(), 0), ReplicaInfo::new(100, 5, false));
+        let description = LogDirDescription::with_volume_bytes(
+            Some(KafkaError::Generic(KafkaGenericError::new(Errors::KafkaStorageError))),
+            replicas,
+            2_000,
+            1_000,
+        );
+
+        let flat = LogDirDescriptionInner::new(&description);
+
+        let error = flat.error.as_ref().expect("log dir reported an error");
+        assert_eq!(error.error.code(), Errors::KafkaStorageError.code());
+        assert_eq!(flat.total_bytes, 2_000);
+        assert_eq!(flat.usable_bytes, 1_000);
+        assert_eq!(flat.replicas.len(), 1);
+        assert_eq!(flat.replicas[0].size, 100);
+        assert_eq!(flat.replicas[0].offset_lag, 5);
+        assert!(!flat.replicas[0].is_future);
+    }
+
+    #[test]
+    fn log_dir_description_reports_absent_volume_bytes_as_unknown() {
+        // Java's empty `OptionalLong` becomes
+        // `DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES` (-1) over the boundary.
+        let flat = LogDirDescriptionInner::new(&LogDirDescription::new(None, HashMap::new()));
+        assert!(flat.error.is_none());
+        assert_eq!(flat.total_bytes, UNKNOWN_VOLUME_BYTES);
+        assert_eq!(flat.usable_bytes, UNKNOWN_VOLUME_BYTES);
+        assert!(flat.replicas.is_empty());
+    }
+
+    #[test]
+    fn log_dir_description_sorts_replicas_by_topic_then_partition() {
+        let mut replicas = HashMap::new();
+        for (topic, partition) in [("b", 0), ("a", 10), ("a", 2)] {
+            replicas.insert(TopicPartition::new(topic.to_string(), partition), ReplicaInfo::new(0, 0, false));
+        }
+        let flat = LogDirDescriptionInner::new(&LogDirDescription::new(None, replicas));
+        let order: Vec<(&str, i32)> = flat.replicas.iter().map(|r| (text(&r.topic_c), r.partition)).collect();
+        // Partition ordering is numeric, not lexicographic: 2 before 10.
+        assert_eq!(order, [("a", 2), ("a", 10), ("b", 0)]);
+    }
+
+    #[test]
+    fn log_dir_description_map_sorts_by_path() {
+        let mut map = HashMap::new();
+        for path in ["/data/2", "/data/1"] {
+            map.insert(path.to_string(), LogDirDescription::new(None, HashMap::new()));
+        }
+        let flat = LogDirDescriptionMapInner::new(&map);
+        let paths: Vec<&str> = flat.log_dirs.iter().map(text).collect();
+        assert_eq!(paths, ["/data/1", "/data/2"]);
+        assert_eq!(flat.descriptions.len(), 2);
+    }
+
+    // -- ReplicaLogDirInfoInner ---------------------------------------------
+
+    #[test]
+    fn replica_log_dir_info_carries_both_log_dirs() {
+        let flat = ReplicaLogDirInfoInner::new(&ReplicaLogDirInfo::new(
+            Some("/data/current".to_string()),
+            7,
+            Some("/data/future".to_string()),
+            3,
+        ));
+        assert_eq!(opt_text(&flat.current_log_dir_c), Some("/data/current"));
+        assert_eq!(flat.current_offset_lag, 7);
+        assert_eq!(opt_text(&flat.future_log_dir_c), Some("/data/future"));
+        assert_eq!(flat.future_offset_lag, 3);
+    }
+
+    #[test]
+    fn replica_log_dir_info_preserves_null_log_dirs() {
+        // This is what a real broker returns for a replica whose topic it does
+        // not know (`KafkaAdminClient.java:3066-3068` seeds a default
+        // `ReplicaLogDirInfo`), and for a replica that is not being moved.
+        let flat = ReplicaLogDirInfoInner::new(&ReplicaLogDirInfo::new(None, -1, None, -1));
+        assert_eq!(opt_text(&flat.current_log_dir_c), None);
+        assert_eq!(opt_text(&flat.future_log_dir_c), None);
+        assert_eq!(flat.current_offset_lag, -1);
+        assert_eq!(flat.future_offset_lag, -1);
     }
 }

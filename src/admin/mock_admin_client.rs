@@ -1102,6 +1102,14 @@ impl Admin for MockAdminClient {
             unwrapped.entry(broker).or_default();
         }
 
+        // Two deliberate divergences below, both skipping where Java throws.
+        // Java dereferences `partitionLogDirs.get(0)` and
+        // `unwrappedResults.get(node.id())` unchecked
+        // (`MockAdminClient.java:1082-1083`), so a topic with no log dirs raises
+        // `IndexOutOfBoundsException` and a replica on a broker the caller did
+        // not ask about raises an NPE. Both are latent defects in a test helper
+        // rather than a contract, and reproducing them would mean panicking in a
+        // public API (CLAUDE.md §10.1), so each case is skipped instead.
         for (topic_name, meta) in &state.all_topics {
             // For tests, we assume there will always be only 1 log-dir entry.
             let Some(log_dir) = meta.partition_log_dirs.first() else {

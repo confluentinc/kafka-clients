@@ -3304,6 +3304,25 @@ static PyObject* borrowed_error_to_py(const kafka_common_KafkaError_t* e) {
                          kafka_common_KafkaError_is_fatal(e) ? 1 : 0);
 }
 
+// Builds the (error, value) pair every admin `*_drain` maps a key to, consuming
+// both references on every path and returning NULL on failure with an exception
+// already set by whichever step failed.
+//
+// Callers must NOT Py_XDECREF the arguments after a NULL return. Py_BuildValue's
+// 'N' unit steals its argument's reference even when the build itself fails:
+// CPython's do_mktuple routes a PyTuple_New failure through do_ignore, which
+// re-runs do_mkvalue over the remaining format units and releases each result.
+// Releasing them again here is a double-decref. It is only reachable under
+// allocation failure, which is exactly when a double-decref is least survivable.
+static PyObject* error_value_pair(PyObject* err, PyObject* value) {
+    if (err == NULL || value == NULL) {
+        Py_XDECREF(err);
+        Py_XDECREF(value);
+        return NULL;
+    }
+    return Py_BuildValue("(NN)", err, value);
+}
+
 // (topic_id, num_partitions, replication_factor,
 //  [(name, value, is_default, is_sensitive, is_read_only)], embedded_error)
 static PyObject* topic_metadata_to_py(const kafka_admin_TopicMetadataAndConfig_t* mc) {
@@ -3404,8 +3423,7 @@ static PyObject* py_CreateTopicsResult_drain(PyObject* self, PyObject* args) {
         const kafka_admin_TopicMetadataAndConfig_t* mc =
             kafka_admin_CreateTopicsResult_get_value(r, i);
         PyObject* meta = mc ? topic_metadata_to_py(mc) : (Py_INCREF(Py_None), Py_None);
-        PyObject* val = (err && meta) ? Py_BuildValue("(NN)", err, meta) : NULL;
-        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(meta); }
+        PyObject* val = error_value_pair(err, meta);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_admin_CreateTopicsResult_destroy(r); return NULL;
@@ -3477,8 +3495,7 @@ static PyObject* py_DescribeTopicsResult_drain(PyObject* self, PyObject* args) {
         const kafka_admin_TopicDescription_t* desc =
             kafka_admin_DescribeTopicsResult_get_value(r, i);
         PyObject* value = desc ? topic_description_to_py(desc) : (Py_INCREF(Py_None), Py_None);
-        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
-        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        PyObject* val = error_value_pair(err, value);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_admin_DescribeTopicsResult_destroy(r); return NULL;
@@ -3523,11 +3540,16 @@ static PyObject* py_DeleteRecordsResult_drain(PyObject* self, PyObject* args) {
         PyObject* key = Py_BuildValue("(si)", kafka_admin_DeleteRecordsResult_get_topic(r, i),
                                       kafka_admin_DeleteRecordsResult_get_partition(r, i));
         PyObject* err = borrowed_error_to_py(kafka_admin_DeleteRecordsResult_get_error(r, i));
-        PyObject* val = (key && err)
-            ? Py_BuildValue("(NL)", err,
-                            (long long)kafka_admin_DeleteRecordsResult_get_low_watermark(r, i))
-            : NULL;
-        if (val == NULL) Py_XDECREF(err);
+        // Not error_value_pair: the second slot is a plain long watermark, not
+        // an object. Same 'N'-steals-even-on-failure rule though, so `err` is
+        // released only on the branch where Py_BuildValue never ran.
+        PyObject* val = NULL;
+        if (key == NULL || err == NULL) {
+            Py_XDECREF(err);
+        } else {
+            val = Py_BuildValue("(NL)", err,
+                                (long long)kafka_admin_DeleteRecordsResult_get_low_watermark(r, i));
+        }
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_admin_DeleteRecordsResult_destroy(r); return NULL;
@@ -3879,8 +3901,7 @@ static PyObject* py_DescribeConfigsResult_drain(PyObject* self, PyObject* args) 
         PyObject* err = borrowed_error_to_py(kafka_admin_DescribeConfigsResult_get_error(r, i));
         const kafka_admin_Config_t* config = kafka_admin_DescribeConfigsResult_get_value(r, i);
         PyObject* value = config ? config_to_py(config) : (Py_INCREF(Py_None), Py_None);
-        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
-        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        PyObject* val = error_value_pair(err, value);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_admin_DescribeConfigsResult_destroy(r); return NULL;
@@ -4007,8 +4028,7 @@ static PyObject* py_DescribeLogDirsResult_drain(PyObject* self, PyObject* args) 
         const kafka_admin_LogDirDescriptionMap_t* map =
             kafka_admin_DescribeLogDirsResult_get_value(r, i);
         PyObject* value = map ? log_dir_map_to_py(map) : (Py_INCREF(Py_None), Py_None);
-        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
-        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        PyObject* val = error_value_pair(err, value);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_admin_DescribeLogDirsResult_destroy(r); return NULL;
@@ -4070,8 +4090,7 @@ static PyObject* py_DescribeReplicaLogDirsResult_drain(PyObject* self, PyObject*
                             kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(info),
                             (long long)kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(info))
             : (Py_INCREF(Py_None), Py_None);
-        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
-        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        PyObject* val = error_value_pair(err, value);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_admin_DescribeReplicaLogDirsResult_destroy(r); return NULL;
