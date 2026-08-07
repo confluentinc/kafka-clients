@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import threading
 import _confluentkafka as _lib
 from _confluentkafka import ProducerRecord
 from concurrent.futures import (Future)
+
+_log = logging.getLogger(__name__)
 
 
 # ProducerRecord is a C extension type imported from _confluentkafka module
@@ -90,6 +93,43 @@ class RecordMetadata:
 
     def timestamp(self):
         return self._get_record_metadata()._timestamp
+
+
+def _invoke_on_delivery(on_delivery, metadata, exception):
+    """Invoke a user delivery callback, shielding the C caller from it.
+
+    Mirrors Java's ``Callback.onCompletion(RecordMetadata, Exception)``: exactly
+    one of the two arguments is meaningful (``metadata`` on success,
+    ``exception`` on failure) and the callback returns nothing. Java's contract
+    is that the callback fires exactly once per record, so it is invoked here on
+    *every* completion path — including one whose ``Future`` was already
+    cancelled or resolved, where the future itself is left untouched.
+
+    An exception raised by the callback is logged and swallowed. It must not
+    propagate: the caller is a C completion thread, where the only handling
+    available is ``PyErr_Print``, and the record's ``Future`` has already been
+    resolved by then."""
+    if on_delivery is None:
+        return
+    try:
+        on_delivery(metadata, exception)
+    except Exception:  # noqa: BLE001 - user callback, must not escape into C
+        _log.exception("Error in on_delivery callback")
+
+
+def _completion_to_python(result, error):
+    """Convert the raw C completion handles into owned Python objects.
+
+    Called exactly once per completion, before any branching, so ownership of
+    both handles is transferred into Python objects that free themselves —
+    :meth:`KafkaError._from_c` destroys the error handle immediately, and
+    :class:`RecordMetadata` owns the metadata handle until it is copied or
+    garbage collected. Every downstream branch (future cancelled, future
+    already done, ``on_delivery`` invocation) can then simply use or ignore the
+    objects with no double-free or leak to reason about."""
+    metadata = RecordMetadata._from_c(result) if result != 0 else None
+    exception = KafkaError._from_c(error) if error != 0 else None
+    return metadata, exception
 
 
 class _ProducerBase:
@@ -222,38 +262,44 @@ class Producer(_ProducerBase):
                 self._remove_future(future)
                 future.cancel()
 
-    def send(self, producer_record: ProducerRecord) -> Future[RecordMetadata]:
+    def send(self, producer_record: ProducerRecord,
+             on_delivery=None) -> Future[RecordMetadata]:
+        """Send a record; returns a ``Future`` resolving to its metadata.
+
+        Args:
+            producer_record: the :class:`ProducerRecord` to send.
+            on_delivery: optional ``callback(metadata, exception)`` invoked once
+                the record completes — Java's ``Callback`` argument to
+                ``send(record, callback)``. Exactly one argument is meaningful:
+                ``metadata`` is a :class:`RecordMetadata` on success and
+                ``exception`` a :class:`KafkaError` on failure. It is invoked
+                exactly once per record, even if the returned ``Future`` was
+                cancelled or already resolved; exceptions it raises are logged
+                and swallowed.
+
+        .. warning::
+           ``on_delivery`` runs on the producer's completion thread, not on the
+           caller's — the same contract as Java, where the callback executes on
+           the producer's I/O thread. (This differs from
+           ``confluent-kafka-python``, which defers callbacks until the
+           application calls ``poll()``.) Keep it short and do not block in it.
+        """
         self._check_closed()
         self._validate_record(producer_record)
         ret = Future()
 
         def cb(result, error):
-            if ret.cancelled():
-                if error != 0:
-                    _lib.KafkaError_destroy(error)
-                if result != 0:
-                    _lib.RecordMetadata_destroy(result)
-                return
-            if error != 0:
-                if ret.done():
-                    _lib.KafkaError_destroy(error)
-                    if result != 0:
-                        _lib.RecordMetadata_destroy(result)
-                    return
-                ret.set_exception(
-                    KafkaError._from_c(error)
-                )
-                if result != 0:
-                    _lib.RecordMetadata_destroy(result)
-            else:
-                if ret.done():
-                    if result != 0:
-                        _lib.RecordMetadata_destroy(result)
-                    return
-                if result != 0:
-                    ret.set_result(RecordMetadata._from_c(result))
+            # Runs on the C completion thread with the GIL held. Convert the
+            # handles once up front, then resolve the future (unless the caller
+            # cancelled it or it is already done) and honor the callback
+            # obligation on every path.
+            metadata, exception = _completion_to_python(result, error)
+            if not ret.cancelled() and not ret.done():
+                if exception is not None:
+                    ret.set_exception(exception)
                 else:
-                    ret.set_result(None)
+                    ret.set_result(metadata)
+            _invoke_on_delivery(on_delivery, metadata, exception)
 
         full = _lib.Producer_send(self.c_producer, producer_record, cb)
         fut = self._add_future(ret)
@@ -363,35 +409,19 @@ class AsyncProducer(_ProducerBase):
         await self.close()
 
     @staticmethod
-    def _resolve_future(ret, result, error):
+    def _resolve_future(ret, on_delivery, result, error):
         """Resolve a single future from C completion handles. Runs on the event
         loop thread, so it is safe to mutate the asyncio.Future. Ownership of
         the ``result`` / ``error`` C handles transfers here and is always
-        freed."""
-        if ret.cancelled():
-            if error != 0:
-                _lib.KafkaError_destroy(error)
-            if result != 0:
-                _lib.RecordMetadata_destroy(result)
-            return
-        if error != 0:
-            if ret.done():
-                _lib.KafkaError_destroy(error)
-                if result != 0:
-                    _lib.RecordMetadata_destroy(result)
-                return
-            ret.set_exception(KafkaError._from_c(error))
-            if result != 0:
-                _lib.RecordMetadata_destroy(result)
-        else:
-            if ret.done():
-                if result != 0:
-                    _lib.RecordMetadata_destroy(result)
-                return
-            if result != 0:
-                ret.set_result(RecordMetadata._from_c(result))
+        freed. ``on_delivery`` (if given) is invoked here too — on the loop
+        thread, and on every path, per the callback obligation."""
+        metadata, exception = _completion_to_python(result, error)
+        if not ret.cancelled() and not ret.done():
+            if exception is not None:
+                ret.set_exception(exception)
             else:
-                ret.set_result(None)
+                ret.set_result(metadata)
+        _invoke_on_delivery(on_delivery, metadata, exception)
 
     @staticmethod
     def _resolve_space(space):
@@ -406,8 +436,8 @@ class AsyncProducer(_ProducerBase):
             items = self._pending
             self._pending = []
             self._drain_scheduled = False
-        for ret, result, error in items:
-            self._resolve_future(ret, result, error)
+        for ret, on_delivery, result, error in items:
+            self._resolve_future(ret, on_delivery, result, error)
 
     def _cancel(self):
         # asyncio.Future done-callbacks are scheduled, not run inline, so
@@ -420,8 +450,17 @@ class AsyncProducer(_ProducerBase):
                 future.cancel()
         self.futures.clear()
 
-    async def send(self, producer_record: ProducerRecord) \
-            -> "asyncio.Future[RecordMetadata]":
+    async def send(self, producer_record: ProducerRecord,
+                   on_delivery=None) -> "asyncio.Future[RecordMetadata]":
+        """Send a record; returns an ``asyncio.Future`` resolving to its metadata.
+
+        ``on_delivery`` is the asyncio counterpart of the sync
+        :meth:`Producer.send` argument — a plain (non-coroutine)
+        ``callback(metadata, exception)`` invoked exactly once per record. It
+        runs **on the event loop thread** (inside the completion drain), not on
+        the C completion thread, so it may safely touch loop state; it must not
+        block the loop.
+        """
         self._check_closed()
         self._validate_record(producer_record)
         loop = asyncio.get_running_loop()
@@ -431,16 +470,16 @@ class AsyncProducer(_ProducerBase):
         # futures must only be mutated on the loop thread, so buffer the
         # completion and wake the loop once per drain (coalescing) rather than
         # once per record. If the loop is already closed we can't schedule
-        # anything — free the C handles here to avoid leaking them.
+        # anything — convert (and thereby free) the C handles here, and still
+        # honor the callback obligation, noting that in this teardown case
+        # on_delivery necessarily runs on the completion thread.
         def cb(result, error):
             if loop.is_closed():
-                if error != 0:
-                    _lib.KafkaError_destroy(error)
-                if result != 0:
-                    _lib.RecordMetadata_destroy(result)
+                metadata, exception = _completion_to_python(result, error)
+                _invoke_on_delivery(on_delivery, metadata, exception)
                 return
             with self._pending_lock:
-                self._pending.append((ret, result, error))
+                self._pending.append((ret, on_delivery, result, error))
                 if self._drain_scheduled:
                     return
                 self._drain_scheduled = True

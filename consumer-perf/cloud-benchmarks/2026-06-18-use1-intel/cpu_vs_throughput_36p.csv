@@ -1,0 +1,34 @@
+# 36p (low-partition, 36-broker = high-connection) CPU vs throughput. USE1, 2KB, default config.
+# Note producer count + CRC per row (they affect CPU). Cleanest matched-CRC-off ARM sweep is the
+# focus for the single-selector CPU analysis. CPU=avg % of one core (/proc except batch1 self-report).
+arch,partitions,rate_mbs,msg_s,producers,client,crc,cpu_pct,p99_ms,rss_avg_mb,source
+ARM,36,300,150000,1,rust,on,104,17,33,arm-batch
+ARM,36,300,150000,1,librdkafka,off,84,16,50,arm-batch
+ARM,36,300,150000,1,java,on,109,17,662,arm-batch
+ARM,36,200,100000,1,rust,on,87,15,23,arm-batch
+ARM,36,200,100000,1,librdkafka,off,59,14,39,arm-batch
+ARM,36,200,100000,1,java,on,96,15,628,arm-batch
+ARM,36,100,50000,1,rust,on,54,12,21,arm-batch
+ARM,36,100,50000,1,librdkafka,off,32,12,34,arm-batch
+ARM,36,100,50000,1,java,on,70,13,656,arm-batch
+ARM,36,50,25000,1,rust,on,28,11,20,arm-batch
+ARM,36,50,25000,1,librdkafka,off,17,11,26,arm-batch
+ARM,36,50,25000,1,java,on,42,11,628,arm-batch
+ARM,36,300,150000,1,rust,off,100,17,24,crc-matrix
+ARM,36,300,150000,1,librdkafka,on,103,16,47,crc-matrix
+ARM,36,200,100000,1,rust,off,85,15,23,crc-matrix
+ARM,36,200,100000,1,librdkafka,on,71,14,34,crc-matrix
+ARM,36,100,50000,1,rust,off,50,12,21,crc-matrix
+ARM,36,100,50000,1,librdkafka,on,38,21,49,crc-matrix
+ARM,36,50,25000,1,rust,off,27,11,20,crc-matrix
+ARM,36,50,25000,1,librdkafka,on,20,11,26,crc-matrix
+Intel,36,300,150000,1,rust,on,102,17,28,batch1-1producer
+Intel,36,300,150000,1,librdkafka,off,111,16,49,batch1-1producer
+Intel,36,300,150000,1,java,on,112,17,786,batch1-1producer
+Intel,36,300,150000,4,rust,on,107,18,,batch(4prod)
+Intel,36,200,100000,4,rust,on,92,15,,batch(4prod)
+Intel,36,200,100000,4,librdkafka,off,81,14,,batch(4prod)
+Intel,36,100,50000,4,rust,on,56,12,,batch(4prod)
+Intel,36,100,50000,4,librdkafka,off,44,12,,batch(4prod)
+Intel,36,50,25000,4,rust,on,32,11,,batch(4prod)
+Intel,36,50,25000,4,librdkafka,off,23,11,,batch(4prod)

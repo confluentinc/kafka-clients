@@ -1,0 +1,60 @@
+     5.14%  kafka-consumer-  consumer-perf      [.] aws_lc_0_40_0_aesv8_gcm_8x_dec_128
+     4.09%  kafka-consumer-  [kernel.kallsyms]  [k] __arch_copy_to_user
+     3.29%  kafka-consumer-  consumer-perf      [.] std::collections::hash::map::HashMap<K,V,S,A>::get
+     2.28%  kafka-consumer-  libc.so.6          [.] __GI___memcpy_sve
+     2.03%  kafka-consumer-  libc.so.6          [.] malloc
+     1.93%  kafka-consumer-  libc.so.6          [.] _int_free
+     1.72%  kafka-consumer-  libc.so.6          [.] memcmp
+     1.71%  consumer-perf    consumer-perf      [.] core::iter::traits::iterator::Iterator::fold
+     1.70%  kafka-consumer-  libc.so.6          [.] _int_malloc
+     1.60%  kafka-consumer-  libc.so.6          [.] __GI___memset_generic
+     1.58%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::selector::Selector as confluent_kafka::common::network::selectable::Selectable>::poll::{{closure}}
+     1.46%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::consumer_network_thread::ConsumerNetworkThread<K>::run_once::{{closure}}
+     1.45%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::abstract_fetch::AbstractFetch::prepare_fetch_requests
+     1.42%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::fetch_collector::FetchCollector<K,V>::collect_fetch
+     1.35%  kafka-consumer-  [kernel.kallsyms]  [k] el0_svc
+     1.30%  consumer-perf    consumer-perf      [.] confluent_kafka::common::metrics::sensor::Sensor::record_internal
+     1.24%  kafka-consumer-  libc.so.6          [.] malloc_consolidate
+     1.20%  kafka-consumer-  consumer-perf      [.] rustls::conn::ConnectionCore<Data>::process_new_packets
+     1.19%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::selector::Selector::poll_channel_reads::{{closure}}
+     1.13%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::metrics::sensor::Sensor::record_internal
+     1.12%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::network_client::NetworkClient<S,H> as confluent_kafka::kafka_client::KafkaClient>::poll::{{closure}}
+     1.07%  consumer-perf    libc.so.6          [.] _int_free
+     1.05%  consumer-perf    libc.so.6          [.] __GI___memcpy_sve
+     1.03%  kafka-consumer-  consumer-perf      [.] confluent_kafka::consumer::internals::fetch_request_manager::FetchRequestManager::drain_pending_completions
+     1.02%  kafka-consumer-  consumer-perf      [.] indexmap::map::IndexMap<K,V,S>::get_index_of
+     0.98%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::completed_fetch::CompletedFetch::peek_current_record
+     0.96%  kafka-consumer-  [kernel.kallsyms]  [k] check_heap_object
+     0.93%  kafka-consumer-  consumer-perf      [.] std::collections::hash::map::HashMap<K,V,S,A>::contains_key
+     0.71%  kafka-consumer-  libc.so.6          [.] cfree@GLIBC_2.17
+     0.69%  kafka-consumer-  consumer-perf      [.] hashbrown::map::HashMap<K,V,S,A>::get
+     0.68%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::has_bytes_buffered
+     0.63%  kafka-consumer-  consumer-perf      [.] hashbrown::map::HashMap<K,V,S,A>::get
+     0.61%  kafka-consumer-  [kernel.kallsyms]  [k] fdget
+     0.60%  consumer-perf    consumer-perf      [.] <confluent_kafka::common::metrics::stats::sampled_stat::SampledStat as confluent_kafka::common::metrics::stat::Stat>::record
+     0.55%  kafka-consumer-  [kernel.kallsyms]  [k] ena_start_xmit
+     0.54%  kafka-consumer-  [vdso]             [.] 0x000000000000051c
+     0.53%  kafka-consumer-  [kernel.kallsyms]  [k] sch_direct_xmit
+     0.51%  kafka-consumer-  consumer-perf      [.] <alloc::vec::Vec<T,A> as alloc::vec::spec_extend::SpecExtend<T,I>>::spec_extend
+     0.50%  kafka-consumer-  consumer-perf      [.] std::collections::hash::map::HashMap<K,V,S,A>::get
+     0.49%  consumer-perf    [vdso]             [.] 0x000000000000051c
+     0.47%  consumer-perf    libc.so.6          [.] malloc
+     0.47%  kafka-consumer-  consumer-perf      [.] confluent_kafka::common::network::selector::Selector::arm_channel
+     0.46%  kafka-consumer-  consumer-perf      [.] tokio::sync::notify::NotifiedProject::poll_notified
+     0.45%  kafka-consumer-  libc.so.6          [.] unlink_chunk.constprop.0
+     0.44%  kafka-consumer-  consumer-perf      [.] tokio::net::tcp::stream::TcpStream::try_read
+     0.44%  kafka-consumer-  consumer-perf      [.] <rustls::conn::connection::Reader as std::io::Read>::read
+     0.43%  kafka-consumer-  libc.so.6          [.] realloc
+     0.42%  kafka-consumer-  libc.so.6          [.] __libc_recv
+     0.38%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::is_connected
+     0.37%  kafka-consumer-  [kernel.kallsyms]  [k] arch_counter_get_cntvct
+     0.36%  kafka-consumer-  [kernel.kallsyms]  [k] lock_sock_nested
+     0.35%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::metrics::stats::sampled_stat::SampledStat as confluent_kafka::common::metrics::stat::Stat>::record
+     0.35%  kafka-consumer-  consumer-perf      [.] <confluent_kafka::common::network::ssl_transport_layer::SslTransportLayer as confluent_kafka::common::network::transport_layer::TransportLayer>::try_read
+     0.34%  kafka-consumer-  consumer-perf      [.] confluent_kafka::network_client::NetworkClient<S,H>::do_send
+     0.34%  kafka-consumer-  consumer-perf      [.] std::collections::hash::set::HashSet<T,S,A>::remove
+     0.34%  consumer-perf    consumer-perf      [.] confluent_kafka::common::protocol::varint::read_unsigned_varint
+     0.34%  consumer-perf    consumer-perf      [.] confluent_kafka::common::metrics::metrics::Metrics::get_sensor
+     0.34%  consumer-perf    consumer-perf      [.] confluent_kafka::consumer::internals::completed_fetch::CompletedFetch::drain
+     0.33%  kafka-consumer-  [kernel.kallsyms]  [k] skb_attempt_defer_free
+     0.33%  kafka-consumer-  [vdso]             [.] 0x000000000000050c

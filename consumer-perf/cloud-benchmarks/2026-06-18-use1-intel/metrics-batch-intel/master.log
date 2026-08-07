@@ -1,0 +1,8 @@
+[19:16:34] MBATCH-INTEL START
+[19:16:34] START R-200p-metrics (rust WITH-METRICS self-produce, cmp-bench-200p, 1800s)
+[19:50:43] END R-200p-metrics
+[19:50:43] START R-36p-metrics (rust WITH-METRICS self-produce, cmp-bench-36p, 1800s)
+[20:24:50] END R-36p-metrics
+[20:24:50] START RDK-200p-stats (librdkafka statistics.interval.ms=5000, cmp-bench-200p, 1800s, ext producer)
+[20:59:39] END RDK-200p-stats
+[20:59:39] MBATCH-INTEL DONE

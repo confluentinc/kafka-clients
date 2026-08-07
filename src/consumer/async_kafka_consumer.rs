@@ -63,8 +63,9 @@ use tokio::task::JoinHandle;
 
 use regex::Regex;
 
+use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::LogContext;
-use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::common::{IsolationLevel, KafkaError, MetricName, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
@@ -72,6 +73,7 @@ use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::consumer_network_thread::ThreadTime;
@@ -85,6 +87,9 @@ use crate::consumer::internals::events::completable_event::{calculate_deadline_m
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_collector::FetchCollector;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
+use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
+use crate::consumer::internals::kafka_consumer_metrics::KafkaConsumerMetrics;
 use crate::consumer::internals::member_state_listener::MemberStateListener;
 use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
@@ -119,68 +124,829 @@ enum BgJoin {
     },
 }
 
-/// A `Send + 'static` handle that can fire [`Consumer::wakeup`] from a
-/// task or thread other than the one holding the consumer.
+/// A `Clone + Send + Sync` handle to a consumer that exposes
+/// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+/// callable from a task or thread other than the one owning the consumer.
 ///
-/// **No Java class counterpart.** Java's `Consumer` reference is itself
-/// freely shareable across threads, so `consumer.wakeup()` can be called
-/// from another thread while the owning thread blocks in
-/// `poll()` / `position()` (e.g.
-/// `CompletableFuture.runAsync(() -> consumer.wakeup())`,
-/// `PlaintextConsumerTest.java:1501`). In Rust the consumer is owned via
-/// `&mut self` for the duration of a blocking call, so a bare reference
-/// cannot cross the task boundary. This handle captures only the
-/// internally-synchronized, `Arc`-backed wakeup state (the rotating
-/// [`WakeupTrigger`] watch channel and the bg-task notify closure) so the
-/// same cross-task wakeup pattern is expressible **without `unsafe`**.
+/// **No Java class counterpart — it recovers a Java capability.** Java's
+/// `Consumer` reference is itself a freely-shareable, thread-safe
+/// reference. Application code relies on this in two ways that a bare
+/// Rust `&mut self` consumer cannot express:
 ///
-/// Obtain one via [`Consumer::wakeup_handle`] **before** starting a
-/// blocking call, move it into the other task, and call
-/// [`WakeupHandle::wakeup`].
+///   1. **Cross-task `wakeup()`** — `consumer.wakeup()` is called from
+///      another thread while the owning thread blocks in `poll()` /
+///      `position()` (e.g.
+///      `CompletableFuture.runAsync(() -> consumer.wakeup())`,
+///      `PlaintextConsumerTest.java:1501`).
+///   2. **In-callback reentrancy** — a `ConsumerRebalanceListener` calls
+///      `consumer.assign/seek/pause/resume/position/committed/
+///      beginningOffsets/commit` from *inside*
+///      `onPartitionsAssigned` / `onPartitionsRevoked` by capturing the
+///      `consumer` variable in the (anonymous-inner-class) listener
+///      (`PlaintextConsumerCallbackTest.java`).
 ///
-/// Cheap to clone — clones share the same underlying wakeup state.
+/// In Rust the consumer is owned via `&mut self` for the duration of a
+/// blocking call, and `Box<dyn Consumer>` is not `Clone`, so neither
+/// pattern is expressible with a bare reference. This handle captures
+/// only the already-`Arc`-shared, internally-synchronized consumer state,
+/// so both patterns are expressible **without `unsafe`**. The user
+/// captures the handle into their listener struct — the Rust equivalent
+/// of Java capturing the `consumer` variable.
+///
+/// Obtain one via [`Consumer::handle`]. Cheap to clone — clones share the
+/// same underlying state.
+///
+/// # Operations
+///
+/// Sync: [`wakeup`](Self::wakeup), [`assignment`](Self::assignment),
+/// [`subscription`](Self::subscription), [`paused`](Self::paused).
+///
+/// Async (reentrant-safe consumer ops): [`assign`](Self::assign),
+/// [`seek`](Self::seek), [`seek_to_beginning`](Self::seek_to_beginning),
+/// [`seek_to_end`](Self::seek_to_end), [`pause`](Self::pause),
+/// [`resume`](Self::resume), [`position`](Self::position),
+/// [`committed`](Self::committed),
+/// [`beginning_offsets`](Self::beginning_offsets),
+/// [`end_offsets`](Self::end_offsets),
+/// [`offsets_for_times`](Self::offsets_for_times),
+/// [`commit_sync`](Self::commit_sync),
+/// [`commit_async`](Self::commit_async).
+///
+/// Lifecycle / ownership operations (`poll`, `subscribe`, `unsubscribe`,
+/// `close`) are intentionally NOT exposed — Java does not invoke these
+/// reentrantly from callbacks.
+///
+/// # Concrete `async fn`, no `#[async_trait]`
+///
+/// `ConsumerHandle` is a concrete struct, so its async methods are
+/// concrete `async fn` returning an anonymous future (no
+/// `Pin<Box<dyn Future>>`), per CLAUDE.md §11. None of its methods are on
+/// a per-record hot path.
 #[derive(Clone)]
-pub struct WakeupHandle {
-    inner: WakeupHandleInner,
+pub struct ConsumerHandle {
+    inner: ConsumerHandleInner,
+}
+
+/// Shared state captured by a [`ConsumerHandle`] for an
+/// [`AsyncKafkaConsumer`]. Every field is already `Arc`-shared on the
+/// consumer; the handle holds cheap clones.
+#[derive(Clone)]
+pub(crate) struct AsyncConsumerHandleState {
+    /// Rotating wakeup token + bg-task `select!` poke (see
+    /// [`AsyncKafkaConsumer::wakeup`]).
+    wakeup_trigger: WakeupTrigger,
+    bg_wakeup: Arc<dyn Fn() + Send + Sync>,
+    /// Submits `ApplicationEvent`s to the bg task.
+    application_event_handler: Arc<ApplicationEventHandler>,
+    /// Subscription / assignment state (sync getters + `position` /
+    /// `seek` pre-checks).
+    subscriptions: Arc<Mutex<SubscriptionState>>,
+    /// Fetch buffer — `assign` drops buffered fetches for no-longer-owned
+    /// partitions (Java `fetchBuffer.retainAll`).
+    fetch_buffer: Arc<FetchBuffer>,
+    /// Time source for deadline computation.
+    time: Arc<dyn ThreadTime>,
+    /// Cached `default.api.timeout.ms`.
+    default_api_timeout_ms: i64,
 }
 
 #[derive(Clone)]
-enum WakeupHandleInner {
-    /// `AsyncKafkaConsumer`: fire the rotating-token trigger AND poke the
-    /// bg-task `select!`, exactly as `AsyncKafkaConsumer::wakeup` does.
-    Async {
-        wakeup_trigger: WakeupTrigger,
-        bg_wakeup: Arc<dyn Fn() + Send + Sync>,
-    },
-    /// `MockConsumer`: set the shared wakeup flag observed by the next
-    /// `poll()`.
+enum ConsumerHandleInner {
+    /// `AsyncKafkaConsumer`: full reentrant-safe op surface backed by the
+    /// shared `Arc` state.
+    Async(AsyncConsumerHandleState),
+    /// `MockConsumer`: only `wakeup()` is meaningful — it sets the shared
+    /// wakeup flag observed by the next `poll()`. The mock has no bg task
+    /// / event pipeline, so the async ops are not wired (they return an
+    /// `unsupported_version` error — the mock test surface drives the
+    /// concrete `MockConsumer` directly).
     Mock { flag: Arc<AtomicBool> },
 }
 
-impl WakeupHandle {
+impl ConsumerHandle {
     /// Fires the consumer's `wakeup()` from this handle. Equivalent to
     /// calling [`Consumer::wakeup`] on the owning consumer, but callable
     /// from any task / thread without holding a reference to the consumer.
     pub fn wakeup(&self) {
         match &self.inner {
-            WakeupHandleInner::Async { wakeup_trigger, bg_wakeup } => {
-                wakeup_trigger.wakeup();
-                bg_wakeup();
+            ConsumerHandleInner::Async(state) => {
+                state.wakeup_trigger.wakeup();
+                (state.bg_wakeup)();
             },
-            WakeupHandleInner::Mock { flag } => {
+            ConsumerHandleInner::Mock { flag } => {
                 flag.store(true, Ordering::SeqCst);
             },
         }
     }
 
-    /// Builds an async-consumer wakeup handle from its shared wakeup state.
-    pub(crate) fn for_async(wakeup_trigger: WakeupTrigger, bg_wakeup: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { inner: WakeupHandleInner::Async { wakeup_trigger, bg_wakeup } }
+    // ── Sync getters ───────────────────────────────────────────────────
+
+    /// [`Consumer::assignment`] via the shared `SubscriptionState`.
+    pub fn assignment(&self) -> HashSet<TopicPartition> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().assigned_partitions(),
+            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
     }
 
-    /// Builds a mock-consumer wakeup handle from its shared wakeup flag.
+    /// [`Consumer::subscription`] via the shared `SubscriptionState`.
+    pub fn subscription(&self) -> HashSet<String> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().subscription(),
+            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
+    }
+
+    /// [`Consumer::paused`] via the shared `SubscriptionState`.
+    pub fn paused(&self) -> HashSet<TopicPartition> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
+            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
+    }
+
+    // ── Async reentrant-safe consumer ops ───────────────────────────────
+
+    /// [`AsyncKafkaConsumer::assign`].
+    pub async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+        self.async_state()?.assign(partitions).await
+    }
+
+    /// [`AsyncKafkaConsumer::seek`].
+    pub async fn seek(&self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
+        self.async_state()?.seek(partition, offset, None).await
+    }
+
+    /// [`AsyncKafkaConsumer::seek_with_metadata`].
+    pub async fn seek_with_metadata(
+        &self,
+        partition: TopicPartition,
+        offset_and_metadata: OffsetAndMetadata,
+    ) -> Result<(), KafkaError> {
+        let offset = offset_and_metadata.offset();
+        let epoch = offset_and_metadata.leader_epoch();
+        self.async_state()?.seek(partition, offset, epoch).await
+    }
+
+    /// [`AsyncKafkaConsumer::seek_to_beginning`].
+    pub async fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.async_state()?
+            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+            .await
+    }
+
+    /// [`AsyncKafkaConsumer::seek_to_end`].
+    pub async fn seek_to_end(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.async_state()?
+            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+            .await
+    }
+
+    /// [`AsyncKafkaConsumer::pause`].
+    pub async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.async_state()?.pause(partitions).await
+    }
+
+    /// [`AsyncKafkaConsumer::resume`].
+    pub async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.async_state()?.resume(partitions).await
+    }
+
+    /// [`AsyncKafkaConsumer::position`].
+    pub async fn position(&self, partition: &TopicPartition) -> Result<i64, KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.position(partition, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::position_timeout`].
+    pub async fn position_timeout(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError> {
+        self.async_state()?.position(partition, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::committed`].
+    pub async fn committed(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.committed(partitions, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::beginning_offsets`].
+    pub async fn beginning_offsets(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
+        state.beginning_or_end_offsets(partitions, -2, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::end_offsets`].
+    pub async fn end_offsets(&self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
+        state.beginning_or_end_offsets(partitions, -1, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::offsets_for_times`].
+    pub async fn offsets_for_times(
+        &self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.offsets_for_times(timestamps_to_search, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_sync`]. Commits the offsets the bg
+    /// task has consumed (Java `commitSync()` with no offsets — commit
+    /// `allConsumed`).
+    pub async fn commit_sync(&self) -> Result<(), KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.commit_sync(None, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_sync_offsets`].
+    pub async fn commit_sync_offsets(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<(), KafkaError> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.commit_sync(Some(offsets), timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget commit of the
+    /// offsets the bg task has consumed.
+    pub async fn commit_async(&self) -> Result<(), KafkaError> {
+        self.async_state()?.commit_async(None).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_async_offsets`].
+    pub async fn commit_async_offsets(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<(), KafkaError> {
+        self.async_state()?.commit_async(Some(offsets)).await
+    }
+
+    /// Returns the shared async state, or an error if this handle was
+    /// obtained from a `MockConsumer` (which has no event pipeline). The
+    /// mock surface drives the concrete `MockConsumer` directly, so this
+    /// path is never hit by faithful mock tests.
+    fn async_state(&self) -> Result<&AsyncConsumerHandleState, KafkaError> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => Ok(state),
+            ConsumerHandleInner::Mock { .. } => Err(KafkaError::unsupported_version(
+                "ConsumerHandle async operations are not supported on a MockConsumer handle; \
+                 drive the MockConsumer directly.",
+            )),
+        }
+    }
+
+    /// Builds an async-consumer handle from its shared state.
+    pub(crate) fn for_async(state: AsyncConsumerHandleState) -> Self {
+        Self { inner: ConsumerHandleInner::Async(state) }
+    }
+
+    /// Builds a mock-consumer handle from its shared wakeup flag.
     pub(crate) fn for_mock(flag: Arc<AtomicBool>) -> Self {
-        Self { inner: WakeupHandleInner::Mock { flag } }
+        Self { inner: ConsumerHandleInner::Mock { flag } }
+    }
+}
+
+impl AsyncConsumerHandleState {
+    /// Shared submit + wakeup-aware-await core, the **no-drain** sibling
+    /// of [`AsyncKafkaConsumer::submit_and_drain`].
+    ///
+    /// The handle cannot own the background-event receiver or the
+    /// rebalance-listener invoker (those stay on `&mut self`), so it does
+    /// NOT drain background events while waiting. It is only ever called
+    /// reentrantly from *inside* a rebalance-listener callback, by which
+    /// point (after Phase 41b) the background task is no longer frozen on
+    /// the callback ack — it keeps spinning and services this event. A
+    /// single rebalance callback never triggers a nested rebalance, so
+    /// there is nothing for the handle to drain.
+    ///
+    /// The wait honors `wakeup()` exactly like
+    /// [`AsyncKafkaConsumer::process_background_events_until`]'s
+    /// `enable_wakeup` arm: it races the receiver against the rotating
+    /// wakeup token's cancellation and the absolute `deadline_ms`. The
+    /// deadline / timeout logic is identical in shape — see that method
+    /// for the per-stage rationale.
+    async fn submit_and_await<T: Send + 'static>(
+        &self,
+        event: ApplicationEvent,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+    ) -> Result<T, KafkaError> {
+        let now_ms = self.time.milliseconds();
+        self.application_event_handler.add(event, now_ms)?;
+        self.await_completion(receiver, deadline_ms, timeout_msg, enable_wakeup).await
+    }
+
+    /// Milliseconds remaining until `deadline_ms`, saturating at zero.
+    fn remaining_ms(&self, deadline_ms: i64) -> i64 {
+        deadline_ms.saturating_sub(self.time.milliseconds()).max(0)
+    }
+
+    fn default_api_timeout_deadline_ms(&self) -> i64 {
+        calculate_deadline_ms(self.time.milliseconds(), self.default_api_timeout_ms)
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::assign`].
+    async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+        if partitions.is_empty() {
+            // Phase 41 Issue 4: On the owning consumer, `assign([])` delegates
+            // to `unsubscribe()` (leave the group). The handle intentionally
+            // does NOT expose the unsubscribe / leave-group lifecycle pipeline
+            // (it owns neither `background_event_rx` nor the close path), so it
+            // cannot faithfully reproduce `assign([])`. Submitting an empty
+            // `AssignmentChange` would clear the assignment WITHOUT leaving the
+            // group — a silent divergence from Java's `KafkaConsumer.assign([])`
+            // for a group consumer. Reject it with a clear error pointing the
+            // caller at the owning consumer's `unsubscribe()`.
+            return Err(KafkaError::illegal_argument(
+                "ConsumerHandle::assign with an empty collection is not supported: on the owning \
+                 consumer assign([]) leaves the group (equivalent to unsubscribe()), which the \
+                 handle does not expose. Call unsubscribe() on the owning AsyncKafkaConsumer instead.",
+            ));
+        }
+
+        for tp in &partitions {
+            if tp.topic().trim().is_empty() {
+                return Err(KafkaError::illegal_argument(
+                    "Topic partitions to assign to cannot have null or empty topic",
+                ));
+            }
+        }
+
+        let partitions_set: HashSet<TopicPartition> = partitions.into_iter().collect();
+        self.fetch_buffer.retain_all(&partitions_set);
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the assignment-change event to complete",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::seek`] /
+    /// [`AsyncKafkaConsumer::seek_with_metadata`].
+    async fn seek(&self, partition: TopicPartition, offset: i64, offset_epoch: Option<i32>) -> Result<(), KafkaError> {
+        if offset < 0 {
+            return Err(KafkaError::illegal_argument("seek offset must not be a negative number"));
+        }
+        log::info!("Seeking to offset {offset} for partition {partition}");
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::SeekUnvalidated { handle, partition, offset, offset_epoch },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek event to complete",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe `seekToBeginning` / `seekToEnd`.
+    async fn seek_with_reset_strategy(
+        &self,
+        partitions: &[TopicPartition],
+        strategy: crate::consumer::AutoOffsetResetStrategy,
+    ) -> Result<(), KafkaError> {
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::ResetOffset { handle, partitions: set, offset_reset_strategy: strategy },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek-with-reset-strategy event to complete",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::pause`].
+    async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::PausePartitions { handle, partitions: set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for PausePartitions",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::resume`].
+    async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::ResumePartitions { handle, partitions: set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for ResumePartitions",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::position_timeout`].
+    async fn position(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError> {
+        {
+            let subs = self.subscriptions.lock().unwrap();
+            if !subs.is_assigned(partition) {
+                return Err(KafkaError::illegal_state(
+                    "You can only check the position for partitions assigned to this consumer.",
+                ));
+            }
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        loop {
+            let position_offset = {
+                let subs = self.subscriptions.lock().unwrap();
+                subs.valid_position(partition)?.map(|fp| fp.offset)
+            };
+            if let Some(offset) = position_offset {
+                return Ok(offset);
+            }
+
+            let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+            let drain_result = self
+                .submit_and_await::<()>(
+                    ApplicationEvent::CheckAndUpdatePositions { handle },
+                    receiver,
+                    deadline_ms,
+                    "Timeout expired while waiting for CheckAndUpdatePositions",
+                    true,
+                )
+                .await;
+            match drain_result {
+                Ok(()) => {},
+                Err(KafkaError::Timeout(_)) => {},
+                Err(err) => return Err(err),
+            }
+
+            if self.time.milliseconds() >= deadline_ms {
+                return Err(KafkaError::timeout(format!(
+                    "Timeout of {}ms expired before the position for partition {} could be determined",
+                    timeout.as_millis(),
+                    partition
+                )));
+            }
+        }
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::committed_timeout`].
+    async fn committed(
+        &self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let result = self
+            .submit_and_await::<HashMap<TopicPartition, OffsetAndMetadata>>(
+                ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for FetchCommittedOffsets",
+                true,
+            )
+            .await;
+        match result {
+            Ok(map) => Ok(map),
+            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+                "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
+                timeout.as_millis(),
+                format_partitions_for_display(partitions),
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reentrant-safe `beginningOffsets` / `endOffsets`.
+    async fn beginning_or_end_offsets(
+        &self,
+        partitions: &[TopicPartition],
+        timestamp: i64,
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut timestamps_to_search: HashMap<TopicPartition, i64> = HashMap::new();
+        for tp in partitions {
+            timestamps_to_search.insert(tp.clone(), timestamp);
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        if timeout.is_zero() {
+            let (handle, _receiver, _erased) =
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+            self.application_event_handler.add(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
+                now_ms,
+            )?;
+            return Ok(HashMap::new());
+        }
+
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+        let result = self
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for ListOffsets",
+                false,
+            )
+            .await;
+        match result {
+            Ok(offsets_map) => {
+                let mut out = HashMap::with_capacity(offsets_map.len());
+                for (tp, opt) in offsets_map {
+                    if let Some(oat) = opt {
+                        out.insert(tp, oat.offset());
+                    }
+                }
+                Ok(out)
+            },
+            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+                "Failed to get offsets by times in {}ms",
+                timeout.as_millis()
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::offsets_for_times_timeout`].
+    async fn offsets_for_times(
+        &self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+        for (tp, ts) in &timestamps_to_search {
+            if *ts < 0 {
+                return Err(KafkaError::illegal_argument(format!(
+                    "The target time for partition {tp} is {ts}. The target time cannot be negative."
+                )));
+            }
+        }
+        if timestamps_to_search.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        if timeout.is_zero() {
+            let (handle, _receiver, _erased) =
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+            self.application_event_handler.add(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
+                now_ms,
+            )?;
+            return Ok(HashMap::new());
+        }
+
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+        let result = self
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for ListOffsets",
+                false,
+            )
+            .await;
+        match result {
+            Ok(offsets_map) => {
+                let mut out = HashMap::with_capacity(offsets_map.len());
+                for (tp, opt) in offsets_map {
+                    if let Some(oat) = opt {
+                        out.insert(tp, oat.build_offset_and_timestamp()?);
+                    }
+                }
+                Ok(out)
+            },
+            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+                "Failed to get offsets by times in {}ms",
+                timeout.as_millis()
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::commit_sync`].
+    ///
+    /// Deviation from `AsyncKafkaConsumer::commit_sync`: the handle does
+    /// NOT own the `OffsetCommitCallbackInvoker`, the interceptor chain,
+    /// or `last_pending_async_commit`, so it does not (a) drain pending
+    /// async-commit callbacks, (b) run `interceptors.onCommit(...)`. It
+    /// submits a `CommitSync` event and awaits the committed offsets. The
+    /// interceptor `onCommit` hook fires from the owning consumer's own
+    /// `commit_*` path, not from a reentrant handle call — matching the
+    /// fact that a listener flushing offsets via `commit_sync` is
+    /// concerned with durability, not with the interceptor side-channel.
+    async fn commit_sync(
+        &self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        timeout: Duration,
+    ) -> Result<(), KafkaError> {
+        // Empty-offsets short-circuit (Java's `completedFuture(null)`).
+        if let Some(map) = &offsets
+            && map.is_empty()
+        {
+            return Ok(());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let (offsets_ready_handle, offsets_ready_rx, _erased_or) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler.add(
+            ApplicationEvent::CommitSync { handle, offsets_ready: offsets_ready_handle, offsets },
+            now_ms,
+        )?;
+        // Wait until the bg task has resolved which offsets to commit.
+        self.await_completion::<()>(
+            offsets_ready_rx,
+            deadline_ms,
+            "Timeout expired while waiting for commit offsets to be ready",
+            true,
+        )
+        .await?;
+        // Wait for the commit RPC result.
+        self.await_completion::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            receiver,
+            deadline_ms,
+            format!(
+                "Timeout of {}ms expired before successfully committing offsets",
+                timeout.as_millis()
+            ),
+            true,
+        )
+        .await
+        .map(|_committed| ())
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget:
+    /// submits a `CommitAsync` event and spawns a detached task to consume
+    /// the result (logging failures). The handle cannot store
+    /// `last_pending_async_commit` or run the callback invoker, so user
+    /// `OffsetCommitCallback`s are NOT supported on the handle — the
+    /// no-callback overload mirrors Java's `commitAsync()`.
+    async fn commit_async(
+        &self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+    ) -> Result<(), KafkaError> {
+        if let Some(map) = &offsets
+            && map.is_empty()
+        {
+            return Ok(());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let (offsets_ready_handle, offsets_ready_rx, _erased_or) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler.add(
+            ApplicationEvent::CommitAsync { handle, offsets_ready: offsets_ready_handle, offsets },
+            now_ms,
+        )?;
+        // Java's commitAsync is non-blocking and never throws Wakeup; wait
+        // only for offsets-ready (so the commit window is pinned) with
+        // wakeup disabled, then detach.
+        self.await_completion::<()>(
+            offsets_ready_rx,
+            deadline_ms,
+            "Timeout expired while waiting for commit offsets to be ready",
+            false,
+        )
+        .await?;
+        tokio::spawn(async move {
+            match receiver.await {
+                Ok(Ok(_committed)) => {},
+                Ok(Err(err)) => log::error!("Offset commit (via ConsumerHandle) failed: {err}"),
+                Err(_recv_err) => log::error!("commit_async (via ConsumerHandle) receiver dropped without completion"),
+            }
+        });
+        Ok(())
+    }
+
+    /// The shared wakeup-aware, no-drain await core (see
+    /// [`Self::submit_and_await`]). Awaits an already-submitted event's
+    /// receiver, racing it against the rotating wakeup token's
+    /// cancellation (when `enable_wakeup`) and the absolute `deadline_ms`.
+    /// All handle ops funnel their wait through this one helper so the
+    /// deadline / timeout logic is not duplicated. The commit paths submit
+    /// one event but await two receivers (offsets-ready + commit result),
+    /// hence the submit and the await are separated here.
+    async fn await_completion<T: Send + 'static>(
+        &self,
+        mut receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+    ) -> Result<T, KafkaError> {
+        loop {
+            if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
+            match receiver.try_recv() {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(err)) => return Err(err),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(KafkaError::illegal_state(
+                        "Background task dropped the completion sender without completing it",
+                    ));
+                },
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    let remaining = self.remaining_ms(deadline_ms);
+                    if remaining <= 0 {
+                        return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
+                    }
+                    let wait = std::cmp::min(remaining, 100) as u64;
+                    let token = if enable_wakeup {
+                        Some(self.wakeup_trigger.current_token())
+                    } else {
+                        None
+                    };
+                    let recv_fut = &mut receiver;
+                    match token {
+                        Some(tok) => {
+                            tokio::select! {
+                                biased;
+                                _ = tok.cancelled() => {},
+                                res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
+                                    match res {
+                                        Ok(Ok(Ok(value))) => return Ok(value),
+                                        Ok(Ok(Err(err))) => return Err(err),
+                                        Ok(Err(_recv_err)) => {
+                                            return Err(KafkaError::illegal_state(
+                                                "Background task dropped the completion sender without completing it",
+                                            ));
+                                        },
+                                        Err(_elapsed) => {},
+                                    }
+                                },
+                            }
+                        },
+                        None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
+                            Ok(Ok(Ok(value))) => return Ok(value),
+                            Ok(Ok(Err(err))) => return Err(err),
+                            Ok(Err(_recv_err)) => {
+                                return Err(KafkaError::illegal_state(
+                                    "Background task dropped the completion sender without completing it",
+                                ));
+                            },
+                            Err(_elapsed) => {},
+                        },
+                    }
+                },
+            }
+            if self.remaining_ms(deadline_ms) <= 0 {
+                return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
+            }
+        }
     }
 }
 
@@ -193,17 +959,76 @@ impl WakeupHandle {
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
 /// instance; dropped (with `signal_close`) on close.
 pub(crate) struct NetworkThreadCloseHandle {
-    /// Cancels the bg-task `run_once` loop and wakes the trigger so the
-    /// next iteration observes the shutdown.
+    /// Clears the bg-task `running` flag and pokes the bg loop so the
+    /// next iteration observes the shutdown. Built by
+    /// [`build_network_thread_close_fns`].
     signal_close_fn: Box<dyn Fn() + Send + Sync>,
-    /// Wakes the bg-task's `select!` on the wakeup token. Held as an
-    /// `Arc` (not `Box`) so a clone can be handed to a shareable
-    /// [`WakeupHandle`] (so cross-task `wakeup()` — a first-class Java
-    /// pattern — is expressible without `unsafe`); the bg-wakeup
-    /// closure is `Send + Sync` and side-effect-idempotent.
+    /// Pokes the bg-task's `select!` so its in-flight network poll returns
+    /// at a safe boundary. Held as an `Arc` (not `Box`) so a clone can be
+    /// handed to a shareable [`ConsumerHandle`] (so cross-task `wakeup()`
+    /// — a first-class Java pattern — is expressible without `unsafe`);
+    /// the bg-wakeup closure is `Send + Sync` and side-effect-idempotent.
+    /// Built by [`build_network_thread_close_fns`].
     wakeup_fn: Arc<dyn Fn() + Send + Sync>,
     /// How the bg loop is joined on close (tokio task vs dedicated thread).
     join: BgJoin,
+}
+
+/// `(signal_close_fn, wakeup_fn)` as returned by
+/// [`build_network_thread_close_fns`] and consumed by
+/// [`NetworkThreadCloseHandle::new`] / [`NetworkThreadCloseHandle::new_dedicated`].
+/// Aliased to satisfy clippy's `type_complexity` lint.
+pub(crate) type NetworkThreadCloseFns = (Box<dyn Fn() + Send + Sync>, Box<dyn Fn() + Send + Sync>);
+
+/// Builds the two erased closures held by a [`NetworkThreadCloseHandle`]:
+/// `signal_close_fn` (clear the bg-task `running` flag, then wake) and
+/// `wakeup_fn` (wake only).
+///
+/// **Both wakes go through the application-event `Notify`** — the same
+/// `Arc<Notify>` [`ApplicationEventHandler::wake_background_task`] fires and
+/// that `ConsumerNetworkThread::run_once`'s network-poll `select!` has an arm
+/// for. That arm pokes the selector's wakeup primitive, so the in-flight poll
+/// returns at a safe boundary instead of waiting out `poll_wait_time_ms`
+/// (bounded by `MAX_POLL_TIMEOUT_MS` = 5 s). Java analog:
+/// `ConsumerNetworkThread.close()` → `wakeup()` → `networkClientDelegate
+/// .wakeup()` → `Selector.wakeup()`.
+///
+/// It MUST NOT be [`WakeupTrigger::wakeup`], for two independent reasons:
+///
+///  1. `close_internal` step 1 calls `wakeup_trigger.disable()`, after which
+///     `WakeupTrigger::wakeup()` returns early without cancelling the token.
+///     A trigger-based shutdown wake is therefore *silently inert* on the
+///     close path, and `close()` blocks until the in-flight poll times out.
+///  2. The trigger is the *user-facing* `Consumer::wakeup()` cancellation
+///     token; firing it internally makes the caller's own `poll()` return
+///     `KafkaError::Wakeup` although the user never called `wakeup()` (the
+///     Phase-41b listener-ack bug). Java's `ConsumerNetworkThread.wakeup()`
+///     likewise never touches `wakeupTrigger`.
+///
+/// Callers that *do* want the user-visible cancellation
+/// ([`AsyncKafkaConsumer::wakeup`], [`ConsumerHandle::wakeup`]) fire the
+/// trigger themselves before calling [`NetworkThreadCloseHandle::wakeup`].
+///
+/// Shared by the production constructor and the unit-test fixture
+/// (`spawn_dedicated_bg`) so the two can never diverge: a fixture that
+/// substitutes a working primitive for a broken one turns its test into a
+/// proof about the fixture.
+pub(crate) fn build_network_thread_close_fns(
+    running: Arc<AtomicBool>,
+    event_notify: Arc<tokio::sync::Notify>,
+) -> NetworkThreadCloseFns {
+    let close_notify = Arc::clone(&event_notify);
+    let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        running.store(false, Ordering::Release);
+        // `notify_one()` stores a permit when the bg loop is not currently
+        // parked on `notified()`, so the shutdown poke is never lost in the
+        // gap between two `run_once` phases.
+        close_notify.notify_one();
+    });
+    let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        event_notify.notify_one();
+    });
+    (signal_close_fn, wakeup_fn)
 }
 
 impl NetworkThreadCloseHandle {
@@ -242,20 +1067,26 @@ impl NetworkThreadCloseHandle {
     }
 
     /// Clones the bg-task wakeup closure as a shareable `Arc`. Used to
-    /// build a [`WakeupHandle`] that can fire the bg-task `select!` from
+    /// build a [`ConsumerHandle`] that can fire the bg-task `select!` from
     /// another task without holding any reference to the consumer.
     pub(crate) fn wakeup_fn_clone(&self) -> Arc<dyn Fn() + Send + Sync> {
         Arc::clone(&self.wakeup_fn)
     }
 
     /// Signals the bg task to exit and wakes it from its current
-    /// `select!`. Idempotent.
+    /// `select!` via the application-event `Notify` (NOT the user-facing
+    /// `WakeupTrigger` — see [`build_network_thread_close_fns`]).
+    /// Idempotent.
     pub(crate) fn signal_close(&self) {
         (self.signal_close_fn)();
     }
 
-    /// Wakes the bg task's `select!` without signalling shutdown. Used
-    /// from `AsyncKafkaConsumer::wakeup`.
+    /// Pokes the bg task's `select!` via the application-event `Notify`
+    /// (NOT the user-facing `WakeupTrigger` — see
+    /// [`build_network_thread_close_fns`]) so an in-flight network poll
+    /// returns at a safe boundary, without signalling shutdown. Used from
+    /// `AsyncKafkaConsumer::wakeup`, `ConsumerHandle::wakeup` and
+    /// `close_internal` step 7.
     pub(crate) fn wakeup(&self) {
         (self.wakeup_fn)();
     }
@@ -377,6 +1208,34 @@ where
     /// App-side fetch decoder. Owned by `Arc` so the consumer can hand a
     /// shared reference to per-poll helpers without re-construction.
     fetch_collector: Arc<FetchCollector<K, V>>,
+
+    /// The metrics registry (Java `private final Metrics metrics`). Kept so
+    /// Phase M7 can expose the public `metrics()` accessor over the same
+    /// registry the fetch path records into. The fetch managers hold
+    /// `Arc<FetchMetricsManager>` clones that reference this same registry.
+    #[allow(dead_code)]
+    metrics: Arc<Metrics>,
+
+    /// Consumer-level poll/commit timing metrics (`KafkaConsumerMetrics`,
+    /// `AsyncKafkaConsumer.java:291`). Records `time-between-poll`,
+    /// `poll-idle-ratio-avg`, `last-poll-seconds-ago`,
+    /// `commit-sync-time-ns-total`, `committed-time-ns-total` into the same
+    /// `metrics` registry. Wired in `poll`/`commit_sync`/`committed`/`close`.
+    kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
+
+    /// Async-consumer background-task / event-queue metrics
+    /// (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Records into the
+    /// same `metrics` registry; wired into the bg task, the event handlers,
+    /// and the network client delegate. Used app-side by
+    /// `process_background_events` (bg-event queue/processing time) and
+    /// removed in `close`.
+    async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+
+    /// Shared mirror of the background-event queue depth (Java reads
+    /// `backgroundEventQueue.size()`; tokio mpsc has no `len()`). Bumped by
+    /// `BackgroundEventHandler::add` on the bg task, reset to 0 by
+    /// `process_background_events` (Java's `drainEvents`).
+    background_event_queue_size: Arc<AtomicI64>,
 
     // ── App-side only ─────────────────────────────────────────────────
     /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
@@ -684,6 +1543,17 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub network_thread_close: NetworkThreadCloseHandle,
     pub fetch_buffer: Arc<FetchBuffer>,
     pub fetch_collector: Arc<FetchCollector<K, V>>,
+    /// The metrics registry. Owned here so Phase M7 can expose the public
+    /// `metrics()` accessor over the same registry the fetch path records into.
+    pub metrics: Arc<Metrics>,
+    /// Consumer-level poll/commit timing metrics
+    /// (`KafkaConsumerMetrics`), recording into the same `metrics` registry.
+    pub kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
+    /// Async-consumer background-task / event-queue metrics
+    /// (`AsyncConsumerMetrics`), recording into the same `metrics` registry.
+    pub async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+    /// Shared mirror of the background-event queue depth.
+    pub background_event_queue_size: Arc<AtomicI64>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
@@ -871,11 +1741,59 @@ where
         let api_versions = Arc::new(ApiVersions::new());
 
         // Java lines 425-429 — `backgroundEventHandler = new
-        // BackgroundEventHandler(...)`.
-        let background_event_handler = Arc::new(BackgroundEventHandler::new(bg_event_tx));
+        // BackgroundEventHandler(...)`. The `AsyncConsumerMetrics` and the
+        // shared background-event queue-depth counter are wired below (after
+        // the `metrics` registry exists) before the handler is shared.
+        let mut background_event_handler = BackgroundEventHandler::new(bg_event_tx);
 
         // Java line 432 — `fetchBuffer = new FetchBuffer(logContext)`.
         let fetch_buffer = Arc::new(FetchBuffer::new());
+
+        // Java lines 402/419 — `metrics = createMetrics(config, time, reporters)`
+        // then `fetchMetricsManager = createFetchMetricsManager(metrics)`.
+        // The consumer owns the `Arc<Metrics>` (kept for Phase M7's public
+        // `metrics()` accessor); the `Arc<FetchMetricsManager>` is shared into
+        // the fetch path (FetchRequestManager / FetchCollector). The full
+        // Metrics-wiring (`consumer.metrics()`, reporter list) is finalized in
+        // M7 over THIS same registry — no re-plumb.
+        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config);
+
+        // M4: the consumer-level + heartbeat + offset-commit metrics managers
+        // all register against the SAME `Arc<Metrics>` registry. Java
+        // constructs each from `metrics` in the relevant constructor
+        // (`KafkaConsumerMetrics`/`HeartbeatMetricsManager`/
+        // `OffsetCommitMetricsManager`). The heartbeat/commit managers are
+        // wired into their bg-task request managers post-construction (the
+        // request managers are built below), mirroring the coordinator/
+        // interceptor-hook setter pattern.
+        let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
+        let offset_commit_metrics_manager = Arc::new(
+            crate::consumer::internals::offset_commit_metrics_manager::OffsetCommitMetricsManager::new(&metrics),
+        );
+        let heartbeat_metrics_manager =
+            Arc::new(crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager::new(&metrics));
+
+        // M6: the async-consumer background-task / event-queue metrics
+        // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
+        // against the SAME `Arc<Metrics>` under `CONSUMER_METRIC_GROUP`
+        // (`consumer-metrics`). Wired into the bg task, the application/
+        // background event handlers, and the network client delegate (the
+        // record sites Java passes `asyncConsumerMetrics` to). The two
+        // `Arc<AtomicI64>` queue-depth counters mirror Java's O(1)
+        // `queue.size()` for the application/background event queues (the
+        // tokio mpsc sender exposes no `len()`).
+        let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        ));
+        let application_event_queue_size = Arc::new(AtomicI64::new(0));
+        let background_event_queue_size = Arc::new(AtomicI64::new(0));
+
+        // Wire the background-event handler's metrics + queue-depth counter
+        // before it is shared into the delegate (single owner here).
+        background_event_handler
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&background_event_queue_size));
+        let background_event_handler = Arc::new(background_event_handler);
 
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
@@ -929,7 +1847,7 @@ where
             MetadataRecoveryStrategy::None,
             log_context,
         );
-        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(NetworkClientDelegate::new(
+        let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,
             Arc::clone(&metadata).metadata_arc(),
@@ -937,7 +1855,11 @@ where
             false, // notify_metadata_errors_via_error_queue — Java
                    // passes `false` for the consumer ctor (Java
                    // `AsyncKafkaConsumer.java:443`).
-        )));
+        );
+        // M6: Java passes `asyncConsumerMetrics` to the delegate ctor; wire it
+        // here before the delegate is shared with the bg task.
+        network_client_delegate_inner.set_async_consumer_metrics(Arc::clone(&async_consumer_metrics));
+        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(network_client_delegate_inner));
 
         // Java line 446 — `offsetCommitCallbackInvoker = new
         // OffsetCommitCallbackInvoker(interceptors)`. The interceptor
@@ -1048,6 +1970,13 @@ where
                 as Arc<dyn crate::consumer::internals::offset_commit_callback_invoker::AutoCommitInterceptorHook>);
         }
 
+        // M4: wire the OffsetCommitMetricsManager into the commit manager so
+        // the commit-response handler records per-commit request latency
+        // (`CommitRequestManager.java:767`).
+        if let Some(commit_arc) = commit.as_ref() {
+            commit_arc.set_offset_commit_metrics_manager(Arc::clone(&offset_commit_metrics_manager));
+        }
+
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
         // groupProtocol == CONSUMER) config.ignore(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
         // Rust does not track "ignored" config keys (no `ConfigDef`
@@ -1075,6 +2004,17 @@ where
                 Arc::clone(&metadata),
                 Arc::clone(&background_event_handler),
                 auto_commit_enabled,
+                // M5: rebalance latency/rate/failure metrics, registered against
+                // the consumer's shared Arc<Metrics> (M3 field). Java builds the
+                // ConsumerRebalanceMetricsManager inside the membership-manager
+                // constructor; we build it here and pass it in.
+                Some(Arc::new(
+                    crate::consumer::internals::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager::new(
+                        &metrics,
+                        Arc::clone(&subscriptions),
+                    ),
+                )),
+                Arc::new(crate::common::metrics::time::SystemTime),
             ))),
             _ => None,
         };
@@ -1084,14 +2024,21 @@ where
         // build heartbeat-request bodies).
         let consumer_heartbeat: Option<ConsumerHeartbeatRequestManager> =
             match (coordinator.as_ref(), membership_opt.as_ref()) {
-                (Some(coord_arc), Some(membership)) => Some(ConsumerHeartbeatRequestManager::new(
-                    current_time_ms,
-                    &config,
-                    Arc::clone(coord_arc),
-                    Arc::clone(&subscriptions),
-                    Arc::clone(membership),
-                    Arc::clone(&background_event_handler),
-                )),
+                (Some(coord_arc), Some(membership)) => {
+                    let mut hb = ConsumerHeartbeatRequestManager::new(
+                        current_time_ms,
+                        &config,
+                        Arc::clone(coord_arc),
+                        Arc::clone(&subscriptions),
+                        Arc::clone(membership),
+                        Arc::clone(&background_event_handler),
+                    );
+                    // M4: wire the HeartbeatMetricsManager so the send/response
+                    // paths record `last-heartbeat-seconds-ago` /
+                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
+                    hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    Some(hb)
+                },
                 _ => None,
             };
 
@@ -1171,6 +2118,7 @@ where
                 is_unavailable,
                 maybe_auth,
                 Arc::clone(&api_versions),
+                Arc::clone(&fetch_metrics_manager),
             );
             // Wake the bg task when a fetch response is ready so it is drained
             // into the FetchBuffer promptly, instead of waiting for the
@@ -1296,12 +2244,28 @@ where
             Arc::clone(&application_event_reaper),
         );
 
-        // Java lines 471-481 — `applicationEventHandler`.
-        let application_event_handler =
-            Arc::new(ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify)));
+        // Java lines 471-481 — `applicationEventHandler`. M6: wire the
+        // `AsyncConsumerMetrics` + shared application-event queue-depth
+        // counter before sharing the handler (Java passes
+        // `asyncConsumerMetrics` to the ctor).
+        let mut application_event_handler = ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify));
+        application_event_handler
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
+        let application_event_handler = Arc::new(application_event_handler);
 
-        // Java lines 482-487 — `rebalanceListenerInvoker`.
-        let rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+        // Java lines 482-487 — `rebalanceListenerInvoker`. Java passes a
+        // `RebalanceCallbackMetricsManager` + `Time` into the constructor; we
+        // wire them post-construction so the no-arg `new` stays usable in
+        // tests. The metrics manager registers against the consumer's shared
+        // `Arc<Metrics>` (M3 field); the clock is `SystemTime` (the same clock
+        // the metrics registry uses), so the recorded latency durations match.
+        let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+        rebalance_listener_invoker.set_metrics(
+            crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager::new(
+                &metrics,
+            ),
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
         // `CompletableEventReaper` as the application reaper since the
@@ -1320,6 +2284,7 @@ where
             Arc::clone(&subscriptions),
             fetch_config,
             Arc::clone(&_deserializers),
+            Arc::clone(&fetch_metrics_manager),
             fetch_collector_time,
         ));
 
@@ -1342,7 +2307,7 @@ where
         // with the bg thread.
         let max_time_to_wait_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS));
 
-        let network_thread = ConsumerNetworkThread::new(
+        let mut network_thread = ConsumerNetworkThread::new(
             Arc::clone(&time),
             _app_event_rx,
             Arc::clone(&application_event_reaper),
@@ -1354,21 +2319,20 @@ where
             Arc::clone(&max_time_to_wait_ms),
             Arc::clone(&event_notify),
         );
+        // M6: Java passes `asyncConsumerMetrics` to the `ConsumerNetworkThread`
+        // ctor; wire it (plus the application-event queue-depth counter the bg
+        // task resets to 0 on drain) before spawning the bg task.
+        network_thread
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
 
-        // Capture the running-flag + wakeup handles before moving
-        // `network_thread` into `tokio::spawn`. The erased closures
-        // call these to signal close / wake the bg task without
-        // holding a reference to the concrete `K` type.
-        let signal_close_running = network_thread.running_handle();
-        let signal_close_wakeup = wakeup_trigger.clone();
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            signal_close_running.store(false, Ordering::Release);
-            signal_close_wakeup.wakeup();
-        });
-        let wakeup_for_fn = wakeup_trigger.clone();
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_for_fn.wakeup();
-        });
+        // Capture the running-flag + the application-event `Notify` before
+        // moving `network_thread` into the bg thread. The erased closures
+        // call these to signal close / wake the bg task without holding a
+        // reference to the concrete `K` type. Both wakes go through the
+        // `Notify`, never the user-facing `WakeupTrigger` — see
+        // [`build_network_thread_close_fns`] for why.
+        let (signal_close_fn, wakeup_fn) =
+            build_network_thread_close_fns(network_thread.running_handle(), Arc::clone(&event_notify));
 
         // The `max_time_to_wait_ms` slot is seeded with
         // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
@@ -1453,6 +2417,10 @@ where
             network_thread_close,
             fetch_buffer,
             fetch_collector,
+            metrics,
+            kafka_consumer_metrics,
+            async_consumer_metrics,
+            background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
             deserializers: _deserializers,
@@ -1465,6 +2433,44 @@ where
         };
 
         Ok(Self::new_with_components(components))
+    }
+
+    /// Builds the consumer's `Metrics` registry and `FetchMetricsManager`.
+    ///
+    /// Translates Java's `ConsumerUtils.createMetrics(config, time, reporters)`
+    /// followed by `createFetchMetricsManager(metrics)`. The `MetricConfig`
+    /// carries the `metrics.num.samples`, `metrics.sample.window.ms`, and
+    /// `metrics.recording.level` settings and the single `client-id` tag; the
+    /// registry uses the `"consumer"` metric group prefix. The (no-op) reporter
+    /// list and the JMX context are deferred to Phase M7; for M3 the registry is
+    /// reporter-less but fully functional. Returns the owned `Arc<Metrics>`
+    /// (kept on the consumer for M7's public accessor) and the
+    /// `Arc<FetchMetricsManager>` shared into the fetch path.
+    fn create_fetch_metrics_manager(config: &ConsumerConfig) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
+        const CONSUMER_METRIC_GROUP_PREFIX: &str = "consumer";
+        const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(CONSUMER_CLIENT_ID_METRIC_TAG.to_string(), config.client_id().to_string());
+
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .with_samples(config.metrics_num_samples)
+            .with_time_window_ms(config.metrics_sample_window_ms)
+            .with_record_level(recording_level)
+            .with_tags(tags);
+
+        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+
+        // `client-id` is a default config tag, so it is added automatically to
+        // every metric name; the registry's template tag set therefore lists
+        // only `client-id` (matching Java's singleton tag set).
+        let mut registry_tags = indexmap::IndexSet::new();
+        registry_tags.insert(CONSUMER_CLIENT_ID_METRIC_TAG.to_string());
+        let registry = FetchMetricsRegistry::new(registry_tags, CONSUMER_METRIC_GROUP_PREFIX);
+
+        let manager = Arc::new(FetchMetricsManager::new(Arc::clone(&metrics), registry));
+        (metrics, manager)
     }
 
     pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
@@ -1494,6 +2500,10 @@ where
             network_thread_close: components.network_thread_close,
             fetch_buffer: components.fetch_buffer,
             fetch_collector: components.fetch_collector,
+            metrics: components.metrics,
+            kafka_consumer_metrics: components.kafka_consumer_metrics,
+            async_consumer_metrics: components.async_consumer_metrics,
+            background_event_queue_size: components.background_event_queue_size,
             client_id: components.client_id,
             group_id: components.group_id,
             group_metadata: components.group_metadata,
@@ -1592,6 +2602,24 @@ where
         &self.client_id
     }
 
+    /// Java: `Map<MetricName, ? extends Metric> metrics()`
+    /// (`AsyncKafkaConsumer.java:1200-1202`:
+    /// `return Collections.unmodifiableMap(metrics.metrics());`).
+    ///
+    /// Snapshots the consumer's owned `Arc<Metrics>` registry — the SAME
+    /// registry into which every metrics manager (fetch, kafka-consumer,
+    /// heartbeat, offset-commit, rebalance + rebalance-callback, async)
+    /// registers (M3–M6). The returned map is therefore the full Java metric
+    /// set. Cold path (monitoring frequency); the snapshot clones the
+    /// registry `HashMap` under its lock.
+    ///
+    /// Rust returns the owned `HashMap` (caller may not mutate the registry
+    /// through it — it is a clone of `Arc<KafkaMetric>` handles), the natural
+    /// analog of Java's `Collections.unmodifiableMap`.
+    pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        self.metrics.metrics()
+    }
+
     /// Java: `ConsumerGroupMetadata groupMetadata()`.
     ///
     /// # Java divergence
@@ -1685,19 +2713,51 @@ where
     /// signal handlers.
     pub fn wakeup(&self) {
         self.wakeup_trigger.wakeup();
-        // Also wake the bg task's `select!` directly so the underlying
-        // `KafkaClient::poll` is unblocked even if the wakeup token was
-        // already cancelled.
+        // Java's `wakeup()` is the single `wakeupTrigger.wakeup()` statement
+        // above, because Java's `WakeupTrigger` completes the pending
+        // `CompletableFuture` a blocked API call is waiting on — it does not
+        // have to interrupt a socket poll. Rust's `poll()` can instead be
+        // parked inside `NetworkClientDelegate::poll_default` on the bg task,
+        // so the loop also has to be woken (Java's `Selector.wakeup()` analog).
+        //
+        // When the trigger is **enabled**, the statement above already does
+        // that: it cancels the token, and `run_once`'s network-poll `select!`
+        // has a `token.cancelled()` arm that pokes the selector's wakeup handle
+        // (`consumer_network_thread.rs`), so the in-flight poll returns at a
+        // safe boundary. The poke below is then redundant and costs one
+        // spurious early poll return.
+        //
+        // It is load-bearing in exactly one window: after `close_internal` step
+        // 1 has called `wakeup_trigger.disable()`, `WakeupTrigger::wakeup()`
+        // returns early without cancelling anything, so the token arm never
+        // fires and this is the *only* wake. That window is reachable — a
+        // [`ConsumerHandle`] is `Clone + Send + Sync` and its `wakeup()` (which
+        // performs the same two statements) can race a `close()` from another
+        // task. Pinned by
+        // `wakeup_pokes_the_bg_task_even_when_the_trigger_is_disabled`.
+        //
+        // Note it must NOT be the token again: `CancellationToken::cancel()` is
+        // idempotent, so re-firing the (possibly already cancelled) trigger
+        // unblocks nothing. See [`build_network_thread_close_fns`].
         self.network_thread_close.wakeup();
     }
 
-    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
-    /// [`Self::wakeup`] from another task / thread. See [`WakeupHandle`]
-    /// for the rationale (Java's `Consumer` is freely shareable across
-    /// threads; this is the safe Rust equivalent for the cross-task
-    /// `wakeup()` pattern).
-    pub fn wakeup_handle(&self) -> WakeupHandle {
-        WakeupHandle::for_async(self.wakeup_trigger.clone(), self.network_thread_close.wakeup_fn_clone())
+    /// Returns a `Clone + Send + Sync` [`ConsumerHandle`] exposing
+    /// [`Self::wakeup`] and the reentrant-safe consumer ops, callable from
+    /// another task / thread. See [`ConsumerHandle`] for the rationale
+    /// (Java's `Consumer` is freely shareable across threads; this is the
+    /// safe Rust equivalent for both the cross-task `wakeup()` pattern and
+    /// in-callback rebalance-listener reentrancy).
+    pub fn handle(&self) -> ConsumerHandle {
+        ConsumerHandle::for_async(AsyncConsumerHandleState {
+            wakeup_trigger: self.wakeup_trigger.clone(),
+            bg_wakeup: self.network_thread_close.wakeup_fn_clone(),
+            application_event_handler: Arc::clone(&self.application_event_handler),
+            subscriptions: Arc::clone(&self.subscriptions),
+            fetch_buffer: Arc::clone(&self.fetch_buffer),
+            time: Arc::clone(&self.time),
+            default_api_timeout_ms: self.default_api_timeout_ms,
+        })
     }
 
     /// Returns the cached `max_time_to_wait` value, set by the bg task
@@ -1866,6 +2926,17 @@ where
         // `Ok(())` (so a failed submission does not leave the app-side
         // slot pointing at a listener that never landed in
         // `SubscriptionState`).
+        //
+        // The mirror is written UNCONDITIONALLY, including with `None`:
+        // Java has a single slot (`SubscriptionState.rebalanceListener`)
+        // and `subscribe(topics)` without a listener calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so a listener-less subscribe
+        // must CLEAR the previous registration. Skipping the write for
+        // `None` would leave the app-side mirror pointing at the replaced
+        // listener, which `leave_group_on_close` would then wrongly invoke
+        // (and which would keep the listener alive past its release
+        // point).
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
         // Java's `subscribe(...)` does NOT call `setActiveTask` — match
         // by passing `enable_wakeup=false`.
@@ -1877,9 +2948,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -1910,9 +2979,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -1943,9 +3010,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -2002,8 +3067,20 @@ where
             )
             .await;
 
-        // Reset the listener field — the previous subscription is gone.
-        *self.rebalance_listener.lock().unwrap() = None;
+        // NOTE: the app-side `rebalance_listener` mirror is deliberately NOT
+        // cleared here. Java's `SubscriptionState.unsubscribe()`
+        // (`SubscriptionState.java:347-355`) clears the subscription, the
+        // assignment, the pattern and the subscription type but leaves
+        // `rebalanceListener` alone — `registerRebalanceListener` is only ever
+        // called from the three `subscribe(...)` overloads — and
+        // `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`) does not touch it
+        // either. Since Java has ONE slot and the mirror is what
+        // `process_background_events` reads to invoke the callback, clearing it
+        // here would silently skip a `ConsumerRebalanceListenerCallbackNeeded`
+        // that the bg task enqueued while the registration was still live but
+        // the app drains after `unsubscribe()` returns. The retained listener
+        // is released by the next `subscribe(...)` (which writes the mirror
+        // unconditionally, `None` included) or when the consumer is dropped.
 
         // Java: `resetGroupMetadata()` at `AsyncKafkaConsumer.java:1848`,
         // called UNCONDITIONALLY after `processBackgroundEvents(...)` —
@@ -2133,6 +3210,23 @@ where
     async fn process_background_events_inner(&mut self, skip_rebalance_callback: bool) -> Result<bool, KafkaError> {
         let mut first_error: Option<KafkaError> = None;
         let mut had_events = false;
+        // Java records `recordBackgroundEventQueueProcessingTime(now - startMs)`
+        // for the whole drained batch (after `drainEvents`). The Rust drain is
+        // incremental (`try_recv` loop), so capture `start_ms` before the loop
+        // and record once after. Clone the metrics `Arc` up front so `&mut self`
+        // stays usable in the loop body.
+        let async_consumer_metrics = Arc::clone(&self.async_consumer_metrics);
+        let start_ms = self.time.milliseconds();
+
+        // Java `BackgroundEventHandler.drainEvents` (lines 65-70) records
+        // `recordBackgroundEventQueueSize(0)` UNCONDITIONALLY on every drain —
+        // there is no `isEmpty()` early-return (unlike `processApplicationEvents`).
+        // Since `process_background_events` runs at the top of every blocking-style
+        // API, Java continuously refreshes this gauge to 0 while idle. Mirror that
+        // here so the gauge snaps back to 0 on an empty drain instead of lingering
+        // at the last post-`add` peak.
+        self.background_event_queue_size.store(0, Ordering::SeqCst);
+        async_consumer_metrics.record_background_event_queue_size(0);
 
         loop {
             let envelope = match self.background_event_rx.try_recv() {
@@ -2148,6 +3242,8 @@ where
                 },
             };
             had_events = true;
+            // Java AKC:2206 — record the time this event spent in the queue.
+            async_consumer_metrics.record_background_event_queue_time(self.time.milliseconds() - envelope.enqueued_ms);
 
             match envelope.event {
                 BackgroundEvent::Error { error } => {
@@ -2166,14 +3262,18 @@ where
                     // membership manager queued is simply never run and is
                     // discarded when the consumer closes.
                     //
-                    // We still must send the §31 ack so the bg task's
-                    // `invoke_rebalance_callback` (parked on `ack_rx.await`)
-                    // unblocks and reconciliation completes cleanly — without
-                    // it the bg task never makes progress and
-                    // `network_thread_close.await_join()` (Step 8) hangs. Java
-                    // has no equivalent dependency because its KIP-848
-                    // reconcile chains via `CompletableFuture` and never parks
-                    // the bg thread on the ack.
+                    // We still must send the §31 ack. Since Phase 41 the bg
+                    // loop does NOT park on `ack_rx.await` — it stores the
+                    // receiver as cross-iteration state and `try_recv`s it on
+                    // every `reconcile` / `drive_pending_release` entry — so a
+                    // missing ack cannot hang `await_join()`. What it *does*
+                    // gate is the membership state transition: without the ack
+                    // the member stays stuck in its transitional state
+                    // (`RECONCILING` / `FENCED` / `STALE`) for the rest of the
+                    // close path. Java's equivalent
+                    // `revokeAndAssign(...).whenComplete(...)` chain has the
+                    // same shape: the network thread keeps spinning, only the
+                    // reconcile future is outstanding.
                     //
                     // Ack with `Ok(())`: a benign success completes the
                     // reconcile, so the membership stops re-enqueuing the
@@ -2183,6 +3283,12 @@ where
                     let _ = method_name;
                     let _ = partitions;
                     let _ = ack.send(Ok(()));
+                    // Same poke as the sibling arm below: wake the bg loop so
+                    // it `try_recv`s this ack on its next iteration instead of
+                    // waiting out the in-flight selector poll. Matters more on
+                    // the close path than off it — every close step runs under
+                    // the close deadline.
+                    self.application_event_handler.wake_background_task();
                 },
                 BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
                     // Read the currently-registered listener and drop the
@@ -2245,6 +3351,36 @@ where
                     let send_result = result.clone();
                     let _ = ack.send(send_result);
 
+                    // Phase 41b: poke the bg-task wakeup `Notify` so the
+                    // bg loop wakes promptly and `try_recv`s this ack on
+                    // its next `reconcile` entry — rather than waiting out
+                    // the selector poll timeout. This reuses the existing
+                    // application-event wakeup primitive (Java's
+                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
+                    // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
+                    // Perf Contract item 2).
+                    //
+                    // What must NOT happen here is firing the `WakeupTrigger`:
+                    // it is the *user-facing* `Consumer::wakeup()` cancellation
+                    // token, and cancelling it made the caller's own `poll()` —
+                    // the very call that just ran this listener callback —
+                    // return `KafkaError::Wakeup` without the user ever calling
+                    // `wakeup()`. That is how this poke was originally written,
+                    // via `network_thread_close.wakeup()`, which back then fired
+                    // the trigger.
+                    //
+                    // Since `af60796` it no longer does: both the app-event poke
+                    // and `NetworkThreadCloseHandle::wakeup()` fire the *same*
+                    // `Arc<Notify>` (see `build_network_thread_close_fns`), and
+                    // no production path fires the trigger for an internal wake.
+                    // So the choice here is layering, not correctness — this is
+                    // an application-side poke, not a shutdown wake — and the
+                    // regression guard in
+                    // `process_background_events_ack_pokes_bg_wakeup` is against
+                    // *re-introducing* an internal trigger fire, not against
+                    // picking the other handle.
+                    self.application_event_handler.wake_background_task();
+
                     // Java throws if the result is an error — we propagate
                     // via `first_error` so subsequent events are still
                     // processed.
@@ -2253,6 +3389,13 @@ where
                     }
                 },
             }
+        }
+
+        // Java AKC:2219 — record the total processing time for the drained
+        // batch (only when at least one event was processed, matching Java's
+        // `if (!events.isEmpty())` guard).
+        if had_events {
+            async_consumer_metrics.record_background_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
 
         // Java line 2222: reap expired completable events regardless of
@@ -2547,14 +3690,36 @@ where
     /// The translated body mirrors Java line-for-line; deviations are
     /// limited to:
     ///
-    ///   - `kafkaConsumerMetrics.record*` — NO-OPs (Phase 11 PLAN.md #1).
-    ///   - The `try/finally` in Java is a single function body in Rust;
-    ///     panic-safety is achieved via early returns instead.
+    ///   - The `try/finally` in Java is realized with an inner helper
+    ///     (`poll_inner`) so `kafkaConsumerMetrics.recordPollEnd` runs on
+    ///     every exit path (the `finally`), matching
+    ///     `AsyncKafkaConsumer.java:882`.
     ///   - `interceptors.onConsume(...)` mutates the records in place via
     ///     `Mutex<ConsumerInterceptors>`.
     pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, KafkaError> {
         self.ensure_open()?;
 
+        // Java: `kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs())`
+        // (`AsyncKafkaConsumer.java:841`) — recorded right after
+        // `acquireAndEnsureOpen`, before the subscription check. The timer is
+        // created at `poll()` entry, so `currentTimeMs()` is the entry time.
+        let start_ms = self.time.milliseconds();
+        self.kafka_consumer_metrics.record_poll_start(start_ms);
+
+        // Java's `try { … } finally { recordPollEnd(...) }`: run the body and
+        // record poll-end on every exit path (including errors).
+        let result = self.poll_inner(timeout, start_ms).await;
+
+        // Java: `kafkaConsumerMetrics.recordPollEnd(timer.currentTimeMs())`
+        // (`:882`).
+        self.kafka_consumer_metrics.record_poll_end(self.time.milliseconds());
+        result
+    }
+
+    /// The `try`-body of [`Self::poll`] (`AsyncKafkaConsumer.java:842-880`).
+    /// Separated so [`Self::poll`] can record `recordPollEnd` in a
+    /// `finally`-equivalent regardless of how this returns.
+    async fn poll_inner(&mut self, timeout: Duration, start_ms: i64) -> Result<ConsumerRecords<K, V>, KafkaError> {
         // Java: `subscriptions.hasNoSubscriptionOrUserAssignment()`.
         {
             let subs = self.subscriptions.lock().unwrap();
@@ -2565,7 +3730,6 @@ where
             }
         }
 
-        let start_ms = self.time.milliseconds();
         let poll_deadline_ms = calculate_deadline_ms(start_ms, timeout.as_millis() as i64);
         let mut first_pass = true;
 
@@ -3016,6 +4180,24 @@ where
         timeout: Duration,
     ) -> Result<(), KafkaError> {
         self.ensure_open()?;
+        // Java: `long commitStart = time.nanoseconds()` at the top of
+        // `commitSync` (`AsyncKafkaConsumer.java:1709`), recorded in `finally`
+        // as `recordCommitSync(time.nanoseconds() - commitStart)` (`:1721`).
+        let commit_start_ns = self.time.nanoseconds();
+        let result = self.commit_sync_inner(offsets, timeout).await;
+        self.kafka_consumer_metrics
+            .record_commit_sync(self.time.nanoseconds() - commit_start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::commit_sync_internal`]
+    /// (`AsyncKafkaConsumer.java:1710-1718`). Separated so the caller can
+    /// record `recordCommitSync` in a `finally`-equivalent.
+    async fn commit_sync_inner(
+        &mut self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        timeout: Duration,
+    ) -> Result<(), KafkaError> {
         let now_ms = self.time.milliseconds();
         let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
 
@@ -3438,6 +4620,24 @@ where
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
         self.ensure_open()?;
+        // Java: `long start = time.nanoseconds()` after `acquireAndEnsureOpen`
+        // (`AsyncKafkaConsumer.java:1166`), recorded in `finally` as
+        // `recordCommitted(time.nanoseconds() - start)` (`:1187`) — runs on
+        // every exit path (empty partitions, group-id errors, timeout).
+        let start_ns = self.time.nanoseconds();
+        let result = self.committed_inner(partitions, timeout).await;
+        self.kafka_consumer_metrics.record_committed(self.time.nanoseconds() - start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::committed_timeout`]
+    /// (`AsyncKafkaConsumer.java:1167-1185`). Separated so the caller can
+    /// record `recordCommitted` in a `finally`-equivalent.
+    async fn committed_inner(
+        &mut self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
         self.throw_if_group_id_not_defined()?;
         if partitions.is_empty() {
             return Ok(HashMap::new());
@@ -4037,6 +5237,18 @@ where
             reaper.reap(now_ms);
         }
 
+        // Java: `closeQuietly(kafkaConsumerMetrics, "kafka consumer metrics",
+        // firstException)` (`AsyncKafkaConsumer.java:1573`) — removes the
+        // consumer-level poll/commit metrics from the registry. `close()` is
+        // infallible here (no error to fold into `first_error`).
+        self.kafka_consumer_metrics.close();
+
+        // Java: `closeQuietly(asyncConsumerMetrics, "async consumer metrics",
+        // firstException)` (`AsyncKafkaConsumer.java:1574`) — removes the
+        // async-consumer background-task / event-queue sensors from the
+        // registry. `close()` is infallible here.
+        self.async_consumer_metrics.close();
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
@@ -4249,12 +5461,16 @@ where
         AsyncKafkaConsumer::current_lag(self, topic_partition)
     }
 
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        AsyncKafkaConsumer::metrics(self)
+    }
+
     fn wakeup(&self) {
         AsyncKafkaConsumer::wakeup(self);
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        AsyncKafkaConsumer::wakeup_handle(self)
+    fn handle(&self) -> ConsumerHandle {
+        AsyncKafkaConsumer::handle(self)
     }
 
     // ── Subscribe / unsubscribe / assign ───────────────────────────────
@@ -4535,6 +5751,18 @@ mod tests {
         /// Handle on the shared `SubscriptionState` so tests can inspect /
         /// pre-populate it.
         subscriptions: Arc<Mutex<SubscriptionState>>,
+        /// Set to `true` whenever the consumer's erased bg-task wakeup fn
+        /// (`NetworkThreadCloseHandle::wakeup`) is invoked — Phase 41 Issue 3
+        /// observability. Tests assert it is NOT called on paths that only need
+        /// to nudge the bg loop, so a poke re-routed through the close handle
+        /// (whose caller `AsyncKafkaConsumer::wakeup` also fires the
+        /// user-facing `WakeupTrigger`) is caught here.
+        bg_wakeup_called: Arc<AtomicBool>,
+        /// The same `Notify` the consumer's [`ApplicationEventHandler`] fires —
+        /// Java's `wakeupNetworkThread()`. Lets a component test assert the §31
+        /// listener-ack path poked *this* primitive (invisible to the app)
+        /// rather than the `WakeupTrigger`.
+        app_event_notify: Arc<tokio::sync::Notify>,
     }
 
     /// Builds a consumer along with the test-side channel handles needed
@@ -4557,10 +5785,8 @@ mod tests {
         // Test stand-in for the bg task's app-event receiver. Tests hold
         // this `app_event_rx` and pull events off it themselves.
         let (app_handler_tx, app_event_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let app_handler = Arc::new(ApplicationEventHandler::new(
-            app_handler_tx,
-            Arc::new(tokio::sync::Notify::new()),
-        ));
+        let app_event_notify = Arc::new(tokio::sync::Notify::new());
+        let app_handler = Arc::new(ApplicationEventHandler::new(app_handler_tx, Arc::clone(&app_event_notify)));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let max_time = Arc::new(AtomicI64::new(0));
         let wakeup = WakeupTrigger::new();
@@ -4572,12 +5798,22 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
+        // Wrap the SAME closures production builds — from
+        // [`build_network_thread_close_fns`], i.e. the application-event
+        // `Notify`, never the user-facing `WakeupTrigger` — with an
+        // observability flag. Hand-rolling fixture bodies here is what hid
+        // Critic-3 Issue 1; the only fixture-only addition is the flag.
+        let bg_running = Arc::new(AtomicBool::new(true));
+        let (prod_signal_close_fn, prod_wakeup_fn) =
+            build_network_thread_close_fns(Arc::clone(&bg_running), Arc::clone(&app_event_notify));
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
+                prod_signal_close_fn();
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
+                prod_wakeup_fn();
             }),
             join_handle,
         );
@@ -4608,11 +5844,20 @@ mod tests {
             "",
             IsolationLevel::ReadUncommitted,
         );
+        let (metrics, fetch_metrics_manager) =
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
+        let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
+        let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        ));
+        let background_event_queue_size = Arc::new(AtomicI64::new(0));
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
             Arc::clone(&subs),
             fetch_config,
             Arc::clone(&deserializers),
+            Arc::clone(&fetch_metrics_manager),
             Arc::new(crate::consumer::internals::fetch_collector::SystemFetchCollectorTime),
         ));
 
@@ -4647,6 +5892,10 @@ mod tests {
             network_thread_close: close_handle,
             fetch_buffer,
             fetch_collector,
+            metrics,
+            kafka_consumer_metrics,
+            async_consumer_metrics,
+            background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
             deserializers,
@@ -4659,7 +5908,13 @@ mod tests {
         };
         (
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
-            ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions: subs },
+            ConsumerTestHandles {
+                app_event_rx,
+                bg_event_tx,
+                subscriptions: subs,
+                bg_wakeup_called: wakeup_called,
+                app_event_notify,
+            },
         )
     }
 
@@ -4826,25 +6081,130 @@ mod tests {
         assert!(token.is_cancelled(), "wakeup() must cancel the current token");
     }
 
-    /// A `WakeupHandle` obtained from the consumer fires the SAME wakeup
-    /// state as `wakeup()` — proving the shareable handle is a faithful,
-    /// `Send`-able stand-in for the cross-task `wakeup()` pattern (the
-    /// safe replacement for the deleted unsafe test helper).
+    /// `wakeup()`'s second statement (`network_thread_close.wakeup()`) looks
+    /// redundant: with the trigger enabled, `wakeup_trigger.wakeup()` cancels
+    /// the token and `run_once`'s `token.cancelled()` arm already pokes the
+    /// selector. It is load-bearing in exactly one window — after
+    /// `close_internal` step 1 has called `wakeup_trigger.disable()`,
+    /// `WakeupTrigger::wakeup()` returns early without cancelling anything, so
+    /// the token arm never fires. A [`ConsumerHandle::wakeup`] racing a
+    /// `close()` from another task lands there.
+    ///
+    /// Without the second statement, that `wakeup()` would be completely inert
+    /// and `close()` would wait out the in-flight network poll (up to
+    /// `MAX_POLL_TIMEOUT_MS`) — the same class of bug as Critic-3 Issue 1.
     #[tokio::test]
-    async fn wakeup_handle_cancels_current_token() {
+    async fn wakeup_pokes_the_bg_task_even_when_the_trigger_is_disabled() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+
+        // Nothing has poked the bg loop yet.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), handles.app_event_notify.notified())
+                .await
+                .is_err(),
+            "no bg-task poke expected before wakeup()",
+        );
+
+        consumer.wakeup_trigger.disable();
+        let token = consumer.wakeup_trigger.current_token();
+        consumer.wakeup();
+
+        assert!(
+            !token.is_cancelled(),
+            "a disabled trigger must not cancel the token — that is what makes the second \
+             statement of wakeup() the only remaining wake",
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), handles.app_event_notify.notified())
+                .await
+                .is_ok(),
+            "wakeup() must still wake the bg loop when the trigger is disabled, otherwise a \
+             wakeup() racing close() is inert and close() waits out the network poll",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// A [`ConsumerHandle`] obtained from the consumer fires the SAME
+    /// wakeup state as `wakeup()` — proving the shareable handle is a
+    /// faithful, `Send`-able stand-in for the cross-task `wakeup()`
+    /// pattern (the safe replacement for the deleted unsafe test helper).
+    #[tokio::test]
+    async fn handle_wakeup_cancels_current_token() {
         let consumer = make_test_consumer();
         let token = consumer.wakeup_trigger.current_token();
         assert!(!token.is_cancelled());
 
         // The handle is moved into another task — no reference to the
         // consumer crosses the task boundary.
-        let handle = consumer.wakeup_handle();
+        let handle = consumer.handle();
         let joined = tokio::spawn(async move {
             handle.wakeup();
         });
         joined.await.expect("waker task");
 
-        assert!(token.is_cancelled(), "wakeup_handle().wakeup() must cancel the current token");
+        assert!(token.is_cancelled(), "handle().wakeup() must cancel the current token");
+    }
+
+    /// Phase 41c / §31 deadlock regression (blocker b): a reentrant
+    /// `ConsumerHandle` op submitted from another task (standing in for a
+    /// rebalance-listener body) routes an `ApplicationEvent` through the bg
+    /// pipeline and completes — proving the handle's no-drain await is NOT
+    /// frozen. The op is `pause`, which (like every bg-routed handle op)
+    /// goes through `submit_and_await`. We act as the bg task by reading
+    /// the app-event channel and completing the event's handle; the handle
+    /// op must then return promptly.
+    #[tokio::test]
+    async fn handle_reentrant_op_completes_through_bg_pipeline() {
+        let (consumer, mut handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        // Submit the reentrant op from another task — exactly how a
+        // captured handle is used from inside a listener.
+        let op = tokio::spawn(async move { handle.pause(std::slice::from_ref(&tp)).await });
+
+        // Act as the bg task: pull the PausePartitions envelope and
+        // complete it. (The real bg loop keeps spinning during a callback
+        // after Phase 41b, so this event is serviced rather than stranded.)
+        let env = handles.app_event_rx.recv().await.expect("PausePartitions envelope must arrive");
+        match env.event {
+            ApplicationEvent::PausePartitions { handle, partitions } => {
+                assert_eq!(partitions.len(), 1);
+                handle.complete(());
+            },
+            other => panic!("expected PausePartitions, got {}", other.type_name()),
+        }
+
+        op.await
+            .expect("handle op task ok")
+            .expect("reentrant pause completes — no deadlock");
+        // The consumer must outlive the handle/op (shared Arc state).
+        drop(consumer);
+    }
+
+    /// Phase 41 Issue 4: `ConsumerHandle::assign([])` must REJECT the empty
+    /// collection (rather than silently clearing the assignment without
+    /// leaving the group). On the owning consumer `assign([])` delegates to
+    /// `unsubscribe()` (group leave), which the handle does not expose, so the
+    /// handle returns a clear error pointing the caller at the owning
+    /// consumer's `unsubscribe()`. A non-empty `assign` still routes through
+    /// the bg pipeline as before.
+    #[tokio::test]
+    async fn handle_assign_empty_is_rejected() {
+        let (consumer, _handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+
+        let err = handle.assign(Vec::new()).await.expect_err("empty assign must be rejected");
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "empty assign should be an illegal-argument error, got {err:?}",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsubscribe"),
+            "error must point the caller at unsubscribe(); got: {msg}",
+        );
+        drop(consumer);
     }
 
     /// Phase 12.5 Issue 7 regression: the production ctor must register
@@ -5034,42 +6394,61 @@ mod tests {
     ) -> tokio::task::JoinHandle<Option<ApplicationEventEnvelope>> {
         tokio::spawn(async move {
             let env = rx.recv().await?;
-            match &env.event {
-                ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::AssignmentChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::Unsubscribe { handle } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::SeekUnvalidated { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResetOffset { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::PausePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResumePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                _ => {
-                    // Unknown variant — leave the handle un-completed; the
-                    // test's `add_and_get` will time out and the
-                    // assertion will be a clear failure.
-                },
-            }
+            complete_event(&env);
             Some(env)
         })
+    }
+
+    /// Same as [`auto_complete_next_event`] but keeps completing every event
+    /// that arrives until the channel closes — for tests that make more than
+    /// one blocking call.
+    fn auto_complete_all_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                complete_event(&env);
+            }
+        })
+    }
+
+    /// Completes the handle carried by an application event, so the app-side
+    /// `add_and_get` resolves without a background task.
+    fn complete_event(env: &ApplicationEventEnvelope) {
+        match &env.event {
+            ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::AssignmentChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::Unsubscribe { handle } => {
+                handle.complete(());
+            },
+            ApplicationEvent::SeekUnvalidated { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResetOffset { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::PausePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResumePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            _ => {
+                // Unknown variant — leave the handle un-completed; the
+                // test's `add_and_get` will time out and the
+                // assertion will be a clear failure.
+            },
+        }
     }
 
     /// Java: `testSubscribeGeneratesEvent`.
@@ -5282,15 +6661,164 @@ mod tests {
             }
         }
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let completer = auto_complete_next_event(handles.app_event_rx);
+        let completer = auto_complete_all_events(handles.app_event_rx);
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
         consumer
             .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
             .await
             .expect("ok");
-        let _ = completer.await;
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
         assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+
+        // Java keeps ONE slot: a listener-less `subscribe(topics)` calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so it must CLEAR the app-side
+        // mirror too — otherwise `leave_group_on_close` would invoke the
+        // replaced listener, and (through the C FFI) its `user_data_destroy`
+        // hook would be withheld until the consumer is dropped.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("ok");
+        let stored = consumer.rebalance_listener.lock().unwrap().clone();
+        assert!(
+            stored.is_none(),
+            "a listener-less subscribe must clear the previously stored listener"
+        );
+        completer.abort();
+    }
+
+    /// The other half of the single-slot invariant: `unsubscribe()` must
+    /// **keep** the registered listener.
+    ///
+    /// `SubscriptionState.unsubscribe()` (`SubscriptionState.java:347-355`)
+    /// clears the subscription, group subscription, assignment, assigned topic
+    /// ids, pattern and subscription type and bumps `assignmentId` — it does
+    /// not touch `rebalanceListener`, which is only ever written by the three
+    /// `subscribe(...)` overloads (`:193`, `:199`, `:205`, `:219`). Neither
+    /// does `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`).
+    ///
+    /// Rust duplicates Java's one slot (bg-side `SubscriptionState`, app-side
+    /// mirror, because §31 invokes the callback on the caller's task) and the
+    /// **mirror** is what `process_background_events` reads. So the observable
+    /// consequence of clearing it here is a
+    /// `ConsumerRebalanceListenerCallbackNeeded` enqueued by the bg task while
+    /// the registration was still live, but drained by the app after
+    /// `unsubscribe()` returned, silently taking the `None => Ok(())` arm and
+    /// skipping the user's `on_partitions_revoked`. That behaviour — not just
+    /// the field state — is what this test pins, together with the fact that a
+    /// later listener-less `subscribe(...)` (Java's
+    /// `registerRebalanceListener(Optional.empty())`) is what ends the
+    /// registration.
+    #[tokio::test]
+    async fn unsubscribe_keeps_the_registered_listener() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct RecordingListener {
+            revoked: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for RecordingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        /// Enqueues the callback-needed event the bg task would raise and
+        /// drains it, returning the ack result.
+        async fn drive_revoked_callback(
+            consumer: &mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+            bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        ) -> Result<(), KafkaError> {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("send ok");
+            consumer.process_background_events().await.expect("drain ok");
+            ack_rx.await.expect("ack received")
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_all_events(handles.app_event_rx);
+        let listener: Arc<RecordingListener> = Arc::new(RecordingListener { revoked: AtomicUsize::new(0) });
+        let erased: Arc<dyn ConsumerRebalanceListener> = Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>;
+
+        consumer
+            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&erased))
+            .await
+            .expect("subscribe ok");
+        // The fixture has no background task, so apply the registration the
+        // `ApplicationEventProcessor` would perform for
+        // `TopicSubscriptionChange` — that is the bg-side half of the slot.
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t".to_string()].into_iter().collect(), Some(Arc::clone(&erased)))
+            .expect("subscribe_topics ok");
+
+        consumer.unsubscribe().await.expect("unsubscribe ok");
+        // ...and the bg-side half of `Unsubscribe`.
+        handles.subscriptions.lock().unwrap().unsubscribe();
+
+        // Both copies of Java's single slot must still hold the listener.
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_some(),
+            "SubscriptionState::unsubscribe must not clear the listener (Java parity)"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_some(),
+            "the app-side mirror must track SubscriptionState's slot across unsubscribe()"
+        );
+
+        // Observable behaviour: a callback the bg task raised while the
+        // registration was live is still delivered to the user.
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "a rebalance callback drained after unsubscribe() must still reach the retained listener"
+        );
+
+        // A listener-less `subscribe(...)` is what ends the registration
+        // (`registerRebalanceListener(Optional.empty())`), on both copies.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("subscribe ok");
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t2".to_string()].into_iter().collect(), None)
+            .expect("subscribe_topics ok");
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_none(),
+            "a listener-less subscribe clears SubscriptionState's slot"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_none(),
+            "...and the app-side mirror with it"
+        );
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "the de-registered listener must not be invoked again"
+        );
+
+        completer.abort();
     }
 
     // ─── Phase 11 commit (8/N) Java test translations ───
@@ -5306,7 +6834,10 @@ mod tests {
     //     `issue_10_commit_sync_drains_listener_callback_while_waiting`
     //     (inline above) AND the §31 regression pair in commit 11/N.
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
-    //     PLAN deferral #1 (AsyncConsumerMetrics deferred past Phase 12).
+    //     TRANSLATED (Phase M7) as
+    //     `test_record_background_event_queue_size_and_time` (inline below).
+    //     Drains a bg event under a mock `ThreadTime` advanced by 10 ms, then
+    //     reads the values via the public `metrics()` accessor (M7).
     //   - testEmptyStreamRebalanceData, testStreamRebalanceData,
     //     testCloseInvokesStreamsRebalanceListenerOnTasksRevokedWhenMemberEpochPositive,
     //     testCloseInvokesStreamsRebalanceListenerOnAllTasksLostWhenMemberEpochZeroOrNegative,
@@ -5761,11 +7292,327 @@ mod tests {
         drop(handles.subscriptions);
     }
 
+    /// Phase 41 Issue 3: the ack-send path in `process_background_events`
+    /// must poke the bg-task wakeup `Notify` so the bg loop observes the ack
+    /// promptly (rather than waiting out the selector poll timeout). The
+    /// non-Docker component tests otherwise busy-drive the membership loop and
+    /// never exercise this poke — removing it (the
+    /// `application_event_handler.wake_background_task()` after `ack.send(...)`)
+    /// would fail no local test without this one.
+    ///
+    /// It also guards the Phase-41b bug that this poke originally shipped with:
+    /// it was written as `network_thread_close.wakeup()`, which *at the time*
+    /// fired the `WakeupTrigger` — the user-facing `Consumer::wakeup()`
+    /// cancellation token — and left the caller's own `poll()` (the call that
+    /// just ran the listener callback) failing with `KafkaError::Wakeup` when
+    /// the user never called `wakeup()`. That broke every rebalance-listener
+    /// integration test until the multilanguage callback suite caught it.
+    ///
+    /// Since `af60796` the two handles are no longer distinguishable by their
+    /// effect: `NetworkThreadCloseHandle::wakeup()` fires the *same*
+    /// `Arc<Notify>` as `wake_background_task()` (see
+    /// `build_network_thread_close_fns`) and nothing in production fires the
+    /// trigger for an internal wake. Consequences for the assertions below,
+    /// spelled out because they are easy to get wrong:
+    ///
+    ///  - the notify-permit assertions cannot tell the two handles apart, since
+    ///    it is one `Notify`;
+    ///  - `!bg_wakeup_called` is the **only** assertion that does — the fixture
+    ///    wraps the production close closure with that flag. Do not remove it as
+    ///    "redundant" with the token assertions below;
+    ///  - the token assertions guard the thing that actually still matters:
+    ///    nothing on this path may fire the `WakeupTrigger` (directly, or by
+    ///    regressing `build_network_thread_close_fns` back to firing it). They
+    ///    are negative assertions, so the test ends by firing the trigger
+    ///    deliberately and checking it *does* bite — otherwise a disabled or
+    ///    inert trigger would satisfy them for free
+    ///    (`maybe_trigger_wakeup()` returns `Ok` when the trigger is disabled).
+    #[tokio::test]
+    async fn process_background_events_ack_pokes_bg_wakeup() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct NoopListener;
+        #[async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::new(NoopListener) as Arc<dyn ConsumerRebalanceListener>);
+
+        // Nothing has poked the bg loop yet: no stored `Notify` permit.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), handles.app_event_notify.notified())
+                .await
+                .is_err(),
+            "the application-event notify must not be poked before the callback ack is sent",
+        );
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+        consumer.process_background_events().await.expect("ok");
+        assert!(ack_rx.await.expect("ack received").is_ok());
+
+        // The ack-send path must have poked the bg loop's application-event
+        // notify (a permit is stored even though nobody was parked on it).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), handles.app_event_notify.notified())
+                .await
+                .is_ok(),
+            "process_background_events must poke the application-event notify after sending the listener ack",
+        );
+        // ...without enqueueing an application event, so the permit above is
+        // attributable to the poke and nothing else.
+        assert!(
+            handles.app_event_rx.try_recv().is_err(),
+            "the listener-ack poke must not enqueue an application event",
+        );
+
+        // Regression guard, part 1 — the only assertion that discriminates the
+        // handle: the poke went through the application-event handler and NOT
+        // through `NetworkThreadCloseHandle::wakeup()`, whose production closure
+        // the fixture wraps with this flag. Both fire the same `Notify` today,
+        // so no notify-based assertion can substitute for this one.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "the listener-ack poke must go through the application-event handler, not the \
+             network-thread close handle — that is the shutdown path, and it is what used to \
+             fire the user-facing WakeupTrigger",
+        );
+        // Part 2 — nothing on this path may fire the `WakeupTrigger`, whichever
+        // handle it uses: it is `Consumer::wakeup()`'s cancellation token, and
+        // cancelling it fails the caller's own `poll()`.
+        assert!(
+            !consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the listener-ack path must not cancel the user-facing wakeup token",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "no wakeup may be pending after a rebalance callback: the next poll() would fail with \
+             KafkaError::Wakeup although the user never called wakeup()",
+        );
+
+        // Negative control for part 2: both assertions above are negative, and
+        // `maybe_trigger_wakeup()` also returns `Ok` for a *disabled* trigger —
+        // so prove the trigger was live here and would have caught a fire.
+        consumer.wakeup_trigger.wakeup();
+        assert!(
+            consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the trigger must be enabled here, otherwise the two guards above are vacuous",
+        );
+        assert!(
+            matches!(consumer.wakeup_trigger.maybe_trigger_wakeup(), Err(KafkaError::Wakeup(_))),
+            "the trigger must be enabled here, otherwise the two guards above are vacuous",
+        );
+
+        drop(handles.subscriptions);
+    }
+
     /// Empty bg-events channel: returns immediately with `Ok(())`.
     #[tokio::test]
     async fn process_background_events_on_empty_channel_is_ok() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.process_background_events().await.expect("ok");
+    }
+
+    /// Issue 2 regression (Phase M6): the `background-event-queue-size` gauge
+    /// must snap back to 0 on an *idle* (empty) drain, matching Java's
+    /// `BackgroundEventHandler.drainEvents` which records
+    /// `recordBackgroundEventQueueSize(0)` unconditionally. Pre-seed a stale
+    /// peak (as the bg task's `add` would leave it), then drain an empty
+    /// channel and assert both the shared `AtomicI64` and the registered
+    /// metric reset to 0.
+    #[tokio::test]
+    async fn idle_drain_resets_background_event_queue_size_to_zero() {
+        use crate::common::metric::Metric;
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+
+        // Simulate the bg task's `BackgroundEventHandler::add` having left the
+        // gauge at a peak of 2 (two events enqueued, not yet drained).
+        consumer.background_event_queue_size.store(2, Ordering::SeqCst);
+        consumer.async_consumer_metrics.record_background_event_queue_size(2);
+
+        // An idle (empty) drain — no events to pull.
+        consumer.process_background_events().await.expect("ok");
+
+        // The shared counter must be reset to 0.
+        assert_eq!(
+            consumer.background_event_queue_size.load(Ordering::SeqCst),
+            0,
+            "shared background_event_queue_size must reset to 0 on an empty drain"
+        );
+        // The registered gauge must read 0, not linger at the stale peak.
+        let mn = consumer.metrics.metric_name_group(
+            "background-event-queue-size",
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        );
+        let value = consumer
+            .metrics
+            .metric(&mn)
+            .expect("background-event-queue-size metric present")
+            .metric_value()
+            .as_double()
+            .expect("double-valued gauge");
+        assert_eq!(
+            value, 0.0,
+            "background-event-queue-size gauge must snap back to 0 on an idle drain"
+        );
+    }
+
+    /// Java `AsyncKafkaConsumerTest.testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime`
+    /// (line 1952). Deferred from Phase M6 (needed the public `metrics()`
+    /// accessor + a mock-clock-injectable consumer); translated here.
+    ///
+    /// Java enqueues a `ConsumerRebalanceListenerCallbackNeededEvent` stamped
+    /// with `time.milliseconds()`, records `recordBackgroundEventQueueSize(1)`,
+    /// sleeps the mock clock 10 ms, calls `processBackgroundEvents()`, then
+    /// asserts via the registry: `background-event-queue-size` == 0,
+    /// `background-event-queue-time-avg` == 10, `-time-max` == 10.
+    #[tokio::test]
+    async fn test_record_background_event_queue_size_and_time() {
+        use crate::common::metric::Metric;
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::consumer_network_thread::ThreadTime;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        use tokio::sync::oneshot;
+
+        // Mock clock so the recorded queue-time (now - enqueuedMs) is exactly
+        // 10 ms, deterministically. `self.time` drives both the enqueue stamp
+        // and the drain-time read in `process_background_events`.
+        struct MockThreadTime {
+            millis: std::sync::Mutex<i64>,
+        }
+        impl MockThreadTime {
+            fn sleep(&self, dur_ms: i64) {
+                *self.millis.lock().unwrap() += dur_ms;
+            }
+        }
+        impl ThreadTime for MockThreadTime {
+            fn milliseconds(&self) -> i64 {
+                *self.millis.lock().unwrap()
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        // Swap in the mock clock (start at an arbitrary non-zero epoch).
+        let mock_time = Arc::new(MockThreadTime { millis: std::sync::Mutex::new(1_000) });
+        consumer.time = Arc::clone(&mock_time) as Arc<dyn ThreadTime>;
+
+        // Java: `event.setEnqueuedMs(time.milliseconds()); backgroundEventQueue.add(event);`
+        // A no-listener callback-needed event acks Ok(()) — the time recording
+        // does not depend on the listener result.
+        let enqueued_ms = mock_time.milliseconds();
+        let (ack_tx, _ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                partitions: Vec::new(),
+                ack: ack_tx,
+            },
+            enqueued_ms,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+
+        // Java: `asyncConsumerMetrics.recordBackgroundEventQueueSize(1);`
+        consumer.async_consumer_metrics.record_background_event_queue_size(1);
+
+        // Java: `time.sleep(10); consumer.processBackgroundEvents();`
+        mock_time.sleep(10);
+        consumer.process_background_events().await.expect("drain ok");
+
+        // Read the values through the PUBLIC `metrics()` accessor (M7).
+        let snapshot = consumer.metrics();
+        let read = |name: &str| -> f64 {
+            let mn = consumer.metrics.metric_name_group(name, CONSUMER_METRIC_GROUP);
+            snapshot
+                .get(&mn)
+                .unwrap_or_else(|| panic!("metric {name} present"))
+                .metric_value()
+                .as_double()
+                .expect("double-valued metric")
+        };
+
+        assert_eq!(read("background-event-queue-size"), 0.0);
+        assert_eq!(read("background-event-queue-time-avg"), 10.0);
+        assert_eq!(read("background-event-queue-time-max"), 10.0);
+    }
+
+    /// Phase M7: the public `metrics()` accessor returns the registry snapshot
+    /// that the metrics managers populate. Mirrors the read contract of
+    /// Java's `AsyncKafkaConsumer.metrics()` (`Collections.unmodifiableMap`).
+    ///
+    /// This proves that the three metrics families that register EAGERLY in
+    /// this fixture — fetch (`create_fetch_metrics_manager`), kafka-consumer
+    /// (`KafkaConsumerMetrics::new`), and async-consumer
+    /// (`AsyncConsumerMetrics::new`) — each surface a representative metric in
+    /// the public `metrics()` snapshot, i.e. the registry plumbing reaches the
+    /// public accessor and the snapshot is the live registry, not an
+    /// empty/partial map.
+    ///
+    /// The other four families (heartbeat / offset-commit / rebalance /
+    /// rebalance-callback) register against the shared `Metrics` only through
+    /// their request managers, which the production ctor builds but this
+    /// fixture does not (`RequestManagers::new(None × 7)`). Their registration
+    /// against the shared `Metrics` is covered by their own M4/M5 manager tests
+    /// (`heartbeat_metrics`, `offset_commit_metrics`, the
+    /// `ConsumerRebalanceMetricsManager` / `RebalanceCallbackMetricsManager`
+    /// tests). We deliberately do NOT force-register managers the fixture does
+    /// not build, so this test stays honest about what it constructs.
+    #[tokio::test]
+    async fn metrics_snapshot_includes_eagerly_registered_families() {
+        use crate::common::metric::Metric;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        // Group name built by `FetchMetricsRegistry::new` from the
+        // `"consumer"` prefix (`create_fetch_metrics_manager`).
+        const FETCH_MANAGER_METRIC_GROUP: &str = "consumer-fetch-manager-metrics";
+
+        let consumer = make_test_consumer();
+        let snapshot = consumer.metrics();
+        assert!(!snapshot.is_empty(), "metrics() must not be empty");
+
+        let assert_present = |name: &str, group: &str| {
+            let mn = consumer.metrics.metric_name_group(name, group);
+            assert!(
+                snapshot.contains_key(&mn),
+                "metrics() snapshot must include `{name}` (group `{group}`)"
+            );
+        };
+
+        // Fetch family (M3): a client-level fetch metric registered eagerly in
+        // `FetchMetricsManager::new`.
+        assert_present("records-consumed-total", FETCH_MANAGER_METRIC_GROUP);
+        // Kafka-consumer family (M4): registered eagerly in
+        // `KafkaConsumerMetrics::new` under the consumer-metrics group.
+        assert_present("last-poll-seconds-ago", CONSUMER_METRIC_GROUP);
+        // Async-consumer family (M6): registered eagerly in
+        // `AsyncConsumerMetrics::new` under the consumer-metrics group.
+        assert_present("background-event-queue-size", CONSUMER_METRIC_GROUP);
+
+        // The snapshot is keyed by MetricName and the values impl `Metric`:
+        // every entry's `metric_name()` matches its key (sanity of the snapshot).
+        for (name, metric) in &snapshot {
+            assert_eq!(metric.metric_name(), name);
+        }
     }
 
     /// Issue 11 regression: a blocking API with `enable_wakeup=true`
@@ -6248,7 +8095,10 @@ mod tests {
     //
     // Skipped Java tests for this commit (each carries a one-line rationale):
     //   - `testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime` —
-    //     `AsyncConsumerMetrics` deferred to a separate cross-cutting commit.
+    //     `AsyncConsumerMetrics` is now WIRED (Phase M6) and verified by the
+    //     handler-side smoke tests; the end-to-end value assertion under a
+    //     mock clock awaits the M7 public `metrics()` accessor + MockTime
+    //     fixture (see the matching skip note in the commit-8 batch above).
     //   - `testReaperInvokedInPoll` — depends on the metrics observers that
     //     would observe the reaper invocations. The `reap` call itself is
     //     wired and unit-tested via the bg-events drain test in commit 3.
@@ -8459,14 +10309,31 @@ mod tests {
     /// Builds a dedicated bg thread that mirrors the production loop:
     /// a `current_thread` runtime spinning a `run_once`-style loop until
     /// the running flag flips, firing `done` on exit. Returns the close
-    /// handle plus the running flag and a wakeup `Notify` the loop waits
-    /// on (so the test can prove `signal_close` + `wakeup` terminate it).
-    fn spawn_dedicated_bg() -> (NetworkThreadCloseHandle, Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+    /// handle plus the running flag and the application-event `Notify` the
+    /// loop waits on (so the test can prove `signal_close` + `wakeup`
+    /// terminate it).
+    ///
+    /// The close/wakeup closures come from the SAME
+    /// [`build_network_thread_close_fns`] the production ctor uses, so this
+    /// fixture cannot diverge from production. Building them by hand here is
+    /// what previously hid Critic-3 Issue 1: the fixture poked the loop's
+    /// `Notify` while production fired the (close-time disabled)
+    /// `WakeupTrigger`, and the test proved a wake path production did not
+    /// have.
+    ///
+    /// The fixture also reports when the loop has actually **parked** on the
+    /// wake primitive. Without that, `signal_close()` could be observed by the
+    /// loop's `while` check before it ever parks, and the test would pass even
+    /// with a completely inert wake — the second half of Critic-3 Issue 1's
+    /// "why no test caught it".
+    fn spawn_dedicated_bg() -> DedicatedBgFixture {
         let running = Arc::new(AtomicBool::new(true));
         let wake = Arc::new(tokio::sync::Notify::new());
+        let parked = Arc::new(AtomicBool::new(false));
 
         let loop_running = Arc::clone(&running);
         let loop_wake = Arc::clone(&wake);
+        let loop_parked = Arc::clone(&parked);
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let thread_handle = std::thread::Builder::new()
             .name("kafka-consumer-io-test".into())
@@ -8481,6 +10348,10 @@ mod tests {
                     // the loop only proceeds when woken (as the real
                     // selector poll returns on `Selector::wakeup`).
                     while loop_running.load(Ordering::Acquire) {
+                        // Set BEFORE awaiting. `Notify::notify_one()` stores a
+                        // permit when nobody is parked yet, so a poke landing in
+                        // the gap is not lost either way.
+                        loop_parked.store(true, Ordering::Release);
                         loop_wake.notified().await;
                     }
                     // Stand-in for `cleanup().await`.
@@ -8489,27 +10360,42 @@ mod tests {
             })
             .expect("spawn test io thread");
 
-        let close_running = Arc::clone(&running);
-        let close_wake = Arc::clone(&wake);
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            close_running.store(false, Ordering::Release);
-            close_wake.notify_one();
-        });
-        let wakeup_wake = Arc::clone(&wake);
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_wake.notify_one();
-        });
+        let (signal_close_fn, wakeup_fn) = build_network_thread_close_fns(Arc::clone(&running), Arc::clone(&wake));
 
         let handle = NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
-        (handle, running, wake)
+        (handle, running, wake, parked)
+    }
+
+    /// Return value of [`spawn_dedicated_bg`]: the close handle, the bg
+    /// `running` flag, the wake `Notify` the loop parks on, and a flag set once
+    /// the loop has reached that park. Aliased to satisfy clippy's
+    /// `type_complexity` lint.
+    type DedicatedBgFixture = (
+        NetworkThreadCloseHandle,
+        Arc<AtomicBool>,
+        Arc<tokio::sync::Notify>,
+        Arc<AtomicBool>,
+    );
+
+    /// Spins (bounded) until the dedicated bg loop has parked on its wake
+    /// primitive, so a subsequent `signal_close()` genuinely has to wake it.
+    async fn await_bg_parked(parked: &Arc<AtomicBool>) {
+        for _ in 0..500 {
+            if parked.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("dedicated bg loop never parked on its wake primitive");
     }
 
     /// `signal_close()` + `wakeup()` terminate the dedicated bg loop and
     /// `await_join()` cleanly reaps the OS thread within a bounded
-    /// timeout (no hang).
+    /// timeout (no hang) — even though the loop is parked when close starts.
     #[tokio::test]
     async fn dedicated_close_handle_joins_cleanly() {
-        let (mut handle, running, _wake) = spawn_dedicated_bg();
+        let (mut handle, running, _wake, parked) = spawn_dedicated_bg();
+        await_bg_parked(&parked).await;
 
         handle.signal_close();
         handle.wakeup();
@@ -8525,7 +10411,8 @@ mod tests {
     /// call after a successful join is a no-op `Ok(())`, not a hang.
     #[tokio::test]
     async fn dedicated_await_join_is_idempotent() {
-        let (mut handle, _running, _wake) = spawn_dedicated_bg();
+        let (mut handle, _running, _wake, parked) = spawn_dedicated_bg();
+        await_bg_parked(&parked).await;
 
         handle.signal_close();
         handle.wakeup();

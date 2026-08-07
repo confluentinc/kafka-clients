@@ -589,11 +589,14 @@ impl ConsumerConfig {
     /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
-        // NOTE: 16 of Java's per-field `atLeast(..)` numeric validators
+        // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
         // that lands, negative / out-of-range values are silently accepted
         // for the following keys (Java line numbers in parentheses):
+        // (Phase M7 added the `metrics.num.samples` >= 1 and
+        //  `metrics.sample.window.ms` >= 0 validators — see below — so they
+        //  are no longer in this deferred list.)
         //   - `max.poll.interval.ms`                          atLeast(1)  (632)
         //   - `metadata.max.age.ms`                           atLeast(0)  (455)
         //   - `auto.commit.interval.ms`                       atLeast(0)  (466)
@@ -609,10 +612,9 @@ impl ConsumerConfig {
         //   - `retry.backoff.max.ms`                          atLeast(0L) (536)
         //   - `request.timeout.ms`                            atLeast(0)  (590)
         //   - `default.api.timeout.ms`                        atLeast(0)  (596)
-        //   - `metrics.sample.window.ms`                      atLeast(0)  (558)
-        //   - `metrics.num.samples`                           atLeast(1)  (564)
         //   - `metadata.recovery.rebootstrap.trigger.ms`      atLeast(0)  (689)
-        // The currently-translated validators are `max.poll.records >= 1`
+        // The currently-translated validators are `max.poll.records >= 1`,
+        // `metrics.num.samples >= 1`, `metrics.sample.window.ms >= 0`,
         // and the string-enum keys.
         let mut config = Self::default();
 
@@ -780,10 +782,26 @@ impl ConsumerConfig {
                     config.enable_metrics_push = parse_bool(key, value)?;
                 },
                 Self::METRICS_SAMPLE_WINDOW_MS_CONFIG => {
-                    config.metrics_sample_window_ms = parse_i64(key, value)?;
+                    // Java `ConsumerConfig` / `CommonClientConfigs`:
+                    // `metrics.sample.window.ms` is `atLeast(0)`.
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(KafkaError::illegal_argument(format!(
+                            "Invalid value {v} for configuration {key}: Value must be at least 0"
+                        )));
+                    }
+                    config.metrics_sample_window_ms = v;
                 },
                 Self::METRICS_NUM_SAMPLES_CONFIG => {
-                    config.metrics_num_samples = parse_i32(key, value)?;
+                    // Java `ConsumerConfig` / `CommonClientConfigs`:
+                    // `metrics.num.samples` is `atLeast(1)`.
+                    let v = parse_i32(key, value)?;
+                    if v < 1 {
+                        return Err(KafkaError::illegal_argument(format!(
+                            "Invalid value {v} for configuration {key}: Value must be at least 1"
+                        )));
+                    }
+                    config.metrics_num_samples = v;
                 },
                 Self::METRICS_RECORDING_LEVEL_CONFIG => {
                     let uc = value.to_ascii_uppercase();
@@ -925,6 +943,58 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let c = ConsumerConfig::from_properties(&props).unwrap();
         assert_eq!(c.bootstrap_servers(), &["localhost:9092".to_string()]);
+    }
+
+    /// `metrics.num.samples` is `atLeast(1)` (Java ConsumerConfig). A value
+    /// below 1 is rejected with a message asserting the bound.
+    #[test]
+    fn test_metrics_num_samples_validator() {
+        // Valid: >= 1.
+        let mut props = HashMap::new();
+        props.insert("metrics.num.samples".to_string(), "3".to_string());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.metrics_num_samples, 3);
+
+        // Invalid: 0 (< 1).
+        let mut props = HashMap::new();
+        props.insert("metrics.num.samples".to_string(), "0".to_string());
+        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metrics.num.samples") && msg.contains("at least 1"),
+            "unexpected message: {msg}"
+        );
+
+        // Invalid: negative.
+        let mut props = HashMap::new();
+        props.insert("metrics.num.samples".to_string(), "-1".to_string());
+        assert!(ConsumerConfig::from_properties(&props).is_err());
+    }
+
+    /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A
+    /// negative value is rejected with a message asserting the bound.
+    #[test]
+    fn test_metrics_sample_window_ms_validator() {
+        // Valid: >= 0 (0 is allowed).
+        let mut props = HashMap::new();
+        props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.metrics_sample_window_ms, 0);
+
+        let mut props = HashMap::new();
+        props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.metrics_sample_window_ms, 60_000);
+
+        // Invalid: negative.
+        let mut props = HashMap::new();
+        props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
+        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metrics.sample.window.ms") && msg.contains("at least 0"),
+            "unexpected message: {msg}"
+        );
     }
 
     /// Each of the four `security.protocol` values parses to the right enum.

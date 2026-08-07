@@ -1,0 +1,30 @@
+Java e2e: bootstrap=pkc-devcg1y1mn.us-east-2.aws.devel.cpdev.cloud:9092 topic=cmp-bench-200p proto=consumer maxPoll=500 fetch.min=4MiB partFetch=4MiB crc=off dur=600s warmup=18000000
+subscribed; waiting for assignment/records...
+warmup complete (18000000 msgs); measuring 600s now
+[interval 0] t=  30.0s msgs=4499725 thr=   149991 msg/s avg= 10.92 p50=11 p99=23 p999=35 max=46 ms rss=1083.8MB
+[interval 1] t=  60.0s msgs=4500235 thr=   149998 msg/s avg= 10.83 p50=10 p99=22 p999=35 max=55 ms rss=1084.2MB
+[interval 2] t=  90.0s msgs=4500761 thr=   150020 msg/s avg= 10.83 p50=10 p99=21 p999=34 max=48 ms rss=1084.5MB
+[interval 3] t= 120.0s msgs=4500055 thr=   150002 msg/s avg= 10.84 p50=10 p99=21 p999=33 max=112 ms rss=1084.7MB
+[interval 4] t= 150.0s msgs=4500099 thr=   150003 msg/s avg= 10.95 p50=10 p99=23 p999=81 max=129 ms rss=1085.1MB
+[interval 5] t= 180.0s msgs=4500152 thr=   150000 msg/s avg= 10.90 p50=10 p99=22 p999=33 max=230 ms rss=1085.3MB
+[interval 6] t= 210.0s msgs=4500177 thr=   150006 msg/s avg= 10.96 p50=10 p99=22 p999=36 max=250 ms rss=1085.6MB
+[interval 7] t= 240.0s msgs=4500381 thr=   150008 msg/s avg= 10.89 p50=10 p99=22 p999=33 max=54 ms rss=1085.8MB
+[interval 8] t= 270.0s msgs=4500297 thr=   150000 msg/s avg= 10.88 p50=10 p99=22 p999=33 max=227 ms rss=1086.1MB
+[interval 9] t= 300.0s msgs=4500282 thr=   150009 msg/s avg= 10.85 p50=10 p99=22 p999=37 max=111 ms rss=1086.5MB
+[interval 10] t= 330.0s msgs=4500423 thr=   150004 msg/s avg= 10.98 p50=11 p99=23 p999=36 max=292 ms rss=1086.7MB
+[interval 11] t= 360.0s msgs=4499934 thr=   149998 msg/s avg= 10.89 p50=10 p99=22 p999=33 max=44 ms rss=1087.1MB
+[interval 12] t= 390.0s msgs=4500692 thr=   150008 msg/s avg= 10.79 p50=10 p99=23 p999=36 max=47 ms rss=1087.4MB
+[interval 13] t= 420.0s msgs=4500383 thr=   149998 msg/s avg= 10.90 p50=10 p99=23 p999=35 max=50 ms rss=1087.6MB
+[interval 14] t= 450.0s msgs=4499967 thr=   149999 msg/s avg= 10.93 p50=10 p99=23 p999=48 max=114 ms rss=1088.0MB
+[interval 15] t= 480.0s msgs=4500390 thr=   150013 msg/s avg= 10.79 p50=10 p99=21 p999=35 max=46 ms rss=1088.3MB
+[interval 16] t= 510.0s msgs=4500140 thr=   150005 msg/s avg= 10.90 p50=11 p99=22 p999=34 max=49 ms rss=1088.6MB
+[interval 17] t= 540.0s msgs=4500050 thr=   150002 msg/s avg= 10.85 p50=10 p99=22 p999=40 max=87 ms rss=1088.8MB
+[interval 18] t= 570.0s msgs=4500125 thr=   149999 msg/s avg= 10.84 p50=10 p99=22 p999=35 max=45 ms rss=1089.1MB
+======================================================================
+SUMMARY - Java kafka-clients (KIP-848=consumer, warmup 18000000 excluded)
+Measured messages: 90000112
+Duration:          600.51 s
+Throughput:        149874 msg/s  (292.72 MiB/s)
+E2E latency (ms):  min=2 avg=10.88 stddev=3.64 p50=10 p90=14 p95=15 p99=22 p99.9=35 max=292
+RSS (MB, current): avg=1086.5 min=1083.8 max=1089.1 (19 samples)
+{"client":"java","protocol":"consumer","messages":90000112,"duration_s":600.51,"throughput_msg_s":149874.04,"throughput_mib_s":292.72,"lat_min_ms":2,"lat_avg_ms":10.88,"lat_stddev_ms":3.64,"lat_p50_ms":10,"lat_p90_ms":14,"lat_p95_ms":15,"lat_p99_ms":22,"lat_p999_ms":35,"lat_max_ms":292,"rss_avg_mb":1086.5,"rss_min_mb":1083.8,"rss_max_mb":1089.1}

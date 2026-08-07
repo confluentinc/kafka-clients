@@ -22,6 +22,7 @@
 //! when that memory is exhausted, unless this behavior is explicitly disabled.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +78,87 @@ pub struct RecordAppendResult {
     pub new_batch_created: bool,
     /// The number of bytes appended.
     pub appended_bytes: i32,
+}
+
+/// The failure returned by [`RecordAccumulator::append`], carrying the
+/// user [`Callback`] back to the caller when the record was not appended.
+///
+/// # Why this type exists (no Java counterpart)
+///
+/// Java's `RecordAccumulator.append` simply throws, and
+/// `KafkaProducer.doSend` can still fire the user callback from its
+/// `catch (ApiException e)` arm because it created `appendCallbacks`
+/// *before* the call and keeps its own `callback` reference alive for the
+/// whole method (`KafkaProducer.java:985,1056-1062`).
+///
+/// Rust has no such shared reference: [`Callback`] is a
+/// `Box<dyn FnOnce>` whose ownership is **moved** into `append` so it can
+/// be parked in the [`ProducerBatch`](super::ProducerBatch) thunk. An
+/// error return would therefore drop it unfired, breaking the
+/// exactly-once callback obligation (CLAUDE.md §5, §9.5). This type is
+/// the explicit hand-back: `callback` is `Some` exactly when the record
+/// was *not* appended and no batch took ownership of it; it is `None` when
+/// a batch already owns the callback and will fire it itself.
+///
+/// Handing it back restores the caller's *choice*, not an obligation to
+/// fire — the accumulator does not decide. `do_send_bytes` fires it through
+/// `KafkaProducer::handle_api_exception` when [`error`](Self::error) is an
+/// `ApiException` (Java's `catch (ApiException e)`), and drops it unfired
+/// when it is not (Java's `catch (KafkaException e)` rethrow, which leaves
+/// `appendCallbacks` uninvoked).
+pub struct AppendError {
+    /// The error that prevented the append.
+    pub error: KafkaError,
+    /// The user callback, returned unfired iff no batch took ownership of it.
+    pub callback: Option<Callback>,
+}
+
+impl fmt::Debug for AppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `Callback` is a boxed closure and cannot be formatted; report
+        // whether it was handed back instead.
+        f.debug_struct("AppendError")
+            .field("error", &self.error)
+            .field("callback_returned", &self.callback.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Display for AppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+/// RAII stand-in for Java's `finally { free.deallocate(buffer); }` in
+/// `RecordAccumulator.append` (`RecordAccumulator.java:355-358`).
+///
+/// Java keeps a single `ByteBuffer buffer` local, returns it to the pool from
+/// one `finally`, and sets it to `null` only once a batch has taken ownership
+/// of it (`:347-348`). Rust has no `finally`, and enumerating the exits by
+/// hand is exactly what let the buffer escape the pool's accounting on some
+/// of them: dropping a `Vec` is not deallocating it, because
+/// [`BufferPool::allocate`] debits `non_pooled_available_memory` and only
+/// [`BufferPool::deallocate`] credits it back (and notifies a waiter), so a
+/// dropped buffer permanently shrinks the pool.
+///
+/// Holding the buffer in this guard makes the `finally` structural instead:
+/// every exit — `return`, `?`, or panic — returns whatever is still in it.
+/// The pool is *borrowed* rather than held as an `Arc` so the guard costs no
+/// per-record atomic on the send path (CLAUDE.md §11).
+struct PooledBuffer<'a> {
+    pool: &'a BufferPool,
+    /// The allocated buffer, or `None` once a batch has taken ownership of it
+    /// (Java's `buffer = null`).
+    buffer: Option<Vec<u8>>,
+}
+
+impl Drop for PooledBuffer<'_> {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            self.pool.deallocate(buffer);
+        }
+    }
 }
 
 /// The set of nodes that have at least one complete record batch in the
@@ -281,6 +363,13 @@ impl RecordAccumulator {
     ///   buffer memory to be available
     /// * `now_ms` - The current time, in milliseconds
     /// * `cluster` - The cluster metadata
+    ///
+    /// # Errors
+    ///
+    /// On failure the returned [`AppendError`] hands `callback` back
+    /// unfired (see that type for why) so the caller can honour the
+    /// exactly-once callback obligation, exactly as Java's
+    /// `KafkaProducer.doSend` `catch (ApiException e)` arm does.
     #[allow(clippy::too_many_arguments)]
     pub async fn append(
         &self,
@@ -294,7 +383,7 @@ impl RecordAccumulator {
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, AppendError> {
         let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
@@ -334,9 +423,11 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, AppendError> {
         let mut callback = callback;
-        let mut buffer: Option<Vec<u8>> = None;
+        // Java's `ByteBuffer buffer = null;` plus the `finally` that returns it
+        // to the pool on *every* exit of this method — see [`PooledBuffer`].
+        let mut pooled = PooledBuffer { pool: &self.free, buffer: None };
 
         loop {
             // Determine the effective partition.
@@ -382,7 +473,7 @@ impl RecordAccumulator {
             // DashMap guard dropped here — safe to .await below.
 
             // Need a new batch. Allocate a buffer (only once).
-            if buffer.is_none() {
+            if pooled.buffer.is_none() {
                 let estimated = abstract_records::estimate_size_in_bytes_upper_bound(
                     RecordBatch::CURRENT_MAGIC_VALUE,
                     self.compression.compression_type(),
@@ -401,7 +492,18 @@ impl RecordAccumulator {
                     max_time_to_block
                 );
 
-                buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
+                pooled.buffer = Some(match self.free.allocate(size as usize, max_time_to_block).await {
+                    Ok(b) => b,
+                    // Buffer exhaustion / `max.block.ms` expiry. Java throws
+                    // `BufferExhaustedException` (an `ApiException`) out of
+                    // `append`, and `doSend` fires the user callback with the
+                    // placeholder metadata — hand the callback back so the
+                    // caller can do the same. (`BufferPool` can also fail with
+                    // the bare `KafkaException` "Producer closed while
+                    // allocating memory", which is *not* an `ApiException`;
+                    // `doSend` re-raises that one without firing.)
+                    Err(error) => return Err(AppendError { error, callback: callback.take() }),
+                });
             }
 
             // Try again under lock -- another thread might have created the batch.
@@ -418,7 +520,10 @@ impl RecordAccumulator {
                 let (result, returned_callback) =
                     self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
                 if let Some(result) = result {
-                    self.free.deallocate(buffer.take().unwrap());
+                    // Somebody else created a batch with room while we were
+                    // allocating; `pooled` returns the unused buffer to the
+                    // pool on the way out (Java's `finally`, with
+                    // `newBatchCreated == false` so `buffer` stays non-null).
                     if partition == record_metadata::UNKNOWN_PARTITION {
                         let enable_switch = Self::all_batches_full(&deque);
                         let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
@@ -437,7 +542,9 @@ impl RecordAccumulator {
                     value,
                     headers,
                     returned_callback,
-                    buffer.take().unwrap(),
+                    // Java: `if (appendResult.newBatchCreated) buffer = null;`
+                    // — the batch owns it now, so the guard must not return it.
+                    pooled.buffer.take().unwrap(),
                     now_ms,
                 );
 
@@ -525,7 +632,8 @@ impl RecordAccumulator {
     ///
     /// If it is full, we return `Ok(None)` and a new batch is created. The callback is
     /// returned back via the second element of the tuple so the caller can retry or
-    /// pass it to `append_new_batch`.
+    /// pass it to `append_new_batch`. On error it is returned inside the
+    /// [`AppendError`] for the same reason.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn try_append(
         &self,
@@ -536,12 +644,20 @@ impl RecordAccumulator {
         callback: Option<Callback>,
         deque: &mut VecDeque<ProducerBatch>,
         now_ms: i64,
-    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
+    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), AppendError> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                "Producer closed while send in progress",
-            ));
+            // Java throws a **bare** `KafkaException` here
+            // (`RecordAccumulator.java:427-428`), not an `ApiException`, so
+            // `doSend`'s `catch (ApiException e)` arm does not see it and the
+            // user callback is never invoked — `catch (KafkaException e)`
+            // rethrows instead (`KafkaProducer.java:1073-1077`).
+            // [`KafkaError::kafka`] is what preserves that distinction.
+            //
+            // The callback is still handed back rather than dropped here: the
+            // record was not appended, so nothing else owns it, and it is
+            // `do_send_bytes` — not the accumulator — that decides whether an
+            // error fires it.
+            return Err(AppendError { error: KafkaError::kafka("Producer closed while send in progress"), callback });
         }
 
         if let Some(last) = deque.back_mut() {
@@ -3025,6 +3141,252 @@ mod tests {
         assert!(
             split_operations < max_split_operations,
             "Should not hit the safety limit, indicating no infinite recursion"
+        );
+    }
+
+    /// `append` must hand the user callback back on every failure path so the
+    /// caller can honour the exactly-once callback obligation
+    /// (CLAUDE.md §5, §9.5) — see [`AppendError`]. Java does not need this
+    /// because `KafkaProducer.doSend` keeps its own `callback` reference alive
+    /// across the `append` call.
+    #[tokio::test]
+    async fn test_append_returns_the_callback_on_buffer_exhaustion() {
+        let now: i64 = 0;
+        let n1 = node1();
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+        // A pool that fits exactly one batch.
+        let accum = create_test_accumulator(batch_size, batch_size as i64, Compression::none(), 10);
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = metadata.cluster().clone();
+        let k = key();
+        let v = value();
+
+        // Drain the pool.
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
+            .unwrap();
+
+        // A second partition needs a new buffer; `max_time_to_block = 0` makes
+        // the allocation fail immediately.
+        let fired = Arc::new(AtomicI32::new(0));
+        let counter = Arc::clone(&fired);
+        let callback: Callback = Box::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        // `RecordAppendResult` is not `Debug`, so unwrap the error by hand.
+        let err = match accum
+            .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], Some(callback), 0, now, &cluster)
+            .await
+        {
+            Ok(_) => panic!("the allocation should fail"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(err.error, KafkaError::BufferExhausted(_)),
+            "expected buffer exhaustion, got {:?}",
+            err.error
+        );
+        let returned = err.callback.expect("the callback must be handed back, not dropped");
+        assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
+        returned(None, None);
+        assert_eq!(1, fired.load(Ordering::SeqCst), "the handed-back callback must be intact");
+    }
+
+    /// Same hand-back contract for the "producer closed while send in
+    /// progress" failure, which Java raises from
+    /// `RecordAccumulator.tryAppend` (`RecordAccumulator.java:427-428`).
+    #[tokio::test]
+    async fn test_append_returns_the_callback_when_closed() {
+        let now: i64 = 0;
+        let n1 = node1();
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+        let accum = create_test_accumulator(batch_size, 10 * batch_size as i64, Compression::none(), 10);
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
+        let cluster = metadata.cluster().clone();
+        accum.close();
+
+        let fired = Arc::new(AtomicI32::new(0));
+        let counter = Arc::clone(&fired);
+        let callback: Callback = Box::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let err = match accum
+            .append(TOPIC, 0, 0, Some(&key()), Some(&value()), &[], Some(callback), 0, now, &cluster)
+            .await
+        {
+            Ok(_) => panic!("appending to a closed accumulator should fail"),
+            Err(e) => e,
+        };
+
+        assert!(err.callback.is_some(), "the callback must be handed back, not dropped");
+        assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
+    }
+
+    /// Java brackets the whole of `append` in
+    /// `finally { free.deallocate(buffer); }` (`RecordAccumulator.java:355-358`)
+    /// and nulls `buffer` only once a batch has taken ownership of it
+    /// (`:347-348`), so every exit returns an unused buffer to the pool —
+    /// including the **success** exit of the *first* `synchronized (dq)` block.
+    ///
+    /// That exit holds a live buffer when a sticky-partition switch sends us
+    /// back around the loop *after* the buffer was allocated and the newly
+    /// selected partition turns out to already have a batch with room. This
+    /// test drives exactly that interleaving:
+    ///
+    /// 1. the sticky partition is `0`, with `produced_bytes == sticky_batch_size`
+    ///    banked from an append whose switch was disabled (a non-full last
+    ///    batch), so the switch is still pending;
+    /// 2. `deque(0)`'s last batch is not full but has no room for our record,
+    ///    so the first block returns "no result" without switching partitions;
+    /// 3. the pool is empty, so `free.allocate(...)` parks — and while it is
+    ///    parked `deque(0)` is drained, which makes `allBatchesFull(dq)` true;
+    /// 4. the second block therefore completes the pending switch (to `1`, the
+    ///    only partition with a leader in the cluster the appender sees) and
+    ///    `continue`s;
+    /// 5. on the next iteration the first block's `tryAppend` succeeds, because
+    ///    `deque(1)` has a batch with room — reaching the exit under test with
+    ///    the buffer still in hand.
+    ///
+    /// Dropping that buffer instead of deallocating it is not equivalent:
+    /// `BufferPool::allocate` debits `non_pooled_available_memory` and only
+    /// `deallocate` credits it back (and notifies the next waiter), so every
+    /// occurrence permanently shrinks the pool for the lifetime of the
+    /// producer.
+    #[tokio::test]
+    async fn test_append_returns_the_buffer_when_the_first_block_wins_after_a_partition_switch() {
+        let now: i64 = 0;
+        let n1 = node1();
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+        // Room for exactly two batches, so the third allocation has to wait.
+        let accum = Arc::new(create_test_accumulator(
+            batch_size,
+            2 * batch_size as i64,
+            Compression::none(),
+            10,
+        ));
+
+        // Two views of the same topic: the partitioner picks uniformly among the
+        // partitions that have a leader, so restricting the leader makes
+        // `next_partition` deterministic. `cluster_before` pins the sticky
+        // partition to 0; the appender is handed `cluster_after`, in which the
+        // only possible switch target is 1.
+        let cluster_before = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, None)])
+            .cluster()
+            .clone();
+        let cluster_after = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, None), (1, Some(0))])
+            .cluster()
+            .clone();
+
+        let k = key();
+        // Large enough that two of these do not fit in one batch, small enough
+        // that one leaves the batch not full.
+        let big = vec![b'v'; 600];
+
+        let (_, topic_info) = accum.get_or_create_topic_info(TOPIC);
+
+        // Bank a pending partition switch on partition 0: `produced_bytes`
+        // reaches `sticky_batch_size` with `enable_switch = false`, which is
+        // what Java's `updatePartitionInfo` does while the partition's last
+        // batch is not full.
+        {
+            let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
+            assert_eq!(0, partitioner.peek_current_partition_info(&cluster_before).partition());
+            partitioner.update_partition_info_with_switch(batch_size, &cluster_before, false);
+            assert_eq!(
+                0,
+                partitioner.peek_current_partition_info(&cluster_before).partition(),
+                "a disabled switch must not move the sticky partition yet"
+            );
+        }
+
+        // A batch on partition 0 that is not full but has no room for `big`,
+        // and a batch on partition 1 that does have room. Both use an explicit
+        // partition, so neither touches the partitioner.
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&big), &[], None, 0, now, &cluster_before)
+            .await
+            .unwrap();
+        accum
+            .append(TOPIC, 1, 0, Some(&k), Some(&value()), &[], None, 0, now, &cluster_before)
+            .await
+            .unwrap();
+        assert_eq!(0, accum.free.available_memory(), "both batches should have drained the pool");
+
+        // The append under test: unknown partition, so the partitioner drives it.
+        let appender = {
+            let accum = Arc::clone(&accum);
+            let cluster = cluster_after.clone();
+            let k = k.clone();
+            let big = big.clone();
+            tokio::spawn(async move {
+                accum
+                    .append(
+                        TOPIC,
+                        record_metadata::UNKNOWN_PARTITION,
+                        0,
+                        Some(&k),
+                        Some(&big),
+                        &[],
+                        None,
+                        5_000,
+                        now,
+                        &cluster,
+                    )
+                    .await
+                    // `RecordAppendResult` is not `Send`-agnostic enough to be
+                    // worth returning wholesale; the flags are what we assert.
+                    .map(|r| r.new_batch_created)
+                    .map_err(|e| e.error)
+            })
+        };
+
+        // Let it reach `free.allocate(...)` and park there.
+        for _ in 0..10_000 {
+            if accum.free.queued() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            1,
+            accum.free.queued(),
+            "the appender should be parked in `BufferPool::allocate`"
+        );
+
+        // The sender drains partition 0 — its buffer goes back to the pool,
+        // which both releases the parked allocation and makes the pending
+        // partition switch eligible (`allBatchesFull(dq)` is true for an empty
+        // deque).
+        topic_info.batches.get(&0).unwrap().lock().unwrap().clear();
+        accum.free.deallocate(vec![0u8; batch_size as usize]);
+
+        let new_batch_created = appender.await.unwrap().expect("the append must succeed");
+
+        assert!(
+            !new_batch_created,
+            "the record must land in the batch that already exists on partition 1"
+        );
+        assert_eq!(
+            1,
+            topic_info.batches.get(&1).unwrap().lock().unwrap().len(),
+            "no new batch should have been created on partition 1"
+        );
+        {
+            let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
+            assert_eq!(
+                1,
+                partitioner.peek_current_partition_info(&cluster_after).partition(),
+                "the pending switch should have completed, which is what sends us around the loop"
+            );
+        }
+        // Only partition 1's batch is still outstanding, so the buffer this
+        // append allocated and did not use must be back in the pool.
+        assert_eq!(
+            batch_size as i64,
+            accum.free.available_memory(),
+            "the unused buffer must be deallocated, not dropped"
         );
     }
 }

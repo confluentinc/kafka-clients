@@ -315,6 +315,27 @@ pub enum KafkaError {
     /// carries no error code). Used by `Consumer::wakeup()` to break out
     /// of a `poll()` / `commit_sync()` / etc. call.
     Wakeup(String),
+    /// A plain Kafka error — Java's `KafkaException` thrown directly, i.e.
+    /// *not* an `ApiException` subclass and carrying no protocol error code.
+    ///
+    /// The distinction is behavioural, not cosmetic:
+    /// `KafkaProducer.doSend` catches `ApiException` first (invokes the user
+    /// callback with the placeholder metadata and returns a failed future,
+    /// `KafkaProducer.java:1056-1068`) and a bare `KafkaException` second
+    /// (records the error, notifies the interceptors and **rethrows** without
+    /// invoking the callback, `:1073-1077`). Modelling one of these throws as
+    /// an `ApiException` would fire a user callback where Java guarantees it
+    /// does not fire at all.
+    ///
+    /// The producer raises it in two places:
+    /// - `RecordAccumulator.tryAppend` — "Producer closed while send in
+    ///   progress" (`RecordAccumulator.java:427-428`)
+    /// - `BufferPool.allocate` — "Producer closed while allocating memory"
+    ///   (`BufferPool.java:119`, `:157`)
+    ///
+    /// Like the other message-only variants it has no [`Errors`] code, so
+    /// [`error()`](Self::error) reports [`Errors::UnknownServerError`].
+    Kafka(String),
     /// Concurrent modification error — the consumer was accessed from more
     /// than one thread.
     ///
@@ -458,6 +479,15 @@ impl KafkaError {
         Self::ConcurrentModification(message.into())
     }
 
+    /// Create a plain Kafka error — Java's `new KafkaException(message)`.
+    ///
+    /// See [`Kafka`](Self::Kafka): this is a `KafkaException` that is **not**
+    /// an `ApiException`, which is what keeps `KafkaProducer::do_send*` from
+    /// invoking the user callback for it.
+    pub fn kafka(message: impl Into<String>) -> Self {
+        Self::Kafka(message.into())
+    }
+
     /// Create a record batch too large error.
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
@@ -484,6 +514,7 @@ impl KafkaError {
             | Self::RecordTooLarge(_)
             | Self::Serialization(_)
             | Self::Wakeup(_)
+            | Self::Kafka(_)
             | Self::ConcurrentModification(_) => None,
         }
     }
@@ -515,6 +546,7 @@ impl KafkaError {
             | Self::RecordTooLarge(msg)
             | Self::Serialization(msg)
             | Self::Wakeup(msg)
+            | Self::Kafka(msg)
             | Self::ConcurrentModification(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
@@ -566,6 +598,9 @@ impl KafkaError {
     /// - `IllegalArgument` (IllegalArgumentException extends RuntimeException)
     /// - `IllegalState` (IllegalStateException extends RuntimeException)
     /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
+    /// - `Wakeup` (WakeupException extends KafkaException, NOT ApiException)
+    /// - `Kafka` (a bare KafkaException — see [`Kafka`](Self::Kafka))
+    /// - `ConcurrentModification` (java.util.ConcurrentModificationException)
     pub fn is_api_exception(&self) -> bool {
         !matches!(
             self,
@@ -573,6 +608,7 @@ impl KafkaError {
                 | Self::IllegalState(_)
                 | Self::Serialization(_)
                 | Self::Wakeup(_)
+                | Self::Kafka(_)
                 | Self::ConcurrentModification(_)
         )
     }
@@ -624,6 +660,7 @@ impl fmt::Display for KafkaError {
             Self::RecordTooLarge(msg) => write!(f, "RecordTooLargeError: {msg}"),
             Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
             Self::Wakeup(msg) => write!(f, "WakeupError: {msg}"),
+            Self::Kafka(msg) => write!(f, "KafkaError: {msg}"),
             Self::ConcurrentModification(msg) => write!(f, "ConcurrentModificationError: {msg}"),
         }
     }
@@ -662,5 +699,31 @@ mod tests {
     fn concurrent_modification_display() {
         let cme = KafkaError::concurrent_modification("oops");
         assert_eq!(cme.to_string(), "ConcurrentModificationError: oops");
+    }
+
+    /// [`KafkaError::Kafka`] models a Java `KafkaException` thrown directly:
+    /// a `KafkaException` but **not** an `ApiException`. That single bit is
+    /// what decides whether `KafkaProducer.doSend` invokes the user callback
+    /// (`catch (ApiException e)`) or rethrows (`catch (KafkaException e)`),
+    /// so pin it here rather than only at the producer call site.
+    #[test]
+    fn bare_kafka_exception_is_not_an_api_exception() {
+        let bare = KafkaError::kafka("Producer closed while send in progress");
+
+        assert!(!bare.is_api_exception(), "a bare KafkaException is not an ApiException");
+        assert!(bare.is_kafka_exception(), "but it *is* a KafkaException");
+        assert_eq!("Producer closed while send in progress", bare.message());
+        // No protocol code, like the other message-only variants.
+        assert!(bare.kafka_error().is_none());
+        assert_eq!(Errors::UnknownServerError, bare.error());
+        assert!(!bare.is_retriable());
+        assert!(!bare.is_fatal());
+        assert!(!bare.txn_requires_abort());
+        assert_eq!("KafkaError: Producer closed while send in progress", bare.to_string());
+
+        // Contrast with `Generic`, which is how an `Errors`-coded
+        // `ApiException` is modelled.
+        let api = KafkaError::with_message(Errors::UnknownServerError, "Producer closed while send in progress");
+        assert!(api.is_api_exception());
     }
 }
