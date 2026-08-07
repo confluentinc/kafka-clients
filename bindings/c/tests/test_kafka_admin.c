@@ -648,20 +648,6 @@ static void test_kafka_admin_b5b_rejects_bad_arguments(void) {
                              kafka_common_KafkaError_message(err));
     kafka_common_KafkaError_destroy(err);
 
-    /* An upsertion with no password is not a legal credential. */
-    const char *users[1] = {"alice"};
-    const bool upsertion[1] = {false};
-    const int32_t mechanisms[1] = {1};
-    kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
-    err = kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, RPC_TIMEOUT_MS,
-        &altered);
-    TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(altered);
-    TEST_ASSERT_EQUAL_STRING("scram alteration at index 0 is an upsertion with no password",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
-
     /* An empty update map: the production client throws where the mock does
      * not, so this arm has no coverage in test_mock_admin.c. */
     kafka_admin_UpdateFeaturesResult_t *updated = NULL;
@@ -707,6 +693,50 @@ static void test_kafka_admin_b5b_empty_batches_need_no_broker(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* An upsertion with an empty password is NOT a whole-call rejection.
+ * KafkaAdminClient records `UnacceptableCredentialException("Password must not
+ * be empty")` against that user only (KafkaAdminClient.java:4414-4416) and
+ * still builds and sends every other user's alteration, so the marshaling layer
+ * must pass it through. What this asserts is exactly that: the call is accepted
+ * and yields a per-user row for BOTH users. Which error each row carries depends
+ * on whether anything is listening on localhost:9092 (a timeout without a
+ * broker, the per-user credential error with one), so only the key set is
+ * asserted -- but a whole-call rejection would fail this outright. */
+static void test_kafka_admin_b5b_empty_password_is_a_per_user_error(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    const char *users[2] = {"alice", "bob"};
+    const bool upsertions[2] = {false, false};
+    const int32_t mechanisms[2] = {1, 2};
+    const int32_t iterations[2] = {4096, 8192};
+    const uint8_t bob_password[3] = {'p', 'w', '2'};
+    const uint8_t *passwords[2] = {NULL, bob_password};
+    const int32_t password_lens[2] = {0, 3};
+
+    kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, upsertions, mechanisms, iterations, passwords, password_lens, NULL, NULL, 2,
+        RPC_TIMEOUT_MS, &altered);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(altered);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_AlterUserScramCredentialsResult_count(altered));
+    int seen_alice = 0, seen_bob = 0;
+    for (int32_t i = 0; i < 2; i++) {
+        const char *user = kafka_admin_AlterUserScramCredentialsResult_get_user(altered, i);
+        TEST_ASSERT_NOT_NULL(user);
+        if (strcmp(user, "alice") == 0) {
+            seen_alice = 1;
+        } else if (strcmp(user, "bob") == 0) {
+            seen_bob = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(seen_alice);
+    TEST_ASSERT_TRUE(seen_bob);
+    kafka_admin_AlterUserScramCredentialsResult_destroy(altered);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_admin_new_succeeds);
@@ -731,5 +761,6 @@ int main(void) {
     RUN_TEST(test_kafka_admin_b4_empty_batches_need_no_broker);
     RUN_TEST(test_kafka_admin_b5b_rejects_bad_arguments);
     RUN_TEST(test_kafka_admin_b5b_empty_batches_need_no_broker);
+    RUN_TEST(test_kafka_admin_b5b_empty_password_is_a_per_user_error);
     return UNITY_END();
 }

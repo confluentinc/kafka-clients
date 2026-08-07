@@ -237,6 +237,29 @@ Additionally, per slice:
   flat `test_*` functions) and include the two lifetime/interrupt cases that
   file establishes: handle-lifetime after GC, and SIGINT interrupting a sync
   call with the client still usable afterwards.
+- **Request-direction pinning, sharpened after B5b.** A mock that throws **per
+  key** still echoes the key set back, so the key columns *are* pinned by any
+  pre-existing per-key test; only the **payload** columns are dead. A mock that
+  fails the **whole call** echoes nothing, so every column is dead. Both cases
+  still owe the extracted row-builder a direct unit test — the discriminants
+  live in the payload — but do not claim "no test pins any column" when the key
+  columns are covered.
+- **"Mock implemented" does not mean "request observable."** The discard audit
+  is per *field*, not per RPC: `MockAdminClient.createDelegationToken` is fully
+  implemented yet ignores `options.owner()` entirely (it uses
+  `renewers().get(0)`), so the owner needed an options-level test even though the
+  RPC has end-to-end coverage. Check each option field of each new RPC.
+- **Before writing a drain, check whether the mock has state to seed.** If Java's
+  `MockAdminClient` has a `Builder` setter or an `update*` method for it, export
+  the equivalent: it beats substituting a `_to_*`-converter test because it
+  exercises the C builder too. Cite the Java setter lines in the rustdoc
+  (B5b's `kafka_admin_MockAdminClient_set_feature_levels` is the precedent).
+- **A literal translation of a Java `get(0)` / `get(key)` that can throw becomes
+  a completed-exceptionally future in Rust, never an index panic.** Java's throw
+  is a catchable `RuntimeException`; a Rust panic unwinds across `extern "C"`
+  (every FFI path runs `submit` inline on the calling thread) and aborts the
+  process. `MockAdminClient::create_delegation_token` is the case that caught
+  this.
 
 ## 7. Decisions taken (Manager, 2026-08-06)
 
@@ -274,11 +297,15 @@ Java as possible."* That resolves D1–D3.
   > collection** — because the handle gives the inner collection an index space
   > starting at 0, whereas flattening would need a third index.
   >
-  > **Two index levels is the limit.** A `_get_x(i, j, k)` signature is where
-  > flattening stops being readable in C and the accessor count starts
-  > multiplying.
+  > **Two index levels is the limit — per handle, not per RPC.** A
+  > `_get_x(i, j, k)` signature is where flattening stops being readable in C
+  > and the accessor count starts multiplying. Minting a handle is precisely
+  > the move that *resets* the budget, so the mechanical form of the rule is:
+  > **flatten while the remaining depth is ≤ 2 from the current handle; mint
+  > when it would exceed that.** An RPC may therefore address three or more
+  > levels in total, as `describeLogDirs` does across three handles.
 
-  Both precedents fall out of it mechanically:
+  All three shipped precedents fall out of it mechanically:
 
   - `describeLogDirs` (B2) is `Map<Integer, KafkaFuture<Map<String,
     LogDirDescription>>>`, and `LogDirDescription` carries
@@ -293,6 +320,15 @@ Java as possible."* That resolves D1–D3.
     is a two-field union (binding **xor** exception) with no collection inside.
     Two levels suffice, so B5a shipped `_get_result_count(i)` /
     `_get_binding(i, j)` / `_get_result_error(i, j)` with no new handle.
+  - `describeTopics` (B1) is the third worked example, and the one that shows
+    the rule applying **recursively**. `V = TopicDescription` carries
+    `List<TopicPartitionInfo>`, whose element carries `List<Node>` (replicas,
+    ISR, ELR) — so the element is *not* scalar-only and fully flattening would
+    need `_get_partition_replica(i, j, k)`. B1 accordingly shipped
+    `_get_value(i)` → `kafka_admin_TopicDescription_t` →
+    `_partition(j)` → `kafka_admin_TopicPartitionInfo_t` → flattened nodes
+    (`src/ffi/admin.rs`), each handle spending at most two index levels. The
+    main rule predicts exactly that shape.
 
   Rejected the alternative discriminator "mint when the value is a named Java
   type users hold, flatten when it is an anonymous list wrapper": `FilterResults`
@@ -307,13 +343,19 @@ Java as possible."* That resolves D1–D3.
     `OffsetAndMetadata` (B4) and `ReplicaLogDirInfo` (B2) already do. B6's
     `fenceProducers` (`Map<String, KafkaFuture<ProducerIdAndEpoch>>`) is this
     case, not the collection case.
-  - A record with scalars *and* one collection, keyed directly by the result
-    (not nested inside another collection), still flattens: the scalars sit at
-    `i` and the collection at `(i, j)`, which is two levels. B6's
-    `describeTransactions` (`TransactionDescription`: scalars plus
-    `Set<TopicPartition>`) is this case. `describeProducers`
-    (`PartitionProducerState` → `List<ProducerState>`, all scalars) is the
-    plain flatten case.
+  - A record with scalars *and* one collection **whose element is scalar-only**,
+    keyed directly by the result (not nested inside another collection), still
+    flattens: the scalars sit at `i` and the collection at `(i, j)`, which is
+    two levels. B6's `describeTransactions` (`TransactionDescription`: scalars
+    plus `Set<TopicPartition>`, and a `TopicPartition` is two scalars) is this
+    case. `describeProducers` (`PartitionProducerState` → `List<ProducerState>`,
+    all scalars) is the plain flatten case.
+
+    The "element is scalar-only" qualifier is load-bearing, not decoration:
+    without it this clarification contradicts the main rule on
+    `TopicDescription`, which is *also* "a record with scalars and one
+    collection, keyed directly by the result" and correctly did **not** flatten,
+    because a `TopicPartitionInfo` element contains three more collections.
 
   Per-key *data and errors* are preserved wherever Java expresses them — only
   independent per-key *timing* is lost, which C has no `KafkaFuture` to convey.
