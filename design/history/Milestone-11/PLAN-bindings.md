@@ -177,8 +177,15 @@ method phase would dwarf the work). Each slice is Rust FFI → C tests → Pytho
 | **B2 — Cluster, configs, log dirs** | `describeCluster`, `describeConfigs`, `incrementalAlterConfigs`, `listConfigResources`, `describeLogDirs`, `alterReplicaLogDirs`, `describeReplicaLogDirs`, `listClientMetricsResources` | Introduces `Config`/`ConfigEntry` marshaling; reuses `Node`. |
 | **B3 — Elections, reassignments, offsets** | `electLeaders`, `alterPartitionReassignments`, `listPartitionReassignments`, `listOffsets` | Partition-keyed throughout. Passes partitions as parallel `topics[]`/`partitions[]` arrays and returns `_get_topic(i)`/`_get_partition(i)`, as `deleteRecords` already does — *not* the consumer's `TopicPartition` handle, which is output-only and, per CLAUDE.md §3, misnamed (`TopicPartition` is `org.apache.kafka.common`, so it should be `kafka_common_TopicPartition_t`). Reusing it would propagate that namespace error into a second public C API. |
 | **B4 — Groups & offsets** (= `PLAN.md` slice A) | the 9 Tier-2 group RPCs | Natural "group administration" boundary. |
-| **B5 — ACLs, quotas, SCRAM, tokens, features** (= slice B) | the 13 Tier-3 RPCs from phases 1–5 | All small, independent, low-call-volume. Needs new ACL/quota/SCRAM C types. |
+| **B5a — ACLs and quotas** (= first half of slice B) | `createAcls`, `describeAcls`, `deleteAcls`, `describeClientQuotas`, `alterClientQuotas` | Both domains are type-heavy and both turn on a null-versus-absent distinction C cannot carry in a pointer alone. New `kafka_common_*` types: `AclBinding`, `AclBindingFilter`, `ClientQuotaEntity`, plus the four ACL enums as `code()` values and the wire match-type constants. |
+| **B5b — SCRAM, delegation tokens, features** (= second half of slice B) | `describeUserScramCredentials`, `alterUserScramCredentials`, `describeDelegationToken`, `createDelegationToken`, `renewDelegationToken`, `expireDelegationToken`, `describeFeatures`, `updateFeatures` | The remaining Tier-3 phases 3–5. Independent of B5a: no shared C types. |
 | **B6 — Producers & transactions** (= slice C) | `describeProducers`, `describeTransactions`, `abortTransaction`, `forceTerminateTransaction`, `listTransactions`, `fenceProducers` | The richest per-key shapes (`fenceProducers` → `ProducerIdAndEpoch` per id, `describeProducers` per partition) — deliberately last, once the batch-result pattern is settled. |
+
+**B5 was split in two (Manager, after B4).** As originally tabled it was 13 RPCs
+across five unrelated domains, each needing new C types with no precedent — roughly
+twice B2's type-design load in one slice. B5a is ACLs + client quotas (both
+type-heavy, both with null-versus-absent distinctions); B5b is SCRAM + delegation
+tokens + features. The two halves share no C types, so the boundary costs nothing.
 
 `MockAdminClient` bindings ride along in each slice (mirroring
 `test_mock_consumer.c` / `MockConsumer`), because the C and Python unit tests
