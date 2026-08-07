@@ -3562,6 +3562,44 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_metadata(tp, oam))) }
 }
 
+/// Seeks a single partition to `offset` with commit metadata / leader epoch
+/// (async). Pass `metadata == NULL` for no metadata and `leader_epoch < 0` for
+/// no leader epoch.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
+/// or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topic: *const c_char,
+    partition: i32,
+    offset: i64,
+    leader_epoch: i32,
+    metadata: *const c_char,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    let tp = TopicPartition::new(topic_str, partition);
+    let metadata_str = if metadata.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
+    };
+    let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
+    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+        Ok(o) => o,
+        Err(e) => {
+            // Marshaling failed: fire inline with the error (no guard taken).
+            unsafe { callback(box_error(e), user_data) };
+            return;
+        },
+    };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_metadata(tp, oam)) };
+}
+
 /// Seeks the given partitions to their beginning offsets (sync).
 ///
 /// # Safety

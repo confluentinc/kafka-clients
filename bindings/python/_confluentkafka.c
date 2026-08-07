@@ -1412,7 +1412,21 @@ static Py_ssize_t offsets_to_arrays(PyObject* list, offset_arrays_t* out) {
         int ok = item && PyArg_ParseTuple(item, "siL|iO", &t, &p, &o, &e, &meta);
         if (ok) {
             out->topics[i] = t; out->parts[i] = p; out->offs[i] = o; out->epochs[i] = e;
-            out->metas[i] = (meta == Py_None) ? NULL : PyUnicode_AsUTF8(meta);
+            // A non-str metadata must fail the whole call: treating the failed
+            // conversion as "no metadata" would commit a different map than the
+            // caller passed AND return success with a live exception set, which
+            // CPython later reports as an unrelated SystemError.
+            if (meta == Py_None) {
+                out->metas[i] = NULL;
+            } else if (!PyUnicode_Check(meta)) {
+                PyErr_Format(PyExc_TypeError,
+                             "offset metadata must be str or None, not %s",
+                             Py_TYPE(meta)->tp_name);
+                ok = 0;
+            } else {
+                out->metas[i] = PyUnicode_AsUTF8(meta);
+                if (out->metas[i] == NULL) ok = 0;  // e.g. unencodable surrogates
+            }
         }
         Py_XDECREF(item);
         if (!ok) { offset_arrays_free(out); return -1; }
@@ -1916,25 +1930,37 @@ static PyObject* py_Consumer_list_topics_async(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// ---- sync local ops (return error handle int, 0 on success) ----------------
-static PyObject* py_Consumer_seek(PyObject* self, PyObject* args) {
-    unsigned long long h; const char* topic; int partition; long long offset;
-    if (!PyArg_ParseTuple(args, "KsiL", &h, &topic, &partition, &offset)) return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_Consumer_seek(
-        (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition, offset);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
+// seek / seek_with_metadata: single partition + the op callback.
+//
+// These use the async entry points like every other op that blocks in Rust. The
+// sync kafka_consumer_Consumer_seek[_with_metadata] must NOT be called from here:
+// AsyncKafkaConsumer::seek submits a SeekUnvalidatedEvent and drains background
+// events, so it can invoke the rebalance listener, whose trampoline needs the GIL
+// on the dispatcher thread — a sync call would hold the GIL inside block_on and
+// deadlock the interpreter (and, on the asyncio consumer, occupy the very loop a
+// coroutine listener has to run on).
+static PyObject* py_Consumer_seek_async(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* topic; int partition; long long offset; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsiLO", &h, &topic, &partition, &offset, &cb)) return NULL;
+    Py_INCREF(cb);
+    kafka_consumer_Consumer_seek_async((kafka_consumer_Consumer_t*)(uintptr_t)h,
+        topic, partition, offset, consumer_op_trampoline, cb);
+    Py_RETURN_NONE;
 }
 
-static PyObject* py_Consumer_seek_with_metadata(PyObject* self, PyObject* args) {
+static PyObject* py_Consumer_seek_with_metadata_async(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition; long long offset;
-    int leader_epoch; const char* metadata;
-    if (!PyArg_ParseTuple(args, "KsiLis", &h, &topic, &partition, &offset, &leader_epoch, &metadata))
+    int leader_epoch; const char* metadata; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsiLisO", &h, &topic, &partition, &offset,
+                          &leader_epoch, &metadata, &cb))
         return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_Consumer_seek_with_metadata(
-        (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition, offset, leader_epoch, metadata);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
+    Py_INCREF(cb);
+    kafka_consumer_Consumer_seek_with_metadata_async((kafka_consumer_Consumer_t*)(uintptr_t)h,
+        topic, partition, offset, leader_epoch, metadata, consumer_op_trampoline, cb);
+    Py_RETURN_NONE;
 }
 
+// ---- sync local ops (return error handle int, 0 on success) ----------------
 static PyObject* py_Consumer_enforce_rebalance(PyObject* self, PyObject* args) {
     unsigned long long h; const char* reason;  // None -> ""
     if (!PyArg_ParseTuple(args, "Kz", &h, &reason)) return NULL;
@@ -2811,8 +2837,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_end_offsets_async", py_Consumer_end_offsets_async, METH_VARARGS, "Async end_offsets; cb(map_int, error_int)"},
     {"Consumer_partitions_for_async", py_Consumer_partitions_for_async, METH_VARARGS, "Async partitions_for; cb(list_int, error_int)"},
     {"Consumer_list_topics_async", py_Consumer_list_topics_async, METH_VARARGS, "Async list_topics; cb(map_int, error_int)"},
-    {"Consumer_seek", py_Consumer_seek, METH_VARARGS, "Sync seek; returns error_int"},
-    {"Consumer_seek_with_metadata", py_Consumer_seek_with_metadata, METH_VARARGS, "Sync seek with metadata; returns error_int"},
+    {"Consumer_seek_async", py_Consumer_seek_async, METH_VARARGS, "Async seek; cb(error_int)"},
+    {"Consumer_seek_with_metadata_async", py_Consumer_seek_with_metadata_async, METH_VARARGS, "Async seek with metadata; cb(error_int)"},
     {"Consumer_enforce_rebalance", py_Consumer_enforce_rebalance, METH_VARARGS, "Sync enforce_rebalance; returns error_int"},
     {"Consumer_commit_async", py_Consumer_commit_async, METH_VARARGS,
      "commitAsync([callback]); callback(offset_map_int, error_int); returns error_int"},
