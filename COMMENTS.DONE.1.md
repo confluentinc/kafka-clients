@@ -1101,3 +1101,77 @@ occurrence in `src/` or `bindings/`.
   `_confluentkafka.c`'s `PyArg_ParseTuple` forwarding stay unpinned because the
   mock ignores `options`, so no end-to-end test can reach them. Not claiming
   broader coverage in B3.
+
+---
+
+# Slice B3 — elections, reassignments, offsets (self-review)
+
+No open reviewer comments at the start of this slice; `COMMENTS.1.md` was
+unchanged past round 6, and `COMMENTS.FP.md` / `COMMENTS.FN.md` still do not
+exist on either tree.
+
+## Scope escalation into `src/admin/` (flagged, one commit of its own)
+
+`MockAdminClient::find_partition_reassignment` panicked on Java's
+`RuntimeException` branch, and its rustdoc claimed that branch was reachable
+only through internal corruption. It is not: `delete_topics` removes the topic
+from `all_topics` without pruning `reassignments` (as Java's does), so
+create → alter-reassignment → delete-topic → list-reassignments reaches it.
+Exposing `listPartitionReassignments` to C would have made a process abort
+reachable from a legal C call sequence. Both branches now return
+`KafkaError::illegal_state` with Java's exact message and the single result
+future is failed instead — the accommodation `list_offsets` already makes for a
+`TimestampSpec`. Two mock tests added; the regression one asserts the exact
+message, which is what proves the branch is taken rather than merely present.
+
+## Design decisions worth reviewing
+
+1. **No admin-specific `TopicPartition` type, and no reuse of
+   `kafka_consumer_TopicPartition_t` either.** The brief asked for the latter.
+   Partition keys instead cross as parallel `topics[]` / `partitions[]` arrays
+   on input and `_get_topic(i)` / `_get_partition(i)` on output, matching
+   `deleteRecords` / `DeleteRecordsResult` and `read_topic_partitions` in
+   `src/ffi/consumer.rs`. The reason for the deviation: `kafka_consumer_
+   TopicPartition_t` is **output-only** today — it has `_topic`, `_partition`
+   and `_destroy` but no constructor — so using it as an input would have meant
+   widening the consumer FFI for admin's sake, and using it for result keys
+   would have meant one allocation per key plus a second key style inside the
+   same module. The directive's substance (do not define a competing admin
+   type) is met; if the manager wants the handle literally, say so and it is a
+   contained change.
+
+2. **Each of Java's three `Optional`s gets an explicit boolean discriminant**
+   (`all_partitions`, `cancel[i]`, `is_timestamp[i]`) rather than an overloaded
+   NULL or sentinel. The third is the one that is not merely stylistic:
+   `KafkaAdminClient.getOffsetFromSpec` is not injective, so
+   `forTimestamp(-2)` and `earliest()` are the same `long`, and
+   `MockAdminClient` treats them differently. Both the C and the Python suites
+   assert that difference directly.
+
+3. **Result accessors follow Java's future shape, not a fixed template.**
+   `electLeaders` and `alterPartitionReassignments` get `_get_error(i)` and no
+   `_get_value` (Java: `Optional<Throwable>` and `KafkaFuture<Void>`);
+   `listPartitionReassignments` gets `_get_value(i)` and no `_get_error` (one
+   future for the whole listing, so any failure is a call failure — the
+   `listTopics` shape); only `listOffsets` has both. Stated because D2 is
+   phrased as "per-key value *and* error", which only the last of the four can
+   honour literally.
+
+4. **`OffsetSpec` codes are not invented.** The six no-argument factories are
+   selected by the `ListOffsets` wire sentinels (-1..-6) that Java's own
+   `getOffsetFromSpec` emits, so there is no new code space for a reader to
+   check against Java. `ElectionType` and `IsolationLevel` both have an `id()`
+   in Java and cross as that, per the B2 rule.
+
+## Coverage
+
+16 Rust FFI tests, 21 C mock tests (66 -> 87), 2 C production tests (16 -> 18),
+17 Python tests (70 -> 87). Teeth verified by transposing
+`adding_replicas`/`removing_replicas` and the two `list_offsets_options`
+arguments: each failed exactly the intended test and nothing else, then was
+reverted. Not claiming more than that: as in B2, the `admin.py` `_*_spec` and
+`_confluentkafka.c` `PyArg_ParseTuple` hops stay unpinned for `*Options` fields
+the mock ignores.
+
+DoD #10 (hot-path allocation audit) is N/A for Admin per `admin-client.md` §10;
+#11 does not apply.
