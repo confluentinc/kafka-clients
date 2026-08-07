@@ -51,6 +51,9 @@ pub mod test_certs;
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
 pub mod test_context;
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
+pub mod test_utils;
 
 // Multilanguage integration test harness — Producer impl that tunnels over
 // gRPC to a Python or C++ server. See

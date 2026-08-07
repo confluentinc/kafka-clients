@@ -105,6 +105,10 @@ use crate::common::test_context::TestContext;
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 
+// Consumed records bucketed by topic-partition, borrowed from the batch the
+// poll loop collected them into.
+type RecordsByPartition<'a> = HashMap<TopicPartition, Vec<&'a ConsumerRecord<Vec<u8>, Vec<u8>>>>;
+
 // ── Cluster config ────────────────────────────────────────────────────
 
 /// Cluster config matching the Java suite's `@ClusterTestDefaults`:
@@ -337,7 +341,12 @@ async fn consume_and_verify_records_bytes(
         1
     };
     let collected = consume_records_bytes(consumer, num_records).await;
-    for (i, record) in collected.iter().enumerate().take(num_records) {
+    assert!(
+        collected.len() >= num_records,
+        "expected at least {num_records} records, got {}",
+        collected.len()
+    );
+    for (i, record) in collected.iter().take(num_records).enumerate() {
         let offset = starting_offset + i as i64;
 
         assert_eq!(record.topic(), tp.topic(), "record topic should match tp.topic()");

@@ -221,6 +221,39 @@ impl GroupAuthorizationError {
     }
 }
 
+/// Throttling quota exceeded error carrying the throttle time.
+///
+/// Corresponds to Java's `ThrottlingQuotaExceededException` (a
+/// `RetriableException` subclass carrying error code
+/// [`Errors::ThrottlingQuotaExceeded`] plus a `throttleTimeMs`).
+#[derive(Clone, Debug)]
+pub struct ThrottlingQuotaExceededError {
+    /// Base error fields.
+    kafka_error: KafkaGenericError,
+    /// The amount of time to wait before retrying, in milliseconds.
+    pub throttle_time_ms: i32,
+}
+
+impl ThrottlingQuotaExceededError {
+    /// Create a new throttling quota exceeded error.
+    pub fn new(throttle_time_ms: i32, message: impl Into<String>) -> Self {
+        Self {
+            kafka_error: KafkaGenericError::with_message(Errors::ThrottlingQuotaExceeded, message),
+            throttle_time_ms,
+        }
+    }
+
+    /// Access the base error.
+    pub fn kafka_error(&self) -> &KafkaGenericError {
+        &self.kafka_error
+    }
+
+    /// The amount of time to wait before retrying, in milliseconds.
+    pub fn throttle_time_ms(&self) -> i32 {
+        self.throttle_time_ms
+    }
+}
+
 // ---------------------------------------------------------------------------
 // KafkaError — unified enum for polymorphic error handling
 // ---------------------------------------------------------------------------
@@ -247,6 +280,10 @@ pub enum KafkaError {
     InvalidTopic(InvalidTopicError),
     /// Group authorization failure with group ID.
     GroupAuthorization(GroupAuthorizationError),
+    /// Throttling quota exceeded error carrying the throttle time.
+    ///
+    /// Corresponds to Java's `ThrottlingQuotaExceededException`.
+    ThrottlingQuotaExceeded(ThrottlingQuotaExceededError),
     /// Buffer exhausted error — the producer cannot allocate memory for a record
     /// because the buffer pool is full and the max blocking time has elapsed.
     ///
@@ -359,6 +396,24 @@ impl KafkaError {
         Self::Generic(KafkaGenericError::with_message(Errors::InvalidGroupId, message))
     }
 
+    /// Create a throttling quota exceeded error.
+    ///
+    /// Corresponds to Java's `ThrottlingQuotaExceededException(int, String)`.
+    pub fn throttling_quota_exceeded(throttle_time_ms: i32, message: impl Into<String>) -> Self {
+        Self::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(throttle_time_ms, message))
+    }
+
+    /// The throttle time carried by a [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded)
+    /// error, or `None` for any other error.
+    ///
+    /// Mirrors Java's `ThrottlingQuotaExceededException.throttleTimeMs()`.
+    pub fn throttle_time_ms(&self) -> Option<i32> {
+        match self {
+            Self::ThrottlingQuotaExceeded(e) => Some(e.throttle_time_ms),
+            _ => None,
+        }
+    }
+
     /// Create a buffer exhausted error.
     ///
     /// Corresponds to Java's `BufferExhaustedException`.
@@ -452,6 +507,7 @@ impl KafkaError {
             Self::TopicAuthorization(e) => Some(&e.kafka_error),
             Self::InvalidTopic(e) => Some(&e.kafka_error),
             Self::GroupAuthorization(e) => Some(&e.kafka_error),
+            Self::ThrottlingQuotaExceeded(e) => Some(&e.kafka_error),
             Self::IllegalArgument(_)
             | Self::IllegalState(_)
             | Self::Timeout(_)
@@ -597,6 +653,7 @@ impl fmt::Display for KafkaError {
             Self::GroupAuthorization(e) => {
                 write!(f, "{}: {}", e.kafka_error, e.group_id)
             },
+            Self::ThrottlingQuotaExceeded(e) => write!(f, "{}", e.kafka_error),
             Self::IllegalArgument(msg) => write!(f, "IllegalArgumentError: {msg}"),
             Self::IllegalState(msg) => write!(f, "IllegalStateError: {msg}"),
             Self::Timeout(msg) => write!(f, "TimeoutError: {msg}"),

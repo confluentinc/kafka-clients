@@ -99,3 +99,20 @@
 - [Critic-1 FFI contract round](critic1_ffi_contract_round.md) — check Java before doc-vs-code; Rust moves what Java shares (callback hand-back); clear duplicated state, not just set it
 - [Critic-2 Python bindings round](critic2_python_bindings_round.md) — route a blocking wrapper through the async FFI twin (not just ALLOW_THREADS); cache the asyncio loop; mock can't reproduce block_on deadlocks
 - [Critic-0 re-review round](critic0_rereview_round.md) — Java finally→RAII guard; bare KafkaException variant; un-defanging a merged-primitive guard test
+- [M11 P1 Admin foundation](m11_phase1_admin_notes.md) — Admin rules + completable KafkaFuture + common leaf types; scope conflicts vs PLAN
+- [M11 P2 Admin driver](m11_phase2_admin_driver_notes.md) — createPartitions plain Call + deleteRecords via AdminApiDriver/PartitionLeaderStrategy
+- [M11 P2 driver tests](m11_phase2_driver_test_notes.md) — AdminApiDriverTest; shared #[cfg(test)] fakes; key_to_broker_id; maybe_retry hook
+- [M11 P3 cluster & configs](m11_phase3_cluster_configs_notes.md) — describeCluster UV→Metadata failback; node_for routing; LeastLoadedBrokerOrActiveKController
+- [M11 P4 log dirs](m11_phase4_log_dirs_notes.md) — describeLogDirs/alterReplicaLogDirs per-broker ConstantNodeId fan-out; TopicPartitionReplica
+- [M11 P5 elections/reassign/offsets](m11_phase5_elections_reassignments_offsets_notes.md) — final Tier 1; listOffsets on AdminApiDriver; OffsetSpec enum; 3 controller-Call wrappers
+- [M11 Tier2 P1 group listing/describe](m11_tier2_phase1_notes.md) — layers done; format gotcha; driver/list-Call patterns
+- [M11 Tier2 P2 group offsets](m11_tier2_phase2_notes.md) — OffsetDelete is dedicated RPC (not OffsetCommit -1 sentinel); disableBatch driver wiring; MockClient version-mismatch helper; old-form FC avoids flaky scope-crossing
+- [M11 Tier2 P3 group/member deletion](m11_tier2_phase3_notes.md) — DeleteGroups+LeaveGroup wire; abstract-base-via-composition; removeAll describe-chain via SimpleAdminApiFuture::handle; MockClient matches at send-time (late response hangs); reason trunc 255
+- [M11 Tier3 P1 ACLs](m11_tier3_phase1_acls_notes.md) — LeastLoaded retry (no metadata refresh) vs Controller; module_inception; DeleteAclsResult custom aggregate future; authorizer fixture can't gate ANONYMOUS super user
+- [M11 Tier3 P2 client quotas](m11_tier3_phase2_client_quotas_notes.md) — ClientQuotaMatch tri-state enum; Op None=removal; manual Hash for map-key entity; generated msg data pre-existed
+- [M11 Tier3 P4 delegation tokens](m11_tier3_phase4_delegation_tokens_notes.md) — prereqs+wire+mock; admin has no SASL so integration deferred; TokenInformation eq/hash quirk
+- [M11 Tier3 P5 features](m11_tier3_phase5_features_notes.md) — describe reuses ApiVersions; updateFeatures net-new wire + Result-for-sync-throw; mock version-bounds validation (finding #9)
+- [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
+- [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
+- [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
+- [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
