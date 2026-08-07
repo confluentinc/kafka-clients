@@ -14,55 +14,41 @@ else
   CFLAGS_NATIVE = -mtune=generic
 endif
 
-.PHONY: all build build-rust submodules build-c build-all init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init init-hooks test test-rust test-integration test-c test-python verify format-check lint clean
+.PHONY: build build-all \
+	build-rust build-rust-integration-tests build-rust-all-features \
+	submodules build-c init-venv build-python \
+	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
+	devel-build-c devel-build-python \
+	build-grpc-images init init-hooks \
+	test test-rust test-integration test-c test-python test-rust-all-features \
+	test-integration-perf test-integration-perf-rust test-integration-perf-python \
+	producer-perf-test producer-perf-test-c \
+	consumer-perf-test-python producer-perf-test-python \
+	verify verify-c verify-python verify-rust-and-multilanguage-integration-tests \
+	verify-sandbox format-check lint clean
 
 build: init-hooks build-all
 
-build-all: build-rust build-c build-python
+build-all: build-rust-all-features build-c build-python
 
 build-rust:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
+build-rust-integration-tests:
+	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests --release
+build-rust-all-features:
+	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features --release
 
 submodules:
 	git submodule update --init --recursive
 
-build-c: submodules build-rust
-	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
-	cmake --build bindings/c/build
-
-build-python: submodules build-rust
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
-
-devel-build: devel-build-rust devel-build-c devel-build-python
-
-devel-build-rust:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
-
-devel-build-c: submodules devel-build-rust
-	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
-	cmake --build bindings/c/build
-
-devel-build-python: submodules init-venv devel-build-rust
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
-
-.PHONY: all init build devel-build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python build-grpc-images test-multilanguage producer-perf-test producer-perf-test-c consumer-perf-test-python producer-perf-test-python verify format-check lint clean
-
-build: build-rust build-c build-python
-
-build-rust:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
-
-submodules:
-	git submodule update --init --recursive
-
-build-c: submodules build-rust
+build-c: submodules build-rust-all-features
 	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
 	cmake --build bindings/c/build
 
 init-venv:
 	[ -d venv ] || python3 -m venv venv
 
-build-python: submodules init-venv build-rust
+build-python: init-venv build-rust-all-features
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
 
@@ -70,12 +56,16 @@ devel-build: devel-build-rust devel-build-c devel-build-python
 
 devel-build-rust:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
+devel-build-rust-integration-tests:
+	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests
+devel-build-rust-all-features:
+	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features
 
 devel-build-c: submodules devel-build-rust
 	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
 	cmake --build bindings/c/build
 
-devel-build-python: submodules init-venv devel-build-rust
+devel-build-python: init-venv devel-build-rust
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
 
@@ -97,13 +87,48 @@ init:
 	@[ -d venv ] || python3 -m venv venv
 	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
 
-test: test-multilanguage test-c test-python
+test: test-rust-all-features test-c test-python
 
 test-rust: build-rust
 	cargo test
 
-test-integration: build-rust
-	cargo test --features integration-tests
+# The whole Rust test suite with every feature enabled. `--all-features`
+# turns on `multilanguage-tests`, which runs the producer integration suite
+# three times — once per backend (rust / python / c). Those backends are
+# docker-run from prebuilt gRPC images via testcontainers, so the images
+# must already exist locally: hence the `build-grpc-images` prerequisite.
+#
+# Part of `verify` (through `test`) and of the CI
+# `verify-rust-and-multilanguage-integration-tests` job.
+test-rust-all-features: build build-grpc-images
+	cargo test --all-features
+
+# Functional integration tests only. The performance tests live in their own
+# `performance` cargo test target (tests/performance/main.rs), so `--test
+# integration` cannot schedule them alongside the functional suite.
+test-integration: build-rust-integration-tests
+	cargo test --features integration-tests --test integration
+
+# ── Performance integration tests ────────────────────────────────────────
+#
+# Separated from the functional suites because they assert latency and
+# throughput budgets: run concurrently with ~138 functional tests they contend
+# for CPU, memory and Docker, and their p99 budgets fail for reasons unrelated
+# to the code under test. Both targets expect an otherwise-idle machine.
+
+test-integration-perf-rust: build-rust-integration-tests
+	cargo test --features integration-tests --test performance -- --nocapture
+
+test-integration-perf-python: build-python
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test-performance)
+
+# Rust and Python performance suites, one after the other. Recipe lines rather
+# than prerequisites so the order holds under `make -j`, and so the two
+# suites never overlap — each needs the machine to itself.
+test-integration-perf:
+	$(MAKE) test-integration-perf-rust
+	$(MAKE) test-integration-perf-python
 
 # Env-driven producer performance benchmark. Configure via environment
 # variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
@@ -143,17 +168,15 @@ test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
-# Run the producer integration suite three times — once per backend
-# (rust / python / c). The Rust test process docker-runs the prebuilt
-# images via testcontainers, so the only thing this target ensures
-# beyond `cargo test` is that the images exist locally.
-#
-# Opt-in only — NOT part of `verify` until the harness has been stable
-# in CI for one cycle.
-test-multilanguage: build-grpc-images
-	cargo test --features integration-tests,multilanguage-tests
-
 verify: build format-check lint test
+
+verify-c: test-c
+
+verify-python: test-python
+	make test-integration-perf-python
+
+verify-rust-and-multilanguage-integration-tests: build-rust-all-features format-check lint test-rust-all-features
+	make test-integration-perf-rust
 
 verify-sandbox: build-rust build-c format-check lint test-integration test-c
 
