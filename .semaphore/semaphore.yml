@@ -64,38 +64,11 @@ global_job_config:
       - sem-version python 3.10
 
 blocks:
-  - name: Run translation-agent
-    dependencies: []
-    task:
-      env_vars:
-        # Override in the Semaphore project's "Environment Variables" or
-        # Secrets tab to track a different mainline branch. The sweep runs
-        # only when the build is for this exact branch.
-        - name: MAIN_BRANCH
-          value: master
-        # Path to the AK repo, relative to the job's cwd -- the repo root.
-        # (The prologue's `cd tools/translation_agent` is confined to a
-        # subshell, so it does not move the cwd for the job commands.)
-        # Defaults to the `kafka` git submodule at the repo root.
-        - name: AK_REPO_PATH
-          value: ./kafka
-      # Only this block needs the orchestrator package and its DB artifact;
-      # the Verification and R2 blocks skip both.
-      prologue:
-        commands:
-          - artifact pull project translation_agent.db || true
-      jobs:
-        # `make verify` is NOT part of this job -- it runs in the
-        # "Verification" block below.
-        - name: "Sweep phase or PR planning or implementation (optional)"
-          commands:
-            - ./tools/translation_agent/translation_agent.sh
-
   - name: "R2 Code Review"
     # Sequenced after the agent block: on a PR at status 3 the cascade runs
     # the implementation step and pushes commits to this very PR, so a
     # concurrent review would read a half-written diff.
-    dependencies: ["Run translation-agent"]
+    dependencies: []
     run:
       # run on all pull requests except changes in `/.deployed-versions/`
       when: "pull_request =~ '.+' and change_in('/', {exclude: ['/.deployed-versions/']})"
@@ -114,7 +87,7 @@ blocks:
     # No `run: when:` -- build/lint/test validation applies to every build
     # (main-branch pushes included), matching the unconditional `make verify`
     # this replaces.
-    dependencies: ["Run translation-agent"]
+    dependencies: []
     task:
       prologue:
         commands:
@@ -128,6 +101,8 @@ blocks:
             - make verify
 
 promotions:
+  - name: Start translation plan
+    pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
   - name: Ask agent
