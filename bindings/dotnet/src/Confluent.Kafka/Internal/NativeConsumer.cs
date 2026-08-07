@@ -50,7 +50,7 @@ namespace Confluent.Kafka.Internal;
 /// in-flight tracking were removed here as .NET-only additions on top of that
 /// model — a localized, reversible simplification). Concurrency therefore surfaces
 /// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeWithCallback"/> /
-/// <see cref="SeekWithCallback"/>) is rejected by the core inline and surfaces as a
+/// <see cref="PollWithCallback"/>) is rejected by the core inline and surfaces as a
 /// <b>faulted <see cref="Task"/></b> carrying a <see cref="KafkaException"/>
 /// (ConcurrentModification); a concurrent <b>sync state read</b>
 /// (<see cref="GroupId"/>) surfaces as <see cref="InvalidOperationException"/> from
@@ -408,19 +408,28 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Seeks <c>(topic, partition)</c> to <paramref name="offset"/> (async). On a
-    /// <c>MockConsumer</c>, seeking an <b>unassigned</b> partition is a genuine
-    /// broker-free failure — the returned <see cref="Task"/> faults with a
-    /// <see cref="KafkaException"/> (the void bridge's error path).
+    /// Seeks <c>(topic, partition)</c> to <paramref name="offset"/> (<b>sync</b>; M5/P7) —
+    /// the .NET realization of Java <c>seek(TopicPartition, long)</c>, calling the sync ABI
+    /// <c>Consumer_seek</c> directly (not the async bridge; PLAN §1/§2). Structurally
+    /// identical to the shipped <see cref="EnforceRebalance"/> / <see cref="CommitAsync"/>
+    /// sync-op discipline: preconditions BEFORE any pin / P-Invoke, then
+    /// <see cref="ThrowIfClosed"/>, a call-scoped topic pin, the P/Invoke, then
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> throw-iff-non-null. No
+    /// <see cref="GCHandle"/>, no completion bridge, no <see cref="CancellationToken"/>. On a
+    /// <c>MockConsumer</c>, seeking an <b>unassigned</b> partition is a genuine broker-free
+    /// failure → a synchronous <see cref="KafkaException"/> (replacing the old faulted-Task).
     /// </summary>
     /// <remarks>
-    /// <b>Async, Java-faithful (deliberate divergence from Python's sync <c>seek</c>).</b>
-    /// Java's <c>AsyncKafkaConsumer.seek()</c> returns <c>void</c> but calls a blocking
-    /// cross-thread <c>applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))</c>
-    /// — it blocks — so the CLAUDE.md idiom map maps it to a <see cref="Task"/> (§4). We
-    /// promote the existing async mechanism over <c>Consumer_seek_async</c> unchanged
-    /// (never the sync <c>Consumer_seek</c>). Python exposes <c>seek</c> synchronously;
-    /// that is a deliberate Python divergence, and we choose Java fidelity.
+    /// <b>Deliberate divergence from Python (Q1 = KEEP).</b> The negative-offset guard is the
+    /// ONE place .NET is deliberately stricter than Python (whose sync <c>seek</c> does no
+    /// offset validation): Java's <c>AsyncKafkaConsumer.seek</c> throws
+    /// <c>IllegalArgumentException("seek offset must not be a negative number")</c> before the
+    /// event round-trip, so we throw <see cref="ArgumentOutOfRangeException"/> with that exact
+    /// message BEFORE the P/Invoke — even when the consumer is closed (the argument check
+    /// precedes <see cref="ThrowIfClosed"/>). The exact message is asserted by the tests
+    /// (DoD §3). Blocking: the sync ABI parks the caller inside the core's <c>block_on</c>
+    /// (deadlock-free — multi-thread runtime, ffi §B1); it is NOT a <c>Task.Run</c>
+    /// sync-over-async wrapper.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
@@ -428,12 +437,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// (Java: <c>"seek offset must not be a negative number"</c>).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task SeekWithCallback(
-        string topic,
-        int partition,
-        long offset,
-        CancellationToken cancellationToken = default)
+    /// <exception cref="KafkaException">The core reported a seek failure (e.g. an unassigned partition).</exception>
+    internal void Seek(string topic, int partition, long offset)
     {
         if (topic is null)
         {
@@ -446,22 +451,137 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                 nameof(partition), partition, "Partition must not be negative.");
         }
 
-        // Java-fidelity: AsyncKafkaConsumer.seek() throws IllegalArgumentException
-        // ("seek offset must not be a negative number") on offset < 0 BEFORE the
-        // blocking addAndGet. Per the CLAUDE.md idiom map (IllegalArgumentException →
-        // ArgumentOutOfRangeException, validated before the FFI call) and locked
-        // PLAN decision 11 — the exact message is asserted by the tests (DoD §3).
+        // Q1 = KEEP the Java-fidelity negative-offset guard. Java AsyncKafkaConsumer.seek
+        // throws IllegalArgumentException("seek offset must not be a negative number") BEFORE
+        // the call; per the CLAUDE.md idiom map (IllegalArgumentException →
+        // ArgumentOutOfRangeException, validated before the FFI call) and the locked PLAN
+        // decision Q1. This is the ONE place .NET is deliberately stricter than Python
+        // (Python's sync seek does no offset validation). The exact message is asserted by
+        // the tests (DoD §3). Thrown even when the consumer is closed (before ThrowIfClosed).
         if (offset < 0)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(offset), offset, "seek offset must not be a negative number");
         }
 
-        return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+        ThrowIfClosed();
+
+        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+        KafkaException? failure = KafkaException.FromHandle(
+            NativeMethods.ConsumerSeek(_handle.DangerousGetHandle(), topicPin.Pointer, partition, offset));
+        if (failure is not null)
         {
-            using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
-            NativeMethods.ConsumerSeekAsync(consumer, topicPin.Pointer, partition, offset, callback, userData);
-        });
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Seeks <c>(topic, partition)</c> to <paramref name="offsetAndMetadata"/>'s offset,
+    /// carrying its commit metadata + leader epoch (<b>sync</b>; M5/P7) — the .NET realization
+    /// of Java <c>seek(TopicPartition, OffsetAndMetadata)</c>, calling the sync ABI
+    /// <c>Consumer_seek_with_metadata</c> directly. Same sync-op discipline as
+    /// <see cref="Seek(string, int, long)"/> (preconditions → <see cref="ThrowIfClosed"/> →
+    /// call-scoped pins → P/Invoke → <see cref="KafkaException.FromHandle(IntPtr)"/>).
+    /// </summary>
+    /// <remarks>
+    /// <b>No offset guard here (unlike <see cref="Seek(string, int, long)"/>).</b> The
+    /// <see cref="OffsetAndMetadata"/> constructor already rejects a negative offset (with
+    /// <c>"Invalid negative offset"</c>), so a negative offset cannot reach this method — the
+    /// ctor is the upstream gate. <see cref="OffsetAndMetadata.Metadata"/> is never null (the
+    /// ctor coerces null → <c>""</c>), so a valid pointer is always pinned and passed
+    /// (matching Python's <c>offset.metadata or ""</c>); a null leader epoch maps to the ABI's
+    /// <c>-1</c> "no epoch" sentinel (Python's <c>epoch or -1</c>). Both strings are pinned
+    /// call-scoped.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/> or <paramref name="offsetAndMetadata"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a seek failure (e.g. an unassigned partition).</exception>
+    internal void SeekWithMetadata(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        if (offsetAndMetadata is null)
+        {
+            throw new ArgumentNullException(nameof(offsetAndMetadata));
+        }
+
+        ThrowIfClosed();
+
+        // Python parity (offset.metadata or ""; epoch or -1): a null leader epoch → the ABI's
+        // -1 "no epoch" sentinel. Metadata is never null by construction (the OffsetAndMetadata
+        // ctor coerces null → ""), so a valid pointer is always pinned and passed.
+        int leaderEpoch = offsetAndMetadata.LeaderEpoch ?? -1;
+
+        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+        using Utf8Marshal.PinnedUtf8String metadataPin = Utf8Marshal.Pin(offsetAndMetadata.Metadata);
+        KafkaException? failure = KafkaException.FromHandle(
+            NativeMethods.ConsumerSeekWithMetadata(
+                _handle.DangerousGetHandle(),
+                topicPin.Pointer,
+                partition,
+                offsetAndMetadata.Offset,
+                leaderEpoch,
+                metadataPin.Pointer));
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Returns the current lag of <c>(topic, partition)</c> (<b>sync</b>; M5/P7) — the .NET
+    /// realization of Java <c>currentLag(TopicPartition)</c>, calling the sync ABI
+    /// <c>Consumer_current_lag</c> directly (a non-blocking local read). Maps Java's
+    /// <c>OptionalLong.empty</c> → <c>null</c>. No error handle, no completion bridge, no
+    /// <see cref="CancellationToken"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Python-parity <c>false</c> → <c>null</c> (no concurrent-read split).</b> The ABI's
+    /// <c>false</c> means <em>either</em> the lag is unknown <em>or</em> the access guard could
+    /// not be acquired (a concurrent read) — the binding maps <b>both</b> to <c>null</c>,
+    /// matching the Python sibling (<c>bindings/python/consumer.py:279</c> returns the raw
+    /// value, <c>None</c> on false). <c>CurrentLag</c> deliberately does NOT get the
+    /// <see cref="InvalidOperationException"/> concurrent-state-read treatment that
+    /// <see cref="GroupId"/> / <see cref="Assignment"/> use (those return a null owned handle
+    /// on rejection; <c>current_lag</c> conflates the two into a bare <c>false</c>, so the
+    /// split is not observable). The same check-then-use handle TOCTOU vs a concurrent
+    /// teardown as <see cref="EnforceRebalance"/> is the accepted single-owner residual.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    internal long? CurrentLag(string topic, int partition)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        ThrowIfClosed();
+
+        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+        return NativeMethods.ConsumerCurrentLag(
+            _handle.DangerousGetHandle(), topicPin.Pointer, partition, out long lag)
+            ? lag
+            : (long?)null;
     }
 
     /// <summary>

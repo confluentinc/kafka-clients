@@ -29,13 +29,17 @@ namespace Confluent.Kafka;
 /// <remarks>
 /// Mostly non-blocking <em>local</em> reads and actions (<see cref="Wakeup"/>,
 /// <see cref="GroupMetadata"/>, <see cref="Assignment"/>, <see cref="Subscription"/>,
-/// <see cref="Paused"/>, <see cref="EnforceRebalance"/>), plus one non-blocking
-/// <em>data-plane</em> member — the fire-and-forget <see cref="CommitAsync"/> (M5/P6). It
-/// belongs here because it is <b>flavor-independent</b> (always a synchronous
-/// <see langword="void"/>, whether the consumer is async or sync), a mild widening of the
-/// base's charter from "non-blocking <em>local</em>" to "non-blocking regardless of network
-/// semantics" — accepted for the flavor-independence it buys (a future sync
-/// <c>IConsumer</c> inherits the identical member).
+/// <see cref="Paused"/>, <see cref="EnforceRebalance"/>), plus the fire-and-forget
+/// <see cref="CommitAsync"/> (M5/P6) and, from M5/P7, the two
+/// <see cref="Seek(TopicPartition, long)"/> overloads and <see cref="CurrentLag"/>. The
+/// latter three are <b>flavor-independent</b> (always synchronous, whether the consumer is
+/// async or sync), so they live on this shared base — reachable through an
+/// <see cref="IAsyncConsumer"/> reference and inherited unchanged by a future sync
+/// <c>IConsumer</c>. <see cref="CurrentLag"/> is a genuine non-blocking local read;
+/// <c>Seek</c> blocks in Java yet is shipped <b>synchronous</b> here for Python parity
+/// (a deliberate CLAUDE.md §4 divergence — see the member remarks), so this base's charter
+/// widens from "non-blocking <em>local</em>" to "non-blocking regardless of network
+/// semantics", accepted for the flavor-independence it buys.
 /// </remarks>
 /// <remarks>
 /// The three state getters (<see cref="Assignment"/> / <see cref="Subscription"/> /
@@ -154,4 +158,79 @@ public interface IConsumerCommon
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
     void CommitAsync();
+
+    /// <summary>
+    /// Seeks <paramref name="partition"/> to <paramref name="offset"/> (Java
+    /// <c>seek(TopicPartition, long)</c>) — <b>synchronous</b>, matching the Python sibling.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Sync (deliberate §4 divergence).</b> Java's <c>AsyncKafkaConsumer.seek()</c> blocks
+    /// (a cross-thread <c>addAndGet(new SeekUnvalidatedEvent(...))</c>), so CLAUDE.md §4 would
+    /// map it to a <see cref="Task"/>; this phase ships it <b>synchronous</b> instead —
+    /// Python exposes <c>seek</c> synchronously, and the sync ABI (<c>Consumer_seek</c>) is
+    /// called directly (no <c>Task.Run</c>, so not sync-over-async). It therefore lives on
+    /// this non-blocking shared base, reachable through an <see cref="IAsyncConsumer"/>
+    /// reference. Documented under the §4 idiom-map divergence.
+    /// </para>
+    /// <para>
+    /// <b>Java-fidelity negative-offset guard (the one place stricter than Python).</b> A
+    /// negative <paramref name="offset"/> is rejected with the exact Java message before any
+    /// native call — even when the consumer is closed (the argument check precedes the
+    /// disposed check).
+    /// </para>
+    /// </remarks>
+    /// <param name="partition">The topic-partition to seek.</param>
+    /// <param name="offset">The offset to seek to (must be non-negative).</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="offset"/> is negative (Java: <c>"seek offset must not be a negative
+    /// number"</c>).
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a seek failure (e.g. seeking an unassigned partition).
+    /// </exception>
+    void Seek(TopicPartition partition, long offset);
+
+    /// <summary>
+    /// Seeks <paramref name="partition"/> to <paramref name="offsetAndMetadata"/>'s offset,
+    /// carrying its commit metadata and leader epoch (Java
+    /// <c>seek(TopicPartition, OffsetAndMetadata)</c>) — <b>synchronous</b>, matching the
+    /// Python sibling.
+    /// </summary>
+    /// <remarks>
+    /// Same sync mapping as <see cref="Seek(TopicPartition, long)"/> (calls the sync ABI
+    /// <c>Consumer_seek_with_metadata</c> directly). No offset guard is needed here — the
+    /// <see cref="OffsetAndMetadata"/> constructor already rejects a negative offset (with
+    /// <c>"Invalid negative offset"</c>).
+    /// </remarks>
+    /// <param name="partition">The topic-partition to seek.</param>
+    /// <param name="offsetAndMetadata">The offset (with metadata / leader epoch) to seek to.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsetAndMetadata"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a seek failure (e.g. seeking an unassigned partition).
+    /// </exception>
+    void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
+
+    /// <summary>
+    /// Returns the consumer's current lag for <paramref name="partition"/> — the number of
+    /// records between the consumer's position and the log-end offset (Java
+    /// <c>currentLag(TopicPartition)</c>) — or <see langword="null"/> when the lag is not
+    /// currently known (Java's <c>OptionalLong.empty</c>). <b>Synchronous</b>: a non-blocking
+    /// local read (never blocks in the core), so it stays sync (a §4 divergence — the §4
+    /// idiom map lists <c>currentLag</c> as blocking, corrected this phase).
+    /// </summary>
+    /// <remarks>
+    /// A <see langword="null"/> result conflates "lag unknown" with a concurrent-access
+    /// rejection (the ABI reports both as a bare "unknown") — matching the Python sibling,
+    /// which returns the raw value / <c>None</c>. Unlike the concurrent sync <em>state
+    /// reads</em> (<see cref="Assignment"/> etc.), <c>CurrentLag</c> does <b>not</b> throw
+    /// <see cref="InvalidOperationException"/> on concurrent access — the ABI does not
+    /// surface that split for lag.
+    /// </remarks>
+    /// <param name="partition">The topic-partition whose lag to read.</param>
+    /// <returns>The current lag, or <see langword="null"/> when the lag is unknown.</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    long? CurrentLag(TopicPartition partition);
 }

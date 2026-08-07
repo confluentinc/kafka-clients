@@ -104,28 +104,6 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     Task Unsubscribe(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Seeks <paramref name="partition"/> to <paramref name="offset"/> (Java
-    /// <c>seek(TopicPartition, long)</c>).
-    /// </summary>
-    /// <remarks>
-    /// <b>Async, Java-faithful (deliberate divergence from Python's sync <c>seek</c>).</b>
-    /// Java's <c>AsyncKafkaConsumer.seek()</c> returns <c>void</c> but performs a blocking
-    /// cross-thread event round-trip (<c>addAndGet(new SeekUnvalidatedEvent(...))</c>), so
-    /// the CLAUDE.md §4 idiom map maps it to a <see cref="Task"/>. Python exposes
-    /// <c>seek</c> synchronously; we choose Java fidelity. A negative <paramref name="offset"/>
-    /// is rejected with the exact Java message before any native call.
-    /// </remarks>
-    /// <param name="partition">The topic-partition to seek.</param>
-    /// <param name="offset">The offset to seek to (must be non-negative).</param>
-    /// <param name="cancellationToken">Best-effort cancellation.</param>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="offset"/> is negative (Java: <c>"seek offset must not be a
-    /// negative number"</c>).
-    /// </exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default);
-
-    /// <summary>
     /// Manually assigns <paramref name="partitions"/> to this consumer (Java
     /// <c>assign(Collection)</c>). Blocks in Java (a cross-thread event round-trip), so it
     /// returns a <see cref="Task"/> here.

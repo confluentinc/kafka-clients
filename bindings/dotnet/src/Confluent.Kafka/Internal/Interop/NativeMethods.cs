@@ -177,22 +177,11 @@ internal static class NativeMethods
         ConsumerCallbacks.OperationCallback callback,
         IntPtr userData);
 
-    /// <summary>
-    /// <c>kafka_consumer_Consumer_seek_async</c> — seeks <c>(topic, partition)</c> to
-    /// <paramref name="offset"/>. <paramref name="topic"/> is a pinned,
-    /// NUL-terminated UTF-8 buffer read <b>synchronously</b> during the call
-    /// (call-scoped pin). Completion semantics match
-    /// <see cref="ConsumerSubscribeAsync"/> (seeking an unassigned partition is a
-    /// genuine broker-free failure — the void bridge's error path).
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_async", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ConsumerSeekAsync(
-        IntPtr consumer,
-        IntPtr topic,
-        int partition,
-        long offset,
-        ConsumerCallbacks.OperationCallback callback,
-        IntPtr userData);
+    // NOTE (M5/P7): `Consumer_seek_async` is intentionally NOT declared. Seek is now a
+    // SYNC member (Python parity) that calls the sync ABI directly — see the sync-op
+    // declarations `ConsumerSeek` / `ConsumerSeekWithMetadata` below. The Rust
+    // `Consumer_seek_async` symbol still exists in the header (Rust-owned; Mode A = no
+    // Rust change), we simply stop declaring it on the C# side.
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_unsubscribe_async</c> — unsubscribes from all
@@ -674,6 +663,51 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_enforce_rebalance", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerEnforceRebalance(IntPtr consumer, IntPtr reason);
+
+    // ---- Sync seek + current lag (ffi §B5) — M5/P7 ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek</c> — seeks <c>(topic, partition)</c> to
+    /// <paramref name="offset"/> (sync). <paramref name="topic"/> is a pinned
+    /// NUL-terminated UTF-8 buffer read <b>synchronously</b> during the call
+    /// (call-scoped pin). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success) consumed by <see cref="KafkaException.FromHandle(IntPtr)"/> — the
+    /// shipped <see cref="ConsumerEnforceRebalance"/> sync-op shape. Seeking an unassigned
+    /// partition is a genuine broker-free failure (a non-null error handle).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSeek(IntPtr consumer, IntPtr topic, int partition, long offset);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek_with_metadata</c> — seeks <c>(topic, partition)</c>
+    /// to <paramref name="offset"/> carrying a commit metadata string and leader epoch
+    /// (sync). <paramref name="topic"/> and <paramref name="metadata"/> are pinned
+    /// NUL-terminated UTF-8 buffers read <b>synchronously</b> during the call (call-scoped
+    /// pins). Per the header contract, <paramref name="leaderEpoch"/> <c>&lt; 0</c> means
+    /// "no leader epoch" and <paramref name="metadata"/> == <see cref="IntPtr.Zero"/> means
+    /// "no metadata" — the binding always passes a valid pointer, since
+    /// <see cref="OffsetAndMetadata.Metadata"/> is never null. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success), the same sync-op shape as
+    /// <see cref="ConsumerSeek"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_with_metadata", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSeekWithMetadata(
+        IntPtr consumer, IntPtr topic, int partition, long offset, int leaderEpoch, IntPtr metadata);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_current_lag</c> — the current lag of
+    /// <c>(topic, partition)</c> (sync, never blocks — a local read). <paramref name="topic"/>
+    /// is a pinned NUL-terminated UTF-8 buffer read during the call. Writes the lag to
+    /// <paramref name="outLag"/> and returns <see langword="true"/> when the lag is known;
+    /// returns <see langword="false"/> when the lag is unknown OR the access guard could not
+    /// be acquired — the binding maps <b>both</b> to <c>null</c> (Java's
+    /// <c>OptionalLong.empty</c> / the Python sibling). There is no error handle. The
+    /// <c>bool</c> return is marshalled as <see cref="UnmanagedType.I1"/> (a 1-byte C bool,
+    /// not a 4-byte Win32 <c>BOOL</c>; ffi §0.1).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_current_lag", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerCurrentLag(IntPtr consumer, IntPtr topic, int partition, out long outLag);
 
     // ---- TopicPartitionList_t — owned borrow-root + borrowed elements (ffi §B2) ----
 

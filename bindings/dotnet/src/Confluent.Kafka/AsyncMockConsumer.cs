@@ -70,8 +70,16 @@ public sealed class AsyncMockConsumer : IAsyncConsumer
         _native.UnsubscribeWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
-        _native.SeekWithCallback(partition.Topic, partition.Partition, offset, cancellationToken);
+    public void Seek(TopicPartition partition, long offset) =>
+        _native.Seek(partition.Topic, partition.Partition, offset);
+
+    /// <inheritdoc/>
+    public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
+        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+
+    /// <inheritdoc/>
+    public long? CurrentLag(TopicPartition partition) =>
+        _native.CurrentLag(partition.Topic, partition.Partition);
 
     /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
