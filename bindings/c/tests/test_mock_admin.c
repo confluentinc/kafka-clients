@@ -3176,6 +3176,1023 @@ static void test_mock_admin_b3_null_out_result(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+// ---------------------------------------------------------------------------
+// B4 — groups and group offsets
+//
+// Java's own MockAdminClient implements only two of these nine RPCs
+// (`listGroups` / `listConsumerGroups` from `groupConfigs`, and
+// `listConsumerGroupOffsets` from `committedOffsets`); the other seven throw
+// `UnsupportedOperationException("Not implemented yet")`, which the Rust mock
+// surfaces as an exceptional future per `admin-client.md` §9. So the tests
+// below split into round-trip tests for the first three and
+// where-does-the-error-land tests for the rest — and the latter are not
+// filler: they pin whether a failure arrives per key or as the call's error,
+// which is exactly what each Java `*Result`'s future shape decides.
+// ---------------------------------------------------------------------------
+
+/* Seeds a group in the mock by writing a group config: `groupConfigs` is the
+ * only map `MockAdminClient.listGroups` reads (MockAdminClient.java:728-732),
+ * and `incrementalAlterConfigs` on a GROUP resource is the only writer. */
+static void seed_group(kafka_admin_AdminClient_t *admin, const char *group_id) {
+    alter_one_config(admin, RESOURCE_TYPE_GROUP, group_id, "consumer.session.timeout.ms", "45000",
+                     OP_TYPE_SET);
+}
+
+/* Returns the index of `group_id` in a listConsumerGroupOffsets result, or -1. */
+static int32_t find_group_offsets_key(const kafka_admin_ListConsumerGroupOffsetsResult_t *result,
+                                      const char *group_id) {
+    int32_t n = kafka_admin_ListConsumerGroupOffsetsResult_count(result);
+    for (int32_t i = 0; i < n; i++) {
+        const char *k = kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(result, i);
+        if (k != NULL && strcmp(k, group_id) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Returns the index of (topic, partition) in an offset map, or -1. */
+static int32_t find_offset_entry(const kafka_admin_OffsetAndMetadataMap_t *map,
+                                 const char *topic, int32_t partition) {
+    int32_t n = kafka_admin_OffsetAndMetadataMap_count(map);
+    for (int32_t i = 0; i < n; i++) {
+        const char *t = kafka_admin_OffsetAndMetadataMap_get_topic(map, i);
+        if (t != NULL && strcmp(t, topic) == 0 &&
+            kafka_admin_OffsetAndMetadataMap_get_partition(map, i) == partition) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Returns the index of `group_id` in a listGroups result's valid listings. */
+static int32_t find_group_listing(const kafka_admin_ListGroupsResult_t *result,
+                                  const char *group_id) {
+    int32_t n = kafka_admin_ListGroupsResult_valid_count(result);
+    for (int32_t i = 0; i < n; i++) {
+        const kafka_admin_GroupListing_t *listing =
+            kafka_admin_ListGroupsResult_get_valid(result, i);
+        const char *k = listing == NULL ? NULL : kafka_admin_GroupListing_group_id(listing);
+        if (k != NULL && strcmp(k, group_id) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// ---- listGroups ------------------------------------------------------------
+
+static void test_mock_admin_list_groups_reports_seeded_groups(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    seed_group(admin, "lg-a");
+    seed_group(admin, "lg-b");
+
+    kafka_admin_ListGroupsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_groups(
+        admin, NULL, 0, NULL, 0, NULL, 0, -1, &result);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_ListGroupsResult_valid_count(result));
+    /* The mock never reports a per-broker failure, so the error list is empty
+     * and is *not* parallel to the listing list. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListGroupsResult_error_count(result));
+    TEST_ASSERT_NULL(kafka_admin_ListGroupsResult_get_error(result, 0));
+
+    int32_t i = find_group_listing(result, "lg-a");
+    TEST_ASSERT_TRUE(i >= 0);
+    const kafka_admin_GroupListing_t *listing = kafka_admin_ListGroupsResult_get_valid(result, i);
+    TEST_ASSERT_NOT_NULL(listing);
+    /* MockAdminClient.java:730 builds every listing as CONSUMER / "consumer" /
+     * STABLE. `GroupType.toString()` is "Consumer" (capitalised); the protocol
+     * type is the lower-case wire string, and the two are unrelated. */
+    TEST_ASSERT_EQUAL_STRING("Consumer", kafka_admin_GroupListing_group_type(listing));
+    TEST_ASSERT_EQUAL_STRING("consumer", kafka_admin_GroupListing_protocol(listing));
+    TEST_ASSERT_EQUAL_STRING("Stable", kafka_admin_GroupListing_group_state(listing));
+    /* A CONSUMER-type group with a non-empty protocol is not simple. */
+    TEST_ASSERT_FALSE(kafka_admin_GroupListing_is_simple_consumer_group(listing));
+
+    TEST_ASSERT_TRUE(find_group_listing(result, "lg-b") >= 0);
+    TEST_ASSERT_NULL(kafka_admin_ListGroupsResult_get_valid(result, 2));
+    TEST_ASSERT_NULL(kafka_admin_ListGroupsResult_get_valid(result, -1));
+    kafka_admin_ListGroupsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_list_groups_with_no_groups_is_empty(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* Filters are accepted and passed through; the mock ignores its options
+     * argument entirely (MockAdminClient.java:728), so this only proves the
+     * name arrays marshal without error. */
+    const char *states[1] = {"Stable"};
+    const char *protocols[1] = {"consumer"};
+    const char *types[1] = {"Consumer"};
+
+    kafka_admin_ListGroupsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_groups(
+        admin, states, 1, protocols, 1, types, 1, 5000, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListGroupsResult_valid_count(result));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListGroupsResult_error_count(result));
+    kafka_admin_ListGroupsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t valid_count;
+    int32_t error_count;
+} list_groups_async_result_t;
+
+static void on_list_groups(kafka_admin_ListGroupsResult_t *result,
+                           kafka_common_KafkaError_t *error, void *user_data) {
+    list_groups_async_result_t *r = (list_groups_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    if (result != NULL) {
+        r->valid_count = kafka_admin_ListGroupsResult_valid_count(result);
+        r->error_count = kafka_admin_ListGroupsResult_error_count(result);
+        kafka_admin_ListGroupsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_list_groups_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    seed_group(admin, "lg-async");
+
+    list_groups_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_list_groups_async(admin, NULL, 0, NULL, 0, NULL, 0, -1,
+                                              on_list_groups, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.valid_count);
+    TEST_ASSERT_EQUAL_INT32(0, r.error_count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_list_groups_async_null_handle(void) {
+    list_groups_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_list_groups_async(NULL, NULL, 0, NULL, 0, NULL, 0, -1,
+                                              on_list_groups, &r);
+    /* Fires inline on this thread, before the call returns. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- listConsumerGroups ----------------------------------------------------
+
+static void test_mock_admin_list_consumer_groups_reports_seeded_groups(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    seed_group(admin, "lcg-a");
+
+    kafka_admin_ListConsumerGroupsResult_t *result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_list_consumer_groups(admin, NULL, 0, NULL, 0, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_ListConsumerGroupsResult_valid_count(result));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListConsumerGroupsResult_error_count(result));
+
+    const kafka_admin_ConsumerGroupListing_t *listing =
+        kafka_admin_ListConsumerGroupsResult_get_valid(result, 0);
+    TEST_ASSERT_NOT_NULL(listing);
+    TEST_ASSERT_EQUAL_STRING("lcg-a", kafka_admin_ConsumerGroupListing_group_id(listing));
+    /* MockAdminClient.java:743 uses `new ConsumerGroupListing(g, false)`, whose
+     * state and type are empty Optionals: null strings here, not "Unknown". */
+    TEST_ASSERT_FALSE(kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
+    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_group_state(listing));
+    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_state(listing));
+    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_group_type(listing));
+
+    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupsResult_get_valid(result, 1));
+    kafka_admin_ListConsumerGroupsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t valid_count;
+} list_consumer_groups_async_result_t;
+
+static void on_list_consumer_groups(kafka_admin_ListConsumerGroupsResult_t *result,
+                                    kafka_common_KafkaError_t *error, void *user_data) {
+    list_consumer_groups_async_result_t *r = (list_consumer_groups_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    if (result != NULL) {
+        r->valid_count = kafka_admin_ListConsumerGroupsResult_valid_count(result);
+        kafka_admin_ListConsumerGroupsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_list_consumer_groups_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    seed_group(admin, "lcg-async");
+
+    list_consumer_groups_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_list_consumer_groups_async(admin, NULL, 0, NULL, 0, -1,
+                                                       on_list_consumer_groups, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.valid_count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+// ---- describeConsumerGroups / describeClassicGroups ------------------------
+
+static void test_mock_admin_describe_consumer_groups_reports_unsupported_per_group(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *groups[2] = {"dg-a", "dg-b"};
+
+    kafka_admin_DescribeConsumerGroupsResult_t *result = NULL;
+    /* `describedGroups()` is one future per group, so the mock's
+     * UnsupportedOperationException (MockAdminClient.java:735-737) lands in
+     * every per-group slot, not as a call failure. */
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_consumer_groups(admin, groups, 2, -1, true, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DescribeConsumerGroupsResult_count(result));
+    /* Entries are sorted by group id. */
+    TEST_ASSERT_EQUAL_STRING("dg-a",
+                             kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 0));
+    TEST_ASSERT_EQUAL_STRING("dg-b",
+                             kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        TEST_ASSERT_NULL(kafka_admin_DescribeConsumerGroupsResult_get_value(result, i));
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DescribeConsumerGroupsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, kafka_common_KafkaError_code(e));
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    TEST_ASSERT_NULL(kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 2));
+    TEST_ASSERT_NULL(kafka_admin_DescribeConsumerGroupsResult_get_error(result, -1));
+    kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_classic_groups_reports_unsupported_per_group(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *groups[1] = {"dcg"};
+
+    kafka_admin_DescribeClassicGroupsResult_t *result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_classic_groups(admin, groups, 1, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DescribeClassicGroupsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("dcg",
+                             kafka_admin_DescribeClassicGroupsResult_get_group_id(result, 0));
+    TEST_ASSERT_NULL(kafka_admin_DescribeClassicGroupsResult_get_value(result, 0));
+    const kafka_common_KafkaError_t *e =
+        kafka_admin_DescribeClassicGroupsResult_get_error(result, 0);
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    kafka_admin_DescribeClassicGroupsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+    int32_t first_error_code;
+} describe_groups_async_result_t;
+
+static void on_describe_consumer_groups(kafka_admin_DescribeConsumerGroupsResult_t *result,
+                                        kafka_common_KafkaError_t *error, void *user_data) {
+    describe_groups_async_result_t *r = (describe_groups_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    r->first_error_code = 0;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeConsumerGroupsResult_count(result);
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DescribeConsumerGroupsResult_get_error(result, 0);
+        if (e != NULL) {
+            r->first_error_code = kafka_common_KafkaError_code(e);
+        }
+        kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_describe_consumer_groups_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *groups[1] = {"dg-async"};
+
+    describe_groups_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_consumer_groups_async(admin, groups, 1, -1, false,
+                                                           on_describe_consumer_groups, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, r.first_error_code);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_consumer_groups_async_null_handle(void) {
+    describe_groups_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_consumer_groups_async(NULL, NULL, 0, -1, false,
+                                                           on_describe_consumer_groups, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- listConsumerGroupOffsets ----------------------------------------------
+
+/* Seeds two committed offsets and reads them back both ways: with the group's
+ * partition selection unset (Java's null Collection, "everything") and with an
+ * explicit one-partition selection. */
+static void test_mock_admin_list_consumer_group_offsets_round_trip(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *seed_topics[2] = {"og-a", "og-b"};
+    const int32_t seed_partitions[2] = {0, 1};
+    const int64_t seed_offsets[2] = {17, 23};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_update_consumer_group_offsets(
+        admin, seed_topics, seed_partitions, seed_offsets, 2));
+
+    const char *groups[1] = {"og-group"};
+    const bool all_partitions[1] = {true};
+    const int32_t counts[1] = {0};
+
+    kafka_admin_ListConsumerGroupOffsetsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, all_partitions, NULL, NULL, counts, 1, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_ListConsumerGroupOffsetsResult_count(result));
+    int32_t g = find_group_offsets_key(result, "og-group");
+    TEST_ASSERT_TRUE(g >= 0);
+    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, g));
+
+    const kafka_admin_OffsetAndMetadataMap_t *map =
+        kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, g);
+    TEST_ASSERT_NOT_NULL(map);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_OffsetAndMetadataMap_count(map));
+
+    int32_t i = find_offset_entry(map, "og-a", 0);
+    TEST_ASSERT_TRUE(i >= 0);
+    TEST_ASSERT_TRUE(kafka_admin_OffsetAndMetadataMap_has_offset(map, i));
+    TEST_ASSERT_EQUAL_INT64(17, kafka_admin_OffsetAndMetadataMap_get_offset(map, i));
+    /* Java's one-argument OffsetAndMetadata constructor normalises the metadata
+     * to "", so it is a non-null empty string rather than NULL. */
+    TEST_ASSERT_EQUAL_STRING("", kafka_admin_OffsetAndMetadataMap_get_metadata(map, i));
+    int32_t epoch = -99;
+    TEST_ASSERT_FALSE(kafka_admin_OffsetAndMetadataMap_get_leader_epoch(map, i, &epoch));
+    TEST_ASSERT_EQUAL_INT32(-99, epoch);
+
+    i = find_offset_entry(map, "og-b", 1);
+    TEST_ASSERT_TRUE(i >= 0);
+    TEST_ASSERT_EQUAL_INT64(23, kafka_admin_OffsetAndMetadataMap_get_offset(map, i));
+
+    /* Out-of-range indices are inert, never a crash. */
+    TEST_ASSERT_NULL(kafka_admin_OffsetAndMetadataMap_get_topic(map, 2));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_OffsetAndMetadataMap_get_partition(map, -1));
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_OffsetAndMetadataMap_get_offset(map, 2));
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+
+    /* Now with an explicit selection: `all_partitions = false` plus this
+     * group's own ragged arrays. The result is narrower than the seeded map,
+     * which fails if the selection were ignored. */
+    const char *g0_topics[1] = {"og-b"};
+    const int32_t g0_partitions[1] = {1};
+    const char *const *const topics[1] = {g0_topics};
+    const int32_t *const partitions[1] = {g0_partitions};
+    const bool some_partitions[1] = {false};
+    const int32_t some_counts[1] = {1};
+
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, some_partitions, topics, partitions, some_counts, 1, -1, true, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    map = kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 0);
+    TEST_ASSERT_NOT_NULL(map);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_OffsetAndMetadataMap_count(map));
+    TEST_ASSERT_EQUAL_STRING("og-b", kafka_admin_OffsetAndMetadataMap_get_topic(map, 0));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_OffsetAndMetadataMap_get_partition(map, 0));
+    TEST_ASSERT_EQUAL_INT64(23, kafka_admin_OffsetAndMetadataMap_get_offset(map, 0));
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_list_consumer_group_offsets_rejects_bad_group_ids(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const bool all_partitions[2] = {true, true};
+    const int32_t counts[2] = {0, 0};
+
+    const char *with_null[2] = {"g", NULL};
+    kafka_admin_ListConsumerGroupOffsetsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, with_null, all_partitions, NULL, NULL, counts, 2, -1, false, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("group id at index 1 must not be null",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* Java takes a Map, where the second entry would silently replace the
+     * first, so a duplicate group id is rejected rather than dropped. */
+    const char *duplicated[2] = {"g", "g"};
+    result = NULL;
+    err = kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, duplicated, all_partitions, NULL, NULL, counts, 2, -1, false, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("group id `g` appears more than once at index 1",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_list_consumer_group_offsets_two_groups_are_unsupported(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* MockAdminClient.java:748-751 handles exactly one group and otherwise
+     * throws; the Rust mock fails each group's future instead, so the failure
+     * lands per group. */
+    const char *groups[2] = {"m1", "m2"};
+    const bool all_partitions[2] = {true, true};
+    const int32_t counts[2] = {0, 0};
+
+    kafka_admin_ListConsumerGroupOffsetsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, all_partitions, NULL, NULL, counts, 2, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_ListConsumerGroupOffsetsResult_count(result));
+    for (int32_t i = 0; i < 2; i++) {
+        TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, i));
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+    int32_t offset_count;
+    int64_t first_offset;
+} list_group_offsets_async_result_t;
+
+static void on_list_consumer_group_offsets(kafka_admin_ListConsumerGroupOffsetsResult_t *result,
+                                           kafka_common_KafkaError_t *error, void *user_data) {
+    list_group_offsets_async_result_t *r = (list_group_offsets_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    r->offset_count = -1;
+    r->first_offset = -1;
+    if (result != NULL) {
+        r->count = kafka_admin_ListConsumerGroupOffsetsResult_count(result);
+        const kafka_admin_OffsetAndMetadataMap_t *map =
+            kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 0);
+        if (map != NULL) {
+            r->offset_count = kafka_admin_OffsetAndMetadataMap_count(map);
+            r->first_offset = kafka_admin_OffsetAndMetadataMap_get_offset(map, 0);
+        }
+        kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_list_consumer_group_offsets_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *seed_topics[1] = {"oga"};
+    const int32_t seed_partitions[1] = {2};
+    const int64_t seed_offsets[1] = {99};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_update_consumer_group_offsets(
+        admin, seed_topics, seed_partitions, seed_offsets, 1));
+
+    const char *groups[1] = {"oga-group"};
+    const bool all_partitions[1] = {true};
+    const int32_t counts[1] = {0};
+
+    list_group_offsets_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_list_consumer_group_offsets_async(
+        admin, groups, all_partitions, NULL, NULL, counts, 1, -1, false,
+        on_list_consumer_group_offsets, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT32(1, r.offset_count);
+    TEST_ASSERT_EQUAL_INT64(99, r.first_offset);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_list_consumer_group_offsets_async_null_group_id(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *groups[1] = {NULL};
+    const bool all_partitions[1] = {true};
+    const int32_t counts[1] = {0};
+
+    list_group_offsets_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_list_consumer_group_offsets_async(
+        admin, groups, all_partitions, NULL, NULL, counts, 1, -1, false,
+        on_list_consumer_group_offsets, &r);
+    /* Marshaling failed, so the callback fired inline before returning. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+// ---- alterConsumerGroupOffsets ---------------------------------------------
+
+static void test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per_partition(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *topics[2] = {"ac", "ac"};
+    const int32_t partitions[2] = {0, 1};
+    const int64_t offsets[2] = {5, 6};
+    const char *metadata[2] = {"m0", NULL};
+    const int32_t epochs[2] = {0, 0};
+    const bool has_epoch[2] = {true, false};
+
+    kafka_admin_AlterConsumerGroupOffsetsResult_t *result = NULL;
+    /* Java's `partitionResult(tp)` is one KafkaFuture<Void> per requested
+     * partition, so the mock's "Not implement yet" (Java's own typo,
+     * MockAdminClient.java:1213) lands per partition. */
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "acg", topics, partitions, offsets, metadata, epochs, has_epoch, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_AlterConsumerGroupOffsetsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("ac", kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(result, 0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, 0));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_KafkaError_message(e));
+    }
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_alter_consumer_group_offsets_rejects_bad_input(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t partitions[1] = {0};
+
+    /* A negative offset: Java's OffsetAndMetadata constructor throws, and the
+     * index prefix tells a C caller which array entry was at fault. */
+    const char *topics[1] = {"ac"};
+    const int64_t bad_offsets[1] = {-1};
+    kafka_admin_AlterConsumerGroupOffsetsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "acg", topics, partitions, bad_offsets, NULL, NULL, NULL, 1, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("offset at index 0: Invalid negative offset",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* A NULL topic entry. */
+    const char *null_topics[1] = {NULL};
+    const int64_t offsets[1] = {0};
+    result = NULL;
+    err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "acg", null_topics, partitions, offsets, NULL, NULL, NULL, 1, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("topic at index 0 must not be null",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* A NULL group id. */
+    result = NULL;
+    err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, NULL, topics, partitions, offsets, NULL, NULL, NULL, 1, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("group_id must not be null", kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_the_call(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* With no requested partition there is no per-key slot for the outcome, so
+     * the whole-request error is returned instead — Java's `all()` is then the
+     * only observable too. */
+    kafka_admin_AlterConsumerGroupOffsetsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "acg", NULL, NULL, NULL, NULL, NULL, NULL, 0, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+} alter_group_offsets_async_result_t;
+
+static void on_alter_consumer_group_offsets(kafka_admin_AlterConsumerGroupOffsetsResult_t *result,
+                                            kafka_common_KafkaError_t *error, void *user_data) {
+    alter_group_offsets_async_result_t *r = (alter_group_offsets_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_AlterConsumerGroupOffsetsResult_count(result);
+        kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_alter_consumer_group_offsets_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *topics[1] = {"aca"};
+    const int32_t partitions[1] = {0};
+    const int64_t offsets[1] = {1};
+
+    alter_group_offsets_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+        admin, "acg", topics, partitions, offsets, NULL, NULL, NULL, 1, -1,
+        on_alter_consumer_group_offsets, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    /* A negative offset cannot be submitted at all, so the callback fires
+     * inline with an error and no result. */
+    const int64_t bad_offsets[1] = {-5};
+    alter_group_offsets_async_result_t bad = {0};
+    atomic_init(&bad.fired, 0);
+    kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+        admin, "acg", topics, partitions, bad_offsets, NULL, NULL, NULL, 1, -1,
+        on_alter_consumer_group_offsets, &bad);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad.fired));
+    TEST_ASSERT_EQUAL_INT(0, bad.had_result);
+    TEST_ASSERT_EQUAL_INT(1, bad.had_error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+// ---- deleteConsumerGroupOffsets --------------------------------------------
+
+static void test_mock_admin_delete_consumer_group_offsets_reports_unsupported_per_partition(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *topics[2] = {"dc", "dc"};
+    const int32_t partitions[2] = {0, 1};
+
+    kafka_admin_DeleteConsumerGroupOffsetsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_consumer_group_offsets(
+        admin, "dcg", topics, partitions, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DeleteConsumerGroupOffsetsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("dc",
+                             kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(result, 0));
+    TEST_ASSERT_EQUAL_INT32(1,
+                            kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    TEST_ASSERT_EQUAL_INT32(-1,
+                            kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(result, -1));
+    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+} delete_group_offsets_async_result_t;
+
+static void on_delete_consumer_group_offsets(kafka_admin_DeleteConsumerGroupOffsetsResult_t *result,
+                                             kafka_common_KafkaError_t *error, void *user_data) {
+    delete_group_offsets_async_result_t *r = (delete_group_offsets_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DeleteConsumerGroupOffsetsResult_count(result);
+        kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_delete_consumer_group_offsets_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *topics[1] = {"dca"};
+    const int32_t partitions[1] = {3};
+
+    delete_group_offsets_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+        admin, "dcg", topics, partitions, 1, -1, on_delete_consumer_group_offsets, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+// ---- deleteConsumerGroups --------------------------------------------------
+
+static void test_mock_admin_delete_consumer_groups_reports_unsupported_per_group(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *groups[2] = {"z-group", "a-group"};
+
+    kafka_admin_DeleteConsumerGroupsResult_t *result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_delete_consumer_groups(admin, groups, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DeleteConsumerGroupsResult_count(result));
+    /* Entries are sorted by group id, not left in request order. */
+    TEST_ASSERT_EQUAL_STRING("a-group",
+                             kafka_admin_DeleteConsumerGroupsResult_get_group_id(result, 0));
+    TEST_ASSERT_EQUAL_STRING("z-group",
+                             kafka_admin_DeleteConsumerGroupsResult_get_group_id(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DeleteConsumerGroupsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    TEST_ASSERT_NULL(kafka_admin_DeleteConsumerGroupsResult_get_error(result, 2));
+    kafka_admin_DeleteConsumerGroupsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+} delete_groups_async_result_t;
+
+static void on_delete_consumer_groups(kafka_admin_DeleteConsumerGroupsResult_t *result,
+                                      kafka_common_KafkaError_t *error, void *user_data) {
+    delete_groups_async_result_t *r = (delete_groups_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DeleteConsumerGroupsResult_count(result);
+        kafka_admin_DeleteConsumerGroupsResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_delete_consumer_groups_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *groups[1] = {"dg-async"};
+
+    delete_groups_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_delete_consumer_groups_async(admin, groups, 1, -1,
+                                                         on_delete_consumer_groups, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+// ---- removeMembersFromConsumerGroup ----------------------------------------
+
+static void test_mock_admin_remove_members_reports_unsupported_per_member(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *members[2] = {"instance-b", "instance-a"};
+
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_remove_members_from_consumer_group(
+        admin, "rm-group", false, members, 2, "rolling restart", -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_RemoveMembersFromConsumerGroupResult_count(result));
+    /* Keyed by group instance id, sorted. */
+    TEST_ASSERT_EQUAL_STRING(
+        "instance-a",
+        kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(result, 0));
+    TEST_ASSERT_EQUAL_STRING(
+        "instance-b",
+        kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_remove_all_members_has_no_per_member_outcome(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* `remove_all` is Java's no-argument constructor, where `memberResult` is
+     * "not applicable in 'removeAll' mode" and `all()` is the only observable.
+     * The member array is deliberately non-empty: the flag must win. */
+    const char *members[1] = {"ignored"};
+
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_remove_members_from_consumer_group(
+        admin, "rm-group", true, members, 1, NULL, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_remove_members_rejects_an_empty_member_list(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* Java's Collection constructor throws for an empty collection, so an
+     * empty array must not silently become "remove everything". */
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_remove_members_from_consumer_group(
+        admin, "rm-group", false, NULL, 0, NULL, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Invalid empty members has been provided",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* And a NULL group id is rejected before anything else. */
+    result = NULL;
+    const char *members[1] = {"i"};
+    err = kafka_admin_AdminClient_remove_members_from_consumer_group(admin, NULL, false, members, 1,
+                                                                     NULL, -1, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("group_id must not be null", kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+} remove_members_async_result_t;
+
+static void on_remove_members(kafka_admin_RemoveMembersFromConsumerGroupResult_t *result,
+                              kafka_common_KafkaError_t *error, void *user_data) {
+    remove_members_async_result_t *r = (remove_members_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    r->had_error = error != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_RemoveMembersFromConsumerGroupResult_count(result);
+        kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+    }
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_remove_members_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *members[1] = {"instance-async"};
+
+    remove_members_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+        admin, "rm-group", false, members, 1, NULL, -1, on_remove_members, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    /* An empty member list without `remove_all` cannot be submitted, so the
+     * callback fires inline with an error. */
+    remove_members_async_result_t bad = {0};
+    atomic_init(&bad.fired, 0);
+    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+        admin, "rm-group", false, NULL, 0, NULL, -1, on_remove_members, &bad);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad.fired));
+    TEST_ASSERT_EQUAL_INT(0, bad.had_result);
+    TEST_ASSERT_EQUAL_INT(1, bad.had_error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+// ---- Cross-cutting ---------------------------------------------------------
+
+static void test_mock_admin_group_offsets_driver_rejects_non_mock(void) {
+    kafka_admin_AdminClientProperties_t *props = kafka_admin_AdminClientProperties_new();
+    kafka_admin_AdminClientProperties_put(props, "bootstrap.servers", "localhost:9092");
+    kafka_common_KafkaError_t *new_err = NULL;
+    kafka_admin_AdminClient_t *admin = kafka_admin_AdminClient_new(props, &new_err);
+    kafka_admin_AdminClientProperties_destroy(props);
+    TEST_ASSERT_NULL(new_err);
+    TEST_ASSERT_NOT_NULL(admin);
+
+    const char *topics[1] = {"t"};
+    const int32_t partitions[1] = {0};
+    const int64_t offsets[1] = {1};
+    kafka_common_KafkaError_t *err = kafka_admin_MockAdminClient_update_consumer_group_offsets(
+        admin, topics, partitions, offsets, 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("this operation is only supported on a MockAdminClient",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_close(admin, 1000);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A NULL `out_result` must not leak the result handle or crash: the sync entry
+ * points simply do not build one. */
+static void test_mock_admin_b4_null_out_result(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    seed_group(admin, "nb4");
+    const char *groups[1] = {"nb4"};
+    const bool all_partitions[1] = {true};
+    const int32_t counts[1] = {0};
+    const char *topics[1] = {"t"};
+    const int32_t partitions[1] = {0};
+    const int64_t offsets[1] = {1};
+    const char *members[1] = {"i"};
+
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_groups(admin, NULL, 0, NULL, 0, NULL, 0, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_groups(admin, NULL, 0, NULL, 0, -1, NULL));
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_consumer_groups(admin, groups, 1, -1, false, NULL));
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_classic_groups(admin, groups, 1, -1, false, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, all_partitions, NULL, NULL, counts, 1, -1, false, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "nb4", topics, partitions, offsets, NULL, NULL, NULL, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_consumer_group_offsets(
+        admin, "nb4", topics, partitions, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_consumer_groups(admin, groups, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_remove_members_from_consumer_group(
+        admin, "nb4", false, members, 1, NULL, -1, NULL));
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
@@ -3266,5 +4283,34 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_offsets_async_null_handle);
     RUN_TEST(test_mock_admin_offset_drivers_reject_non_mock);
     RUN_TEST(test_mock_admin_b3_null_out_result);
+    RUN_TEST(test_mock_admin_list_groups_reports_seeded_groups);
+    RUN_TEST(test_mock_admin_list_groups_with_no_groups_is_empty);
+    RUN_TEST(test_mock_admin_list_groups_async);
+    RUN_TEST(test_mock_admin_list_groups_async_null_handle);
+    RUN_TEST(test_mock_admin_list_consumer_groups_reports_seeded_groups);
+    RUN_TEST(test_mock_admin_list_consumer_groups_async);
+    RUN_TEST(test_mock_admin_describe_consumer_groups_reports_unsupported_per_group);
+    RUN_TEST(test_mock_admin_describe_classic_groups_reports_unsupported_per_group);
+    RUN_TEST(test_mock_admin_describe_consumer_groups_async);
+    RUN_TEST(test_mock_admin_describe_consumer_groups_async_null_handle);
+    RUN_TEST(test_mock_admin_list_consumer_group_offsets_round_trip);
+    RUN_TEST(test_mock_admin_list_consumer_group_offsets_rejects_bad_group_ids);
+    RUN_TEST(test_mock_admin_list_consumer_group_offsets_two_groups_are_unsupported);
+    RUN_TEST(test_mock_admin_list_consumer_group_offsets_async);
+    RUN_TEST(test_mock_admin_list_consumer_group_offsets_async_null_group_id);
+    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per_partition);
+    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_rejects_bad_input);
+    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_the_call);
+    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_async);
+    RUN_TEST(test_mock_admin_delete_consumer_group_offsets_reports_unsupported_per_partition);
+    RUN_TEST(test_mock_admin_delete_consumer_group_offsets_async);
+    RUN_TEST(test_mock_admin_delete_consumer_groups_reports_unsupported_per_group);
+    RUN_TEST(test_mock_admin_delete_consumer_groups_async);
+    RUN_TEST(test_mock_admin_remove_members_reports_unsupported_per_member);
+    RUN_TEST(test_mock_admin_remove_all_members_has_no_per_member_outcome);
+    RUN_TEST(test_mock_admin_remove_members_rejects_an_empty_member_list);
+    RUN_TEST(test_mock_admin_remove_members_async);
+    RUN_TEST(test_mock_admin_group_offsets_driver_rejects_non_mock);
+    RUN_TEST(test_mock_admin_b4_null_out_result);
     return UNITY_END();
 }
