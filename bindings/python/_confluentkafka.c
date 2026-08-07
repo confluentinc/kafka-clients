@@ -4632,6 +4632,488 @@ static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, P
 }
 
 
+// ---------------------------------------------------------------------------
+// B5a — ACLs and client quotas
+//
+// Java's MockAdminClient throws for all five RPCs, so the success branch of
+// every drain below is unreachable from the test suite. Their Py_BuildValue
+// arity is instead checked statically by `cargo xtask check-bindings`, and the
+// field *order* by review against the matching `_to_*` unpacker in admin.py.
+// ---------------------------------------------------------------------------
+
+static void admin_create_acls_trampoline(kafka_admin_CreateAclsResult_t* r,
+                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_acls_trampoline(kafka_admin_DescribeAclsResult_t* r,
+                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_delete_acls_trampoline(kafka_admin_DeleteAclsResult_t* r,
+                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_client_quotas_trampoline(kafka_admin_DescribeClientQuotasResult_t* r,
+                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_alter_client_quotas_trampoline(kafka_admin_AlterClientQuotasResult_t* r,
+                                                 kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// ---- ACL request marshaling -------------------------------------------------
+
+// The seven parallel arrays an ACL binding or filter request needs. Held
+// together so the seven allocations have one owner and one cleanup path.
+typedef struct {
+    int32_t* resource_types;
+    const char** resource_names;
+    int32_t* pattern_types;
+    const char** principals;
+    const char** hosts;
+    int32_t* operations;
+    int32_t* permission_types;
+    Py_ssize_t count;
+} acl_arrays_t;
+
+static void acl_arrays_free(acl_arrays_t* a) {
+    PyMem_Free(a->resource_types); PyMem_Free((void*)a->resource_names);
+    PyMem_Free(a->pattern_types); PyMem_Free((void*)a->principals);
+    PyMem_Free((void*)a->hosts); PyMem_Free(a->operations);
+    PyMem_Free(a->permission_types);
+    memset(a, 0, sizeof(*a));
+}
+
+// Reads a sequence of 7-tuples into `a`. `nullable` selects the filter form,
+// whose resource name, principal and host may be None (Java's null = match
+// any); the binding form requires all three. Returns 0 on success, -1 with an
+// exception set. The `const char*`s borrow from `seq`, which the caller must
+// keep alive across the FFI call.
+static int build_acl_arrays(PyObject* seq, int nullable, acl_arrays_t* a) {
+    memset(a, 0, sizeof(*a));
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) return -1;
+    size_t slots = (size_t)(n > 0 ? n : 1);
+    a->resource_types = PyMem_Malloc(slots * sizeof(int32_t));
+    a->resource_names = PyMem_Malloc(slots * sizeof(char*));
+    a->pattern_types = PyMem_Malloc(slots * sizeof(int32_t));
+    a->principals = PyMem_Malloc(slots * sizeof(char*));
+    a->hosts = PyMem_Malloc(slots * sizeof(char*));
+    a->operations = PyMem_Malloc(slots * sizeof(int32_t));
+    a->permission_types = PyMem_Malloc(slots * sizeof(int32_t));
+    if (!a->resource_types || !a->resource_names || !a->pattern_types || !a->principals ||
+        !a->hosts || !a->operations || !a->permission_types) {
+        acl_arrays_free(a);
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(seq, i);  // new ref
+        int rt = 0, pt = 0, op = 0, pm = 0;
+        const char* name = NULL; const char* principal = NULL; const char* host = NULL;
+        // Two literal formats rather than one conditional expression: a
+        // non-literal format is unverifiable by `cargo xtask check-bindings`,
+        // and this is precisely the call shape that gate exists to guard.
+        int ok = item != NULL;
+        if (ok) {
+            ok = nullable
+                     ? PyArg_ParseTuple(item, "izizzii", &rt, &name, &pt, &principal, &host, &op,
+                                        &pm)
+                     : PyArg_ParseTuple(item, "isissii", &rt, &name, &pt, &principal, &host, &op,
+                                        &pm);
+        }
+        Py_XDECREF(item);
+        if (!ok) { acl_arrays_free(a); return -1; }
+        a->resource_types[i] = (int32_t)rt;
+        a->resource_names[i] = name;
+        a->pattern_types[i] = (int32_t)pt;
+        a->principals[i] = principal;
+        a->hosts[i] = host;
+        a->operations[i] = (int32_t)op;
+        a->permission_types[i] = (int32_t)pm;
+    }
+    a->count = n;
+    return 0;
+}
+
+// (resource_type, resource_name, pattern_type, principal, host, operation,
+//  permission_type) — the field order `_to_acl_binding` unpacks.
+static PyObject* acl_binding_to_py(const kafka_common_AclBinding_t* b) {
+    if (b == NULL) Py_RETURN_NONE;
+    return Py_BuildValue("(isissii)",
+                         kafka_common_AclBinding_resource_type(b),
+                         kafka_common_AclBinding_resource_name(b),
+                         kafka_common_AclBinding_pattern_type(b),
+                         kafka_common_AclBinding_principal(b),
+                         kafka_common_AclBinding_host(b),
+                         kafka_common_AclBinding_operation(b),
+                         kafka_common_AclBinding_permission_type(b));
+}
+
+// Same seven fields, but the three strings use 'z' so a NULL (Java's "match
+// any") becomes None rather than crashing on PyUnicode_FromString(NULL).
+static PyObject* acl_binding_filter_to_py(const kafka_common_AclBindingFilter_t* f) {
+    if (f == NULL) Py_RETURN_NONE;
+    return Py_BuildValue("(izizzii)",
+                         kafka_common_AclBindingFilter_resource_type(f),
+                         kafka_common_AclBindingFilter_resource_name(f),
+                         kafka_common_AclBindingFilter_pattern_type(f),
+                         kafka_common_AclBindingFilter_principal(f),
+                         kafka_common_AclBindingFilter_host(f),
+                         kafka_common_AclBindingFilter_operation(f),
+                         kafka_common_AclBindingFilter_permission_type(f));
+}
+
+// [(entity_type, entity_name_or_None)] — a None name is Java's null map value,
+// the built-in default entity, which is not the empty name.
+static PyObject* client_quota_entity_to_py(const kafka_common_ClientQuotaEntity_t* e) {
+    if (e == NULL) Py_RETURN_NONE;
+    int32_t n = kafka_common_ClientQuotaEntity_entry_count(e);
+    PyObject* pairs = PyTuple_New(n < 0 ? 0 : n);
+    if (pairs == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* pair = Py_BuildValue("(sz)",
+                                       kafka_common_ClientQuotaEntity_get_entry_type(e, i),
+                                       kafka_common_ClientQuotaEntity_get_entry_name(e, i));
+        if (pair == NULL) { Py_DECREF(pairs); return NULL; }
+        PyTuple_SET_ITEM(pairs, i, pair);
+    }
+    return pairs;
+}
+
+// ---- submits ----------------------------------------------------------------
+
+static PyObject* py_Admin_create_acls_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* acls; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &acls, &timeout_ms, &cb)) return NULL;
+
+    acl_arrays_t a;
+    if (build_acl_arrays(acls, 0, &a) < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_create_acls_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
+        a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
+        (int32_t)a.count, timeout_ms, admin_create_acls_trampoline, cb);
+    acl_arrays_free(&a);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_acls_async(PyObject* self, PyObject* args) {
+    unsigned long long h; int rt, pt, op, pm; int timeout_ms; PyObject* cb;
+    const char* name = NULL; const char* principal = NULL; const char* host = NULL;
+    if (!PyArg_ParseTuple(args, "KizizziiiO", &h, &rt, &name, &pt, &principal, &host, &op, &pm,
+                          &timeout_ms, &cb))
+        return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_acls_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, (int32_t)rt, name, (int32_t)pt, principal, host,
+        (int32_t)op, (int32_t)pm, timeout_ms, admin_describe_acls_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_delete_acls_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* filters; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &filters, &timeout_ms, &cb)) return NULL;
+
+    acl_arrays_t a;
+    if (build_acl_arrays(filters, 1, &a) < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_delete_acls_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
+        a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
+        (int32_t)a.count, timeout_ms, admin_delete_acls_trampoline, cb);
+    acl_arrays_free(&a);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_client_quotas_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* components; int strict; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOpiO", &h, &components, &strict, &timeout_ms, &cb)) return NULL;
+
+    Py_ssize_t n = PySequence_Size(components);
+    if (n < 0) return NULL;
+    size_t slots = (size_t)(n > 0 ? n : 1);
+    const char** types = PyMem_Malloc(slots * sizeof(char*));
+    int32_t* match_types = PyMem_Malloc(slots * sizeof(int32_t));
+    const char** names = PyMem_Malloc(slots * sizeof(char*));
+    if (!types || !match_types || !names) {
+        PyMem_Free((void*)types); PyMem_Free(match_types); PyMem_Free((void*)names);
+        PyErr_NoMemory(); return NULL;
+    }
+    int failed = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(components, i);  // new ref
+        const char* type = NULL; int match_type = 0; const char* name = NULL;
+        int ok = item && PyArg_ParseTuple(item, "siz", &type, &match_type, &name);
+        Py_XDECREF(item);
+        if (!ok) { failed = 1; break; }
+        types[i] = type;
+        match_types[i] = (int32_t)match_type;
+        names[i] = name;
+    }
+    if (!failed) {
+        Py_INCREF(cb);
+        kafka_admin_AdminClient_describe_client_quotas_async(
+            (kafka_admin_AdminClient_t*)(uintptr_t)h, types, match_types, names, (int32_t)n,
+            strict ? true : false, timeout_ms, admin_describe_client_quotas_trampoline, cb);
+    }
+    PyMem_Free((void*)types); PyMem_Free(match_types); PyMem_Free((void*)names);
+    if (failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* entries; int timeout_ms; int validate_only; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOipO", &h, &entries, &timeout_ms, &validate_only, &cb))
+        return NULL;
+
+    Py_ssize_t n = PySequence_Size(entries);
+    if (n < 0) return NULL;
+    size_t slots = (size_t)(n > 0 ? n : 1);
+    const char*** entity_types = PyMem_Malloc(slots * sizeof(char**));
+    const char*** entity_names = PyMem_Malloc(slots * sizeof(char**));
+    int32_t* entity_counts = PyMem_Malloc(slots * sizeof(int32_t));
+    const char*** op_keys = PyMem_Malloc(slots * sizeof(char**));
+    double** op_values = PyMem_Malloc(slots * sizeof(double*));
+    bool** op_has_values = PyMem_Malloc(slots * sizeof(bool*));
+    int32_t* op_counts = PyMem_Malloc(slots * sizeof(int32_t));
+    if (!entity_types || !entity_names || !entity_counts || !op_keys || !op_values ||
+        !op_has_values || !op_counts) {
+        PyMem_Free((void*)entity_types); PyMem_Free((void*)entity_names);
+        PyMem_Free(entity_counts); PyMem_Free((void*)op_keys); PyMem_Free(op_values);
+        PyMem_Free(op_has_values); PyMem_Free(op_counts);
+        PyErr_NoMemory(); return NULL;
+    }
+
+    // `built` counts fully populated rows; every row's five pointers are NULLed
+    // before any fallible work, so the cleanup loop never frees a stale value.
+    Py_ssize_t built = 0;
+    int failed = 0;
+    for (; built < n; built++) {
+        entity_types[built] = NULL; entity_names[built] = NULL;
+        op_keys[built] = NULL; op_values[built] = NULL; op_has_values[built] = NULL;
+        PyObject* item = PySequence_GetItem(entries, built);  // new ref
+        PyObject* pairs = NULL; PyObject* ops = NULL;
+        int ok = item && PyArg_ParseTuple(item, "OO", &pairs, &ops);
+        if (ok) {
+            Py_ssize_t np = PySequence_Size(pairs);
+            Py_ssize_t no = ops == Py_None ? 0 : PySequence_Size(ops);
+            if (np < 0 || no < 0) {
+                ok = 0;
+            } else {
+                const char** t = PyMem_Malloc((size_t)(np > 0 ? np : 1) * sizeof(char*));
+                const char** nm = PyMem_Malloc((size_t)(np > 0 ? np : 1) * sizeof(char*));
+                const char** k = PyMem_Malloc((size_t)(no > 0 ? no : 1) * sizeof(char*));
+                double* v = PyMem_Malloc((size_t)(no > 0 ? no : 1) * sizeof(double));
+                bool* hv = PyMem_Malloc((size_t)(no > 0 ? no : 1) * sizeof(bool));
+                if (!t || !nm || !k || !v || !hv) {
+                    PyMem_Free((void*)t); PyMem_Free((void*)nm); PyMem_Free((void*)k);
+                    PyMem_Free(v); PyMem_Free(hv);
+                    PyErr_NoMemory(); ok = 0;
+                } else {
+                    entity_types[built] = t; entity_names[built] = nm;
+                    op_keys[built] = k; op_values[built] = v; op_has_values[built] = hv;
+                    entity_counts[built] = (int32_t)np;
+                    op_counts[built] = (int32_t)no;
+                    for (Py_ssize_t i = 0; ok && i < np; i++) {
+                        PyObject* pair = PySequence_GetItem(pairs, i);  // new ref
+                        const char* type = NULL; const char* name = NULL;
+                        ok = pair && PyArg_ParseTuple(pair, "sz", &type, &name);
+                        Py_XDECREF(pair);
+                        if (ok) { t[i] = type; nm[i] = name; }
+                    }
+                    for (Py_ssize_t i = 0; ok && i < no; i++) {
+                        PyObject* op = PySequence_GetItem(ops, i);  // new ref
+                        const char* key = NULL; PyObject* value = NULL;
+                        ok = op && PyArg_ParseTuple(op, "sO", &key, &value);
+                        if (ok) {
+                            k[i] = key;
+                            // A None value is Java's `Op(key, null)`: remove the
+                            // quota. The flag, not the double, carries that —
+                            // every double including 0 is a legal quota value.
+                            if (value == Py_None) {
+                                hv[i] = false;
+                                v[i] = 0.0;
+                            } else {
+                                double d = PyFloat_AsDouble(value);
+                                if (d == -1.0 && PyErr_Occurred()) {
+                                    ok = 0;
+                                } else {
+                                    hv[i] = true;
+                                    v[i] = d;
+                                }
+                            }
+                        }
+                        Py_XDECREF(op);
+                    }
+                }
+            }
+        }
+        Py_XDECREF(item);
+        if (!ok) { failed = 1; break; }
+    }
+
+    if (!failed) {
+        Py_INCREF(cb);
+        kafka_admin_AdminClient_alter_client_quotas_async(
+            (kafka_admin_AdminClient_t*)(uintptr_t)h,
+            (const char* const* const*)entity_types, (const char* const* const*)entity_names,
+            entity_counts, (const char* const* const*)op_keys,
+            (const double* const*)op_values, (const bool* const*)op_has_values, op_counts,
+            (int32_t)n, timeout_ms, validate_only ? true : false,
+            admin_alter_client_quotas_trampoline, cb);
+    }
+    for (Py_ssize_t i = 0; i < built; i++) {
+        PyMem_Free((void*)entity_types[i]); PyMem_Free((void*)entity_names[i]);
+        PyMem_Free((void*)op_keys[i]); PyMem_Free(op_values[i]); PyMem_Free(op_has_values[i]);
+    }
+    PyMem_Free((void*)entity_types); PyMem_Free((void*)entity_names); PyMem_Free(entity_counts);
+    PyMem_Free((void*)op_keys); PyMem_Free(op_values); PyMem_Free(op_has_values);
+    PyMem_Free(op_counts);
+    if (failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+// ---- drains -----------------------------------------------------------------
+
+// {binding_tuple: error_or_None}
+static PyObject* py_CreateAclsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_CreateAclsResult_t* r = (kafka_admin_CreateAclsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_CreateAclsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_CreateAclsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = acl_binding_to_py(kafka_admin_CreateAclsResult_get_binding(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_CreateAclsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_CreateAclsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_CreateAclsResult_destroy(r);
+    return d;
+}
+
+// [binding_tuple] — a plain list, because describeAcls has one future for the
+// whole call and so no key to hang an error on.
+static PyObject* py_DescribeAclsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeAclsResult_t* r = (kafka_admin_DescribeAclsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeAclsResult_count(r);
+    PyObject* list = PyList_New(n < 0 ? 0 : n);
+    if (list == NULL) { kafka_admin_DescribeAclsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* b = acl_binding_to_py(kafka_admin_DescribeAclsResult_get_binding(r, i));
+        if (b == NULL) {
+            Py_DECREF(list);
+            kafka_admin_DescribeAclsResult_destroy(r); return NULL;
+        }
+        PyList_SET_ITEM(list, i, b);
+    }
+    kafka_admin_DescribeAclsResult_destroy(r);
+    return list;
+}
+
+// {filter_tuple: (error_or_None, [(binding_or_None, error_or_None)])}
+//
+// Two levels, because Java's FilterResults holds one FilterResult per matched
+// ACL and each carries either a binding or its own exception. The outer error
+// is the filter's future failing, which is a different thing.
+static PyObject* py_DeleteAclsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DeleteAclsResult_t* r = (kafka_admin_DeleteAclsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DeleteAclsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DeleteAclsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        int32_t rn = kafka_admin_DeleteAclsResult_get_result_count(r, i);
+        PyObject* results = PyList_New(rn < 0 ? 0 : rn);
+        if (results == NULL) { Py_DECREF(d); kafka_admin_DeleteAclsResult_destroy(r); return NULL; }
+        for (int32_t j = 0; j < rn; j++) {
+            PyObject* b = acl_binding_to_py(kafka_admin_DeleteAclsResult_get_binding(r, i, j));
+            PyObject* e =
+                borrowed_error_to_py(kafka_admin_DeleteAclsResult_get_result_error(r, i, j));
+            PyObject* row = error_value_pair(e, b);
+            if (row == NULL) {
+                Py_DECREF(results); Py_DECREF(d);
+                kafka_admin_DeleteAclsResult_destroy(r); return NULL;
+            }
+            PyList_SET_ITEM(results, j, row);
+        }
+        PyObject* key = acl_binding_filter_to_py(kafka_admin_DeleteAclsResult_get_filter(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_DeleteAclsResult_get_error(r, i));
+        PyObject* value = error_value_pair(err, results);
+        if (!key || !value || PyDict_SetItem(d, key, value) < 0) {
+            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
+            kafka_admin_DeleteAclsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(value);
+    }
+    kafka_admin_DeleteAclsResult_destroy(r);
+    return d;
+}
+
+// {entity_pairs: [(quota_key, quota_value)]}
+static PyObject* py_DescribeClientQuotasResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeClientQuotasResult_t* r =
+        (kafka_admin_DescribeClientQuotasResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeClientQuotasResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeClientQuotasResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        int32_t qn = kafka_admin_DescribeClientQuotasResult_get_quota_count(r, i);
+        PyObject* quotas = PyList_New(qn < 0 ? 0 : qn);
+        if (quotas == NULL) {
+            Py_DECREF(d); kafka_admin_DescribeClientQuotasResult_destroy(r); return NULL;
+        }
+        int broken = 0;
+        for (int32_t j = 0; j < qn; j++) {
+            double value = 0.0;
+            // Out of range is impossible here (j < the reported count), but the
+            // accessor is an out-param because no double sentinel could be
+            // unambiguous, so the return value is still checked.
+            if (!kafka_admin_DescribeClientQuotasResult_get_quota_value(r, i, j, &value)) {
+                broken = 1;
+                break;
+            }
+            PyObject* pair = Py_BuildValue(
+                "(sd)", kafka_admin_DescribeClientQuotasResult_get_quota_key(r, i, j), value);
+            if (pair == NULL) { broken = 1; break; }
+            PyList_SET_ITEM(quotas, j, pair);
+        }
+        PyObject* key = broken ? NULL
+                               : client_quota_entity_to_py(
+                                     kafka_admin_DescribeClientQuotasResult_get_entity(r, i));
+        if (broken || !key || PyDict_SetItem(d, key, quotas) < 0) {
+            Py_XDECREF(key); Py_DECREF(quotas); Py_DECREF(d);
+            kafka_admin_DescribeClientQuotasResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(quotas);
+    }
+    kafka_admin_DescribeClientQuotasResult_destroy(r);
+    return d;
+}
+
+// {entity_pairs: error_or_None}
+static PyObject* py_AlterClientQuotasResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_AlterClientQuotasResult_t* r = (kafka_admin_AlterClientQuotasResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_AlterClientQuotasResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_AlterClientQuotasResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key =
+            client_quota_entity_to_py(kafka_admin_AlterClientQuotasResult_get_entity(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_AlterClientQuotasResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_AlterClientQuotasResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_AlterClientQuotasResult_destroy(r);
+    return d;
+}
+
 static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
@@ -4837,6 +5319,26 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"RemoveMembersFromConsumerGroupResult_drain",
      py_RemoveMembersFromConsumerGroupResult_drain, METH_VARARGS,
      "Drain+destroy a RemoveMembersFromConsumerGroupResult handle into a dict"},
+    {"Admin_create_acls_async", py_Admin_create_acls_async, METH_VARARGS,
+     "Async createAcls; cb(result_int, error_int)"},
+    {"Admin_describe_acls_async", py_Admin_describe_acls_async, METH_VARARGS,
+     "Async describeAcls; cb(result_int, error_int)"},
+    {"Admin_delete_acls_async", py_Admin_delete_acls_async, METH_VARARGS,
+     "Async deleteAcls; cb(result_int, error_int)"},
+    {"Admin_describe_client_quotas_async", py_Admin_describe_client_quotas_async, METH_VARARGS,
+     "Async describeClientQuotas; cb(result_int, error_int)"},
+    {"Admin_alter_client_quotas_async", py_Admin_alter_client_quotas_async, METH_VARARGS,
+     "Async alterClientQuotas; cb(result_int, error_int)"},
+    {"CreateAclsResult_drain", py_CreateAclsResult_drain, METH_VARARGS,
+     "Drain+destroy a CreateAclsResult handle into a dict"},
+    {"DescribeAclsResult_drain", py_DescribeAclsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeAclsResult handle into a list"},
+    {"DeleteAclsResult_drain", py_DeleteAclsResult_drain, METH_VARARGS,
+     "Drain+destroy a DeleteAclsResult handle into a dict"},
+    {"DescribeClientQuotasResult_drain", py_DescribeClientQuotasResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeClientQuotasResult handle into a dict"},
+    {"AlterClientQuotasResult_drain", py_AlterClientQuotasResult_drain, METH_VARARGS,
+     "Drain+destroy an AlterClientQuotasResult handle into a dict"},
     {NULL, NULL, 0, NULL}
 };
 
