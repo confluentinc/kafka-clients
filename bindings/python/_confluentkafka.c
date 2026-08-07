@@ -2396,6 +2396,10 @@ static PyObject* py_MockAdminClient_update_end_offsets(PyObject* self, PyObject*
     return mock_update_offsets(args, kafka_admin_MockAdminClient_update_end_offsets);
 }
 
+static PyObject* py_MockAdminClient_update_consumer_group_offsets(PyObject* self, PyObject* args) {
+    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_consumer_group_offsets);
+}
+
 // ---- createTopics ----------------------------------------------------------
 
 // Frees `count` NewTopic handles.
@@ -3889,6 +3893,737 @@ static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
     return d;
 }
 
+// ---------------------------------------------------------------------------
+// B4 — groups and group offsets
+// ---------------------------------------------------------------------------
+
+static void admin_list_groups_trampoline(kafka_admin_ListGroupsResult_t* r,
+                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_list_consumer_groups_trampoline(kafka_admin_ListConsumerGroupsResult_t* r,
+                                                  kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_consumer_groups_trampoline(kafka_admin_DescribeConsumerGroupsResult_t* r,
+                                                      kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_classic_groups_trampoline(kafka_admin_DescribeClassicGroupsResult_t* r,
+                                                     kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_list_consumer_group_offsets_trampoline(kafka_admin_ListConsumerGroupOffsetsResult_t* r,
+                                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_alter_consumer_group_offsets_trampoline(kafka_admin_AlterConsumerGroupOffsetsResult_t* r,
+                                                          kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_delete_consumer_group_offsets_trampoline(kafka_admin_DeleteConsumerGroupOffsetsResult_t* r,
+                                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_delete_consumer_groups_trampoline(kafka_admin_DeleteConsumerGroupsResult_t* r,
+                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_remove_members_trampoline(kafka_admin_RemoveMembersFromConsumerGroupResult_t* r,
+                                            kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// ---- shared string-array reader --------------------------------------------
+
+// Reads a sequence of str into a PyMem_Malloc'd `const char*` array (caller
+// frees). The pointers borrow from the sequence, which the caller must keep
+// alive across the FFI call. Returns the count, or -1 with an exception set.
+static Py_ssize_t build_string_array(PyObject* seq, const char*** out) {
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) return -1;
+    const char** items = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    if (items == NULL) { PyErr_NoMemory(); return -1; }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(seq, i);  // new ref
+        const char* text = item ? PyUnicode_AsUTF8(item) : NULL;
+        Py_XDECREF(item);
+        if (text == NULL) { PyMem_Free(items); return -1; }
+        items[i] = text;
+    }
+    *out = items;
+    return n;
+}
+
+// ---- submits ---------------------------------------------------------------
+
+static PyObject* py_Admin_list_groups_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* states; PyObject* protocols; PyObject* types;
+    int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOOOiO", &h, &states, &protocols, &types, &timeout_ms, &cb))
+        return NULL;
+
+    const char** s = NULL; const char** p = NULL; const char** t = NULL;
+    Py_ssize_t ns = build_string_array(states, &s);
+    if (ns < 0) return NULL;
+    Py_ssize_t np = build_string_array(protocols, &p);
+    if (np < 0) { PyMem_Free(s); return NULL; }
+    Py_ssize_t nt = build_string_array(types, &t);
+    if (nt < 0) { PyMem_Free(s); PyMem_Free(p); return NULL; }
+
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_list_groups_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, s, (int32_t)ns, p, (int32_t)np, t, (int32_t)nt,
+        timeout_ms, admin_list_groups_trampoline, cb);
+    PyMem_Free(s); PyMem_Free(p); PyMem_Free(t);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_list_consumer_groups_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* states; PyObject* types; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOOiO", &h, &states, &types, &timeout_ms, &cb)) return NULL;
+
+    const char** s = NULL; const char** t = NULL;
+    Py_ssize_t ns = build_string_array(states, &s);
+    if (ns < 0) return NULL;
+    Py_ssize_t nt = build_string_array(types, &t);
+    if (nt < 0) { PyMem_Free(s); return NULL; }
+
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_list_consumer_groups_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, s, (int32_t)ns, t, (int32_t)nt, timeout_ms,
+        admin_list_consumer_groups_trampoline, cb);
+    PyMem_Free(s); PyMem_Free(t);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_consumer_groups_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* groups; int timeout_ms; int include_authorized; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOipO", &h, &groups, &timeout_ms, &include_authorized, &cb))
+        return NULL;
+
+    const char** ids = NULL;
+    Py_ssize_t n = build_string_array(groups, &ids);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_consumer_groups_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
+        include_authorized ? true : false, admin_describe_consumer_groups_trampoline, cb);
+    PyMem_Free(ids);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_classic_groups_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* groups; int timeout_ms; int include_authorized; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOipO", &h, &groups, &timeout_ms, &include_authorized, &cb))
+        return NULL;
+
+    const char** ids = NULL;
+    Py_ssize_t n = build_string_array(groups, &ids);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_classic_groups_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
+        include_authorized ? true : false, admin_describe_classic_groups_trampoline, cb);
+    PyMem_Free(ids);
+    Py_RETURN_NONE;
+}
+
+// spec is a sequence of (group_id:str, all_partitions:bool,
+// [(topic:str, partition:int), ...]) — one ragged partition list per group.
+static PyObject* py_Admin_list_consumer_group_offsets_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms; int require_stable; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOipO", &h, &spec, &timeout_ms, &require_stable, &cb))
+        return NULL;
+
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    size_t slots = (size_t)(n > 0 ? n : 1);
+    const char** groups = PyMem_Malloc(slots * sizeof(char*));
+    bool* all_partitions = PyMem_Malloc(slots * sizeof(bool));
+    const char*** topics = PyMem_Malloc(slots * sizeof(char**));
+    int32_t** partitions = PyMem_Malloc(slots * sizeof(int32_t*));
+    int32_t* counts = PyMem_Malloc(slots * sizeof(int32_t));
+    if (!groups || !all_partitions || !topics || !partitions || !counts) {
+        PyMem_Free(groups); PyMem_Free(all_partitions); PyMem_Free(topics);
+        PyMem_Free(partitions); PyMem_Free(counts);
+        PyErr_NoMemory(); return NULL;
+    }
+
+    // `built` counts fully populated rows; each row's two pointers are NULLed
+    // before any fallible work, so the cleanup loop never frees a stale value.
+    Py_ssize_t built = 0;
+    int failed = 0;
+    for (; built < n; built++) {
+        topics[built] = NULL; partitions[built] = NULL;
+        PyObject* item = PySequence_GetItem(spec, built);  // new ref
+        const char* group = NULL; int all = 0; PyObject* tps = NULL;
+        int ok = item && PyArg_ParseTuple(item, "spO", &group, &all, &tps);
+        if (ok) {
+            groups[built] = group;
+            all_partitions[built] = all ? true : false;
+            const char** row_topics = NULL; int32_t* row_partitions = NULL;
+            Py_ssize_t rows = build_topic_partitions(tps, &row_topics, &row_partitions);
+            if (rows < 0) {
+                ok = 0;
+            } else {
+                topics[built] = row_topics;
+                partitions[built] = row_partitions;
+                counts[built] = (int32_t)rows;
+            }
+        }
+        Py_XDECREF(item);
+        if (!ok) { failed = 1; break; }
+    }
+
+    if (!failed) {
+        Py_INCREF(cb);
+        kafka_admin_AdminClient_list_consumer_group_offsets_async(
+            (kafka_admin_AdminClient_t*)(uintptr_t)h, groups, all_partitions,
+            (const char* const* const*)topics, (const int32_t* const*)partitions, counts,
+            (int32_t)n, timeout_ms, require_stable ? true : false,
+            admin_list_consumer_group_offsets_trampoline, cb);
+    }
+    for (Py_ssize_t i = 0; i < built; i++) {
+        PyMem_Free((void*)topics[i]); PyMem_Free(partitions[i]);
+    }
+    PyMem_Free(groups); PyMem_Free(all_partitions); PyMem_Free(topics);
+    PyMem_Free(partitions); PyMem_Free(counts);
+    if (failed) return NULL;
+    Py_RETURN_NONE;
+}
+
+// spec is a sequence of
+// (topic:str, partition:int, offset:int, metadata:str|None,
+//  has_leader_epoch:bool, leader_epoch:int).
+static PyObject* py_Admin_alter_consumer_group_offsets_async(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* group_id; PyObject* spec; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsOiO", &h, &group_id, &spec, &timeout_ms, &cb)) return NULL;
+
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    size_t slots = (size_t)(n > 0 ? n : 1);
+    const char** topics = PyMem_Malloc(slots * sizeof(char*));
+    int32_t* partitions = PyMem_Malloc(slots * sizeof(int32_t));
+    int64_t* offsets = PyMem_Malloc(slots * sizeof(int64_t));
+    const char** metadata = PyMem_Malloc(slots * sizeof(char*));
+    int32_t* epochs = PyMem_Malloc(slots * sizeof(int32_t));
+    bool* has_epoch = PyMem_Malloc(slots * sizeof(bool));
+    if (!topics || !partitions || !offsets || !metadata || !epochs || !has_epoch) {
+        PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
+        PyMem_Free(metadata); PyMem_Free(epochs); PyMem_Free(has_epoch);
+        PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        const char* topic = NULL; int p = 0; long long offset = 0;
+        const char* meta = NULL; int has = 0; int epoch = 0;
+        int ok = item && PyArg_ParseTuple(item, "siLzpi", &topic, &p, &offset, &meta, &has, &epoch);
+        Py_XDECREF(item);
+        if (!ok) {
+            PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
+            PyMem_Free(metadata); PyMem_Free(epochs); PyMem_Free(has_epoch);
+            return NULL;
+        }
+        topics[i] = topic; partitions[i] = (int32_t)p; offsets[i] = (int64_t)offset;
+        metadata[i] = meta; epochs[i] = (int32_t)epoch; has_epoch[i] = has ? true : false;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, offsets, metadata,
+        epochs, has_epoch, (int32_t)n, timeout_ms, admin_alter_consumer_group_offsets_trampoline,
+        cb);
+    PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
+    PyMem_Free(metadata); PyMem_Free(epochs); PyMem_Free(has_epoch);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_delete_consumer_group_offsets_async(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* group_id; PyObject* spec; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsOiO", &h, &group_id, &spec, &timeout_ms, &cb)) return NULL;
+
+    const char** topics = NULL; int32_t* partitions = NULL;
+    Py_ssize_t n = build_topic_partitions(spec, &topics, &partitions);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, (int32_t)n,
+        timeout_ms, admin_delete_consumer_group_offsets_trampoline, cb);
+    PyMem_Free(topics); PyMem_Free(partitions);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_delete_consumer_groups_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* groups; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &groups, &timeout_ms, &cb)) return NULL;
+
+    const char** ids = NULL;
+    Py_ssize_t n = build_string_array(groups, &ids);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_delete_consumer_groups_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
+        admin_delete_consumer_groups_trampoline, cb);
+    PyMem_Free(ids);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_remove_members_from_consumer_group_async(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* group_id; int remove_all; PyObject* members;
+    const char* reason; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KspOziO", &h, &group_id, &remove_all, &members, &reason,
+                          &timeout_ms, &cb))
+        return NULL;
+
+    const char** ids = NULL;
+    Py_ssize_t n = build_string_array(members, &ids);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, remove_all ? true : false, ids,
+        (int32_t)n, reason, timeout_ms, admin_remove_members_trampoline, cb);
+    PyMem_Free(ids);
+    Py_RETURN_NONE;
+}
+
+// ---- result drains ---------------------------------------------------------
+
+// A `const char*` that may be NULL becomes None rather than "".
+static PyObject* optional_str_to_py(const char* text) {
+    if (text == NULL) Py_RETURN_NONE;
+    return PyUnicode_FromString(text);
+}
+
+// [(topic, partition), ...] for a MemberAssignment.
+static PyObject* member_assignment_to_py(const kafka_admin_MemberAssignment_t* a) {
+    if (a == NULL) Py_RETURN_NONE;
+    int32_t n = kafka_admin_MemberAssignment_count(a);
+    PyObject* out = PyList_New(n < 0 ? 0 : n);
+    if (out == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* tp = topic_partition_key(kafka_admin_MemberAssignment_get_topic(a, i),
+                                           kafka_admin_MemberAssignment_get_partition(a, i));
+        if (tp == NULL) { Py_DECREF(out); return NULL; }
+        PyList_SET_ITEM(out, i, tp);
+    }
+    return out;
+}
+
+// (consumer_id, group_instance_id, rack_id, client_id, host, assignment,
+//  target_assignment, member_epoch, upgraded)
+static PyObject* member_description_to_py(const kafka_admin_MemberDescription_t* m) {
+    if (m == NULL) Py_RETURN_NONE;
+    PyObject* gid = optional_str_to_py(kafka_admin_MemberDescription_group_instance_id(m));
+    PyObject* rack = optional_str_to_py(kafka_admin_MemberDescription_rack_id(m));
+    PyObject* assignment = member_assignment_to_py(kafka_admin_MemberDescription_assignment(m));
+    PyObject* target =
+        member_assignment_to_py(kafka_admin_MemberDescription_target_assignment(m));
+    int32_t epoch = 0;
+    PyObject* py_epoch = kafka_admin_MemberDescription_member_epoch(m, &epoch)
+                             ? PyLong_FromLong(epoch)
+                             : (Py_INCREF(Py_None), Py_None);
+    bool upgraded = false;
+    PyObject* py_upgraded = kafka_admin_MemberDescription_upgraded(m, &upgraded)
+                                ? PyBool_FromLong(upgraded ? 1 : 0)
+                                : (Py_INCREF(Py_None), Py_None);
+    if (!gid || !rack || !assignment || !target || !py_epoch || !py_upgraded) {
+        Py_XDECREF(gid); Py_XDECREF(rack); Py_XDECREF(assignment); Py_XDECREF(target);
+        Py_XDECREF(py_epoch); Py_XDECREF(py_upgraded);
+        return NULL;
+    }
+    return Py_BuildValue("(sNNssNNNN)", kafka_admin_MemberDescription_consumer_id(m), gid, rack,
+                         kafka_admin_MemberDescription_client_id(m),
+                         kafka_admin_MemberDescription_host(m), assignment, target, py_epoch,
+                         py_upgraded);
+}
+
+// [AclOperation code, ...]
+static PyObject* acl_codes_to_py(int32_t count, int32_t (*get)(const void*, int32_t),
+                                 const void* owner) {
+    PyObject* out = PyList_New(count < 0 ? 0 : count);
+    if (out == NULL) return NULL;
+    for (int32_t i = 0; i < count; i++) {
+        PyObject* code = PyLong_FromLong(get(owner, i));
+        if (code == NULL) { Py_DECREF(out); return NULL; }
+        PyList_SET_ITEM(out, i, code);
+    }
+    return out;
+}
+
+static int32_t consumer_group_acl_at(const void* d, int32_t i) {
+    return kafka_admin_ConsumerGroupDescription_authorized_operation(
+        (const kafka_admin_ConsumerGroupDescription_t*)d, i);
+}
+
+static int32_t classic_group_acl_at(const void* d, int32_t i) {
+    return kafka_admin_ClassicGroupDescription_authorized_operation(
+        (const kafka_admin_ClassicGroupDescription_t*)d, i);
+}
+
+// [member_tuple, ...] from a count/index accessor pair.
+static PyObject* members_to_py(int32_t count,
+                               const kafka_admin_MemberDescription_t* (*get)(const void*, int32_t),
+                               const void* owner) {
+    PyObject* out = PyList_New(count < 0 ? 0 : count);
+    if (out == NULL) return NULL;
+    for (int32_t i = 0; i < count; i++) {
+        PyObject* m = member_description_to_py(get(owner, i));
+        if (m == NULL) { Py_DECREF(out); return NULL; }
+        PyList_SET_ITEM(out, i, m);
+    }
+    return out;
+}
+
+static const kafka_admin_MemberDescription_t* consumer_group_member_at(const void* d, int32_t i) {
+    return kafka_admin_ConsumerGroupDescription_get_member(
+        (const kafka_admin_ConsumerGroupDescription_t*)d, i);
+}
+
+static const kafka_admin_MemberDescription_t* classic_group_member_at(const void* d, int32_t i) {
+    return kafka_admin_ClassicGroupDescription_get_member(
+        (const kafka_admin_ClassicGroupDescription_t*)d, i);
+}
+
+// (group_id, is_simple, members, partition_assignor, group_type, state,
+//  group_state, coordinator, authorized_operations, group_epoch,
+//  target_assignment_epoch)
+static PyObject* consumer_group_description_to_py(const kafka_admin_ConsumerGroupDescription_t* d) {
+    if (d == NULL) Py_RETURN_NONE;
+    PyObject* members =
+        members_to_py(kafka_admin_ConsumerGroupDescription_member_count(d),
+                      consumer_group_member_at, d);
+    PyObject* coordinator = node_to_py(kafka_admin_ConsumerGroupDescription_coordinator(d));
+    PyObject* acls =
+        acl_codes_to_py(kafka_admin_ConsumerGroupDescription_authorized_operation_count(d),
+                        consumer_group_acl_at, d);
+    int32_t epoch = 0;
+    PyObject* group_epoch = kafka_admin_ConsumerGroupDescription_group_epoch(d, &epoch)
+                                ? PyLong_FromLong(epoch)
+                                : (Py_INCREF(Py_None), Py_None);
+    int32_t target = 0;
+    PyObject* target_epoch =
+        kafka_admin_ConsumerGroupDescription_target_assignment_epoch(d, &target)
+            ? PyLong_FromLong(target)
+            : (Py_INCREF(Py_None), Py_None);
+    if (!members || !coordinator || !acls || !group_epoch || !target_epoch) {
+        Py_XDECREF(members); Py_XDECREF(coordinator); Py_XDECREF(acls);
+        Py_XDECREF(group_epoch); Py_XDECREF(target_epoch);
+        return NULL;
+    }
+    return Py_BuildValue(
+        "(sONsssNNNN)", kafka_admin_ConsumerGroupDescription_group_id(d),
+        kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(d) ? Py_True : Py_False,
+        members, kafka_admin_ConsumerGroupDescription_partition_assignor(d),
+        kafka_admin_ConsumerGroupDescription_group_type(d),
+        kafka_admin_ConsumerGroupDescription_state(d),
+        // 'N' from here on; the two strings above are copied by 's'.
+        PyUnicode_FromString(kafka_admin_ConsumerGroupDescription_group_state(d)), coordinator,
+        acls, group_epoch, target_epoch);
+}
+
+// (group_id, protocol, protocol_data, is_simple, members, state, coordinator,
+//  authorized_operations)
+static PyObject* classic_group_description_to_py(const kafka_admin_ClassicGroupDescription_t* d) {
+    if (d == NULL) Py_RETURN_NONE;
+    PyObject* members = members_to_py(kafka_admin_ClassicGroupDescription_member_count(d),
+                                      classic_group_member_at, d);
+    PyObject* coordinator = node_to_py(kafka_admin_ClassicGroupDescription_coordinator(d));
+    PyObject* acls =
+        acl_codes_to_py(kafka_admin_ClassicGroupDescription_authorized_operation_count(d),
+                        classic_group_acl_at, d);
+    if (!members || !coordinator || !acls) {
+        Py_XDECREF(members); Py_XDECREF(coordinator); Py_XDECREF(acls);
+        return NULL;
+    }
+    return Py_BuildValue("(sssONsNN)", kafka_admin_ClassicGroupDescription_group_id(d),
+                         kafka_admin_ClassicGroupDescription_protocol(d),
+                         kafka_admin_ClassicGroupDescription_protocol_data(d),
+                         kafka_admin_ClassicGroupDescription_is_simple_consumer_group(d) ? Py_True
+                                                                                        : Py_False,
+                         members, kafka_admin_ClassicGroupDescription_state(d), coordinator, acls);
+}
+
+// ([(group_id, group_type, protocol, group_state, is_simple), ...], [error, ...])
+//
+// Java's ListGroupsResult has no per-key future: valid() and errors() are two
+// independent collections of generally different length, so this is a pair of
+// lists rather than a dict.
+static PyObject* py_ListGroupsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListGroupsResult_t* r = (kafka_admin_ListGroupsResult_t*)(uintptr_t)ptr;
+    int32_t nv = kafka_admin_ListGroupsResult_valid_count(r);
+    int32_t ne = kafka_admin_ListGroupsResult_error_count(r);
+    PyObject* valid = PyList_New(nv < 0 ? 0 : nv);
+    PyObject* errors = PyList_New(ne < 0 ? 0 : ne);
+    if (!valid || !errors) goto fail;
+    for (int32_t i = 0; i < nv; i++) {
+        const kafka_admin_GroupListing_t* g = kafka_admin_ListGroupsResult_get_valid(r, i);
+        PyObject* type = optional_str_to_py(kafka_admin_GroupListing_group_type(g));
+        PyObject* state = optional_str_to_py(kafka_admin_GroupListing_group_state(g));
+        if (!type || !state) { Py_XDECREF(type); Py_XDECREF(state); goto fail; }
+        PyObject* row = Py_BuildValue("(sNsNO)", kafka_admin_GroupListing_group_id(g), type,
+                                      kafka_admin_GroupListing_protocol(g), state,
+                                      kafka_admin_GroupListing_is_simple_consumer_group(g)
+                                          ? Py_True : Py_False);
+        if (row == NULL) goto fail;
+        PyList_SET_ITEM(valid, i, row);
+    }
+    for (int32_t i = 0; i < ne; i++) {
+        PyObject* e = borrowed_error_to_py(kafka_admin_ListGroupsResult_get_error(r, i));
+        if (e == NULL) goto fail;
+        PyList_SET_ITEM(errors, i, e);
+    }
+    kafka_admin_ListGroupsResult_destroy(r);
+    return Py_BuildValue("(NN)", valid, errors);
+fail:
+    Py_XDECREF(valid); Py_XDECREF(errors);
+    kafka_admin_ListGroupsResult_destroy(r);
+    return NULL;
+}
+
+// ([(group_id, is_simple, group_state, state, group_type), ...], [error, ...])
+static PyObject* py_ListConsumerGroupsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListConsumerGroupsResult_t* r =
+        (kafka_admin_ListConsumerGroupsResult_t*)(uintptr_t)ptr;
+    int32_t nv = kafka_admin_ListConsumerGroupsResult_valid_count(r);
+    int32_t ne = kafka_admin_ListConsumerGroupsResult_error_count(r);
+    PyObject* valid = PyList_New(nv < 0 ? 0 : nv);
+    PyObject* errors = PyList_New(ne < 0 ? 0 : ne);
+    if (!valid || !errors) goto fail;
+    for (int32_t i = 0; i < nv; i++) {
+        const kafka_admin_ConsumerGroupListing_t* g =
+            kafka_admin_ListConsumerGroupsResult_get_valid(r, i);
+        PyObject* group_state =
+            optional_str_to_py(kafka_admin_ConsumerGroupListing_group_state(g));
+        PyObject* state = optional_str_to_py(kafka_admin_ConsumerGroupListing_state(g));
+        PyObject* type = optional_str_to_py(kafka_admin_ConsumerGroupListing_group_type(g));
+        if (!group_state || !state || !type) {
+            Py_XDECREF(group_state); Py_XDECREF(state); Py_XDECREF(type); goto fail;
+        }
+        PyObject* row = Py_BuildValue(
+            "(sONNN)", kafka_admin_ConsumerGroupListing_group_id(g),
+            kafka_admin_ConsumerGroupListing_is_simple_consumer_group(g) ? Py_True : Py_False,
+            group_state, state, type);
+        if (row == NULL) goto fail;
+        PyList_SET_ITEM(valid, i, row);
+    }
+    for (int32_t i = 0; i < ne; i++) {
+        PyObject* e = borrowed_error_to_py(kafka_admin_ListConsumerGroupsResult_get_error(r, i));
+        if (e == NULL) goto fail;
+        PyList_SET_ITEM(errors, i, e);
+    }
+    kafka_admin_ListConsumerGroupsResult_destroy(r);
+    return Py_BuildValue("(NN)", valid, errors);
+fail:
+    Py_XDECREF(valid); Py_XDECREF(errors);
+    kafka_admin_ListConsumerGroupsResult_destroy(r);
+    return NULL;
+}
+
+// {group_id: (error, description_or_None)}
+static PyObject* py_DescribeConsumerGroupsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeConsumerGroupsResult_t* r =
+        (kafka_admin_DescribeConsumerGroupsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeConsumerGroupsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeConsumerGroupsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = PyUnicode_FromString(
+            kafka_admin_DescribeConsumerGroupsResult_get_group_id(r, i));
+        PyObject* err =
+            borrowed_error_to_py(kafka_admin_DescribeConsumerGroupsResult_get_error(r, i));
+        PyObject* value = consumer_group_description_to_py(
+            kafka_admin_DescribeConsumerGroupsResult_get_value(r, i));
+        PyObject* val = error_value_pair(err, value);
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_DescribeConsumerGroupsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_DescribeConsumerGroupsResult_destroy(r);
+    return d;
+}
+
+// {group_id: (error, description_or_None)}
+static PyObject* py_DescribeClassicGroupsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeClassicGroupsResult_t* r =
+        (kafka_admin_DescribeClassicGroupsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeClassicGroupsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeClassicGroupsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key =
+            PyUnicode_FromString(kafka_admin_DescribeClassicGroupsResult_get_group_id(r, i));
+        PyObject* err =
+            borrowed_error_to_py(kafka_admin_DescribeClassicGroupsResult_get_error(r, i));
+        PyObject* value = classic_group_description_to_py(
+            kafka_admin_DescribeClassicGroupsResult_get_value(r, i));
+        PyObject* val = error_value_pair(err, value);
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_DescribeClassicGroupsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_DescribeClassicGroupsResult_destroy(r);
+    return d;
+}
+
+// {(topic, partition): (offset, metadata, leader_epoch) | None}
+//
+// A None value is Java's null map value: the group has no committed offset for
+// that partition, which is distinct from a committed offset of 0.
+static PyObject* offset_map_to_py(const kafka_admin_OffsetAndMetadataMap_t* map) {
+    if (map == NULL) Py_RETURN_NONE;
+    int32_t n = kafka_admin_OffsetAndMetadataMap_count(map);
+    PyObject* d = PyDict_New();
+    if (d == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = topic_partition_key(kafka_admin_OffsetAndMetadataMap_get_topic(map, i),
+                                            kafka_admin_OffsetAndMetadataMap_get_partition(map, i));
+        PyObject* value;
+        if (!kafka_admin_OffsetAndMetadataMap_has_offset(map, i)) {
+            Py_INCREF(Py_None);
+            value = Py_None;
+        } else {
+            int32_t epoch = 0;
+            bool has_epoch =
+                kafka_admin_OffsetAndMetadataMap_get_leader_epoch(map, i, &epoch);
+            PyObject* py_epoch =
+                has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None);
+            value = py_epoch == NULL
+                        ? NULL
+                        : Py_BuildValue(
+                              "(LsN)",
+                              (long long)kafka_admin_OffsetAndMetadataMap_get_offset(map, i),
+                              kafka_admin_OffsetAndMetadataMap_get_metadata(map, i), py_epoch);
+        }
+        if (!key || !value || PyDict_SetItem(d, key, value) < 0) {
+            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(value);
+    }
+    return d;
+}
+
+// {group_id: (error, {(topic, partition): offset_tuple | None} | None)}
+static PyObject* py_ListConsumerGroupOffsetsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListConsumerGroupOffsetsResult_t* r =
+        (kafka_admin_ListConsumerGroupOffsetsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_ListConsumerGroupOffsetsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_ListConsumerGroupOffsetsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = PyUnicode_FromString(
+            kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(r, i));
+        PyObject* err =
+            borrowed_error_to_py(kafka_admin_ListConsumerGroupOffsetsResult_get_error(r, i));
+        PyObject* value =
+            offset_map_to_py(kafka_admin_ListConsumerGroupOffsetsResult_get_value(r, i));
+        PyObject* val = error_value_pair(err, value);
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_ListConsumerGroupOffsetsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(r);
+    return d;
+}
+
+// {(topic, partition): error_or_None} — per-partition future is
+// KafkaFuture<Void>, so None means success.
+static PyObject* py_AlterConsumerGroupOffsetsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_AlterConsumerGroupOffsetsResult_t* r =
+        (kafka_admin_AlterConsumerGroupOffsetsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_AlterConsumerGroupOffsetsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_AlterConsumerGroupOffsetsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = topic_partition_key(
+            kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(r, i),
+            kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(r, i));
+        PyObject* err =
+            borrowed_error_to_py(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(r);
+    return d;
+}
+
+// {(topic, partition): error_or_None}
+static PyObject* py_DeleteConsumerGroupOffsetsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DeleteConsumerGroupOffsetsResult_t* r =
+        (kafka_admin_DeleteConsumerGroupOffsetsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DeleteConsumerGroupOffsetsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = topic_partition_key(
+            kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(r, i),
+            kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(r, i));
+        PyObject* err =
+            borrowed_error_to_py(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(r);
+    return d;
+}
+
+// {group_id: error_or_None}
+static PyObject* py_DeleteConsumerGroupsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DeleteConsumerGroupsResult_t* r =
+        (kafka_admin_DeleteConsumerGroupsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DeleteConsumerGroupsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DeleteConsumerGroupsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key =
+            PyUnicode_FromString(kafka_admin_DeleteConsumerGroupsResult_get_group_id(r, i));
+        PyObject* err =
+            borrowed_error_to_py(kafka_admin_DeleteConsumerGroupsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_DeleteConsumerGroupsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_DeleteConsumerGroupsResult_destroy(r);
+    return d;
+}
+
+// {group_instance_id: error_or_None} — empty in removeAll mode, where Java
+// exposes no per-member outcome at all.
+static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t* r =
+        (kafka_admin_RemoveMembersFromConsumerGroupResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_RemoveMembersFromConsumerGroupResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = PyUnicode_FromString(
+            kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(r, i));
+        PyObject* err = borrowed_error_to_py(
+            kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(r);
+    return d;
+}
+
+
 static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
@@ -4053,6 +4788,47 @@ static PyMethodDef ProducerNativeMethods[] = {
      METH_VARARGS, "Drain+destroy a ListPartitionReassignmentsResult handle into a dict"},
     {"ListOffsetsResult_drain", py_ListOffsetsResult_drain, METH_VARARGS,
      "Drain+destroy a ListOffsetsResult handle into a dict"},
+    {"MockAdminClient_update_consumer_group_offsets",
+     py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS,
+     "Mock: seed committed consumer-group offsets; returns error_int"},
+    {"Admin_list_groups_async", py_Admin_list_groups_async, METH_VARARGS,
+     "Async listGroups; cb(result_int, error_int)"},
+    {"Admin_list_consumer_groups_async", py_Admin_list_consumer_groups_async, METH_VARARGS,
+     "Async listConsumerGroups; cb(result_int, error_int)"},
+    {"Admin_describe_consumer_groups_async", py_Admin_describe_consumer_groups_async,
+     METH_VARARGS, "Async describeConsumerGroups; cb(result_int, error_int)"},
+    {"Admin_describe_classic_groups_async", py_Admin_describe_classic_groups_async, METH_VARARGS,
+     "Async describeClassicGroups; cb(result_int, error_int)"},
+    {"Admin_list_consumer_group_offsets_async", py_Admin_list_consumer_group_offsets_async,
+     METH_VARARGS, "Async listConsumerGroupOffsets; cb(result_int, error_int)"},
+    {"Admin_alter_consumer_group_offsets_async", py_Admin_alter_consumer_group_offsets_async,
+     METH_VARARGS, "Async alterConsumerGroupOffsets; cb(result_int, error_int)"},
+    {"Admin_delete_consumer_group_offsets_async", py_Admin_delete_consumer_group_offsets_async,
+     METH_VARARGS, "Async deleteConsumerGroupOffsets; cb(result_int, error_int)"},
+    {"Admin_delete_consumer_groups_async", py_Admin_delete_consumer_groups_async, METH_VARARGS,
+     "Async deleteConsumerGroups; cb(result_int, error_int)"},
+    {"Admin_remove_members_from_consumer_group_async",
+     py_Admin_remove_members_from_consumer_group_async, METH_VARARGS,
+     "Async removeMembersFromConsumerGroup; cb(result_int, error_int)"},
+    {"ListGroupsResult_drain", py_ListGroupsResult_drain, METH_VARARGS,
+     "Drain+destroy a ListGroupsResult handle into (valid, errors)"},
+    {"ListConsumerGroupsResult_drain", py_ListConsumerGroupsResult_drain, METH_VARARGS,
+     "Drain+destroy a ListConsumerGroupsResult handle into (valid, errors)"},
+    {"DescribeConsumerGroupsResult_drain", py_DescribeConsumerGroupsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeConsumerGroupsResult handle into a dict"},
+    {"DescribeClassicGroupsResult_drain", py_DescribeClassicGroupsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeClassicGroupsResult handle into a dict"},
+    {"ListConsumerGroupOffsetsResult_drain", py_ListConsumerGroupOffsetsResult_drain,
+     METH_VARARGS, "Drain+destroy a ListConsumerGroupOffsetsResult handle into a dict"},
+    {"AlterConsumerGroupOffsetsResult_drain", py_AlterConsumerGroupOffsetsResult_drain,
+     METH_VARARGS, "Drain+destroy an AlterConsumerGroupOffsetsResult handle into a dict"},
+    {"DeleteConsumerGroupOffsetsResult_drain", py_DeleteConsumerGroupOffsetsResult_drain,
+     METH_VARARGS, "Drain+destroy a DeleteConsumerGroupOffsetsResult handle into a dict"},
+    {"DeleteConsumerGroupsResult_drain", py_DeleteConsumerGroupsResult_drain, METH_VARARGS,
+     "Drain+destroy a DeleteConsumerGroupsResult handle into a dict"},
+    {"RemoveMembersFromConsumerGroupResult_drain",
+     py_RemoveMembersFromConsumerGroupResult_drain, METH_VARARGS,
+     "Drain+destroy a RemoveMembersFromConsumerGroupResult handle into a dict"},
     {NULL, NULL, 0, NULL}
 };
 
