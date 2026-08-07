@@ -1969,8 +1969,11 @@ def test_alter_client_quotas_keeps_the_default_entity_distinct():
 
 
 def test_alter_client_quotas_rejects_a_duplicate_entity():
-    """Java keys the result by entity, so the second alteration of the same
-    entity could only silently replace the first."""
+    """A deliberate deviation: Java accepts a duplicate entity -- both
+    alterations are sent and only the future map collapses
+    (`KafkaAdminClient.java:4301-4313`) -- but the C result is a flat array
+    built from that map, so the surviving outcome could not be attributed to
+    either row."""
     with MockAdminClient(1) as admin:
         entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
         with pytest.raises(KafkaError) as exc:
@@ -2174,3 +2177,93 @@ def test_quota_alteration_rows_keep_both_nulls():
     # Zero is a value, not a removal: the two must not collapse into each other.
     assert rows[1][1] == [("request_percentage", 0.0)]
     assert rows[1][1][0][1] is not None
+
+
+def test_quota_filter_rows_keep_each_match_type_in_its_own_column():
+    """The C reader ignores the name for the two nameless match types, so a
+    transposed `(entity_type, match_type, match_name)` tuple reaches the mock
+    unchanged and throws with the same message either way. This is the only
+    place the three columns are pinned."""
+    rows = MockAdminClient._quota_filter_rows(ClientQuotaFilter.contains_only([
+        ClientQuotaFilterComponent.of_entity(ClientQuotaEntity.USER, "alice"),
+        ClientQuotaFilterComponent.of_default_entity(ClientQuotaEntity.CLIENT_ID),
+        ClientQuotaFilterComponent.of_entity_type(ClientQuotaEntity.IP),
+    ]))
+    assert rows == [
+        ("user", ClientQuotaFilterComponent.EXACT, "alice"),
+        ("client-id", ClientQuotaFilterComponent.DEFAULT, None),
+        ("ip", ClientQuotaFilterComponent.SPECIFIED, None),
+    ]
+    # DEFAULT and SPECIFIED both carry no name, so only the match type tells
+    # them apart -- collapsing the two is a different broker request.
+    assert rows[1][1] != rows[2][1]
+
+
+def test_create_partitions_rows_keep_the_two_increase_to_forms_apart():
+    """`assignments is None` is Java's `increaseTo(int)`; a list is
+    `increaseTo(int, List<List<Integer>>)`. The mock throws before either is
+    echoed back."""
+    rows = MockAdminClient._create_partitions_rows({
+        "broker-assigned": NewPartitions(4),
+        "hand-assigned": NewPartitions(3, [[7, 8], [9]]),
+    })
+    assert rows == [
+        ("broker-assigned", 4, None),
+        ("hand-assigned", 3, [[7, 8], [9]]),
+    ]
+    # The nested lists are ragged, so swapping them changes the row.
+    assert rows[0][2] is None
+
+
+def test_delete_records_rows_keep_partition_and_offset_apart():
+    rows = MockAdminClient._delete_records_rows({
+        ("orders", 3): RecordsToDelete(11),
+        ("events", 5): RecordsToDelete(-1),
+    })
+    # Every number is distinct, so transposing partition and offset changes the
+    # row.
+    assert rows == [("orders", 3, 11), ("events", 5, -1)]
+
+
+def test_elect_leaders_rows_keep_all_partitions_apart_from_an_empty_selection():
+    """`None` elects a leader for every partition in the cluster; `[]` elects
+    none. The mock throws, so only this builder tells the two apart."""
+    assert MockAdminClient._elect_leaders_rows(None) == (True, [])
+    assert MockAdminClient._elect_leaders_rows([]) == (False, [])
+    assert MockAdminClient._elect_leaders_rows([("orders", 3), ("events", 5)]) == (
+        False, [("orders", 3), ("events", 5)])
+
+
+def test_alter_consumer_group_offsets_rows_keep_both_nulls():
+    """`leader_epoch is None` is an absent epoch, not epoch 0, and
+    `metadata is None` is a NULL pointer, not `""`. The mock throws before
+    either is echoed back."""
+    rows = MockAdminClient._alter_consumer_group_offsets_rows({
+        ("orders", 3): OffsetAndMetadata(11, "checkpoint", 7),
+        ("events", 5): OffsetAndMetadata(13, None, 0),
+        ("audit", 6): OffsetAndMetadata(17, "", None),
+    })
+    assert rows[0] == ("orders", 3, 11, "checkpoint", True, 7)
+    # Epoch 0 is present, and must not collapse into the absent case.
+    assert rows[1] == ("events", 5, 13, None, True, 0)
+    # An absent epoch is flagged absent and pads with 0, which the C side
+    # ignores; `""` metadata is a value and must not become NULL.
+    assert rows[2] == ("audit", 6, 17, "", False, 0)
+    assert rows[1][4] != rows[2][4]
+
+
+def test_delete_consumer_group_offsets_rows_keep_topic_and_partition_apart():
+    rows = MockAdminClient._delete_consumer_group_offsets_rows(
+        [("orders", 3), ("events", 5)])
+    assert rows == [("orders", 3), ("events", 5)]
+
+
+def test_remove_members_rows_keep_remove_all_apart_from_an_empty_list():
+    """`None` removes every member; `[]` removes none. Java's Collection
+    constructor rejects the empty list outright, so the two must never
+    collapse."""
+    assert MockAdminClient._remove_members_rows(None) == (True, [])
+    assert MockAdminClient._remove_members_rows([]) == (False, [])
+    assert MockAdminClient._remove_members_rows(
+        [MemberToRemove("instance-1"), MemberToRemove("instance-2")]) == (
+            False, ["instance-1", "instance-2"])
