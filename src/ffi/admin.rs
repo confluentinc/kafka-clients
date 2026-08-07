@@ -98,23 +98,26 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::{
-    Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
-    AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
-    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
-    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
-    DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
-    DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
-    DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions,
-    FeatureMetadata, FeatureUpdate, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
+    AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
+    AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry,
+    ConfigSource, ConfigType, ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions,
+    CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions,
+    DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
+    DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
+    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureMetadata,
+    FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
     ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
-    OpType, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
-    ReplicaLogDirInfo, ScramCredentialInfo, ScramMechanism, TopicDescription, TopicListing, TopicMetadataAndConfig,
-    UpdateFeaturesOptions, UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion,
-    UserScramCredentialUpsertion, UserScramCredentialsDescription,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
+    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
+    ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
+    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
+    UserScramCredentialsDescription,
 };
 // `listClientMetricsResources` (superseded by `listConfigResources` filtered to
 // CLIENT_METRICS) and `listConsumerGroups` (superseded by `listGroups`) are both
@@ -143,6 +146,7 @@ use crate::common::requests::list_offsets_request::{
 use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
+use crate::common::utils::ProducerIdAndEpoch;
 use crate::common::{
     ElectionType, GroupState, GroupType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection,
     TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
@@ -17533,6 +17537,2040 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut k
 }
 
 // ---------------------------------------------------------------------------
+// B6 — producers and transactions
+//
+// The six RPCs of the last slice, and the four result shapes they need
+// (`PLAN-bindings.md` §7 D2):
+//
+//   - `describeProducers`: `Map<TopicPartition, KafkaFuture<PartitionProducerState>>`.
+//     `PartitionProducerState` is one `List<ProducerState>` and a `ProducerState`
+//     is scalar-only, so the list is flattened to a second index rather than
+//     minting a value handle (D2's fifth rule). Its two `Optional`s become
+//     `bool fn(..., T *out)` accessors, which is a present-flag, not an index
+//     level.
+//   - `describeTransactions`: `Map<String, KafkaFuture<TransactionDescription>>`.
+//     Scalars sit at `i` and `topicPartitions()` at `(i, j)` — two levels from
+//     this handle, because a `TopicPartition` element is itself scalar-only.
+//   - `fenceProducers`: `Map<String, KafkaFuture<ProducerIdAndEpoch>>`. A record
+//     of two scalars is not the collection case at all: both fields sit at `i`.
+//   - `listTransactions`: driven from Java's `byBrokerId()`, the richest of its
+//     three views — it is the only one that keeps a *per-broker* error, so the
+//     handle is broker-keyed with the listings flattened to `(i, j)`.
+//
+// `abortTransaction` and `forceTerminateTransaction` get **no result handle**.
+// This is a deliberate fifth shape, recorded in D2: `AbortTransactionResult`
+// exposes exactly one method, `all() -> KafkaFuture<Void>`, and
+// `TerminateTransactionResult` exposes `result() -> KafkaFuture<Void>`. Neither
+// carries any data, and neither exposes per-key granularity a caller could reach
+// (`AbortTransactionResult`'s per-partition map is private and the RPC takes
+// exactly one spec, so there is one key by construction). A handle whose only
+// method is `_destroy` would be ceremony plus a leak to get wrong, so success is
+// a null return / a null `error` in the callback, following the
+// `kafka_admin_AdminClient_close_async` callback shape already in this module.
+// ---------------------------------------------------------------------------
+
+/// Per-partition outcomes of `describeProducers`.
+type DescribeProducersOutcomes = HashMap<TopicPartition, Result<PartitionProducerState, KafkaError>>;
+/// Per-transactional-id outcomes of `describeTransactions`.
+type DescribeTransactionsOutcomes = HashMap<String, Result<TransactionDescription, KafkaError>>;
+/// Per-transactional-id outcomes of `fenceProducers`.
+type FenceProducersOutcomes = HashMap<String, Result<ProducerIdAndEpoch, KafkaError>>;
+/// Per-broker outcomes of `listTransactions`, from Java's `byBrokerId()`.
+type ListTransactionsOutcomes = HashMap<i32, Result<Vec<TransactionListing>, KafkaError>>;
+
+/// Returns `values[index]`, or -1 when `index` is out of range or the row that
+/// owns the slice does not exist. The `i64` twin of [`indexed_i32_at`]; -1 is
+/// Java's own "absent" value for every caller (`RecordBatch.NO_PRODUCER_ID`,
+/// `NO_TIMESTAMP`).
+fn indexed_i64_at(values: Option<&[i64]>, index: i32) -> i64 {
+    if index < 0 {
+        return -1;
+    }
+    values.and_then(|values| values.get(index as usize)).copied().unwrap_or(-1)
+}
+
+/// Returns `values[index]` when both the row and the entry are present.
+///
+/// The nested-`Option` reader for a Java `OptionalLong` / `OptionalInt` inside a
+/// flattened second index: an out-of-range index and an empty `Optional` are
+/// both "absent", which is what [`write_optional`] then reports as `false`.
+fn indexed_optional_at<T: Copy>(values: Option<&[Option<T>]>, index: i32) -> Option<T> {
+    if index < 0 {
+        return None;
+    }
+    values.and_then(|values| values.get(index as usize)).copied().flatten()
+}
+
+/// Reads `count` 64-bit integers into an owned vector.
+///
+/// # Safety
+///
+/// `values` must be null or have `count` readable entries.
+unsafe fn read_i64s(values: *const i64, count: i32) -> Vec<i64> {
+    let n = count.max(0) as usize;
+    if values.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(unsafe { *values.add(i) });
+    }
+    out
+}
+
+/// Parses `count` `TransactionState` names into a set.
+///
+/// Names are Java's `TransactionState.toString()` values (`"Ongoing"`,
+/// `"PrepareAbort"`, `"CompleteCommit"`, …), and an unrecognised name becomes
+/// `TransactionState.UNKNOWN`, exactly as Java's `TransactionState.parse` does.
+/// Unlike `GroupState.parse` (which upper-cases first, so [`read_group_states`]
+/// is case-insensitive), `TransactionState.parse` matches its
+/// `NAME_TO_ENUM` map **case-sensitively** — `"ongoing"` is UNKNOWN, not
+/// ONGOING. An empty or NULL array leaves the filter unset, i.e. "every state",
+/// which is Java's own default.
+///
+/// # Safety
+///
+/// `names` must be null or have `count` entries, each NULL or a valid C string.
+unsafe fn read_transaction_states(names: *const *const c_char, count: i32) -> Vec<TransactionState> {
+    unsafe { read_strings(names, count) }
+        .iter()
+        .map(|name| TransactionState::parse(name))
+        .collect()
+}
+
+/// Builds the [`AbortTransactionSpec`] that `abortTransaction` takes.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::illegal_argument`] when `topic` is NULL: Java's
+/// `AbortTransactionSpec` holds a `TopicPartition`, which has no null-topic
+/// form.
+///
+/// # Safety
+///
+/// `topic` must be null or a valid C string.
+unsafe fn read_abort_transaction_spec(
+    topic: *const c_char,
+    partition: i32,
+    producer_id: i64,
+    producer_epoch: i32,
+    coordinator_epoch: i32,
+) -> Result<AbortTransactionSpec, KafkaError> {
+    let topic = unsafe { read_required_string(topic, "abort transaction topic") }?;
+    // Java's `producerEpoch` is a `short`; it crosses as `int32_t` for the same
+    // reason every other enum/epoch column does, and is narrowed here rather
+    // than truncated with `as i16`.
+    let epoch = i16::try_from(producer_epoch).map_err(|_| {
+        KafkaError::illegal_argument(format!("producer epoch {producer_epoch} does not fit in a 16-bit epoch"))
+    })?;
+    Ok(AbortTransactionSpec::new(
+        TopicPartition::new(topic, partition),
+        producer_id,
+        epoch,
+        coordinator_epoch,
+    ))
+}
+
+/// Builds [`DescribeProducersOptions`] from the C arguments.
+///
+/// `has_broker_id` is the explicit discriminant for Java's
+/// `OptionalInt brokerId()`: `-1` is not a usable sentinel because a broker id
+/// is only *conventionally* non-negative, and Java's own `brokerId(int)` setter
+/// does not range-check it.
+fn describe_producers_options(timeout_ms: i32, has_broker_id: bool, broker_id: i32) -> DescribeProducersOptions {
+    let options = DescribeProducersOptions::new().timeout_ms(option_timeout(timeout_ms));
+    if has_broker_id {
+        options.broker_id(broker_id)
+    } else {
+        options
+    }
+}
+
+/// Builds [`DescribeTransactionsOptions`] from the C arguments.
+fn describe_transactions_options(timeout_ms: i32) -> DescribeTransactionsOptions {
+    DescribeTransactionsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds [`AbortTransactionOptions`] from the C arguments.
+fn abort_transaction_options(timeout_ms: i32) -> AbortTransactionOptions {
+    AbortTransactionOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds [`TerminateTransactionOptions`] from the C arguments.
+fn terminate_transaction_options(timeout_ms: i32) -> TerminateTransactionOptions {
+    TerminateTransactionOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds [`FenceProducersOptions`] from the C arguments.
+fn fence_producers_options(timeout_ms: i32) -> FenceProducersOptions {
+    FenceProducersOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds [`ListTransactionsOptions`] from the C arguments.
+///
+/// `duration_ms` keeps Java's own "negative means no duration filter" contract
+/// (`ListTransactionsOptions.filteredDuration()` defaults to `-1`), so it needs
+/// no separate flag. `transactional_id_pattern` is a nullable string: a null
+/// pointer is Java's null pattern (no pattern filter), which cannot collide with
+/// a pointer to `""` — an empty pattern is a distinct, legal value the broker
+/// evaluates.
+///
+/// # Safety
+///
+/// `states` must be null or have `state_count` entries, each NULL or a valid C
+/// string; `producer_ids` must be null or have `producer_id_count` readable
+/// entries; `transactional_id_pattern` must be null or a valid C string.
+unsafe fn list_transactions_options(
+    timeout_ms: i32,
+    states: *const *const c_char,
+    state_count: i32,
+    producer_ids: *const i64,
+    producer_id_count: i32,
+    duration_ms: i64,
+    transactional_id_pattern: *const c_char,
+) -> ListTransactionsOptions {
+    ListTransactionsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .filter_states(unsafe { read_transaction_states(states, state_count) })
+        .filter_producer_ids(unsafe { read_i64s(producer_ids, producer_id_count) })
+        .filter_on_duration(duration_ms)
+        .filter_on_transactional_id_pattern(unsafe { optional_owned_string(transactional_id_pattern) })
+}
+
+/// Reads a nullable C string into an `Option<String>`, preserving NULL as
+/// `None`.
+///
+/// # Safety
+///
+/// `text` must be null or a valid C string.
+unsafe fn optional_owned_string(text: *const c_char) -> Option<String> {
+    if text.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(text) }.to_string_lossy().to_string())
+}
+
+/// Submits `describeProducers` and returns the collect-all future over its
+/// per-partition futures.
+///
+/// `DescribeProducersResult` exposes its futures through `partitionResult(tp)`
+/// rather than as a map, so the requested keys drive the join — the
+/// `listOffsets` shape. A duplicate partition in the request collapses to one
+/// key, which is what Java's `Map` does too.
+fn submit_describe_producers(
+    admin: &dyn Admin,
+    partitions: &[TopicPartition],
+    options: DescribeProducersOptions,
+) -> Result<KafkaFuture<DescribeProducersOutcomes>, KafkaError> {
+    let result = admin.describe_producers(partitions, options);
+    let mut entries: Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)> = Vec::with_capacity(partitions.len());
+    let mut seen: HashSet<&TopicPartition> = HashSet::with_capacity(partitions.len());
+    for tp in partitions {
+        if !seen.insert(tp) {
+            continue;
+        }
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `describeTransactions` and returns the collect-all future over its
+/// per-transactional-id futures.
+///
+/// Like `describeProducers`, the result exposes `description(id)` rather than a
+/// map, so the requested ids drive the join.
+fn submit_describe_transactions(
+    admin: &dyn Admin,
+    transactional_ids: &[String],
+    options: DescribeTransactionsOptions,
+) -> Result<KafkaFuture<DescribeTransactionsOutcomes>, KafkaError> {
+    let result = admin.describe_transactions(transactional_ids, options);
+    let mut entries: Vec<(String, KafkaFuture<TransactionDescription>)> = Vec::with_capacity(transactional_ids.len());
+    let mut seen: HashSet<&String> = HashSet::with_capacity(transactional_ids.len());
+    for id in transactional_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        entries.push((id.clone(), result.description(id)?));
+    }
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `abortTransaction` and returns its single `all()` future.
+fn submit_abort_transaction(
+    admin: &dyn Admin,
+    spec: AbortTransactionSpec,
+    options: AbortTransactionOptions,
+) -> KafkaFuture<()> {
+    admin.abort_transaction(spec, options).all()
+}
+
+/// Submits `forceTerminateTransaction` and returns its single `result()` future.
+fn submit_force_terminate_transaction(
+    admin: &dyn Admin,
+    transactional_id: &str,
+    options: TerminateTransactionOptions,
+) -> KafkaFuture<()> {
+    admin.force_terminate_transaction(transactional_id, options).result()
+}
+
+/// Submits `fenceProducers` and returns a future over its per-transactional-id
+/// outcomes.
+///
+/// Java never exposes the `ProducerIdAndEpoch` as one value: `producerId(id)`
+/// and `epochId(id)` are two `thenApply` projections of the same per-id future,
+/// and `fencedProducers()` is a third that discards both. One C row needs both
+/// scalars, so this joins each projection over the requested key set and merges
+/// them. Both projections resolve from the same future, so they complete
+/// together and neither join can observe a state the other cannot; `get()` is
+/// re-callable on a `KafkaFuture`, so awaiting the same underlying future twice
+/// is not a second request. No `zip` combinator is added to `KafkaFuture` for
+/// this — Java's `KafkaFuture` has none, and inventing one would be a type the
+/// Java client does not have (DoD #7).
+fn submit_fence_producers(
+    admin: &dyn Admin,
+    transactional_ids: &[String],
+    options: FenceProducersOptions,
+) -> Result<impl std::future::Future<Output = Result<FenceProducersOutcomes, KafkaError>> + Send + use<>, KafkaError> {
+    let result = admin.fence_producers(transactional_ids, options);
+    let mut ids: Vec<String> = Vec::with_capacity(transactional_ids.len());
+    let mut producer_id_entries: Vec<(String, KafkaFuture<i64>)> = Vec::with_capacity(transactional_ids.len());
+    let mut epoch_entries: Vec<(String, KafkaFuture<i16>)> = Vec::with_capacity(transactional_ids.len());
+    let mut seen: HashSet<&String> = HashSet::with_capacity(transactional_ids.len());
+    for id in transactional_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        ids.push(id.clone());
+        producer_id_entries.push((id.clone(), result.producer_id(id)?));
+        epoch_entries.push((id.clone(), result.epoch_id(id)?));
+    }
+    let producer_ids = KafkaFuture::join_map_results(producer_id_entries);
+    let epochs = KafkaFuture::join_map_results(epoch_entries);
+    Ok(async move {
+        let mut producer_ids = producer_ids.get().await?;
+        let mut epochs = epochs.get().await?;
+        let mut out: FenceProducersOutcomes = HashMap::with_capacity(ids.len());
+        for id in ids {
+            let producer_id = producer_ids.remove(&id);
+            let epoch = epochs.remove(&id);
+            let outcome = match (producer_id, epoch) {
+                (Some(Ok(producer_id)), Some(Ok(epoch))) => Ok(ProducerIdAndEpoch::new(producer_id, epoch)),
+                // Either projection failing means the shared future failed, so
+                // the two errors are the same one; report whichever is present.
+                (Some(Err(e)), _) | (_, Some(Err(e))) => Err(e),
+                // Unreachable: both joins are built from the same key list. It is
+                // an explicit error rather than a silent drop (CLAUDE.md §5).
+                _ => Err(KafkaError::illegal_state(format!(
+                    "fenceProducers produced no outcome for transactional id `{id}`"
+                ))),
+            };
+            out.insert(id, outcome);
+        }
+        Ok(out)
+    })
+}
+
+/// Submits `listTransactions` and returns a future over its per-broker
+/// outcomes.
+///
+/// Driven from Java's `byBrokerId()`, not `all()` or `allByBrokerId()`: it is
+/// the only one of the three views that keeps a **per-broker** future, so a
+/// listing that succeeded on broker 1 and failed on broker 2 reports both.
+/// `all()` and `allByBrokerId()` would discard the successful half. A failure of
+/// the top-level broker-discovery future itself is the call's error, exactly as
+/// in Java, where all three views fail together in that case.
+fn submit_list_transactions(
+    admin: &dyn Admin,
+    options: ListTransactionsOptions,
+) -> impl std::future::Future<Output = Result<ListTransactionsOutcomes, KafkaError>> + Send + use<> {
+    let result = admin.list_transactions(options);
+    async move {
+        let by_broker = result.by_broker_id().get().await?;
+        let entries: Vec<(i32, KafkaFuture<Vec<TransactionListing>>)> = by_broker.into_iter().collect();
+        KafkaFuture::join_map_results(entries).get().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B6 result handles
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a flattened `DescribeProducersResult`, keyed by topic
+/// partition.
+#[repr(C)]
+pub struct kafka_admin_DescribeProducersResult_t {
+    _private: [u8; 0],
+}
+
+/// One partition's row in [`kafka_admin_DescribeProducersResult_t`].
+///
+/// `PartitionProducerState` is a list of scalar-only `ProducerState`s, so the
+/// list is flattened into per-column vectors indexed by the producer position
+/// rather than minted as a handle (`PLAN-bindings.md` §7 D2, fifth rule). The
+/// two `Optional` columns keep an explicit present flag beside the value,
+/// because every `long` / `int` — including 0 and -1 — is a legal
+/// `currentTransactionStartOffset` / `coordinatorEpoch`.
+struct ProducerStateRows {
+    producer_ids: Vec<i64>,
+    producer_epochs: Vec<i32>,
+    last_sequences: Vec<i32>,
+    last_timestamps: Vec<i64>,
+    current_transaction_start_offsets: Vec<Option<i64>>,
+    coordinator_epochs: Vec<Option<i32>>,
+}
+
+impl ProducerStateRows {
+    /// Splits a partition's `activeProducers()` into the parallel columns.
+    fn from_state(state: &PartitionProducerState) -> Self {
+        let producers = state.active_producers();
+        Self {
+            producer_ids: producers.iter().map(|p| p.producer_id()).collect(),
+            producer_epochs: producers.iter().map(|p| p.producer_epoch()).collect(),
+            last_sequences: producers.iter().map(|p| p.last_sequence()).collect(),
+            last_timestamps: producers.iter().map(|p| p.last_timestamp()).collect(),
+            current_transaction_start_offsets: producers.iter().map(|p| p.current_transaction_start_offset()).collect(),
+            coordinator_epochs: producers.iter().map(|p| p.coordinator_epoch()).collect(),
+        }
+    }
+
+    /// An empty column set, for a partition that failed.
+    fn empty() -> Self {
+        Self {
+            producer_ids: Vec::new(),
+            producer_epochs: Vec::new(),
+            last_sequences: Vec::new(),
+            last_timestamps: Vec::new(),
+            current_transaction_start_offsets: Vec::new(),
+            coordinator_epochs: Vec::new(),
+        }
+    }
+}
+
+/// Backing state for [`kafka_admin_DescribeProducersResult_t`].
+struct DescribeProducersResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    producers: Vec<ProducerStateRows>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `describeProducers` outcomes into the C handle.
+fn box_describe_producers_result(outcomes: DescribeProducersOutcomes) -> *mut kafka_admin_DescribeProducersResult_t {
+    let entries = sorted_partition_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut producers = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (tp, outcome) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        match outcome {
+            Ok(state) => {
+                producers.push(ProducerStateRows::from_state(&state));
+                errors.push(None);
+            },
+            Err(e) => {
+                producers.push(ProducerStateRows::empty());
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DescribeProducersResultInner { topics, partitions, producers, errors }))
+        as *mut kafka_admin_DescribeProducersResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeProducersResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_producers` call.
+unsafe fn describe_producers_result_ref(
+    result: *const kafka_admin_DescribeProducersResult_t,
+) -> &'static DescribeProducersResultInner {
+    unsafe { &*(result as *const DescribeProducersResultInner) }
+}
+
+/// Returns the producer columns of the partition at `index`, or `None` when it
+/// is out of range.
+fn producer_rows_at(inner: &DescribeProducersResultInner, index: i32) -> Option<&ProducerStateRows> {
+    if index < 0 {
+        return None;
+    }
+    inner.producers.get(index as usize)
+}
+
+/// Returns the number of requested partitions. Entries are sorted by topic name
+/// then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_count(
+    result: *const kafka_admin_DescribeProducersResult_t,
+) -> i32 {
+    unsafe { describe_producers_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the partition at `index` (borrowed), or null if out
+/// of range. Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_topic(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_producers_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_partition(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+) -> i32 {
+    partition_at(&unsafe { describe_producers_result_ref(result) }.partitions, index)
+}
+
+/// Returns the error for the partition at `index` (borrowed), or null if that
+/// partition succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { describe_producers_result_ref(result) }.errors, index)
+}
+
+/// Returns the number of active producers for the partition at `index`, or 0 if
+/// out of range or that partition failed.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_count(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+) -> i32 {
+    match producer_rows_at(unsafe { describe_producers_result_ref(result) }, index) {
+        Some(rows) => rows.producer_ids.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns `ProducerState.producerId()` for producer `producer_index` of the
+/// partition at `index`, or -1 when either index is out of range (`-1` is
+/// Java's own `RecordBatch.NO_PRODUCER_ID`, i.e. not a real producer).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_id(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+    producer_index: i32,
+) -> i64 {
+    indexed_i64_at(
+        producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.producer_ids.as_slice()),
+        producer_index,
+    )
+}
+
+/// Returns `ProducerState.producerEpoch()` for producer `producer_index` of the
+/// partition at `index`, or -1 when either index is out of range (`-1` is Java's
+/// own `RecordBatch.NO_PRODUCER_EPOCH`).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_epoch(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+    producer_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.producer_epochs.as_slice()),
+        producer_index,
+    )
+}
+
+/// Returns `ProducerState.lastSequence()` for producer `producer_index` of the
+/// partition at `index`, or -1 when either index is out of range (`-1` is Java's
+/// own `RecordBatch.NO_SEQUENCE`).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_sequence(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+    producer_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.last_sequences.as_slice()),
+        producer_index,
+    )
+}
+
+/// Returns `ProducerState.lastTimestamp()` for producer `producer_index` of the
+/// partition at `index`, or -1 when either index is out of range (`-1` is Java's
+/// own `RecordBatch.NO_TIMESTAMP`).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_timestamp(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+    producer_index: i32,
+) -> i64 {
+    indexed_i64_at(
+        producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.last_timestamps.as_slice()),
+        producer_index,
+    )
+}
+
+/// Writes `ProducerState.currentTransactionStartOffset()` for producer
+/// `producer_index` of the partition at `index` to `*out` and returns true, or
+/// returns false when Java's `OptionalLong` is empty (no transaction in
+/// progress) or either index is out of range.
+///
+/// An explicit present flag rather than a sentinel: every `long`, including 0
+/// and -1, is a legal start offset.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle; `out` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+    producer_index: i32,
+    out: *mut i64,
+) -> bool {
+    let value = indexed_optional_at(
+        producer_rows_at(unsafe { describe_producers_result_ref(result) }, index)
+            .map(|r| r.current_transaction_start_offsets.as_slice()),
+        producer_index,
+    );
+    unsafe { write_optional(value, out) }
+}
+
+/// Writes `ProducerState.coordinatorEpoch()` for producer `producer_index` of
+/// the partition at `index` to `*out` and returns true, or returns false when
+/// Java's `OptionalInt` is empty (the broker did not report one, i.e. the
+/// producer is not transactional) or either index is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle; `out` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_coordinator_epoch(
+    result: *const kafka_admin_DescribeProducersResult_t,
+    index: i32,
+    producer_index: i32,
+    out: *mut i32,
+) -> bool {
+    let value = indexed_optional_at(
+        producer_rows_at(unsafe { describe_producers_result_ref(result) }, index)
+            .map(|r| r.coordinator_epochs.as_slice()),
+        producer_index,
+    );
+    unsafe { write_optional(value, out) }
+}
+
+/// Destroys a `describe_producers` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
+    result: *mut kafka_admin_DescribeProducersResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeProducersResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeTransactionsResult`, keyed by
+/// transactional id.
+#[repr(C)]
+pub struct kafka_admin_DescribeTransactionsResult_t {
+    _private: [u8; 0],
+}
+
+/// One transactional id's row in [`kafka_admin_DescribeTransactionsResult_t`].
+///
+/// `TransactionDescription` is scalars plus one `Set<TopicPartition>` whose
+/// element is itself scalar-only, so the scalars sit at `i` and the partitions at
+/// `(i, j)` — the flatten case, not the mint case (`PLAN-bindings.md` §7 D2,
+/// fifth rule and its second clarification). `TransactionState` has no numeric
+/// `id()` in Java, so it crosses as `toString()` (the B2 rule), and
+/// `transactionStartTimeMs()` is an `OptionalLong`, so it gets a present flag.
+struct TransactionDescriptionRow {
+    transactional_id: CString,
+    coordinator_id: i32,
+    state: CString,
+    producer_id: i64,
+    producer_epoch: i32,
+    transaction_timeout_ms: i64,
+    transaction_start_time_ms: Option<i64>,
+    partition_topics: Vec<CString>,
+    partition_ids: Vec<i32>,
+    error: Option<KafkaErrorInner>,
+}
+
+/// Backing state for [`kafka_admin_DescribeTransactionsResult_t`].
+struct DescribeTransactionsResultInner {
+    transactions: Vec<TransactionDescriptionRow>,
+}
+
+/// Flattens the per-transactional-id `describeTransactions` outcomes into the C
+/// handle.
+fn box_describe_transactions_result(
+    outcomes: DescribeTransactionsOutcomes,
+) -> *mut kafka_admin_DescribeTransactionsResult_t {
+    let mut transactions: Vec<TransactionDescriptionRow> = sorted_entries(outcomes)
+        .into_iter()
+        .map(|(id, outcome)| match outcome {
+            Ok(description) => {
+                // Sorted so the second index is stable: Java's `topicPartitions`
+                // is an unordered `Set`.
+                let mut partitions: Vec<TopicPartition> = description.topic_partitions().iter().cloned().collect();
+                partitions.sort_by(|a, b| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+                TransactionDescriptionRow {
+                    transactional_id: to_cstring(&id),
+                    coordinator_id: description.coordinator_id(),
+                    state: to_cstring(&description.state().to_string()),
+                    producer_id: description.producer_id(),
+                    producer_epoch: description.producer_epoch(),
+                    transaction_timeout_ms: description.transaction_timeout_ms(),
+                    transaction_start_time_ms: description.transaction_start_time_ms(),
+                    partition_topics: partitions.iter().map(|tp| to_cstring(tp.topic())).collect(),
+                    partition_ids: partitions.iter().map(|tp| tp.partition()).collect(),
+                    error: None,
+                }
+            },
+            Err(e) => TransactionDescriptionRow {
+                transactional_id: to_cstring(&id),
+                coordinator_id: -1,
+                state: to_cstring(&TransactionState::Unknown.to_string()),
+                producer_id: -1,
+                producer_epoch: -1,
+                transaction_timeout_ms: -1,
+                transaction_start_time_ms: None,
+                partition_topics: Vec::new(),
+                partition_ids: Vec::new(),
+                error: Some(error_inner(e)),
+            },
+        })
+        .collect();
+    transactions.sort_by(|a, b| a.transactional_id.cmp(&b.transactional_id));
+    Box::into_raw(Box::new(DescribeTransactionsResultInner { transactions }))
+        as *mut kafka_admin_DescribeTransactionsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeTransactionsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_transactions` call.
+unsafe fn describe_transactions_result_ref(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+) -> &'static DescribeTransactionsResultInner {
+    unsafe { &*(result as *const DescribeTransactionsResultInner) }
+}
+
+/// Returns the row at `index`, or `None` when it is out of range.
+fn transaction_row_at(inner: &DescribeTransactionsResultInner, index: i32) -> Option<&TransactionDescriptionRow> {
+    if index < 0 {
+        return None;
+    }
+    inner.transactions.get(index as usize)
+}
+
+/// Returns the number of described transactional ids. Rows are sorted by
+/// transactional id.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_count(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+) -> i32 {
+    unsafe { describe_transactions_result_ref(result) }.transactions.len() as i32
+}
+
+/// Returns the transactional id at `index` (borrowed), or null if out of range.
+/// Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transactional_id(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> *const c_char {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.transactional_id.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the transactional id at `index` (borrowed), or null if
+/// it was described successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => error_ptr(row.error.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns `TransactionDescription.coordinatorId()` for the row at `index`, or
+/// -1 if out of range or that row failed.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_coordinator_id(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> i32 {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.coordinator_id,
+        None => -1,
+    }
+}
+
+/// Returns `TransactionState.toString()` for the row at `index` (borrowed) —
+/// `"Ongoing"`, `"PrepareAbort"`, `"PrepareCommit"`, `"CompleteAbort"`,
+/// `"CompleteCommit"`, `"Empty"`, `"PrepareEpochFence"` or `"Unknown"` — or null
+/// if `index` is out of range. A failed row reports `"Unknown"`, which is the
+/// same value Java's `TransactionState.parse` produces for a state it does not
+/// recognise. `TransactionState` has no numeric `id()` in Java, so the name is
+/// the contract rather than an invented code. Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_state(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> *const c_char {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.state.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns `TransactionDescription.producerId()` for the row at `index`, or -1
+/// if out of range or that row failed (`-1` is Java's own
+/// `RecordBatch.NO_PRODUCER_ID`).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_id(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> i64 {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.producer_id,
+        None => -1,
+    }
+}
+
+/// Returns `TransactionDescription.producerEpoch()` for the row at `index`, or
+/// -1 if out of range or that row failed (`-1` is Java's own
+/// `RecordBatch.NO_PRODUCER_EPOCH`).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_epoch(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> i32 {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.producer_epoch,
+        None => -1,
+    }
+}
+
+/// Returns `TransactionDescription.transactionTimeoutMs()` for the row at
+/// `index`, or -1 if out of range or that row failed (a transaction timeout is
+/// never negative).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> i64 {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.transaction_timeout_ms,
+        None => -1,
+    }
+}
+
+/// Writes `TransactionDescription.transactionStartTimeMs()` for the row at
+/// `index` to `*out` and returns true, or returns false when Java's
+/// `OptionalLong` is empty (no transaction in progress), the row failed, or
+/// `index` is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle; `out` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+    out: *mut i64,
+) -> bool {
+    let value = transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index)
+        .and_then(|row| row.transaction_start_time_ms);
+    unsafe { write_optional(value, out) }
+}
+
+/// Returns the number of topic partitions in the transaction at `index`, or 0 if
+/// out of range or that row failed.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_count(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+) -> i32 {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => row.partition_topics.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns the topic name of partition `partition_index` of the transaction at
+/// `index` (borrowed), or null when either index is out of range. Partitions are
+/// sorted by topic name then partition id (Java's `topicPartitions()` is an
+/// unordered `Set`). Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+    partition_index: i32,
+) -> *const c_char {
+    match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
+        Some(row) => cstring_at(&row.partition_topics, partition_index),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the partition id of partition `partition_index` of the transaction at
+/// `index`, or -1 when either index is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+    index: i32,
+    partition_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index)
+            .map(|row| row.partition_ids.as_slice()),
+        partition_index,
+    )
+}
+
+/// Destroys a `describe_transactions` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
+    result: *mut kafka_admin_DescribeTransactionsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeTransactionsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `FenceProducersResult`, keyed by transactional
+/// id.
+#[repr(C)]
+pub struct kafka_admin_FenceProducersResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_FenceProducersResult_t`].
+///
+/// The per-key value is `ProducerIdAndEpoch`, a record of two scalars, so both
+/// fields sit at index `i` — not the collection case at all
+/// (`PLAN-bindings.md` §7 D2, fifth rule, first clarification). Java projects
+/// the same future three ways (`fencedProducers()`, `producerId(id)`,
+/// `epochId(id)`); one row with a key, both scalars and an error subsumes all
+/// three.
+struct FenceProducersResultInner {
+    transactional_ids: Vec<CString>,
+    producer_ids: Vec<i64>,
+    epochs: Vec<i16>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-transactional-id `fenceProducers` outcomes into the C
+/// handle.
+fn box_fence_producers_result(outcomes: FenceProducersOutcomes) -> *mut kafka_admin_FenceProducersResult_t {
+    let entries = sorted_entries(outcomes);
+    let mut transactional_ids = Vec::with_capacity(entries.len());
+    let mut producer_ids = Vec::with_capacity(entries.len());
+    let mut epochs = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (id, outcome) in entries {
+        transactional_ids.push(to_cstring(&id));
+        match outcome {
+            Ok(producer) => {
+                producer_ids.push(producer.producer_id);
+                epochs.push(producer.epoch);
+                errors.push(None);
+            },
+            Err(e) => {
+                // `ProducerIdAndEpoch::NONE`, i.e. Java's own "no producer"
+                // sentinel, rather than 0 — which is a legal producer id.
+                producer_ids.push(ProducerIdAndEpoch::NONE.producer_id);
+                epochs.push(ProducerIdAndEpoch::NONE.epoch);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(FenceProducersResultInner {
+        transactional_ids,
+        producer_ids,
+        epochs,
+        errors,
+    })) as *mut kafka_admin_FenceProducersResult_t
+}
+
+/// Casts a `*const kafka_admin_FenceProducersResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `fence_producers` call.
+unsafe fn fence_producers_result_ref(
+    result: *const kafka_admin_FenceProducersResult_t,
+) -> &'static FenceProducersResultInner {
+    unsafe { &*(result as *const FenceProducersResultInner) }
+}
+
+/// Returns the number of fenced transactional ids. Rows are sorted by
+/// transactional id.
+///
+/// # Safety
+///
+/// `result` must be a valid `fence_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_count(
+    result: *const kafka_admin_FenceProducersResult_t,
+) -> i32 {
+    unsafe { fence_producers_result_ref(result) }.transactional_ids.len() as i32
+}
+
+/// Returns the transactional id at `index` (borrowed), or null if out of range.
+/// Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `fence_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_transactional_id(
+    result: *const kafka_admin_FenceProducersResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { fence_producers_result_ref(result) }.transactional_ids, index)
+}
+
+/// Returns the error for the transactional id at `index` (borrowed), or null if
+/// the fencing succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `fence_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
+    result: *const kafka_admin_FenceProducersResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { fence_producers_result_ref(result) }.errors, index)
+}
+
+/// Returns the producer id generated while initializing the transaction at
+/// `index` (Java's `FenceProducersResult.producerId(transactionalId)`), or -1 if
+/// out of range or that fencing failed. `-1` is Java's own
+/// `ProducerIdAndEpoch.NONE.producerId`.
+///
+/// # Safety
+///
+/// `result` must be a valid `fence_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_producer_id(
+    result: *const kafka_admin_FenceProducersResult_t,
+    index: i32,
+) -> i64 {
+    indexed_i64_at(Some(&unsafe { fence_producers_result_ref(result) }.producer_ids), index)
+}
+
+/// Returns the epoch generated while initializing the transaction at `index`
+/// (Java's `FenceProducersResult.epochId(transactionalId)`), or -1 if out of
+/// range or that fencing failed. `-1` is Java's own
+/// `ProducerIdAndEpoch.NONE.epoch`.
+///
+/// # Safety
+///
+/// `result` must be a valid `fence_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_epoch_id(
+    result: *const kafka_admin_FenceProducersResult_t,
+    index: i32,
+) -> i16 {
+    indexed_i16_at(&unsafe { fence_producers_result_ref(result) }.epochs, index)
+}
+
+/// Destroys a `fence_producers` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `fence_producers` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(result: *mut kafka_admin_FenceProducersResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut FenceProducersResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `ListTransactionsResult`, keyed by broker id.
+#[repr(C)]
+pub struct kafka_admin_ListTransactionsResult_t {
+    _private: [u8; 0],
+}
+
+/// One broker's row in [`kafka_admin_ListTransactionsResult_t`].
+///
+/// A `TransactionListing` is three scalars, so the listings are flattened into a
+/// second index rather than minted as a handle. `TransactionState` has no
+/// numeric `id()` in Java, so it crosses as `toString()` (the B2 rule).
+struct BrokerTransactionRow {
+    broker_id: i32,
+    transactional_ids: Vec<CString>,
+    producer_ids: Vec<i64>,
+    states: Vec<CString>,
+    error: Option<KafkaErrorInner>,
+}
+
+/// Backing state for [`kafka_admin_ListTransactionsResult_t`].
+struct ListTransactionsResultInner {
+    brokers: Vec<BrokerTransactionRow>,
+}
+
+/// Flattens the per-broker `listTransactions` outcomes into the C handle.
+fn box_list_transactions_result(outcomes: ListTransactionsOutcomes) -> *mut kafka_admin_ListTransactionsResult_t {
+    let brokers: Vec<BrokerTransactionRow> = sorted_entries(outcomes)
+        .into_iter()
+        .map(|(broker_id, outcome)| match outcome {
+            Ok(mut listings) => {
+                // Sorted so the second index is stable: Java's value is an
+                // unordered `Collection`.
+                listings.sort_by(|a, b| {
+                    a.transactional_id()
+                        .cmp(b.transactional_id())
+                        .then(a.producer_id().cmp(&b.producer_id()))
+                });
+                BrokerTransactionRow {
+                    broker_id,
+                    transactional_ids: listings.iter().map(|l| to_cstring(l.transactional_id())).collect(),
+                    producer_ids: listings.iter().map(|l| l.producer_id()).collect(),
+                    states: listings.iter().map(|l| to_cstring(&l.state().to_string())).collect(),
+                    error: None,
+                }
+            },
+            Err(e) => BrokerTransactionRow {
+                broker_id,
+                transactional_ids: Vec::new(),
+                producer_ids: Vec::new(),
+                states: Vec::new(),
+                error: Some(error_inner(e)),
+            },
+        })
+        .collect();
+    Box::into_raw(Box::new(ListTransactionsResultInner { brokers })) as *mut kafka_admin_ListTransactionsResult_t
+}
+
+/// Casts a `*const kafka_admin_ListTransactionsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_transactions` call.
+unsafe fn list_transactions_result_ref(
+    result: *const kafka_admin_ListTransactionsResult_t,
+) -> &'static ListTransactionsResultInner {
+    unsafe { &*(result as *const ListTransactionsResultInner) }
+}
+
+/// Returns the broker row at `index`, or `None` when it is out of range.
+fn broker_transaction_row_at(inner: &ListTransactionsResultInner, index: i32) -> Option<&BrokerTransactionRow> {
+    if index < 0 {
+        return None;
+    }
+    inner.brokers.get(index as usize)
+}
+
+/// Returns the number of brokers the listing was fanned out to. Rows are sorted
+/// by broker id.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_count(
+    result: *const kafka_admin_ListTransactionsResult_t,
+) -> i32 {
+    unsafe { list_transactions_result_ref(result) }.brokers.len() as i32
+}
+
+/// Returns the broker id of the row at `index`, or -1 if out of range (a broker
+/// id in a `Metadata` response is never negative).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_broker_id(
+    result: *const kafka_admin_ListTransactionsResult_t,
+    index: i32,
+) -> i32 {
+    match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
+        Some(row) => row.broker_id,
+        None => -1,
+    }
+}
+
+/// Returns the error for the broker at `index` (borrowed), or null if that
+/// broker's listing succeeded or `index` is out of range. Do not destroy it.
+///
+/// A per-broker error is what Java's `byBrokerId()` view keeps and its `all()` /
+/// `allByBrokerId()` views discard, so a listing that succeeded on one broker and
+/// failed on another reports both here.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
+    result: *const kafka_admin_ListTransactionsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
+        Some(row) => error_ptr(row.error.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of transactions the broker at `index` listed, or 0 if out
+/// of range or that broker failed.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_listing_count(
+    result: *const kafka_admin_ListTransactionsResult_t,
+    index: i32,
+) -> i32 {
+    match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
+        Some(row) => row.transactional_ids.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns `TransactionListing.transactionalId()` for listing `listing_index` of
+/// the broker at `index` (borrowed), or null when either index is out of range.
+/// Listings are sorted by transactional id then producer id (Java's value is an
+/// unordered `Collection`). Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_transactional_id(
+    result: *const kafka_admin_ListTransactionsResult_t,
+    index: i32,
+    listing_index: i32,
+) -> *const c_char {
+    match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
+        Some(row) => cstring_at(&row.transactional_ids, listing_index),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns `TransactionListing.producerId()` for listing `listing_index` of the
+/// broker at `index`, or -1 when either index is out of range (`-1` is Java's own
+/// `RecordBatch.NO_PRODUCER_ID`).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_producer_id(
+    result: *const kafka_admin_ListTransactionsResult_t,
+    index: i32,
+    listing_index: i32,
+) -> i64 {
+    indexed_i64_at(
+        broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index)
+            .map(|row| row.producer_ids.as_slice()),
+        listing_index,
+    )
+}
+
+/// Returns `TransactionListing.state()` as `TransactionState.toString()` for
+/// listing `listing_index` of the broker at `index` (borrowed) — `"Ongoing"`,
+/// `"PrepareAbort"`, `"PrepareCommit"`, `"CompleteAbort"`, `"CompleteCommit"`,
+/// `"Empty"`, `"PrepareEpochFence"` or `"Unknown"` — or null when either index is
+/// out of range. `TransactionState` has no numeric `id()` in Java, so the name is
+/// the contract rather than an invented code. Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_state(
+    result: *const kafka_admin_ListTransactionsResult_t,
+    index: i32,
+    listing_index: i32,
+) -> *const c_char {
+    match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
+        Some(row) => cstring_at(&row.states, listing_index),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `list_transactions` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_transactions` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(result: *mut kafka_admin_ListTransactionsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListTransactionsResultInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// describeProducers
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_producers_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeProducersResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_producers_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeProducersResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the active producers of the given partitions, blocking until every
+/// per-partition future has resolved (synchronous).
+///
+/// This is
+/// `describeProducers(Collection<TopicPartition>, DescribeProducersOptions)`.
+/// The partitions cross as parallel arrays: entry `i` is
+/// `(topics[i], partitions[i])`.
+///
+/// On success writes a [`kafka_admin_DescribeProducersResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeProducersResult_destroy`]) and returns null. **A
+/// per-partition failure is not a call failure**: it is reported by
+/// [`kafka_admin_DescribeProducersResult_get_error`] for that partition. A
+/// non-null return means the request could not be submitted at all, and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `topics` / `partitions`: the partitions to describe. An entry with a NULL
+///   topic is skipped, so the two arrays cannot drift out of step. A repeated
+///   partition collapses to one row, as Java's `Map`-keyed result does.
+/// - `has_broker_id` / `broker_id`: Java's `DescribeProducersOptions.brokerId`,
+///   an `OptionalInt` — when `has_broker_id` is false the option is left unset
+///   and the request goes to each partition's leader. The flag is explicit
+///   because Java's `brokerId(int)` setter accepts any `int`, so no sentinel is
+///   free.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics` and `partitions` must be null or
+/// have `count` entries each, with topic entries NULL or valid C strings;
+/// `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    has_broker_id: bool,
+    broker_id: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeProducersResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let requested = unsafe { read_topic_partitions(topics, partitions, count) };
+    let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_producers(a, &requested, options)) };
+    unsafe { finish_sync(outcome, out_result, box_describe_producers_result) }
+}
+
+/// Describes the active producers of the given partitions asynchronously. See
+/// [`kafka_admin_AdminClient_describe_producers`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics` and `partitions` must be null or
+/// have `count` entries each, with topic entries NULL or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    has_broker_id: bool,
+    broker_id: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_producers_callback_t,
+    user_data: *mut c_void,
+) {
+    let requested = unsafe { read_topic_partitions(topics, partitions, count) };
+    let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_describe_producers(a, &requested, options),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_producers_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeTransactions
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_transactions_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeTransactionsResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. A per-transactional-id failure
+/// arrives inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_transactions_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeTransactionsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the given transactions, blocking until every per-id future has
+/// resolved (synchronous).
+///
+/// This is
+/// `describeTransactions(Collection<String>, DescribeTransactionsOptions)`.
+///
+/// On success writes a [`kafka_admin_DescribeTransactionsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeTransactionsResult_destroy`]) and returns null. **A
+/// per-id failure is not a call failure**: it is reported by
+/// [`kafka_admin_DescribeTransactionsResult_get_error`] for that id. A non-null
+/// return means the request could not be submitted at all, and `*out_result` is
+/// left untouched.
+///
+/// # Parameters
+///
+/// - `transactional_ids`: the transactional ids to describe. A NULL entry is
+///   skipped, and a repeated id collapses to one row, as Java's `Map`-keyed
+///   result does.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `transactional_ids` must be null or have
+/// `count` entries, each NULL or a valid C string; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
+    admin: *const kafka_admin_AdminClient_t,
+    transactional_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeTransactionsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let ids = unsafe { read_strings(transactional_ids, count) };
+    let options = describe_transactions_options(timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_transactions(a, &ids, options)) };
+    unsafe { finish_sync(outcome, out_result, box_describe_transactions_result) }
+}
+
+/// Describes the given transactions asynchronously. See
+/// [`kafka_admin_AdminClient_describe_transactions`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `transactional_ids` must be null or have
+/// `count` entries, each NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
+    admin: *const kafka_admin_AdminClient_t,
+    transactional_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_transactions_callback_t,
+    user_data: *mut c_void,
+) {
+    let ids = unsafe { read_strings(transactional_ids, count) };
+    let options = describe_transactions_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_describe_transactions(a, &ids, options),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_transactions_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// abortTransaction
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_abort_transaction_async`].
+///
+/// There is **no result handle**: Java's `AbortTransactionResult` exposes only
+/// `all() -> KafkaFuture<Void>`, so a successful abort carries no data (see the
+/// B6 section comment). `error` is null on success; when it is non-null the
+/// callback owns it and must free it with `kafka_common_KafkaError_destroy`.
+pub type kafka_admin_AdminClient_abort_transaction_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Forcefully aborts the transaction that is open on a topic partition,
+/// blocking until it has completed (synchronous).
+///
+/// This is `abortTransaction(AbortTransactionSpec, AbortTransactionOptions)`.
+/// Returns null on success, or a non-null error handle (free it with
+/// `kafka_common_KafkaError_destroy`). There is no result handle to free —
+/// Java's `AbortTransactionResult` carries nothing but the future's success.
+///
+/// # Parameters
+///
+/// - `topic` / `partition`: the partition whose transaction is aborted. A NULL
+///   topic is rejected — Java's `AbortTransactionSpec` holds a `TopicPartition`,
+///   which has no null-topic form.
+/// - `producer_id`: the id of the producer that owns the open transaction.
+/// - `producer_epoch`: that producer's epoch. Java's field is a `short`; it
+///   crosses as `int32_t` and a value outside the 16-bit range is rejected
+///   rather than truncated.
+/// - `coordinator_epoch`: the epoch of the transaction coordinator, as reported
+///   by [`kafka_admin_AdminClient_describe_producers`].
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topic` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
+    admin: *const kafka_admin_AdminClient_t,
+    topic: *const c_char,
+    partition: i32,
+    producer_id: i64,
+    producer_epoch: i32,
+    coordinator_epoch: i32,
+    timeout_ms: i32,
+) -> *mut kafka_common_KafkaError_t {
+    let spec = unsafe { read_abort_transaction_spec(topic, partition, producer_id, producer_epoch, coordinator_epoch) };
+    let options = abort_transaction_options(timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_abort_transaction(a, spec?, options))) };
+    match outcome {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Forcefully aborts an open transaction asynchronously. See
+/// [`kafka_admin_AdminClient_abort_transaction`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL `topic`, or a
+/// `producer_epoch` that does not fit in 16 bits). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be reached
+/// when the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topic` must be null or a valid C string.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topic: *const c_char,
+    partition: i32,
+    producer_id: i64,
+    producer_epoch: i32,
+    coordinator_epoch: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_abort_transaction_callback_t,
+    user_data: *mut c_void,
+) {
+    let spec = unsafe { read_abort_transaction_spec(topic, partition, producer_id, producer_epoch, coordinator_epoch) };
+    let options = abort_transaction_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_abort_transaction(a, spec?, options)),
+            move |outcome, ud| {
+                let error = match outcome {
+                    Ok(()) => std::ptr::null_mut(),
+                    Err(e) => box_error(e),
+                };
+                callback(error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// forceTerminateTransaction
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_force_terminate_transaction_async`].
+///
+/// There is **no result handle**: Java's `TerminateTransactionResult` exposes
+/// only `result() -> KafkaFuture<Void>`, so a successful termination carries no
+/// data (see the B6 section comment). `error` is null on success; when it is
+/// non-null the callback owns it and must free it with
+/// `kafka_common_KafkaError_destroy`.
+pub type kafka_admin_AdminClient_force_terminate_transaction_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Forcefully terminates the ongoing transaction of a transactional id,
+/// blocking until it has completed (synchronous).
+///
+/// This is
+/// `forceTerminateTransaction(String, TerminateTransactionOptions)`, which Java
+/// implements by fencing the producer — so the ongoing transaction is aborted
+/// and the producer's epoch is bumped. Returns null on success, or a non-null
+/// error handle (free it with `kafka_common_KafkaError_destroy`). There is no
+/// result handle to free — Java's `TerminateTransactionResult` carries nothing
+/// but the future's success.
+///
+/// # Parameters
+///
+/// - `transactional_id`: the transactional id whose transaction is terminated. A
+///   NULL pointer is rejected.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `transactional_id` must be null or a valid C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
+    admin: *const kafka_admin_AdminClient_t,
+    transactional_id: *const c_char,
+    timeout_ms: i32,
+) -> *mut kafka_common_KafkaError_t {
+    let id = unsafe { read_required_string(transactional_id, "transactional id") };
+    let options = terminate_transaction_options(timeout_ms);
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_force_terminate_transaction(a, &id?, options))) };
+    match outcome {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Forcefully terminates an ongoing transaction asynchronously. See
+/// [`kafka_admin_AdminClient_force_terminate_transaction`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle or a NULL `transactional_id`). And it
+/// runs on a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when the result arrives. Destroying the handle does not
+/// cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
+/// guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in the callback, and publish everything the callback
+/// needs (including `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `transactional_id` must be null or a valid C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_async(
+    admin: *const kafka_admin_AdminClient_t,
+    transactional_id: *const c_char,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_force_terminate_transaction_callback_t,
+    user_data: *mut c_void,
+) {
+    let id = unsafe { read_required_string(transactional_id, "transactional id") };
+    let options = terminate_transaction_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_force_terminate_transaction(a, &id?, options)),
+            move |outcome, ud| {
+                let error = match outcome {
+                    Ok(()) => std::ptr::null_mut(),
+                    Err(e) => box_error(e),
+                };
+                callback(error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// fenceProducers
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_fence_producers_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_FenceProducersResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-transactional-id failure arrives
+/// inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_fence_producers_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_FenceProducersResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Fences out every active producer using the given transactional ids, blocking
+/// until every per-id future has resolved (synchronous).
+///
+/// This is `fenceProducers(Collection<String>, FenceProducersOptions)`.
+///
+/// On success writes a [`kafka_admin_FenceProducersResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_FenceProducersResult_destroy`]) and returns null.
+/// **A per-id failure is not a call failure**: it is reported by
+/// [`kafka_admin_FenceProducersResult_get_error`] for that id. A non-null return
+/// means the request could not be submitted at all, and `*out_result` is left
+/// untouched.
+///
+/// # Parameters
+///
+/// - `transactional_ids`: the transactional ids to fence. A NULL entry is
+///   skipped, and a repeated id collapses to one row, as Java's `Map`-keyed
+///   result does.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `transactional_ids` must be null or have
+/// `count` entries, each NULL or a valid C string; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
+    admin: *const kafka_admin_AdminClient_t,
+    transactional_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_FenceProducersResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let ids = unsafe { read_strings(transactional_ids, count) };
+    let options = fence_producers_options(timeout_ms);
+    let outcome = unsafe { admin_sync_future_op(admin, move |a| submit_fence_producers(a, &ids, options)) };
+    unsafe { finish_sync(outcome, out_result, box_fence_producers_result) }
+}
+
+/// Fences out active producers asynchronously. See
+/// [`kafka_admin_AdminClient_fence_producers`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `transactional_ids` must be null or have
+/// `count` entries, each NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
+    admin: *const kafka_admin_AdminClient_t,
+    transactional_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_fence_producers_callback_t,
+    user_data: *mut c_void,
+) {
+    let ids = unsafe { read_strings(transactional_ids, count) };
+    let options = fence_producers_options(timeout_ms);
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| submit_fence_producers(a, &ids, options),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_fence_producers_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// listTransactions
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_list_transactions_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ListTransactionsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-broker failure arrives inside
+/// `result`; only a failure of the broker-discovery step arrives as `error`.
+pub type kafka_admin_AdminClient_list_transactions_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListTransactionsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Lists the cluster's transactions, blocking until every broker's future has
+/// resolved (synchronous).
+///
+/// This is `listTransactions(ListTransactionsOptions)`, which fans out to every
+/// broker.
+///
+/// On success writes a [`kafka_admin_ListTransactionsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_ListTransactionsResult_destroy`]) and returns
+/// null. **A per-broker failure is not a call failure**: it is reported by
+/// [`kafka_admin_ListTransactionsResult_get_error`] for that broker, so a
+/// partial listing survives. A non-null return means the request could not be
+/// submitted at all or the broker list itself could not be discovered, and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `states` / `state_count`: `TransactionState.toString()` names to filter on
+///   (`"Ongoing"`, `"PrepareAbort"`, `"CompleteCommit"`, …). Matching is
+///   case-**sensitive**, as `TransactionState.parse` is, and an unrecognised name
+///   becomes `UNKNOWN` rather than a marshaling error. An empty or NULL array
+///   means every state, which is Java's default.
+/// - `producer_ids` / `producer_id_count`: producer ids to filter on; an empty or
+///   NULL array means every producer.
+/// - `duration_ms`: list only transactions running longer than this. Negative
+///   means no duration filter, which is Java's own `-1` default — no separate
+///   flag is needed.
+/// - `transactional_id_pattern`: list only transactional ids matching this
+///   pattern, or NULL for no pattern filter. NULL and `""` are distinct: an
+///   empty pattern is a legal value the broker evaluates.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `states` must be null or have `state_count`
+/// entries, each NULL or a valid C string; `producer_ids` must be null or have
+/// `producer_id_count` readable entries; `transactional_id_pattern` must be null
+/// or a valid C string; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
+    admin: *const kafka_admin_AdminClient_t,
+    states: *const *const c_char,
+    state_count: i32,
+    producer_ids: *const i64,
+    producer_id_count: i32,
+    duration_ms: i64,
+    transactional_id_pattern: *const c_char,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ListTransactionsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let options = unsafe {
+        list_transactions_options(
+            timeout_ms,
+            states,
+            state_count,
+            producer_ids,
+            producer_id_count,
+            duration_ms,
+            transactional_id_pattern,
+        )
+    };
+    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_transactions(a, options))) };
+    unsafe { finish_sync(outcome, out_result, box_list_transactions_result) }
+}
+
+/// Lists the cluster's transactions asynchronously. See
+/// [`kafka_admin_AdminClient_list_transactions`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `states` must be null or have `state_count`
+/// entries, each NULL or a valid C string; `producer_ids` must be null or have
+/// `producer_id_count` readable entries; `transactional_id_pattern` must be null
+/// or a valid C string.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
+    admin: *const kafka_admin_AdminClient_t,
+    states: *const *const c_char,
+    state_count: i32,
+    producer_ids: *const i64,
+    producer_id_count: i32,
+    duration_ms: i64,
+    transactional_id_pattern: *const c_char,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_list_transactions_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = unsafe {
+        list_transactions_options(
+            timeout_ms,
+            states,
+            state_count,
+            producer_ids,
+            producer_id_count,
+            duration_ms,
+            transactional_id_pattern,
+        )
+    };
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_list_transactions(a, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_list_transactions_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 //
 // These exercise the pure marshaling helpers directly rather than end-to-end
@@ -17556,7 +19594,9 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut k
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::{ConfigSynonym, FilterResult, FinalizedVersionRange, ReplicaInfo, SupportedVersionRange};
+    use crate::admin::{
+        ConfigSynonym, FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange,
+    };
     use crate::common::{ClassicGroupState, Errors, KafkaGenericError};
 
     fn text(value: &CString) -> &str {
@@ -20671,6 +22711,419 @@ mod tests {
                 0
             );
             kafka_admin_CreateDelegationTokenResult_destroy(result);
+        }
+    }
+
+    // -- B6: producers and transactions -------------------------------------
+
+    #[test]
+    fn describe_producers_options_keeps_the_broker_id_apart_from_its_absence() {
+        // Java's `brokerId()` is an `OptionalInt` and its setter accepts any
+        // `int`, so the flag has to be explicit -- 0 and -1 are both values a
+        // caller could legitimately pass.
+        let options = describe_producers_options(1_100, true, 0);
+        assert_eq!(options.timeout(), Some(1_100));
+        assert_eq!(options.broker_id_opt(), Some(0));
+
+        let options = describe_producers_options(-1, false, 7);
+        assert_eq!(options.timeout(), None);
+        assert_eq!(options.broker_id_opt(), None, "the id must be ignored when the flag is false");
+
+        let options = describe_producers_options(0, true, -3);
+        assert_eq!(options.timeout(), Some(0));
+        assert_eq!(options.broker_id_opt(), Some(-3));
+    }
+
+    #[test]
+    fn single_field_transaction_options_carry_only_the_timeout() {
+        // Four B6 options types whose only field is the inherited timeout. Each
+        // is checked with a distinct value so wiring one builder to another's
+        // timeout would still be caught by the pair below.
+        assert_eq!(describe_transactions_options(4_100).timeout(), Some(4_100));
+        assert_eq!(describe_transactions_options(-1).timeout(), None);
+        assert_eq!(abort_transaction_options(4_200).timeout(), Some(4_200));
+        assert_eq!(abort_transaction_options(-1).timeout(), None);
+        assert_eq!(terminate_transaction_options(4_300).timeout(), Some(4_300));
+        assert_eq!(terminate_transaction_options(-1).timeout(), None);
+        assert_eq!(fence_producers_options(4_400).timeout(), Some(4_400));
+        assert_eq!(fence_producers_options(-1).timeout(), None);
+    }
+
+    #[test]
+    fn list_transactions_options_maps_each_filter_to_its_own_field() {
+        // Java's mock throws for `listTransactions` and fails the whole call, so
+        // it echoes nothing: every filter column here is dead end to end and
+        // needs this direct test. Deliberately asymmetric -- two states, three
+        // producer ids -- so substituting one count for the other fails.
+        let (_s, states) = c_array_opt(&[Some("Ongoing"), Some("PrepareAbort")]);
+        let producer_ids = [11i64, 22, 33];
+        let pattern = CString::new("txn-.*").expect("no NUL");
+        let options = unsafe {
+            list_transactions_options(5_100, states.as_ptr(), 2, producer_ids.as_ptr(), 3, 60_000, pattern.as_ptr())
+        };
+        assert_eq!(options.timeout(), Some(5_100));
+        assert_eq!(
+            options.filtered_states(),
+            &HashSet::from([TransactionState::Ongoing, TransactionState::PrepareAbort])
+        );
+        assert_eq!(options.filtered_producer_ids(), &HashSet::from([11i64, 22, 33]));
+        assert_eq!(options.filtered_duration(), 60_000);
+        assert_eq!(options.filtered_transactional_id_pattern(), Some("txn-.*"));
+
+        // NULL arrays and a NULL pattern leave every filter at Java's default,
+        // and `filteredDuration` stays at Java's own -1 "no filter" value.
+        let options =
+            unsafe { list_transactions_options(-1, std::ptr::null(), 0, std::ptr::null(), 0, -1, std::ptr::null()) };
+        assert_eq!(options.timeout(), None);
+        assert!(options.filtered_states().is_empty());
+        assert!(options.filtered_producer_ids().is_empty());
+        assert_eq!(options.filtered_duration(), -1);
+        assert_eq!(options.filtered_transactional_id_pattern(), None);
+
+        // An empty pattern is a distinct, legal value -- not the same as NULL.
+        let empty = CString::new("").expect("no NUL");
+        let options =
+            unsafe { list_transactions_options(-1, std::ptr::null(), 0, std::ptr::null(), 0, 0, empty.as_ptr()) };
+        assert_eq!(options.filtered_transactional_id_pattern(), Some(""));
+        assert_eq!(options.filtered_duration(), 0, "zero is a real duration filter, not 'unset'");
+    }
+
+    #[test]
+    fn read_transaction_states_is_case_sensitive_unlike_group_states() {
+        // `TransactionState.parse` reads its NAME_TO_ENUM map directly, while
+        // `GroupState.parse` upper-cases first. Copying the group helper's
+        // case-insensitivity here would accept names Java rejects.
+        let (_s, names) = c_array_opt(&[Some("CompleteCommit"), Some("ongoing"), Some("nonsense")]);
+        let states = unsafe { read_transaction_states(names.as_ptr(), 3) };
+        assert_eq!(
+            states,
+            vec![
+                TransactionState::CompleteCommit,
+                TransactionState::Unknown,
+                TransactionState::Unknown
+            ]
+        );
+    }
+
+    #[test]
+    fn read_abort_transaction_spec_maps_each_column_and_narrows_the_epoch() {
+        // Every scalar distinct, and none of them is a plausible value for
+        // another column, so any two being transposed fails an assertion.
+        let topic = CString::new("txn-topic").expect("no NUL");
+        let spec = unsafe { read_abort_transaction_spec(topic.as_ptr(), 7, 91_234_567_890, 13, 42) }
+            .expect("every column is well formed");
+        assert_eq!(spec.topic_partition().topic(), "txn-topic");
+        assert_eq!(spec.topic_partition().partition(), 7);
+        assert_eq!(spec.producer_id(), 91_234_567_890);
+        assert_eq!(spec.producer_epoch(), 13);
+        assert_eq!(spec.coordinator_epoch(), 42);
+
+        let error = unsafe { read_abort_transaction_spec(std::ptr::null(), 0, 1, 1, 1) }
+            .expect_err("a null topic has no TopicPartition form");
+        assert_eq!(error.message(), "abort transaction topic must not be null");
+
+        // 65_537 truncates to 1 under a bare `as i16`, which is a legal epoch --
+        // so it must be rejected rather than narrowed silently.
+        let error = unsafe { read_abort_transaction_spec(topic.as_ptr(), 0, 1, 65_537, 1) }
+            .expect_err("an out-of-range producer epoch is rejected");
+        assert_eq!(error.message(), "producer epoch 65537 does not fit in a 16-bit epoch");
+    }
+
+    #[test]
+    fn describe_producers_result_flattens_producers_at_a_second_index() {
+        // Two partitions with *different* producer counts (2 and 0), so
+        // substituting one row's column slice for the other's fails.
+        let mut outcomes: DescribeProducersOutcomes = HashMap::new();
+        outcomes.insert(
+            TopicPartition::new("alpha", 3),
+            Ok(PartitionProducerState::new(vec![
+                // Java's constructor order is (..., coordinatorEpoch,
+                // currentTransactionStartOffset), and the two Optionals have
+                // different widths, so a transposition would not compile.
+                ProducerState::new(1_001, 5, 17, 1_700_000_000_000, Some(9), Some(4_242)),
+                // Both Optionals empty on the second producer, so the present
+                // flags cannot be constant.
+                ProducerState::new(1_002, 6, 18, 1_700_000_000_001, None, None),
+            ])),
+        );
+        outcomes.insert(
+            TopicPartition::new("alpha", 1),
+            Err(KafkaError::unsupported_version("Not implemented yet")),
+        );
+        let result = box_describe_producers_result(outcomes);
+        unsafe {
+            // Sorted by topic then partition, so the failed partition 1 is first.
+            assert_eq!(kafka_admin_DescribeProducersResult_count(result), 2);
+            let topic0 = CStr::from_ptr(kafka_admin_DescribeProducersResult_get_topic(result, 0));
+            assert_eq!(topic0.to_str().expect("utf8"), "alpha");
+            assert_eq!(kafka_admin_DescribeProducersResult_get_partition(result, 0), 1);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_partition(result, 1), 3);
+
+            let error = kafka_admin_DescribeProducersResult_get_error(result, 0);
+            assert!(!error.is_null());
+            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_count(result, 0), 0);
+            assert!(kafka_admin_DescribeProducersResult_get_error(result, 1).is_null());
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_count(result, 1), 2);
+
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_id(result, 1, 0), 1_001);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_epoch(result, 1, 0), 5);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_last_sequence(result, 1, 0), 17);
+            assert_eq!(
+                kafka_admin_DescribeProducersResult_get_last_timestamp(result, 1, 0),
+                1_700_000_000_000
+            );
+            let mut offset = 0i64;
+            assert!(kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+                result,
+                1,
+                0,
+                &mut offset
+            ));
+            assert_eq!(offset, 4_242);
+            let mut coordinator_epoch = 0i32;
+            assert!(kafka_admin_DescribeProducersResult_get_coordinator_epoch(
+                result,
+                1,
+                0,
+                &mut coordinator_epoch
+            ));
+            assert_eq!(coordinator_epoch, 9);
+
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_id(result, 1, 1), 1_002);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_epoch(result, 1, 1), 6);
+            assert!(!kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+                result,
+                1,
+                1,
+                &mut offset
+            ));
+            assert!(!kafka_admin_DescribeProducersResult_get_coordinator_epoch(
+                result,
+                1,
+                1,
+                &mut coordinator_epoch
+            ));
+            // A NULL out-pointer is still a legal presence query.
+            assert!(kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+                result,
+                1,
+                0,
+                std::ptr::null_mut()
+            ));
+
+            // Out of range in either index.
+            assert!(kafka_admin_DescribeProducersResult_get_topic(result, 2).is_null());
+            assert_eq!(kafka_admin_DescribeProducersResult_get_partition(result, -1), -1);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_id(result, 1, 2), -1);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_producer_id(result, 5, 0), -1);
+            assert_eq!(kafka_admin_DescribeProducersResult_get_last_timestamp(result, 1, -1), -1);
+            assert!(!kafka_admin_DescribeProducersResult_get_coordinator_epoch(
+                result,
+                9,
+                0,
+                &mut coordinator_epoch
+            ));
+
+            kafka_admin_DescribeProducersResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn describe_transactions_result_flattens_scalars_at_i_and_partitions_at_i_j() {
+        let mut outcomes: DescribeTransactionsOutcomes = HashMap::new();
+        outcomes.insert(
+            "txn-a".to_string(),
+            Ok(TransactionDescription::new(
+                3,
+                TransactionState::PrepareCommit,
+                7_777,
+                11,
+                60_000,
+                Some(1_700_000_000_500),
+                HashSet::from([TopicPartition::new("zeta", 2), TopicPartition::new("beta", 0)]),
+            )),
+        );
+        outcomes.insert(
+            "txn-b".to_string(),
+            Ok(TransactionDescription::new(
+                4,
+                TransactionState::Empty,
+                8_888,
+                12,
+                30_000,
+                // No transaction in progress: the OptionalLong is empty, so the
+                // present flag cannot be constant across the two rows.
+                None,
+                HashSet::new(),
+            )),
+        );
+        outcomes.insert("txn-c".to_string(), Err(KafkaError::unsupported_version("Not implemented yet")));
+        let result = box_describe_transactions_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeTransactionsResult_count(result), 3);
+            let id0 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_transactional_id(result, 0));
+            assert_eq!(id0.to_str().expect("utf8"), "txn-a");
+            assert!(kafka_admin_DescribeTransactionsResult_get_error(result, 0).is_null());
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_coordinator_id(result, 0), 3);
+            let state0 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_state(result, 0));
+            assert_eq!(state0.to_str().expect("utf8"), "PrepareCommit");
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_producer_id(result, 0), 7_777);
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_producer_epoch(result, 0), 11);
+            assert_eq!(
+                kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(result, 0),
+                60_000
+            );
+            let mut start = 0i64;
+            assert!(kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
+                result, 0, &mut start
+            ));
+            assert_eq!(start, 1_700_000_000_500);
+
+            // Partitions sorted by topic then partition, so "beta" precedes "zeta".
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_topic_partition_count(result, 0), 2);
+            let tp0 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(result, 0, 0));
+            assert_eq!(tp0.to_str().expect("utf8"), "beta");
+            assert_eq!(
+                kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(result, 0, 0),
+                0
+            );
+            let tp1 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(result, 0, 1));
+            assert_eq!(tp1.to_str().expect("utf8"), "zeta");
+            assert_eq!(
+                kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(result, 0, 1),
+                2
+            );
+
+            // Row 1: a different state name, no start time, no partitions.
+            let state1 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_state(result, 1));
+            assert_eq!(state1.to_str().expect("utf8"), "Empty");
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_coordinator_id(result, 1), 4);
+            assert_eq!(
+                kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(result, 1),
+                30_000
+            );
+            assert!(!kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
+                result, 1, &mut start
+            ));
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_topic_partition_count(result, 1), 0);
+
+            // Row 2 failed: the error is present and every scalar is the absent
+            // value, with "Unknown" for the state (Java's own fallback name).
+            let error = kafka_admin_DescribeTransactionsResult_get_error(result, 2);
+            assert!(!error.is_null());
+            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
+            let state2 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_state(result, 2));
+            assert_eq!(state2.to_str().expect("utf8"), "Unknown");
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_producer_id(result, 2), -1);
+            assert_eq!(kafka_admin_DescribeTransactionsResult_get_coordinator_id(result, 2), -1);
+
+            // Out of range in either index.
+            assert!(kafka_admin_DescribeTransactionsResult_get_transactional_id(result, 3).is_null());
+            assert!(kafka_admin_DescribeTransactionsResult_get_state(result, -1).is_null());
+            assert!(kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(result, 0, 2).is_null());
+            assert_eq!(
+                kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(result, 0, -1),
+                -1
+            );
+            assert!(kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(result, 9, 0).is_null());
+
+            kafka_admin_DescribeTransactionsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn fence_producers_result_puts_both_scalars_at_one_index() {
+        let mut outcomes: FenceProducersOutcomes = HashMap::new();
+        outcomes.insert("txn-x".to_string(), Ok(ProducerIdAndEpoch::new(5_000, 3)));
+        outcomes.insert("txn-y".to_string(), Err(KafkaError::unsupported_version("Not implemented yet")));
+        let result = box_fence_producers_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_FenceProducersResult_count(result), 2);
+            let id0 = CStr::from_ptr(kafka_admin_FenceProducersResult_get_transactional_id(result, 0));
+            assert_eq!(id0.to_str().expect("utf8"), "txn-x");
+            assert!(kafka_admin_FenceProducersResult_get_error(result, 0).is_null());
+            assert_eq!(kafka_admin_FenceProducersResult_get_producer_id(result, 0), 5_000);
+            assert_eq!(kafka_admin_FenceProducersResult_get_epoch_id(result, 0), 3);
+
+            let error = kafka_admin_FenceProducersResult_get_error(result, 1);
+            assert!(!error.is_null());
+            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
+            // A failed row reports Java's own NONE sentinel, not 0 -- 0 is a
+            // legal producer id.
+            assert_eq!(
+                kafka_admin_FenceProducersResult_get_producer_id(result, 1),
+                ProducerIdAndEpoch::NONE.producer_id
+            );
+            assert_eq!(
+                kafka_admin_FenceProducersResult_get_epoch_id(result, 1),
+                ProducerIdAndEpoch::NONE.epoch
+            );
+
+            assert!(kafka_admin_FenceProducersResult_get_transactional_id(result, 2).is_null());
+            assert_eq!(kafka_admin_FenceProducersResult_get_producer_id(result, 2), -1);
+            assert_eq!(kafka_admin_FenceProducersResult_get_epoch_id(result, -1), -1);
+            kafka_admin_FenceProducersResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn list_transactions_result_keeps_a_per_broker_error_beside_a_partial_listing() {
+        // The point of driving this from Java's `byBrokerId()` rather than
+        // `all()`: broker 1 succeeded and broker 2 failed, and both survive.
+        let mut outcomes: ListTransactionsOutcomes = HashMap::new();
+        outcomes.insert(
+            1,
+            Ok(vec![
+                TransactionListing::new("txn-z", 71, TransactionState::Ongoing),
+                TransactionListing::new("txn-a", 70, TransactionState::CompleteAbort),
+            ]),
+        );
+        outcomes.insert(2, Err(KafkaError::unsupported_version("Not implemented yet")));
+        let result = box_list_transactions_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_ListTransactionsResult_count(result), 2);
+            assert_eq!(kafka_admin_ListTransactionsResult_get_broker_id(result, 0), 1);
+            assert_eq!(kafka_admin_ListTransactionsResult_get_broker_id(result, 1), 2);
+            assert!(kafka_admin_ListTransactionsResult_get_error(result, 0).is_null());
+            assert_eq!(kafka_admin_ListTransactionsResult_get_listing_count(result, 0), 2);
+
+            // Listings sorted by transactional id, so "txn-a" precedes "txn-z".
+            let id0 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 0));
+            assert_eq!(id0.to_str().expect("utf8"), "txn-a");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 0), 70);
+            let state0 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_state(result, 0, 0));
+            assert_eq!(state0.to_str().expect("utf8"), "CompleteAbort");
+            let id1 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 1));
+            assert_eq!(id1.to_str().expect("utf8"), "txn-z");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 1), 71);
+            let state1 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_state(result, 0, 1));
+            assert_eq!(state1.to_str().expect("utf8"), "Ongoing");
+
+            let error = kafka_admin_ListTransactionsResult_get_error(result, 1);
+            assert!(!error.is_null());
+            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_listing_count(result, 1), 0);
+
+            assert_eq!(kafka_admin_ListTransactionsResult_get_broker_id(result, 2), -1);
+            assert!(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 2).is_null());
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, -1), -1);
+            assert!(kafka_admin_ListTransactionsResult_get_state(result, 9, 0).is_null());
+            kafka_admin_ListTransactionsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn destroying_a_null_b6_result_is_a_no_op() {
+        unsafe {
+            kafka_admin_DescribeProducersResult_destroy(std::ptr::null_mut());
+            kafka_admin_DescribeTransactionsResult_destroy(std::ptr::null_mut());
+            kafka_admin_FenceProducersResult_destroy(std::ptr::null_mut());
+            kafka_admin_ListTransactionsResult_destroy(std::ptr::null_mut());
         }
     }
 

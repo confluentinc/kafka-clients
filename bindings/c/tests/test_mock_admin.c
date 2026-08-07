@@ -5732,6 +5732,431 @@ static void test_mock_admin_set_feature_levels_rejects_non_mock(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* ---------------------------------------------------------------------------
+ * B6 -- producers and transactions
+ *
+ * Java's MockAdminClient throws `UnsupportedOperationException("Not implemented
+ * yet")` for all six (MockAdminClient.java:1368-1395), so what these assert is
+ * the per-key *shape*: which keys came back, that each carries the mock's error
+ * verbatim, and that a value accessor on a failed row reports Java's own absent
+ * sentinel. The success side of every value accessor is covered by the Rust
+ * unit tests in src/ffi/admin.rs, which build the outcome maps directly.
+ * ------------------------------------------------------------------------- */
+
+/* Returns the index of `topic`/`partition` in a describeProducers result, or -1. */
+static int32_t find_producer_partition(const kafka_admin_DescribeProducersResult_t *result,
+                                       const char *topic, int32_t partition) {
+    int32_t n = kafka_admin_DescribeProducersResult_count(result);
+    for (int32_t i = 0; i < n; i++) {
+        const char *t = kafka_admin_DescribeProducersResult_get_topic(result, i);
+        if (t != NULL && strcmp(t, topic) == 0 &&
+            kafka_admin_DescribeProducersResult_get_partition(result, i) == partition) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void test_mock_admin_describe_producers_reports_unsupported_per_partition(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* Deliberately ragged: two partitions of one topic and one of another, so a
+     * topic/partition column transposition changes the key set. */
+    const char *topics[3] = {"alpha", "alpha", "beta"};
+    const int32_t partitions[3] = {0, 4, 2};
+
+    kafka_admin_DescribeProducersResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_producers(admin, topics, partitions, 3, true, 1,
+                                                                -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DescribeProducersResult_count(result));
+    TEST_ASSERT_NOT_EQUAL(-1, find_producer_partition(result, "alpha", 0));
+    TEST_ASSERT_NOT_EQUAL(-1, find_producer_partition(result, "alpha", 4));
+    int32_t beta = find_producer_partition(result, "beta", 2);
+    TEST_ASSERT_NOT_EQUAL(-1, beta);
+    TEST_ASSERT_EQUAL(-1, find_producer_partition(result, "beta", 0));
+
+    for (int32_t i = 0; i < 3; i++) {
+        const kafka_common_KafkaError_t *e = kafka_admin_DescribeProducersResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+        /* A failed partition has no producers, and its Optionals are absent. */
+        TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeProducersResult_get_producer_count(result, i));
+        int64_t offset = 7;
+        TEST_ASSERT_FALSE(kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+            result, i, 0, &offset));
+        TEST_ASSERT_EQUAL_INT64(7, offset); /* untouched when absent */
+    }
+    TEST_ASSERT_NULL(kafka_admin_DescribeProducersResult_get_topic(result, 3));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_DescribeProducersResult_get_partition(result, 3));
+    kafka_admin_DescribeProducersResult_destroy(result);
+
+    /* A duplicate partition collapses to one row, as Java's Map-keyed result
+     * does. */
+    const char *dup_topics[2] = {"alpha", "alpha"};
+    const int32_t dup_partitions[2] = {0, 0};
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_producers(admin, dup_topics, dup_partitions, 2,
+                                                                false, 0, -1, &result));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DescribeProducersResult_count(result));
+    kafka_admin_DescribeProducersResult_destroy(result);
+
+    /* No partitions requested: nothing to join, so an empty success. */
+    result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_producers(admin, NULL, NULL, 0, false, 0, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeProducersResult_count(result));
+    kafka_admin_DescribeProducersResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_transactions_reports_unsupported_per_id(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    const char *ids[2] = {"txn-b", "txn-a"};
+    kafka_admin_DescribeTransactionsResult_t *result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_transactions(admin, ids, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DescribeTransactionsResult_count(result));
+    /* Rows are sorted by transactional id, not by request order. */
+    TEST_ASSERT_EQUAL_STRING(
+        "txn-a", kafka_admin_DescribeTransactionsResult_get_transactional_id(result, 0));
+    TEST_ASSERT_EQUAL_STRING(
+        "txn-b", kafka_admin_DescribeTransactionsResult_get_transactional_id(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_DescribeTransactionsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+        /* A failed row reports Java's own fallback state name and the absent
+         * scalars, never 0 -- 0 is a legal producer id and coordinator id. */
+        TEST_ASSERT_EQUAL_STRING("Unknown", kafka_admin_DescribeTransactionsResult_get_state(result, i));
+        TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_DescribeTransactionsResult_get_producer_id(result, i));
+        TEST_ASSERT_EQUAL_INT32(-1,
+                                kafka_admin_DescribeTransactionsResult_get_coordinator_id(result, i));
+        TEST_ASSERT_EQUAL_INT32(
+            0, kafka_admin_DescribeTransactionsResult_get_topic_partition_count(result, i));
+        int64_t start = 5;
+        TEST_ASSERT_FALSE(kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
+            result, i, &start));
+        TEST_ASSERT_EQUAL_INT64(5, start);
+    }
+    TEST_ASSERT_NULL(kafka_admin_DescribeTransactionsResult_get_transactional_id(result, 2));
+    kafka_admin_DescribeTransactionsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_fence_producers_reports_unsupported_per_id(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    const char *ids[2] = {"txn-y", "txn-x"};
+    kafka_admin_FenceProducersResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_fence_producers(admin, ids, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_FenceProducersResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("txn-x", kafka_admin_FenceProducersResult_get_transactional_id(result, 0));
+    TEST_ASSERT_EQUAL_STRING("txn-y", kafka_admin_FenceProducersResult_get_transactional_id(result, 1));
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e = kafka_admin_FenceProducersResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+        /* ProducerIdAndEpoch.NONE, not 0. */
+        TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_FenceProducersResult_get_producer_id(result, i));
+        TEST_ASSERT_EQUAL_INT16(-1, kafka_admin_FenceProducersResult_get_epoch_id(result, i));
+    }
+    TEST_ASSERT_NULL(kafka_admin_FenceProducersResult_get_transactional_id(result, 2));
+    kafka_admin_FenceProducersResult_destroy(result);
+
+    /* An empty batch has nothing to join, so it resolves without a broker. */
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_fence_producers(admin, NULL, 0, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_FenceProducersResult_count(result));
+    kafka_admin_FenceProducersResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_list_transactions_fails_the_whole_call(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* Java's mock fails the top-level broker-discovery future, and that is the
+     * one listTransactions failure mode that is the *call's* error rather than a
+     * per-broker row. */
+    const char *states[2] = {"Ongoing", "PrepareAbort"};
+    const int64_t producer_ids[3] = {11, 22, 33};
+    kafka_admin_ListTransactionsResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_list_transactions(
+        admin, states, 2, producer_ids, 3, 60000, "txn-.*", -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* Same with every filter left unset -- a NULL pattern must not be read. */
+    error = kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_abort_and_terminate_transaction_report_unsupported(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* Neither RPC has a result handle: Java's AbortTransactionResult exposes
+     * only all(), and TerminateTransactionResult only result(), so success is a
+     * null return and there is nothing to free. */
+    kafka_common_KafkaError_t *error =
+        kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 3, 91234, 7, 42, -1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* A NULL topic is a marshaling failure, before any submit. */
+    error = kafka_admin_AdminClient_abort_transaction(admin, NULL, 0, 1, 1, 1, -1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("abort transaction topic must not be null",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* 65537 truncates to 1 under a bare cast, which is a legal epoch, so an
+     * out-of-range producer epoch must be rejected rather than narrowed. */
+    error = kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 0, 1, 65537, 1, -1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("producer epoch 65537 does not fit in a 16-bit epoch",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    error = kafka_admin_AdminClient_force_terminate_transaction(admin, "txn-a", -1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    error = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, -1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("transactional id must not be null",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_describe_producers(kafka_admin_DescribeProducersResult_t *result,
+                                  kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeProducersResult_count(result);
+        kafka_admin_DescribeProducersResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_describe_transactions(kafka_admin_DescribeTransactionsResult_t *result,
+                                     kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeTransactionsResult_count(result);
+        kafka_admin_DescribeTransactionsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_fence_producers(kafka_admin_FenceProducersResult_t *result,
+                               kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_FenceProducersResult_count(result);
+        kafka_admin_FenceProducersResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_list_transactions(kafka_admin_ListTransactionsResult_t *result,
+                                 kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_ListTransactionsResult_count(result);
+        kafka_admin_ListTransactionsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+/* The two void-result RPCs share the result-less callback shape, so one handler
+ * serves both. */
+static void on_void_transaction_op(kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = error == NULL;
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_b6_async_fires_once(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    const char *topics[2] = {"alpha", "beta"};
+    const int32_t partitions[2] = {0, 1};
+    acl_async_result_t p = {0};
+    atomic_init(&p.fired, 0);
+    kafka_admin_AdminClient_describe_producers_async(admin, topics, partitions, 2, false, 0, -1,
+                                                    on_describe_producers, &p);
+    TEST_ASSERT_TRUE(wait_for(&p.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, p.had_result);
+    TEST_ASSERT_EQUAL_INT32(2, p.count);
+
+    const char *ids[2] = {"txn-a", "txn-b"};
+    acl_async_result_t d = {0};
+    atomic_init(&d.fired, 0);
+    kafka_admin_AdminClient_describe_transactions_async(admin, ids, 2, -1, on_describe_transactions,
+                                                       &d);
+    TEST_ASSERT_TRUE(wait_for(&d.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, d.had_result);
+    TEST_ASSERT_EQUAL_INT32(2, d.count);
+
+    acl_async_result_t f = {0};
+    atomic_init(&f.fired, 0);
+    kafka_admin_AdminClient_fence_producers_async(admin, ids, 2, -1, on_fence_producers, &f);
+    TEST_ASSERT_TRUE(wait_for(&f.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, f.had_result);
+    TEST_ASSERT_EQUAL_INT32(2, f.count);
+
+    /* listTransactions fails wholesale on the mock, so the callback gets the
+     * error rather than a result. */
+    acl_async_result_t l = {0};
+    atomic_init(&l.fired, 0);
+    kafka_admin_AdminClient_list_transactions_async(admin, NULL, 0, NULL, 0, -1, NULL, -1,
+                                                    on_list_transactions, &l);
+    TEST_ASSERT_TRUE(wait_for(&l.fired, 1));
+    TEST_ASSERT_EQUAL_INT(0, l.had_result);
+    TEST_ASSERT_EQUAL_INT(1, l.had_error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", l.message);
+
+    acl_async_result_t a = {0};
+    atomic_init(&a.fired, 0);
+    kafka_admin_AdminClient_abort_transaction_async(admin, "txn-topic", 3, 91234, 7, 42, -1,
+                                                   on_void_transaction_op, &a);
+    TEST_ASSERT_TRUE(wait_for(&a.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, a.had_error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", a.message);
+
+    acl_async_result_t t = {0};
+    atomic_init(&t.fired, 0);
+    kafka_admin_AdminClient_force_terminate_transaction_async(admin, "txn-a", -1,
+                                                             on_void_transaction_op, &t);
+    TEST_ASSERT_TRUE(wait_for(&t.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, t.had_error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", t.message);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_b6_async_null_handle_and_marshaling_failure(void) {
+    /* A NULL handle still honours the callback obligation, inline. */
+    acl_async_result_t p = {0};
+    atomic_init(&p.fired, 0);
+    kafka_admin_AdminClient_describe_producers_async(NULL, NULL, NULL, 0, false, 0, -1,
+                                                    on_describe_producers, &p);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&p.fired));
+    TEST_ASSERT_EQUAL_INT(1, p.had_error);
+
+    acl_async_result_t d = {0};
+    atomic_init(&d.fired, 0);
+    kafka_admin_AdminClient_describe_transactions_async(NULL, NULL, 0, -1, on_describe_transactions,
+                                                       &d);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&d.fired));
+    TEST_ASSERT_EQUAL_INT(1, d.had_error);
+
+    acl_async_result_t f = {0};
+    atomic_init(&f.fired, 0);
+    kafka_admin_AdminClient_fence_producers_async(NULL, NULL, 0, -1, on_fence_producers, &f);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&f.fired));
+    TEST_ASSERT_EQUAL_INT(1, f.had_error);
+
+    acl_async_result_t l = {0};
+    atomic_init(&l.fired, 0);
+    kafka_admin_AdminClient_list_transactions_async(NULL, NULL, 0, NULL, 0, -1, NULL, -1,
+                                                    on_list_transactions, &l);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&l.fired));
+    TEST_ASSERT_EQUAL_INT(1, l.had_error);
+
+    acl_async_result_t a = {0};
+    atomic_init(&a.fired, 0);
+    kafka_admin_AdminClient_abort_transaction_async(NULL, "t", 0, 1, 1, 1, -1, on_void_transaction_op,
+                                                   &a);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&a.fired));
+    TEST_ASSERT_EQUAL_INT(1, a.had_error);
+
+    acl_async_result_t t = {0};
+    atomic_init(&t.fired, 0);
+    kafka_admin_AdminClient_force_terminate_transaction_async(NULL, "t", -1, on_void_transaction_op,
+                                                             &t);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&t.fired));
+    TEST_ASSERT_EQUAL_INT(1, t.had_error);
+
+    /* Marshaling failures fire inline on a *valid* handle too, so the callback
+     * can run before the entry point returns. */
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    acl_async_result_t bad_topic = {0};
+    atomic_init(&bad_topic.fired, 0);
+    kafka_admin_AdminClient_abort_transaction_async(admin, NULL, 0, 1, 1, 1, -1,
+                                                   on_void_transaction_op, &bad_topic);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad_topic.fired));
+    TEST_ASSERT_EQUAL_INT(1, bad_topic.had_error);
+    TEST_ASSERT_EQUAL_STRING("abort transaction topic must not be null", bad_topic.message);
+
+    acl_async_result_t bad_epoch = {0};
+    atomic_init(&bad_epoch.fired, 0);
+    kafka_admin_AdminClient_abort_transaction_async(admin, "t", 0, 1, 65537, 1, -1,
+                                                   on_void_transaction_op, &bad_epoch);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad_epoch.fired));
+    TEST_ASSERT_EQUAL_STRING("producer epoch 65537 does not fit in a 16-bit epoch",
+                             bad_epoch.message);
+
+    acl_async_result_t bad_id = {0};
+    atomic_init(&bad_id.fired, 0);
+    kafka_admin_AdminClient_force_terminate_transaction_async(admin, NULL, -1,
+                                                             on_void_transaction_op, &bad_id);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad_id.fired));
+    TEST_ASSERT_EQUAL_STRING("transactional id must not be null", bad_id.message);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_b6_null_out_result(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *topics[1] = {"alpha"};
+    const int32_t partitions[1] = {0};
+    const char *ids[1] = {"txn-a"};
+
+    /* The per-key RPCs succeed with a NULL out_result and must not build a
+     * handle. */
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_producers(admin, topics, partitions, 1, false, 0,
+                                                                -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_transactions(admin, ids, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_fence_producers(admin, ids, 1, -1, NULL));
+
+    /* listTransactions fails the whole call, so it still returns its error. */
+    kafka_common_KafkaError_t *error =
+        kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL, -1, NULL);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
@@ -5887,5 +6312,13 @@ int main(void) {
     RUN_TEST(test_mock_admin_b5b_async_null_handle);
     RUN_TEST(test_mock_admin_b5b_null_out_result);
     RUN_TEST(test_mock_admin_set_feature_levels_rejects_non_mock);
+    RUN_TEST(test_mock_admin_describe_producers_reports_unsupported_per_partition);
+    RUN_TEST(test_mock_admin_describe_transactions_reports_unsupported_per_id);
+    RUN_TEST(test_mock_admin_fence_producers_reports_unsupported_per_id);
+    RUN_TEST(test_mock_admin_list_transactions_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_abort_and_terminate_transaction_report_unsupported);
+    RUN_TEST(test_mock_admin_b6_async_fires_once);
+    RUN_TEST(test_mock_admin_b6_async_null_handle_and_marshaling_failure);
+    RUN_TEST(test_mock_admin_b6_null_out_result);
     return UNITY_END();
 }
