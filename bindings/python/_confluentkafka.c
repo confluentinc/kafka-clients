@@ -936,7 +936,12 @@ static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
 
     Producer* producer = (Producer*)producer_ptr;
     kafka_common_KafkaError_t *err = NULL;
+    // Blocking FFI call: release the GIL. flush() parks until every in-flight
+    // send completes, and each completion fires the on_delivery trampoline on
+    // the dispatcher thread, which needs the GIL.
+    Py_BEGIN_ALLOW_THREADS
     kafka_producer_Producer_flush(producer->producer, &err);
+    Py_END_ALLOW_THREADS
     if (err != NULL) {
         return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
     }
@@ -952,8 +957,12 @@ static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "Ks", &producer_ptr, &topic)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
     kafka_consumer_PartitionInfoList_t* list = NULL;
-    kafka_common_KafkaError_t* err =
-        kafka_producer_Producer_partitions_for(producer->producer, topic, &list);
+    kafka_common_KafkaError_t* err;
+    // Blocking FFI call (metadata round trip): release the GIL, so a delivery
+    // callback firing meanwhile can take it.
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_partitions_for(producer->producer, topic, &list);
+    Py_END_ALLOW_THREADS
     return Py_BuildValue("KK",
         (unsigned long long)(uintptr_t)list,
         (unsigned long long)(uintptr_t)err);
