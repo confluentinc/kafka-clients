@@ -3313,7 +3313,8 @@ where
                     // bg loop wakes promptly and `try_recv`s this ack on
                     // its next `reconcile` entry — rather than waiting out
                     // the selector poll timeout. This reuses the existing
-                    // wakeup primitive (Java's `Selector.wakeup()` analog);
+                    // application-event wakeup primitive (Java's
+                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
                     // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
                     // Perf Contract item 2).
                     //
@@ -5759,12 +5760,17 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
+        // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
+        // mirror that here as well as setting the flag, so a test asserting
+        // "no wakeup is pending" really exercises what the app would observe.
+        let wakeup_trigger_for_fn = wakeup.clone();
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
+                wakeup_trigger_for_fn.wakeup();
             }),
             join_handle,
         );
@@ -7079,8 +7085,10 @@ mod tests {
 
         // Nothing must have fired before the callback is processed.
         assert!(
-            !handles.bg_wakeup_called.load(Ordering::Acquire),
-            "bg wakeup must not be poked before the callback ack is sent",
+            tokio::time::timeout(Duration::from_millis(50), handles.event_notify.notified())
+                .await
+                .is_err(),
+            "the application-event notify must not be poked before the callback ack is sent",
         );
         assert!(
             consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
