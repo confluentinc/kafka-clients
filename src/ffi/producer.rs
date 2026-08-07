@@ -403,9 +403,16 @@ type BatchCallbackFn = unsafe extern "C" fn(
 /// `callback.onCompletion(nullMetadata, e)` in `KafkaProducer.doSend`'s
 /// `catch (ApiException e)` arm. That covers rejections *before* the record
 /// accumulator (unresolvable metadata, `max.request.size` exceeded, invalid
-/// topic) as well as rejections *inside* it (buffer exhaustion / `max.block.ms`
-/// expiry, producer closed mid-send). Test `error` first. The callee owns, and
-/// must destroy, every non-null handle.
+/// topic) as well as rejections *inside* it (buffer exhaustion /
+/// `max.block.ms` expiry). Test `error` first. The callee owns, and must
+/// destroy, every non-null handle.
+///
+/// It does **not** cover a producer closed mid-send: Java raises a bare
+/// `KafkaException` there (`RecordAccumulator.java:427-428`,
+/// `BufferPool.java:119`/`:157`), which `doSend` rethrows from its
+/// `catch (KafkaException e)` arm without invoking the callback
+/// (`KafkaProducer.java:1073-1077`). The failure is reported by the return
+/// code of the `send` call itself, and this callback never fires.
 pub type kafka_producer_Producer_send_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].

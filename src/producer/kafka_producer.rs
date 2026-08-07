@@ -2424,6 +2424,57 @@ mod tests {
         assert_eq!(record_metadata::INVALID_OFFSET, offset);
     }
 
+    /// The mirror image of `test_callback_invoked_on_buffer_exhaustion`: the
+    /// other failure that happens *inside* `RecordAccumulator.append` must
+    /// **not** fire the callback.
+    ///
+    /// "Producer closed while send in progress" is a **bare** `KafkaException`
+    /// in Java (`RecordAccumulator.java:427-428`), not an `ApiException`, so
+    /// `doSend` skips `catch (ApiException e)` (the arm that invokes the
+    /// callback) and lands in `catch (KafkaException e)`, which records the
+    /// error, notifies the interceptors and **rethrows**
+    /// (`KafkaProducer.java:1073-1077`). Firing the callback here would break
+    /// the exactly-once obligation as surely as dropping one where Java fires.
+    ///
+    /// The accumulator is closed while the producer itself is not, which is
+    /// exactly the race the Java message names: `ensure_not_closed()` and
+    /// `wait_on_metadata` both pass and the rejection comes from `append`.
+    #[tokio::test]
+    async fn test_callback_not_invoked_when_the_accumulator_is_closed() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata, Arc::clone(&accumulator));
+        accumulator.close();
+
+        let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let inv = Arc::clone(&invoked);
+        let callback: Callback = Box::new(move |_, _| {
+            inv.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let record: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+        let error = match producer.send_with_callback(record, Some(callback)).await {
+            Ok(_) => panic!("a bare KafkaException must propagate as Err, not as a failed future"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(error, KafkaError::Kafka(_)),
+            "the closed-mid-send failure must be a bare KafkaException, not an ApiException — \
+             `is_api_exception()` is what routes it away from the callback, got {:?}",
+            error
+        );
+        assert_eq!("Producer closed while send in progress", error.message());
+        assert!(!error.is_api_exception(), "a bare KafkaException is not an ApiException");
+        assert!(error.is_kafka_exception(), "it is still a KafkaException");
+        assert_eq!(
+            0,
+            invoked.load(Ordering::SeqCst),
+            "Java's `catch (KafkaException e)` arm rethrows without invoking the callback"
+        );
+    }
+
     /// Translated from `KafkaProducerTest.testHeadersSuccess`.
     ///
     /// Tests that headers added to a ProducerRecord before send() are passed

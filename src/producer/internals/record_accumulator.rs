@@ -122,9 +122,15 @@ pub struct RecordAppendResult {
 /// error return would therefore drop it unfired, breaking the
 /// exactly-once callback obligation (CLAUDE.md §5, §9.5). This type is
 /// the explicit hand-back: `callback` is `Some` exactly when the record
-/// was *not* appended and no batch took ownership of it, so the caller
-/// must fire it (see `KafkaProducer::handle_api_exception`); it is `None`
-/// when a batch already owns the callback and will fire it itself.
+/// was *not* appended and no batch took ownership of it; it is `None` when
+/// a batch already owns the callback and will fire it itself.
+///
+/// Handing it back restores the caller's *choice*, not an obligation to
+/// fire — the accumulator does not decide. `do_send_bytes` fires it through
+/// `KafkaProducer::handle_api_exception` when [`error`](Self::error) is an
+/// `ApiException` (Java's `catch (ApiException e)`), and drops it unfired
+/// when it is not (Java's `catch (KafkaException e)` rethrow, which leaves
+/// `appendCallbacks` uninvoked).
 pub struct AppendError {
     /// The error that prevented the append.
     pub error: KafkaError,
@@ -740,12 +746,18 @@ impl RecordAccumulator {
         now_ms: i64,
     ) -> Result<(Option<RecordAppendResult>, Option<Callback>), AppendError> {
         if self.closed.load(Ordering::Relaxed) {
-            // The record was not appended, so nothing took ownership of the
-            // callback — hand it back.
-            return Err(AppendError {
-                error: KafkaError::with_message(Errors::UnknownServerError, "Producer closed while send in progress"),
-                callback,
-            });
+            // Java throws a **bare** `KafkaException` here
+            // (`RecordAccumulator.java:427-428`), not an `ApiException`, so
+            // `doSend`'s `catch (ApiException e)` arm does not see it and the
+            // user callback is never invoked — `catch (KafkaException e)`
+            // rethrows instead (`KafkaProducer.java:1073-1077`).
+            // [`KafkaError::kafka`] is what preserves that distinction.
+            //
+            // The callback is still handed back rather than dropped here: the
+            // record was not appended, so nothing else owns it, and it is
+            // `do_send_bytes` — not the accumulator — that decides whether an
+            // error fires it.
+            return Err(AppendError { error: KafkaError::kafka("Producer closed while send in progress"), callback });
         }
 
         if let Some(last) = deque.back_mut() {
