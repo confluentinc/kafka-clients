@@ -249,13 +249,13 @@ public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsume
     public void AddRecord(ConsumerRecord record); // mock-only helpers are inherent, not on IAsyncConsumer
 }
 
-// The sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is **shipped** (M5/P8a) — the most
+// The sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is **shipped** — the most
 // Java-faithful surface (Java's `Consumer` is synchronous), a sibling of the async trio over the
 // SAME native consumer (not a wrapper). Bytes-only, no `CancellationToken` (interruption is
 // `Wakeup()` only), with both `Close()` and `Close(TimeSpan)`. Each sync method calls the sync C
-// ABI directly (block_on inside the Rust core's runtime — NOT sync-over-async, §4). The P8a core
-// loop is below; the query family (`Committed` / `OffsetsForTimes` / `BeginningOffsets` /
-// `EndOffsets` / `PartitionsFor` / `ListTopics`) lands additively in M5/P8b.
+// ABI directly (block_on inside the Rust core's runtime — NOT sync-over-async, §4). Grown in two
+// sub-phases: the core loop (M5/P8a) + the query family (`Committed` / `OffsetsForTimes` /
+// `BeginningOffsets` / `EndOffsets` / `PartitionsFor` / `ListTopics`, added additively in M5/P8b).
 public interface IConsumer : IConsumerCommon, IDisposable {   // Java `Consumer` (synchronous)
     ConsumerRecords Poll(TimeSpan timeout);                    // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
@@ -268,6 +268,13 @@ public interface IConsumer : IConsumerCommon, IDisposable {   // Java `Consumer`
     long Position(TopicPartition partition);
     void Commit();                                             // Java commitSync (confirming)
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
+    // ---- query family (M5/P8b) — blocks; returns the owned result directly ----
+    IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions);
+    IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch);
+    IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions);
+    IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions);
+    IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
+    IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics();
     void Close();                                              // Java close()
     void Close(TimeSpan timeout);                              // Java close(Duration); negative → ArgumentOutOfRange, Zero valid
     // Wakeup() / Assignment() / Subscription() / Paused() / GroupMetadata() / EnforceRebalance() /
