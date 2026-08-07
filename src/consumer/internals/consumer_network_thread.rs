@@ -343,8 +343,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// the Phase-12 production ctor to build the
     /// `NetworkThreadCloseHandle.signal_close_fn` closure before
     /// `self` is moved into `tokio::spawn`. Setting this to `false`
-    /// (in combination with firing the wakeup trigger) is the public
-    /// signal to exit the bg-task loop.
+    /// (in combination with poking the application-event `Notify`, exactly as
+    /// [`Self::signal_close`] does) is the public signal to exit the bg-task
+    /// loop. Never the [`WakeupTrigger`] — see [`Self::signal_close`].
     pub(crate) fn running_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.running)
     }
@@ -1105,8 +1106,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     pub(crate) async fn run(mut self) {
         log::debug!("Consumer network thread started");
         while self.is_running() {
-            // Re-check the shutdown signal first so `signal_close()`
-            // followed by `wakeup.wakeup()` exits immediately.
+            // The `while` condition re-checks the shutdown signal first, so a
+            // `signal_close()` — which stores `running = false` *and* pokes the
+            // application-event `Notify` that `run_once`'s network-poll
+            // `select!` waits on — exits at the next iteration boundary rather
+            // than after `MAX_POLL_TIMEOUT_MS`.
             self.run_once().await;
         }
         self.cleanup().await;

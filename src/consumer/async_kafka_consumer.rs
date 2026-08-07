@@ -2718,13 +2718,25 @@ where
         // `CompletableFuture` a blocked API call is waiting on — it does not
         // have to interrupt a socket poll. Rust's `poll()` can instead be
         // parked inside `NetworkClientDelegate::poll_default` on the bg task,
-        // so we additionally poke the application-event `Notify` (Java's
-        // `Selector.wakeup()` analog): `run_once`'s `select!` arm fires the
-        // selector's wakeup handle and the in-flight poll returns at a safe
-        // boundary. Without it a `wakeup()` arriving while the bg loop is in
-        // its network poll is only acted on up to `MAX_POLL_TIMEOUT_MS` later.
+        // so the loop also has to be woken (Java's `Selector.wakeup()` analog).
         //
-        // This must NOT be the token again: `CancellationToken::cancel()` is
+        // When the trigger is **enabled**, the statement above already does
+        // that: it cancels the token, and `run_once`'s network-poll `select!`
+        // has a `token.cancelled()` arm that pokes the selector's wakeup handle
+        // (`consumer_network_thread.rs`), so the in-flight poll returns at a
+        // safe boundary. The poke below is then redundant and costs one
+        // spurious early poll return.
+        //
+        // It is load-bearing in exactly one window: after `close_internal` step
+        // 1 has called `wakeup_trigger.disable()`, `WakeupTrigger::wakeup()`
+        // returns early without cancelling anything, so the token arm never
+        // fires and this is the *only* wake. That window is reachable — a
+        // [`ConsumerHandle`] is `Clone + Send + Sync` and its `wakeup()` (which
+        // performs the same two statements) can race a `close()` from another
+        // task. Pinned by
+        // `wakeup_pokes_the_bg_task_even_when_the_trigger_is_disabled`.
+        //
+        // Note it must NOT be the token again: `CancellationToken::cancel()` is
         // idempotent, so re-firing the (possibly already cancelled) trigger
         // unblocks nothing. See [`build_network_thread_close_fns`].
         self.network_thread_close.wakeup();
@@ -3348,16 +3360,25 @@ where
                     // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
                     // Perf Contract item 2).
                     //
-                    // It must be the application-event `Notify` and NOT
-                    // `network_thread_close.wakeup()`: the latter fires the
-                    // `WakeupTrigger`, which is the *user-facing*
-                    // `Consumer::wakeup()` cancellation token. Cancelling it
-                    // here made the caller's own `poll()` — the very call that
-                    // just ran this listener callback — return
-                    // `KafkaError::Wakeup` without the user ever calling
-                    // `wakeup()`. Both `Notify`s wake the bg loop's network
-                    // poll (`ConsumerNetworkThread::run_once` `select!` has an
-                    // arm for each); only this one is invisible to the app.
+                    // What must NOT happen here is firing the `WakeupTrigger`:
+                    // it is the *user-facing* `Consumer::wakeup()` cancellation
+                    // token, and cancelling it made the caller's own `poll()` —
+                    // the very call that just ran this listener callback —
+                    // return `KafkaError::Wakeup` without the user ever calling
+                    // `wakeup()`. That is how this poke was originally written,
+                    // via `network_thread_close.wakeup()`, which back then fired
+                    // the trigger.
+                    //
+                    // Since `af60796` it no longer does: both the app-event poke
+                    // and `NetworkThreadCloseHandle::wakeup()` fire the *same*
+                    // `Arc<Notify>` (see `build_network_thread_close_fns`), and
+                    // no production path fires the trigger for an internal wake.
+                    // So the choice here is layering, not correctness — this is
+                    // an application-side poke, not a shutdown wake — and the
+                    // regression guard in
+                    // `process_background_events_ack_pokes_bg_wakeup` is against
+                    // *re-introducing* an internal trigger fire, not against
+                    // picking the other handle.
                     self.application_event_handler.wake_background_task();
 
                     // Java throws if the result is an error — we propagate
@@ -6060,6 +6081,49 @@ mod tests {
         assert!(token.is_cancelled(), "wakeup() must cancel the current token");
     }
 
+    /// `wakeup()`'s second statement (`network_thread_close.wakeup()`) looks
+    /// redundant: with the trigger enabled, `wakeup_trigger.wakeup()` cancels
+    /// the token and `run_once`'s `token.cancelled()` arm already pokes the
+    /// selector. It is load-bearing in exactly one window — after
+    /// `close_internal` step 1 has called `wakeup_trigger.disable()`,
+    /// `WakeupTrigger::wakeup()` returns early without cancelling anything, so
+    /// the token arm never fires. A [`ConsumerHandle::wakeup`] racing a
+    /// `close()` from another task lands there.
+    ///
+    /// Without the second statement, that `wakeup()` would be completely inert
+    /// and `close()` would wait out the in-flight network poll (up to
+    /// `MAX_POLL_TIMEOUT_MS`) — the same class of bug as Critic-3 Issue 1.
+    #[tokio::test]
+    async fn wakeup_pokes_the_bg_task_even_when_the_trigger_is_disabled() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+
+        // Nothing has poked the bg loop yet.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), handles.app_event_notify.notified())
+                .await
+                .is_err(),
+            "no bg-task poke expected before wakeup()",
+        );
+
+        consumer.wakeup_trigger.disable();
+        let token = consumer.wakeup_trigger.current_token();
+        consumer.wakeup();
+
+        assert!(
+            !token.is_cancelled(),
+            "a disabled trigger must not cancel the token — that is what makes the second \
+             statement of wakeup() the only remaining wake",
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), handles.app_event_notify.notified())
+                .await
+                .is_ok(),
+            "wakeup() must still wake the bg loop when the trigger is disabled, otherwise a \
+             wakeup() racing close() is inert and close() waits out the network poll",
+        );
+        drop(handles.subscriptions);
+    }
+
     /// A [`ConsumerHandle`] obtained from the consumer fires the SAME
     /// wakeup state as `wakeup()` — proving the shareable handle is a
     /// faithful, `Send`-able stand-in for the cross-task `wakeup()`
@@ -7236,14 +7300,33 @@ mod tests {
     /// `application_event_handler.wake_background_task()` after `ack.send(...)`)
     /// would fail no local test without this one.
     ///
-    /// It also pins **which** primitive is poked. Poking
-    /// `network_thread_close.wakeup()` here also wakes the bg loop, so it looks
-    /// interchangeable — but it fires the `WakeupTrigger`, i.e. the user-facing
-    /// `Consumer::wakeup()` cancellation token, and left the caller's own
-    /// `poll()` (the call that just ran the listener callback) failing with
-    /// `KafkaError::Wakeup` when the user never called `wakeup()`. That broke
-    /// every rebalance-listener integration test until it was caught by the
-    /// multilanguage callback suite; the last two assertions are the guard.
+    /// It also guards the Phase-41b bug that this poke originally shipped with:
+    /// it was written as `network_thread_close.wakeup()`, which *at the time*
+    /// fired the `WakeupTrigger` — the user-facing `Consumer::wakeup()`
+    /// cancellation token — and left the caller's own `poll()` (the call that
+    /// just ran the listener callback) failing with `KafkaError::Wakeup` when
+    /// the user never called `wakeup()`. That broke every rebalance-listener
+    /// integration test until the multilanguage callback suite caught it.
+    ///
+    /// Since `af60796` the two handles are no longer distinguishable by their
+    /// effect: `NetworkThreadCloseHandle::wakeup()` fires the *same*
+    /// `Arc<Notify>` as `wake_background_task()` (see
+    /// `build_network_thread_close_fns`) and nothing in production fires the
+    /// trigger for an internal wake. Consequences for the assertions below,
+    /// spelled out because they are easy to get wrong:
+    ///
+    ///  - the notify-permit assertions cannot tell the two handles apart, since
+    ///    it is one `Notify`;
+    ///  - `!bg_wakeup_called` is the **only** assertion that does — the fixture
+    ///    wraps the production close closure with that flag. Do not remove it as
+    ///    "redundant" with the token assertions below;
+    ///  - the token assertions guard the thing that actually still matters:
+    ///    nothing on this path may fire the `WakeupTrigger` (directly, or by
+    ///    regressing `build_network_thread_close_fns` back to firing it). They
+    ///    are negative assertions, so the test ends by firing the trigger
+    ///    deliberately and checking it *does* bite — otherwise a disabled or
+    ///    inert trigger would satisfy them for free
+    ///    (`maybe_trigger_wakeup()` returns `Ok` when the trigger is disabled).
     #[tokio::test]
     async fn process_background_events_ack_pokes_bg_wakeup() {
         use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
@@ -7304,17 +7387,43 @@ mod tests {
             "the listener-ack poke must not enqueue an application event",
         );
 
-        // Regression guard: the poke must NOT be the user-facing wakeup.
+        // Regression guard, part 1 — the only assertion that discriminates the
+        // handle: the poke went through the application-event handler and NOT
+        // through `NetworkThreadCloseHandle::wakeup()`, whose production closure
+        // the fixture wraps with this flag. Both fire the same `Notify` today,
+        // so no notify-based assertion can substitute for this one.
         assert!(
             !handles.bg_wakeup_called.load(Ordering::Acquire),
-            "the listener-ack poke must not fire the WakeupTrigger — that is Consumer::wakeup()'s \
-             cancellation token and cancelling it fails the caller's own poll() with Wakeup",
+            "the listener-ack poke must go through the application-event handler, not the \
+             network-thread close handle — that is the shutdown path, and it is what used to \
+             fire the user-facing WakeupTrigger",
+        );
+        // Part 2 — nothing on this path may fire the `WakeupTrigger`, whichever
+        // handle it uses: it is `Consumer::wakeup()`'s cancellation token, and
+        // cancelling it fails the caller's own `poll()`.
+        assert!(
+            !consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the listener-ack path must not cancel the user-facing wakeup token",
         );
         assert!(
             consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
             "no wakeup may be pending after a rebalance callback: the next poll() would fail with \
              KafkaError::Wakeup although the user never called wakeup()",
         );
+
+        // Negative control for part 2: both assertions above are negative, and
+        // `maybe_trigger_wakeup()` also returns `Ok` for a *disabled* trigger —
+        // so prove the trigger was live here and would have caught a fire.
+        consumer.wakeup_trigger.wakeup();
+        assert!(
+            consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the trigger must be enabled here, otherwise the two guards above are vacuous",
+        );
+        assert!(
+            matches!(consumer.wakeup_trigger.maybe_trigger_wakeup(), Err(KafkaError::Wakeup(_))),
+            "the trigger must be enabled here, otherwise the two guards above are vacuous",
+        );
+
         drop(handles.subscriptions);
     }
 
