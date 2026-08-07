@@ -308,4 +308,5 @@
 - [M11 bindings Critic r7](m11_bindings_critic_round7_patterns.md) — namespace (not allocation) decides handle reuse; Java-dead/Rust-live branches; pin an escalation at its own layer
 - [M11 bindings B4](m11_bindings_b4_notes.md) — valid()/errors() is a third result shape; empty key set loses the error; Py_BuildValue arity is untestable on mock-unsupported RPCs
 - [M11 bindings B5a](m11_bindings_b5a_notes.md) — ACLs+quotas; kafka_common_* namespacing; null-vs-absent per kind; equal-count fixtures catch nothing
+- [M11 bindings B5b](m11_bindings_b5b_notes.md) — D2 fifth rule in practice; nullable bytes has no ParseTuple unit; seed the mock or the drain is dead
 - [check-bindings gate](m11_bindings_check_bindings_gate.md) — CPython format-arity xtask; catches arity not order; non-root workspace members escape root cargo test/clippy
