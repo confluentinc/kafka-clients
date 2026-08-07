@@ -98,20 +98,29 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
-    CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions,
-    DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    ElectLeadersOptions, ListConfigResourcesOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete, ReplicaLogDirInfo,
-    TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry,
+    ConfigSource, ConfigType, ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DeletedRecords, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
+    ElectLeadersOptions, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MemberAssignment, MemberDescription,
+    MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, ReplicaLogDirInfo, TopicDescription,
+    TopicListing, TopicMetadataAndConfig,
 };
-// `listClientMetricsResources` is deprecated in Java 4.1 (superseded by
-// `listConfigResources` filtered to CLIENT_METRICS) but is still part of the
-// `Admin` surface, so the FFI exposes it for parity.
+// `listClientMetricsResources` (superseded by `listConfigResources` filtered to
+// CLIENT_METRICS) and `listConsumerGroups` (superseded by `listGroups`) are both
+// deprecated in
+// Java 4.1 but still part of the `Admin` surface, so the FFI exposes them for
+// parity. A `#![deny(warnings)]` crate needs the `use` item itself allowed, not
+// only the functions.
 #[allow(deprecated)]
-use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
+use crate::admin::{
+    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
+};
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::requests::list_offsets_request::{
@@ -119,9 +128,10 @@ use crate::common::requests::list_offsets_request::{
     LATEST_TIMESTAMP, MAX_TIMESTAMP,
 };
 use crate::common::{
-    ElectionType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo,
-    TopicPartitionReplica, Uuid,
+    ElectionType, GroupState, GroupType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection,
+    TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
+use crate::consumer::OffsetAndMetadata;
 
 use super::common::{
     self, CompletionJob, KafkaErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
@@ -8207,6 +8217,3909 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
 }
 
 // ---------------------------------------------------------------------------
+// Group value types
+//
+// Java's group descriptions nest three levels deep
+// (`ConsumerGroupDescription` -> `MemberDescription` -> `MemberAssignment`).
+// Each level that is a real Java class gets its own borrowed opaque handle; a
+// nested value that is *not* a Java class is flattened into indexed accessors
+// on its parent, as B2 already did for `LogDirDescription.ReplicaInfo`.
+//
+// Every `Optional` field crosses with an explicit discriminant, following B3:
+// an optional string is a null `const char *`, an optional number is a
+// `bool fn(handle, T *out)`, and an optional nested handle is a null pointer.
+// ---------------------------------------------------------------------------
+
+/// Returns the NUL-terminated bytes of an optional [`CString`], or null when it
+/// is absent — Java's `Optional.empty()` or a null string.
+fn optional_cstring_ptr(value: &Option<CString>) -> *const c_char {
+    match value {
+        Some(text) => text.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Writes `value` to `out` when it is present, returning whether it was.
+///
+/// The crate's shape for a Java `Optional<Integer>` / `OptionalLong` output
+/// (precedent: `kafka_consumer_OffsetAndMetadata_leader_epoch`).
+///
+/// # Safety
+///
+/// `out` must be null or writable.
+unsafe fn write_optional<T: Copy>(value: Option<T>, out: *mut T) -> bool {
+    match value {
+        Some(value) => {
+            if !out.is_null() {
+                unsafe { *out = value };
+            }
+            true
+        },
+        None => false,
+    }
+}
+
+/// Opaque handle to a `GroupListing` (Java's
+/// `org.apache.kafka.clients.admin.GroupListing`).
+///
+/// Borrowed from the owning `list_groups` result handle; valid until that
+/// handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_GroupListing_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_GroupListing_t`].
+///
+/// `type()` and `groupState()` are `Optional` in Java, so they cross as
+/// nullable strings. Neither `GroupType` nor `GroupState` has a numeric `id()`
+/// in Java, so — per the B2 rule — the enum's `toString()` name is the
+/// contract rather than an invented code.
+struct GroupListingInner {
+    group_id_c: CString,
+    group_type_c: Option<CString>,
+    protocol_c: CString,
+    group_state_c: Option<CString>,
+    is_simple_consumer_group: bool,
+}
+
+impl GroupListingInner {
+    fn new(listing: &GroupListing) -> Self {
+        Self {
+            group_id_c: to_cstring(listing.group_id()),
+            group_type_c: listing.group_type().map(|t| to_cstring(t.name())),
+            protocol_c: to_cstring(listing.protocol()),
+            group_state_c: listing.group_state().map(|s| to_cstring(s.name())),
+            is_simple_consumer_group: listing.is_simple_consumer_group(),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_GroupListing_t` to a reference.
+///
+/// # Safety
+///
+/// `listing` must be a non-null borrowed pointer from a `list_groups` result
+/// getter.
+unsafe fn group_listing_ref(listing: *const kafka_admin_GroupListing_t) -> &'static GroupListingInner {
+    unsafe { &*(listing as *const GroupListingInner) }
+}
+
+/// Returns the group id (borrowed). Java's `groupId()`.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(
+    listing: *const kafka_admin_GroupListing_t,
+) -> *const c_char {
+    unsafe { group_listing_ref(listing) }.group_id_c.as_ptr()
+}
+
+/// Returns the `GroupType` name (borrowed) — Java's `toString()` value, i.e.
+/// `"Consumer"`, `"Classic"`, `"Share"`, `"Streams"` or `"Unknown"` — or null
+/// when Java's `type()` is `Optional.empty()`.
+///
+/// `GroupType` has no numeric id in Java, so its `toString()` name is the
+/// contract.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_GroupListing_group_type(
+    listing: *const kafka_admin_GroupListing_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { group_listing_ref(listing) }.group_type_c)
+}
+
+/// Returns the group protocol (borrowed). Java's `protocol()`; the empty string
+/// for a classic group that is not using a protocol.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
+    listing: *const kafka_admin_GroupListing_t,
+) -> *const c_char {
+    unsafe { group_listing_ref(listing) }.protocol_c.as_ptr()
+}
+
+/// Returns the `GroupState` name (borrowed), e.g. `"Stable"` or `"Empty"`, or
+/// null when Java's `groupState()` is `Optional.empty()`.
+///
+/// `GroupState` has no numeric id in Java, so its `toString()` name is the
+/// contract.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
+    listing: *const kafka_admin_GroupListing_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { group_listing_ref(listing) }.group_state_c)
+}
+
+/// Returns whether this is a simple consumer group. Java's
+/// `isSimpleConsumerGroup()`: a classic group with an empty protocol.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
+    listing: *const kafka_admin_GroupListing_t,
+) -> bool {
+    unsafe { group_listing_ref(listing) }.is_simple_consumer_group
+}
+
+/// Opaque handle to a `ConsumerGroupListing` (Java's
+/// `org.apache.kafka.clients.admin.ConsumerGroupListing`, deprecated since 4.1
+/// in favour of `GroupListing`).
+///
+/// Borrowed from the owning `list_consumer_groups` result handle; valid until
+/// that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_ConsumerGroupListing_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ConsumerGroupListing_t`].
+struct ConsumerGroupListingInner {
+    group_id_c: CString,
+    is_simple_consumer_group: bool,
+    group_state_c: Option<CString>,
+    state_c: Option<CString>,
+    group_type_c: Option<CString>,
+}
+
+impl ConsumerGroupListingInner {
+    #[allow(deprecated)]
+    fn new(listing: &ConsumerGroupListing) -> Self {
+        Self {
+            group_id_c: to_cstring(listing.group_id()),
+            is_simple_consumer_group: listing.is_simple_consumer_group(),
+            group_state_c: listing.group_state().map(|s| to_cstring(s.name())),
+            state_c: listing.state().map(|s| to_cstring(s.name())),
+            group_type_c: listing.group_type().map(|t| to_cstring(t.name())),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_ConsumerGroupListing_t` to a reference.
+///
+/// # Safety
+///
+/// `listing` must be a non-null borrowed pointer from a `list_consumer_groups`
+/// result getter.
+unsafe fn consumer_group_listing_ref(
+    listing: *const kafka_admin_ConsumerGroupListing_t,
+) -> &'static ConsumerGroupListingInner {
+    unsafe { &*(listing as *const ConsumerGroupListingInner) }
+}
+
+/// Returns the consumer group id (borrowed). Java's `groupId()`.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_id(
+    listing: *const kafka_admin_ConsumerGroupListing_t,
+) -> *const c_char {
+    unsafe { consumer_group_listing_ref(listing) }.group_id_c.as_ptr()
+}
+
+/// Returns whether the group is simple. Java's `isSimpleConsumerGroup()`.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_is_simple_consumer_group(
+    listing: *const kafka_admin_ConsumerGroupListing_t,
+) -> bool {
+    unsafe { consumer_group_listing_ref(listing) }.is_simple_consumer_group
+}
+
+/// Returns the `GroupState` name (borrowed), or null when Java's
+/// `groupState()` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_state(
+    listing: *const kafka_admin_ConsumerGroupListing_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { consumer_group_listing_ref(listing) }.group_state_c)
+}
+
+/// Returns the deprecated `ConsumerGroupState` name (borrowed), or null when
+/// Java's `state()` is `Optional.empty()`.
+///
+/// This is Java's deprecated `state()`, which maps `groupState()` through
+/// `ConsumerGroupState.parse(...)`; the two therefore differ only for the group
+/// states `ConsumerGroupState` does not model.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_state(
+    listing: *const kafka_admin_ConsumerGroupListing_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { consumer_group_listing_ref(listing) }.state_c)
+}
+
+/// Returns the `GroupType` name (borrowed), or null when Java's `type()` is
+/// `Optional.empty()`.
+///
+/// # Safety
+///
+/// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_type(
+    listing: *const kafka_admin_ConsumerGroupListing_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { consumer_group_listing_ref(listing) }.group_type_c)
+}
+
+/// Opaque handle to a `MemberAssignment` (Java's
+/// `org.apache.kafka.clients.admin.MemberAssignment`).
+///
+/// Borrowed from the owning `MemberDescription`; valid until the enclosing
+/// result handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_MemberAssignment_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_MemberAssignment_t`].
+///
+/// Java's `topicPartitions()` is an unordered `Set`, so C sorts it by
+/// `(topic, partition)` to make index addressing reproducible.
+struct MemberAssignmentInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+}
+
+impl MemberAssignmentInner {
+    fn new(assignment: &MemberAssignment) -> Self {
+        let mut sorted: Vec<&TopicPartition> = assignment.topic_partitions().iter().collect();
+        sorted.sort_by(|a, b| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+        Self {
+            topics: sorted.iter().map(|tp| to_cstring(tp.topic())).collect(),
+            partitions: sorted.iter().map(|tp| tp.partition()).collect(),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_MemberAssignment_t` to a reference.
+///
+/// # Safety
+///
+/// `assignment` must be a non-null borrowed pointer from a `MemberDescription`
+/// getter.
+unsafe fn member_assignment_ref(assignment: *const kafka_admin_MemberAssignment_t) -> &'static MemberAssignmentInner {
+    unsafe { &*(assignment as *const MemberAssignmentInner) }
+}
+
+/// Returns the number of assigned partitions. Java's `topicPartitions()` size.
+///
+/// # Safety
+///
+/// `assignment` must be a valid borrowed member-assignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberAssignment_count(assignment: *const kafka_admin_MemberAssignment_t) -> i32 {
+    unsafe { member_assignment_ref(assignment) }.topics.len() as i32
+}
+
+/// Returns the topic of the assigned partition at `index` (borrowed), or null
+/// if out of range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `assignment` must be a valid borrowed member-assignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_topic(
+    assignment: *const kafka_admin_MemberAssignment_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { member_assignment_ref(assignment) }.topics, index)
+}
+
+/// Returns the id of the assigned partition at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `assignment` must be a valid borrowed member-assignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_partition(
+    assignment: *const kafka_admin_MemberAssignment_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { member_assignment_ref(assignment) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Opaque handle to a `MemberDescription` (Java's
+/// `org.apache.kafka.clients.admin.MemberDescription`).
+///
+/// Borrowed from the owning group description; valid until the enclosing result
+/// handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_MemberDescription_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_MemberDescription_t`].
+struct MemberDescriptionInner {
+    consumer_id_c: CString,
+    group_instance_id_c: Option<CString>,
+    rack_id_c: Option<CString>,
+    client_id_c: CString,
+    host_c: CString,
+    assignment: MemberAssignmentInner,
+    target_assignment: Option<MemberAssignmentInner>,
+    member_epoch: Option<i32>,
+    upgraded: Option<bool>,
+}
+
+impl MemberDescriptionInner {
+    fn new(member: &MemberDescription) -> Self {
+        Self {
+            consumer_id_c: to_cstring(member.consumer_id()),
+            group_instance_id_c: member.group_instance_id().map(to_cstring),
+            rack_id_c: member.rack_id().map(to_cstring),
+            client_id_c: to_cstring(member.client_id()),
+            host_c: to_cstring(member.host()),
+            assignment: MemberAssignmentInner::new(member.assignment()),
+            target_assignment: member.target_assignment().map(MemberAssignmentInner::new),
+            member_epoch: member.member_epoch(),
+            upgraded: member.upgraded(),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_MemberDescription_t` to a reference.
+///
+/// # Safety
+///
+/// `member` must be a non-null borrowed pointer from a group-description
+/// getter.
+unsafe fn member_description_ref(member: *const kafka_admin_MemberDescription_t) -> &'static MemberDescriptionInner {
+    unsafe { &*(member as *const MemberDescriptionInner) }
+}
+
+/// Returns the consumer id (borrowed). Java's `consumerId()`.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const c_char {
+    unsafe { member_description_ref(member) }.consumer_id_c.as_ptr()
+}
+
+/// Returns the group instance id (borrowed), or null when Java's
+/// `groupInstanceId()` is `Optional.empty()` — i.e. the member is not a static
+/// member.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { member_description_ref(member) }.group_instance_id_c)
+}
+
+/// Returns the rack id (borrowed), or null when Java's `rackId()` is
+/// `Optional.empty()`.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { member_description_ref(member) }.rack_id_c)
+}
+
+/// Returns the client id (borrowed). Java's `clientId()`.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const c_char {
+    unsafe { member_description_ref(member) }.client_id_c.as_ptr()
+}
+
+/// Returns the member host (borrowed). Java's `host()`.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const c_char {
+    unsafe { member_description_ref(member) }.host_c.as_ptr()
+}
+
+/// Returns the member's current assignment (borrowed, never null). Java's
+/// `assignment()`, which is a non-optional `MemberAssignment` — an unassigned
+/// member has an assignment with zero partitions.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const kafka_admin_MemberAssignment_t {
+    &unsafe { member_description_ref(member) }.assignment as *const MemberAssignmentInner
+        as *const kafka_admin_MemberAssignment_t
+}
+
+/// Returns the member's target assignment (borrowed), or null when Java's
+/// `targetAssignment()` is `Optional.empty()` — which is the case for every
+/// classic-protocol member. A null return is therefore "no target assignment
+/// was reported", distinct from a non-null handle whose count is 0.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
+    member: *const kafka_admin_MemberDescription_t,
+) -> *const kafka_admin_MemberAssignment_t {
+    match &unsafe { member_description_ref(member) }.target_assignment {
+        Some(assignment) => assignment as *const MemberAssignmentInner as *const kafka_admin_MemberAssignment_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Writes the member epoch to `*out_epoch` and returns `true`, or returns
+/// `false` when Java's `memberEpoch()` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer; `out_epoch`
+/// must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
+    member: *const kafka_admin_MemberDescription_t,
+    out_epoch: *mut i32,
+) -> bool {
+    unsafe { write_optional(member_description_ref(member).member_epoch, out_epoch) }
+}
+
+/// Writes whether the member has been upgraded to the consumer protocol to
+/// `*out_upgraded` and returns `true`, or returns `false` when Java's
+/// `upgraded()` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `member` must be a valid borrowed member-description pointer;
+/// `out_upgraded` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(
+    member: *const kafka_admin_MemberDescription_t,
+    out_upgraded: *mut bool,
+) -> bool {
+    unsafe { write_optional(member_description_ref(member).upgraded, out_upgraded) }
+}
+
+/// Returns the borrowed member pointer at `index` in `members`, or null when
+/// `index` is out of range.
+fn member_at(members: &[MemberDescriptionInner], index: i32) -> *const kafka_admin_MemberDescription_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match members.get(index as usize) {
+        Some(member) => member as *const MemberDescriptionInner as *const kafka_admin_MemberDescription_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the `AclOperation` code at `index`, or -1 when out of range.
+fn authorized_operation_at(codes: &[i32], index: i32) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    codes.get(index as usize).copied().unwrap_or(-1)
+}
+
+/// Returns a borrowed [`kafka_common_Node_t`] for an optional coordinator.
+fn optional_node_ptr(node: Option<&Node>) -> *const kafka_common_Node_t {
+    match node {
+        Some(node) => node as *const Node as *const kafka_common_Node_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Opaque handle to a `ConsumerGroupDescription` (Java's
+/// `org.apache.kafka.clients.admin.ConsumerGroupDescription`).
+///
+/// Borrowed from the owning `describe_consumer_groups` result handle; valid
+/// until that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_ConsumerGroupDescription_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ConsumerGroupDescription_t`].
+struct ConsumerGroupDescriptionInner {
+    group_id_c: CString,
+    is_simple_consumer_group: bool,
+    members: Vec<MemberDescriptionInner>,
+    partition_assignor_c: CString,
+    group_type_c: CString,
+    state_c: CString,
+    group_state_c: CString,
+    coordinator: Option<Node>,
+    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending.
+    authorized_operations: Vec<i32>,
+    group_epoch: Option<i32>,
+    target_assignment_epoch: Option<i32>,
+}
+
+impl ConsumerGroupDescriptionInner {
+    fn new(description: &ConsumerGroupDescription) -> Self {
+        Self {
+            group_id_c: to_cstring(description.group_id()),
+            is_simple_consumer_group: description.is_simple_consumer_group(),
+            members: description.members().iter().map(MemberDescriptionInner::new).collect(),
+            partition_assignor_c: to_cstring(description.partition_assignor()),
+            group_type_c: to_cstring(description.group_type().name()),
+            state_c: to_cstring(description.state().name()),
+            group_state_c: to_cstring(description.group_state().name()),
+            coordinator: description.coordinator().cloned(),
+            authorized_operations: description
+                .authorized_operations()
+                .iter()
+                .map(|op| i32::from(op.code()))
+                .collect(),
+            group_epoch: description.group_epoch(),
+            target_assignment_epoch: description.target_assignment_epoch(),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_ConsumerGroupDescription_t` to a reference.
+///
+/// # Safety
+///
+/// `description` must be a non-null borrowed pointer from a
+/// `describe_consumer_groups` result getter.
+unsafe fn consumer_group_description_ref(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> &'static ConsumerGroupDescriptionInner {
+    unsafe { &*(description as *const ConsumerGroupDescriptionInner) }
+}
+
+/// Returns the group id (borrowed). Java's `groupId()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *const c_char {
+    unsafe { consumer_group_description_ref(description) }.group_id_c.as_ptr()
+}
+
+/// Returns whether the group is simple. Java's `isSimpleConsumerGroup()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> bool {
+    unsafe { consumer_group_description_ref(description) }.is_simple_consumer_group
+}
+
+/// Returns the number of members in the group. Java's `members()` size.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_member_count(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> i32 {
+    unsafe { consumer_group_description_ref(description) }.members.len() as i32
+}
+
+/// Returns the member at `index` (borrowed), or null if out of range. Members
+/// keep the order Java's `members()` reports them in.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_get_member(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+    index: i32,
+) -> *const kafka_admin_MemberDescription_t {
+    member_at(&unsafe { consumer_group_description_ref(description) }.members, index)
+}
+
+/// Returns the partition assignor name (borrowed). Java's
+/// `partitionAssignor()`; the empty string for a consumer-protocol group, which
+/// assigns partitions server-side.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *const c_char {
+    unsafe { consumer_group_description_ref(description) }
+        .partition_assignor_c
+        .as_ptr()
+}
+
+/// Returns the `GroupType` name (borrowed) — Java's `toString()` value, i.e.
+/// `"Consumer"`, `"Classic"`, `"Share"`, `"Streams"` or `"Unknown"`. Java's
+/// `type()`, which is non-optional here.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *const c_char {
+    unsafe { consumer_group_description_ref(description) }.group_type_c.as_ptr()
+}
+
+/// Returns the deprecated `ConsumerGroupState` name (borrowed), e.g.
+/// `"Stable"`. Java's deprecated `state()`, which maps `groupState()` through
+/// `ConsumerGroupState.parse(...)`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_state(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *const c_char {
+    unsafe { consumer_group_description_ref(description) }.state_c.as_ptr()
+}
+
+/// Returns the `GroupState` name (borrowed), e.g. `"Stable"`. Java's
+/// `groupState()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *const c_char {
+    unsafe { consumer_group_description_ref(description) }.group_state_c.as_ptr()
+}
+
+/// Returns the group coordinator (borrowed), or null when Java's
+/// `coordinator()` reported none.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *const kafka_common_Node_t {
+    optional_node_ptr(unsafe { consumer_group_description_ref(description) }.coordinator.as_ref())
+}
+
+/// Returns the number of authorized operations reported for the group (0 when
+/// the request did not ask for them).
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation_count(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> i32 {
+    unsafe { consumer_group_description_ref(description) }
+        .authorized_operations
+        .len() as i32
+}
+
+/// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
+/// authorized operation at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+    index: i32,
+) -> i32 {
+    authorized_operation_at(
+        &unsafe { consumer_group_description_ref(description) }.authorized_operations,
+        index,
+    )
+}
+
+/// Writes the group epoch to `*out_epoch` and returns `true`, or returns
+/// `false` when Java's `groupEpoch()` is `Optional.empty()` (a classic group).
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer;
+/// `out_epoch` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+    out_epoch: *mut i32,
+) -> bool {
+    unsafe { write_optional(consumer_group_description_ref(description).group_epoch, out_epoch) }
+}
+
+/// Writes the target assignment epoch to `*out_epoch` and returns `true`, or
+/// returns `false` when Java's `targetAssignmentEpoch()` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer;
+/// `out_epoch` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+    out_epoch: *mut i32,
+) -> bool {
+    unsafe { write_optional(consumer_group_description_ref(description).target_assignment_epoch, out_epoch) }
+}
+
+/// Opaque handle to a `ClassicGroupDescription` (Java's
+/// `org.apache.kafka.clients.admin.ClassicGroupDescription`).
+///
+/// Borrowed from the owning `describe_classic_groups` result handle; valid
+/// until that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_ClassicGroupDescription_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ClassicGroupDescription_t`].
+struct ClassicGroupDescriptionInner {
+    group_id_c: CString,
+    protocol_c: CString,
+    protocol_data_c: CString,
+    is_simple_consumer_group: bool,
+    members: Vec<MemberDescriptionInner>,
+    state_c: CString,
+    coordinator: Option<Node>,
+    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending.
+    authorized_operations: Vec<i32>,
+}
+
+impl ClassicGroupDescriptionInner {
+    fn new(description: &ClassicGroupDescription) -> Self {
+        Self {
+            group_id_c: to_cstring(description.group_id()),
+            protocol_c: to_cstring(description.protocol()),
+            protocol_data_c: to_cstring(description.protocol_data()),
+            is_simple_consumer_group: description.is_simple_consumer_group(),
+            members: description.members().iter().map(MemberDescriptionInner::new).collect(),
+            state_c: to_cstring(description.state().name()),
+            coordinator: description.coordinator().cloned(),
+            authorized_operations: description
+                .authorized_operations()
+                .iter()
+                .map(|op| i32::from(op.code()))
+                .collect(),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_ClassicGroupDescription_t` to a reference.
+///
+/// # Safety
+///
+/// `description` must be a non-null borrowed pointer from a
+/// `describe_classic_groups` result getter.
+unsafe fn classic_group_description_ref(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> &'static ClassicGroupDescriptionInner {
+    unsafe { &*(description as *const ClassicGroupDescriptionInner) }
+}
+
+/// Returns the group id (borrowed). Java's `groupId()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> *const c_char {
+    unsafe { classic_group_description_ref(description) }.group_id_c.as_ptr()
+}
+
+/// Returns the group protocol type (borrowed). Java's `protocol()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> *const c_char {
+    unsafe { classic_group_description_ref(description) }.protocol_c.as_ptr()
+}
+
+/// Returns the protocol data (borrowed), i.e. the assignment strategy the group
+/// selected. Java's `protocolData()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> *const c_char {
+    unsafe { classic_group_description_ref(description) }.protocol_data_c.as_ptr()
+}
+
+/// Returns whether the group is simple. Java's `isSimpleConsumerGroup()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_group(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> bool {
+    unsafe { classic_group_description_ref(description) }.is_simple_consumer_group
+}
+
+/// Returns the number of members in the group. Java's `members()` size.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_member_count(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> i32 {
+    unsafe { classic_group_description_ref(description) }.members.len() as i32
+}
+
+/// Returns the member at `index` (borrowed), or null if out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_get_member(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+    index: i32,
+) -> *const kafka_admin_MemberDescription_t {
+    member_at(&unsafe { classic_group_description_ref(description) }.members, index)
+}
+
+/// Returns the `ClassicGroupState` name (borrowed), e.g. `"Stable"`. Java's
+/// `state()`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> *const c_char {
+    unsafe { classic_group_description_ref(description) }.state_c.as_ptr()
+}
+
+/// Returns the group coordinator (borrowed), or null when Java's
+/// `coordinator()` reported none.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> *const kafka_common_Node_t {
+    optional_node_ptr(unsafe { classic_group_description_ref(description) }.coordinator.as_ref())
+}
+
+/// Returns the number of authorized operations reported for the group (0 when
+/// the request did not ask for them).
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation_count(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> i32 {
+    unsafe { classic_group_description_ref(description) }
+        .authorized_operations
+        .len() as i32
+}
+
+/// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
+/// authorized operation at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+    index: i32,
+) -> i32 {
+    authorized_operation_at(
+        &unsafe { classic_group_description_ref(description) }.authorized_operations,
+        index,
+    )
+}
+
+/// Opaque handle to one group's committed offsets: Java's
+/// `Map<TopicPartition, OffsetAndMetadata>`, the value of a
+/// `listConsumerGroupOffsets` per-group future.
+///
+/// There is no `kafka_admin_OffsetAndMetadata_t`: `OffsetAndMetadata` is
+/// `org.apache.kafka.clients.consumer.OffsetAndMetadata`, so an
+/// `kafka_admin_`-prefixed handle would be mis-namespaced (CLAUDE.md §3), and
+/// the crate's existing `kafka_consumer_OffsetAndMetadata_t` is private to the
+/// consumer FFI module. Its three fields are therefore flattened into indexed
+/// accessors on this map handle, exactly as B2 flattened
+/// `LogDirDescription.ReplicaInfo` onto [`kafka_admin_LogDirDescription_t`].
+///
+/// Borrowed from the owning `list_consumer_group_offsets` result handle; valid
+/// until that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_OffsetAndMetadataMap_t {
+    _private: [u8; 0],
+}
+
+/// One `(TopicPartition, OffsetAndMetadata)` pair, flattened for C.
+///
+/// Java's map value is nullable: a partition the group has no committed offset
+/// for is present with a null value. `offset` is therefore `Option`, and
+/// [`kafka_admin_OffsetAndMetadataMap_has_offset`] is the discriminant.
+struct GroupOffsetEntry {
+    topic_c: CString,
+    partition: i32,
+    offset: Option<OffsetAndMetadata>,
+    metadata_c: Option<CString>,
+}
+
+/// Backing state for [`kafka_admin_OffsetAndMetadataMap_t`].
+struct OffsetAndMetadataMapInner {
+    entries: Vec<GroupOffsetEntry>,
+}
+
+impl OffsetAndMetadataMapInner {
+    fn new(offsets: GroupOffsets) -> Self {
+        let entries: Vec<GroupOffsetEntry> = sorted_partition_entries(offsets)
+            .into_iter()
+            .map(|(tp, offset)| GroupOffsetEntry {
+                topic_c: to_cstring(tp.topic()),
+                partition: tp.partition(),
+                metadata_c: offset.as_ref().map(|o| to_cstring(o.metadata())),
+                offset,
+            })
+            .collect();
+        Self { entries }
+    }
+}
+
+/// Casts a `*const kafka_admin_OffsetAndMetadataMap_t` to a reference.
+///
+/// # Safety
+///
+/// `map` must be a non-null borrowed pointer from a
+/// `list_consumer_group_offsets` result getter.
+unsafe fn offset_and_metadata_map_ref(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+) -> &'static OffsetAndMetadataMapInner {
+    unsafe { &*(map as *const OffsetAndMetadataMapInner) }
+}
+
+/// Returns the entry at `index`, or `None` when out of range.
+fn group_offset_at(map: &OffsetAndMetadataMapInner, index: i32) -> Option<&GroupOffsetEntry> {
+    if index < 0 {
+        return None;
+    }
+    map.entries.get(index as usize)
+}
+
+/// Returns the number of partitions in this group's offset map.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_count(map: *const kafka_admin_OffsetAndMetadataMap_t) -> i32 {
+    unsafe { offset_and_metadata_map_ref(map) }.entries.len() as i32
+}
+
+/// Returns the topic of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_topic(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+    index: i32,
+) -> *const c_char {
+    match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
+        Some(entry) => entry.topic_c.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_partition(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+    index: i32,
+) -> i32 {
+    match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
+        Some(entry) => entry.partition,
+        None => -1,
+    }
+}
+
+/// Returns whether the entry at `index` carries a committed offset.
+///
+/// Java's map value is nullable: `listConsumerGroupOffsets` reports a requested
+/// partition the group has never committed for as present with a **null**
+/// `OffsetAndMetadata`. `false` therefore means "no committed offset", which is
+/// distinct from a committed offset of 0. When this returns `false`,
+/// [`kafka_admin_OffsetAndMetadataMap_get_offset`] returns -1,
+/// [`kafka_admin_OffsetAndMetadataMap_get_metadata`] returns null and
+/// [`kafka_admin_OffsetAndMetadataMap_get_leader_epoch`] returns `false`.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_has_offset(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+    index: i32,
+) -> bool {
+    match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
+        Some(entry) => entry.offset.is_some(),
+        None => false,
+    }
+}
+
+/// Returns the committed offset of the entry at `index`, or -1 if out of range
+/// or the group has no committed offset for it (see
+/// [`kafka_admin_OffsetAndMetadataMap_has_offset`]). Committed offsets are
+/// never negative — Java's `OffsetAndMetadata` constructor rejects them — so -1
+/// is unambiguous.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_offset(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+    index: i32,
+) -> i64 {
+    match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
+        Some(entry) => entry.offset.as_ref().map_or(-1, OffsetAndMetadata::offset),
+        None => -1,
+    }
+}
+
+/// Returns the commit metadata of the entry at `index` (borrowed), or null if
+/// out of range or the group has no committed offset for it. Java normalises an
+/// absent metadata string to `""`, so a committed offset always yields a
+/// non-null (possibly empty) string.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_metadata(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+    index: i32,
+) -> *const c_char {
+    match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
+        Some(entry) => optional_cstring_ptr(&entry.metadata_c),
+        None => std::ptr::null(),
+    }
+}
+
+/// Writes the leader epoch of the entry at `index` to `*out_epoch` and returns
+/// `true`, or returns `false` when out of range, when the group has no
+/// committed offset for it, or when Java's `leaderEpoch()` is
+/// `Optional.empty()`.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed offset-map pointer; `out_epoch` must be null
+/// or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_leader_epoch(
+    map: *const kafka_admin_OffsetAndMetadataMap_t,
+    index: i32,
+    out_epoch: *mut i32,
+) -> bool {
+    let epoch = group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index)
+        .and_then(|entry| entry.offset.as_ref())
+        .and_then(OffsetAndMetadata::leader_epoch);
+    unsafe { write_optional(epoch, out_epoch) }
+}
+
+// ---------------------------------------------------------------------------
+// Group input marshaling and submission helpers
+//
+// Group RPCs are keyed by group id rather than by topic partition, so keys are
+// plain C strings. As in B3, every Java `Optional` gets an explicit boolean
+// discriminant beside the payload (`all_partitions[i]` for a per-group
+// `ListConsumerGroupOffsetsSpec`, `remove_all` for the no-members
+// `RemoveMembersFromConsumerGroupOptions` constructor, `has_leader_epoch[i]`
+// for an `OffsetAndMetadata`'s leader epoch), so "absent" and "present but
+// empty" stay distinguishable.
+// ---------------------------------------------------------------------------
+
+/// Per-key `KafkaFuture<Void>` outcomes keyed by a string (group id or group
+/// instance id).
+type GroupVoidOutcomes = HashMap<String, Result<(), KafkaError>>;
+/// Per-partition `KafkaFuture<Void>` outcomes.
+type PartitionVoidOutcomes = HashMap<TopicPartition, Result<(), KafkaError>>;
+/// The `valid()` listings and unkeyed `errors()` of `listGroups`.
+type ListGroupsOutcome = (Vec<GroupListing>, Vec<KafkaError>);
+/// The `valid()` listings and unkeyed `errors()` of `listConsumerGroups`.
+#[allow(deprecated)]
+type ListConsumerGroupsOutcome = (Vec<ConsumerGroupListing>, Vec<KafkaError>);
+/// Per-group outcomes of `describeConsumerGroups`.
+type DescribeConsumerGroupsOutcomes = HashMap<String, Result<ConsumerGroupDescription, KafkaError>>;
+/// Per-group outcomes of `describeClassicGroups`.
+type DescribeClassicGroupsOutcomes = HashMap<String, Result<ClassicGroupDescription, KafkaError>>;
+/// Per-group outcomes of `listConsumerGroupOffsets`.
+type ListConsumerGroupOffsetsOutcomes = HashMap<String, Result<GroupOffsets, KafkaError>>;
+
+/// Reads a required C string parameter.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] when `text` is NULL. Java's group-id
+/// parameters are non-null by contract, and a NULL here would otherwise be
+/// dereferenced; reporting it is cheaper than the alternative of silently
+/// substituting the empty string, which the broker would reject with a much
+/// less specific error.
+///
+/// # Safety
+///
+/// `text` must be null or a valid C string.
+unsafe fn read_required_string(text: *const c_char, parameter: &str) -> Result<String, KafkaError> {
+    if text.is_null() {
+        return Err(KafkaError::illegal_argument(format!("{parameter} must not be null")));
+    }
+    Ok(unsafe { CStr::from_ptr(text) }.to_string_lossy().to_string())
+}
+
+/// Returns `partitions[index]`, or -1 when `index` is out of range.
+fn partition_at(partitions: &[i32], index: i32) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    partitions.get(index as usize).copied().unwrap_or(-1)
+}
+
+/// Returns a borrowed error pointer for `errors[index]`, or null when the key
+/// succeeded or `index` is out of range.
+fn optional_error_at(errors: &[Option<KafkaErrorInner>], index: i32) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Splits string-keyed void outcomes into the parallel key / error vectors a
+/// per-key-error-only result handle stores.
+fn flatten_keyed_void_outcomes(outcomes: GroupVoidOutcomes) -> (Vec<CString>, Vec<Option<KafkaErrorInner>>) {
+    let entries = sorted_entries(outcomes);
+    let mut keys = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (key, outcome) in entries {
+        keys.push(to_cstring(&key));
+        errors.push(outcome.err().map(error_inner));
+    }
+    (keys, errors)
+}
+
+/// Splits partition-keyed void outcomes into the parallel topic / partition /
+/// error vectors a per-key-error-only result handle stores.
+fn flatten_partition_void_outcomes(
+    outcomes: PartitionVoidOutcomes,
+) -> (Vec<CString>, Vec<i32>, Vec<Option<KafkaErrorInner>>) {
+    let entries = sorted_partition_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (tp, outcome) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        errors.push(outcome.err().map(error_inner));
+    }
+    (topics, partitions, errors)
+}
+
+/// Parses `count` `GroupState` names into a set.
+///
+/// Names are Java's `GroupState.toString()` values (`"Stable"`, `"Empty"`, …);
+/// matching is case-insensitive and an unrecognised name becomes
+/// `GroupState.UNKNOWN`, exactly as Java's `GroupState.parse(String)` does. An
+/// empty or NULL array leaves the filter unset, i.e. "every state".
+///
+/// # Safety
+///
+/// `names` must be null or have `count` entries, each NULL or a valid C string.
+unsafe fn read_group_states(names: *const *const c_char, count: i32) -> HashSet<GroupState> {
+    unsafe { read_strings(names, count) }
+        .iter()
+        .map(|name| GroupState::parse(name))
+        .collect()
+}
+
+/// Parses `count` `GroupType` names into a set.
+///
+/// Names are Java's `GroupType.toString()` values (`"Consumer"`, `"Classic"`,
+/// `"Share"`, `"Streams"`); matching is case-insensitive and an unrecognised
+/// name becomes `GroupType.UNKNOWN`, as in Java's `GroupType.parse(String)`.
+///
+/// # Safety
+///
+/// `names` must be null or have `count` entries, each NULL or a valid C string.
+unsafe fn read_group_types(names: *const *const c_char, count: i32) -> HashSet<GroupType> {
+    unsafe { read_strings(names, count) }
+        .iter()
+        .map(|name| GroupType::parse(name))
+        .collect()
+}
+
+/// Builds `ListGroupsOptions` from the flat C option parameters.
+///
+/// # Safety
+///
+/// The three name arrays must be null or have their stated counts.
+unsafe fn list_groups_options(
+    group_states: *const *const c_char,
+    group_state_count: i32,
+    protocol_types: *const *const c_char,
+    protocol_type_count: i32,
+    types: *const *const c_char,
+    type_count: i32,
+    timeout_ms: i32,
+) -> ListGroupsOptions {
+    ListGroupsOptions::new()
+        .in_group_states(unsafe { read_group_states(group_states, group_state_count) })
+        .with_protocol_types(
+            unsafe { read_strings(protocol_types, protocol_type_count) }
+                .into_iter()
+                .collect(),
+        )
+        .with_types(unsafe { read_group_types(types, type_count) })
+        .timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds `ListConsumerGroupsOptions` from the flat C option parameters.
+///
+/// Java also has the deprecated `inStates(Set<ConsumerGroupState>)`, which is
+/// defined as `inGroupStates(states.map(s -> GroupState.parse(s.toString())))`.
+/// The two therefore accept the same strings here, so C exposes only
+/// `group_states`; a caller holding `ConsumerGroupState` names passes them in
+/// the same array.
+///
+/// # Safety
+///
+/// The two name arrays must be null or have their stated counts.
+#[allow(deprecated)]
+unsafe fn list_consumer_groups_options(
+    group_states: *const *const c_char,
+    group_state_count: i32,
+    types: *const *const c_char,
+    type_count: i32,
+    timeout_ms: i32,
+) -> ListConsumerGroupsOptions {
+    ListConsumerGroupsOptions::new()
+        .in_group_states(unsafe { read_group_states(group_states, group_state_count) })
+        .with_types(unsafe { read_group_types(types, type_count) })
+        .timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds `DescribeConsumerGroupsOptions` from the flat C option parameters.
+fn describe_consumer_groups_options(
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+) -> DescribeConsumerGroupsOptions {
+    DescribeConsumerGroupsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .include_authorized_operations(include_authorized_operations)
+}
+
+/// Builds `DescribeClassicGroupsOptions` from the flat C option parameters.
+fn describe_classic_groups_options(
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+) -> DescribeClassicGroupsOptions {
+    DescribeClassicGroupsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .include_authorized_operations(include_authorized_operations)
+}
+
+/// Builds `ListConsumerGroupOffsetsOptions` from the flat C option parameters.
+fn list_consumer_group_offsets_options(timeout_ms: i32, require_stable: bool) -> ListConsumerGroupOffsetsOptions {
+    ListConsumerGroupOffsetsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .require_stable(require_stable)
+}
+
+/// Builds `AlterConsumerGroupOffsetsOptions` from the flat C option parameters.
+fn alter_consumer_group_offsets_options(timeout_ms: i32) -> AlterConsumerGroupOffsetsOptions {
+    AlterConsumerGroupOffsetsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds `DeleteConsumerGroupOffsetsOptions` from the flat C option parameters.
+fn delete_consumer_group_offsets_options(timeout_ms: i32) -> DeleteConsumerGroupOffsetsOptions {
+    DeleteConsumerGroupOffsetsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds `DeleteConsumerGroupsOptions` from the flat C option parameters.
+fn delete_consumer_groups_options(timeout_ms: i32) -> DeleteConsumerGroupsOptions {
+    DeleteConsumerGroupsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds `RemoveMembersFromConsumerGroupOptions` from the flat C option
+/// parameters.
+///
+/// `remove_all` selects Java's no-argument constructor ("remove every member");
+/// otherwise the `Collection<MemberToRemove>` constructor is used, which throws
+/// `IllegalArgumentException("Invalid empty members has been provided")` on an
+/// empty collection. A NULL `reason` is Java's unset reason.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] when `remove_all` is false and no
+/// group instance id was supplied, mirroring Java.
+///
+/// # Safety
+///
+/// `group_instance_ids` must be null or have `member_count` entries, each NULL
+/// or a valid C string; `reason` must be null or a valid C string.
+unsafe fn remove_members_options(
+    remove_all: bool,
+    group_instance_ids: *const *const c_char,
+    member_count: i32,
+    reason: *const c_char,
+    timeout_ms: i32,
+) -> Result<RemoveMembersFromConsumerGroupOptions, KafkaError> {
+    let mut options = if remove_all {
+        // Java's `RemoveMembersFromConsumerGroupOptions()`: removeAll mode.
+        RemoveMembersFromConsumerGroupOptions::default()
+    } else {
+        let members = unsafe { read_strings(group_instance_ids, member_count) }
+            .into_iter()
+            .map(MemberToRemove::new);
+        RemoveMembersFromConsumerGroupOptions::new(members)?
+    };
+    if !reason.is_null() {
+        options.reason(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string());
+    }
+    Ok(options.timeout_ms(option_timeout(timeout_ms)))
+}
+
+/// Reads the per-group `ListConsumerGroupOffsetsSpec` map that
+/// `listConsumerGroupOffsets` takes.
+///
+/// Entry `i` describes group `group_ids[i]`: when `all_partitions[i]` is true
+/// the spec's topic partitions stay unset (Java's null `Collection`, meaning
+/// "every partition the group has committed offsets for"); otherwise
+/// `topics[i]` / `partitions[i]` hold `partition_counts[i]` parallel entries.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if a group id is NULL, or if the
+/// same group id appears twice — Java takes a `Map`, where the second entry
+/// would silently have replaced the first.
+///
+/// # Safety
+///
+/// `group_ids`, `all_partitions`, `topics`, `partitions` and `partition_counts`
+/// must be null or have `group_count` readable entries each; for a group whose
+/// `all_partitions` flag is false, `topics[i]` and `partitions[i]` must have
+/// `partition_counts[i]` readable entries.
+unsafe fn read_group_offsets_specs(
+    group_ids: *const *const c_char,
+    all_partitions: *const bool,
+    topics: *const *const *const c_char,
+    partitions: *const *const i32,
+    partition_counts: *const i32,
+    group_count: i32,
+) -> Result<HashMap<String, ListConsumerGroupOffsetsSpec>, KafkaError> {
+    let n = group_count.max(0) as usize;
+    let mut specs = HashMap::with_capacity(n);
+    if group_ids.is_null() || all_partitions.is_null() {
+        return Ok(specs);
+    }
+    for i in 0..n {
+        let id_ptr = unsafe { *group_ids.add(i) };
+        if id_ptr.is_null() {
+            return Err(KafkaError::illegal_argument(format!("group id at index {i} must not be null")));
+        }
+        let group_id = unsafe { CStr::from_ptr(id_ptr) }.to_string_lossy().to_string();
+        let spec = if unsafe { *all_partitions.add(i) } {
+            ListConsumerGroupOffsetsSpec::new()
+        } else {
+            let count = if partition_counts.is_null() {
+                0
+            } else {
+                unsafe { *partition_counts.add(i) }
+            };
+            let group_topics = if topics.is_null() {
+                std::ptr::null()
+            } else {
+                unsafe { *topics.add(i) }
+            };
+            let group_partitions = if partitions.is_null() {
+                std::ptr::null()
+            } else {
+                unsafe { *partitions.add(i) }
+            };
+            ListConsumerGroupOffsetsSpec::new()
+                .topic_partitions(Some(unsafe { read_topic_partitions(group_topics, group_partitions, count) }))
+        };
+        if specs.insert(group_id.clone(), spec).is_some() {
+            return Err(KafkaError::illegal_argument(format!(
+                "group id `{group_id}` appears more than once at index {i}"
+            )));
+        }
+    }
+    Ok(specs)
+}
+
+/// Reads the `Map<TopicPartition, OffsetAndMetadata>` that
+/// `alterConsumerGroupOffsets` takes.
+///
+/// Entry `i` is `(topics[i], partitions[i]) -> OffsetAndMetadata(offsets[i],
+/// leader_epochs[i] if has_leader_epoch[i], metadata[i])`. A NULL `metadata[i]`
+/// is Java's null metadata, which the `OffsetAndMetadata` constructor
+/// normalises to the empty string. `has_leader_epoch[i]` is the explicit
+/// discriminant for Java's `Optional<Integer> leaderEpoch`, so an epoch of 0
+/// stays distinguishable from an absent one.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if a topic entry is NULL or an
+/// offset is negative — the latter mirroring Java's `OffsetAndMetadata`
+/// constructor, which throws `IllegalArgumentException` for a negative offset.
+///
+/// # Safety
+///
+/// Every non-null array must have `count` readable entries; every topic and
+/// metadata entry must be NULL or a valid C string.
+unsafe fn read_alter_group_offsets(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    metadata: *const *const c_char,
+    leader_epochs: *const i32,
+    has_leader_epoch: *const bool,
+    count: i32,
+) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    let n = count.max(0) as usize;
+    let mut out = HashMap::with_capacity(n);
+    if topics.is_null() || partitions.is_null() || offsets.is_null() {
+        return Ok(out);
+    }
+    for i in 0..n {
+        let name_ptr = unsafe { *topics.add(i) };
+        if name_ptr.is_null() {
+            return Err(KafkaError::illegal_argument(format!("topic at index {i} must not be null")));
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
+        let epoch = if !has_leader_epoch.is_null() && unsafe { *has_leader_epoch.add(i) } && !leader_epochs.is_null() {
+            Some(unsafe { *leader_epochs.add(i) })
+        } else {
+            None
+        };
+        let text = if metadata.is_null() {
+            String::new()
+        } else {
+            let text_ptr = unsafe { *metadata.add(i) };
+            if text_ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(text_ptr) }.to_string_lossy().to_string()
+            }
+        };
+        let offset = OffsetAndMetadata::with_leader_epoch(unsafe { *offsets.add(i) }, epoch, text)
+            .map_err(|e| KafkaError::illegal_argument(format!("offset at index {i}: {}", e.message())))?;
+        out.insert(tp, offset);
+    }
+    Ok(out)
+}
+
+/// Submits `listGroups` and returns a future over its `valid()` / `errors()`
+/// split.
+///
+/// Java's `ListGroupsResult` derives both views from one source future, so
+/// both are awaited before either is inspected — the `describeCluster`
+/// discipline, which keeps a derived future from being abandoned.
+fn submit_list_groups(
+    admin: &dyn Admin,
+    options: ListGroupsOptions,
+) -> impl std::future::Future<Output = Result<ListGroupsOutcome, KafkaError>> + Send + use<> {
+    let result = admin.list_groups(options);
+    let valid = result.valid();
+    let errors = result.errors();
+    async move {
+        let valid = valid.get().await;
+        let errors = errors.get().await;
+        Ok((valid?, errors?))
+    }
+}
+
+/// Submits `listConsumerGroups` and returns a future over its `valid()` /
+/// `errors()` split.
+#[allow(deprecated)]
+fn submit_list_consumer_groups(
+    admin: &dyn Admin,
+    options: ListConsumerGroupsOptions,
+) -> impl std::future::Future<Output = Result<ListConsumerGroupsOutcome, KafkaError>> + Send + use<> {
+    let result = admin.list_consumer_groups(options);
+    let valid = result.valid();
+    let errors = result.errors();
+    async move {
+        let valid = valid.get().await;
+        let errors = errors.get().await;
+        Ok((valid?, errors?))
+    }
+}
+
+/// Submits `describeConsumerGroups` and returns the collect-all future over its
+/// per-group futures.
+fn submit_describe_consumer_groups(
+    admin: &dyn Admin,
+    group_ids: &[String],
+    options: DescribeConsumerGroupsOptions,
+) -> KafkaFuture<DescribeConsumerGroupsOutcomes> {
+    let result = admin.describe_consumer_groups(group_ids, options);
+    KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
+}
+
+/// Submits `describeClassicGroups` and returns the collect-all future over its
+/// per-group futures.
+fn submit_describe_classic_groups(
+    admin: &dyn Admin,
+    group_ids: &[String],
+    options: DescribeClassicGroupsOptions,
+) -> KafkaFuture<DescribeClassicGroupsOutcomes> {
+    let result = admin.describe_classic_groups(group_ids, options);
+    KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
+}
+
+/// Submits `listConsumerGroupOffsets` and returns the collect-all future over
+/// its per-group futures.
+///
+/// `ListConsumerGroupOffsetsResult` exposes its futures only through
+/// `partitionsToOffsetAndMetadata(groupId)`, so the requested group ids drive
+/// the join. That accessor throws for a group that was not requested, which
+/// cannot happen here; the error is propagated rather than dropped.
+fn submit_list_consumer_group_offsets(
+    admin: &dyn Admin,
+    group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+    options: ListConsumerGroupOffsetsOptions,
+) -> Result<KafkaFuture<ListConsumerGroupOffsetsOutcomes>, KafkaError> {
+    let result = admin.list_consumer_group_offsets(group_specs, options);
+    let mut entries: Vec<(String, KafkaFuture<GroupOffsets>)> = Vec::with_capacity(group_specs.len());
+    for group_id in group_specs.keys() {
+        entries.push((group_id.clone(), result.partitions_to_offset_and_metadata_for_group(group_id)?));
+    }
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Turns a single whole-call future into an empty per-key outcome map.
+///
+/// Three of the group RPCs back every per-key future with **one** source
+/// future. When the request selected no keys there is no per-key slot for a
+/// failure to occupy, so the source future is awaited directly and its error
+/// becomes the call's error — which mirrors Java, where `all()` is then the
+/// only observable outcome.
+fn empty_outcomes<K, V>(all: KafkaFuture<()>) -> KafkaFuture<HashMap<K, V>>
+where
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    all.then_apply(|()| HashMap::new())
+}
+
+/// Submits `alterConsumerGroupOffsets` and returns the collect-all future over
+/// its per-partition futures.
+fn submit_alter_consumer_group_offsets(
+    admin: &dyn Admin,
+    group_id: &str,
+    offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+    options: AlterConsumerGroupOffsetsOptions,
+) -> KafkaFuture<PartitionVoidOutcomes> {
+    let result = admin.alter_consumer_group_offsets(group_id, offsets, options);
+    if offsets.is_empty() {
+        return empty_outcomes(result.all());
+    }
+    let entries: Vec<(TopicPartition, KafkaFuture<()>)> =
+        offsets.keys().map(|tp| (tp.clone(), result.partition_result(tp))).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `deleteConsumerGroupOffsets` and returns the collect-all future over
+/// its per-partition futures.
+///
+/// `partitionResult(tp)` throws for a partition that was not requested, which
+/// cannot happen here since the requested set drives the join; the error is
+/// propagated rather than dropped.
+fn submit_delete_consumer_group_offsets(
+    admin: &dyn Admin,
+    group_id: &str,
+    partitions: &HashSet<TopicPartition>,
+    options: DeleteConsumerGroupOffsetsOptions,
+) -> Result<KafkaFuture<PartitionVoidOutcomes>, KafkaError> {
+    let result = admin.delete_consumer_group_offsets(group_id, partitions, options);
+    if partitions.is_empty() {
+        return Ok(empty_outcomes(result.all()));
+    }
+    let mut entries: Vec<(TopicPartition, KafkaFuture<()>)> = Vec::with_capacity(partitions.len());
+    for tp in partitions {
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `deleteConsumerGroups` and returns the collect-all future over its
+/// per-group futures.
+fn submit_delete_consumer_groups(
+    admin: &dyn Admin,
+    group_ids: &[String],
+    options: DeleteConsumerGroupsOptions,
+) -> KafkaFuture<GroupVoidOutcomes> {
+    let result = admin.delete_consumer_groups(group_ids, options);
+    KafkaFuture::join_map_results(result.deleted_groups().into_iter().collect())
+}
+
+/// Submits `removeMembersFromConsumerGroup` and returns the collect-all future
+/// over its per-member futures, keyed by group instance id.
+///
+/// In `removeAll` mode Java's `memberResult` is not applicable at all, so the
+/// single `all()` future is the outcome and the C result carries no keys.
+fn submit_remove_members_from_consumer_group(
+    admin: &dyn Admin,
+    group_id: &str,
+    options: RemoveMembersFromConsumerGroupOptions,
+) -> Result<KafkaFuture<GroupVoidOutcomes>, KafkaError> {
+    let members: Vec<MemberToRemove> = options.members().iter().cloned().collect();
+    let result = admin.remove_members_from_consumer_group(group_id, options);
+    if members.is_empty() {
+        return Ok(empty_outcomes(result.all()));
+    }
+    let mut entries: Vec<(String, KafkaFuture<()>)> = Vec::with_capacity(members.len());
+    for member in &members {
+        entries.push((member.group_instance_id().to_string(), result.member_result(member)?));
+    }
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+// ---------------------------------------------------------------------------
+// Group result handles
+//
+// Accessors follow each Java `*Result`'s future shape (`PLAN-bindings.md` D2 as
+// amended after B3), not a fixed template:
+//
+//   - `Map<K, KafkaFuture<V>>`      -> `_get_value(i)` and `_get_error(i)`
+//     (`describeConsumerGroups`, `describeClassicGroups`,
+//      `listConsumerGroupOffsets`)
+//   - `Map<K, KafkaFuture<Void>>` / one future over `Map<K, Errors>`
+//                                   -> `_get_error(i)` only
+//     (`deleteConsumerGroups`, `alterConsumerGroupOffsets`,
+//      `deleteConsumerGroupOffsets`, `removeMembersFromConsumerGroup`)
+//   - one future split into `valid()` + `errors()`
+//                                   -> two independent lists, no key at all
+//     (`listGroups`, `listConsumerGroups`)
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a flattened `ListGroupsResult`.
+#[repr(C)]
+pub struct kafka_admin_ListGroupsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListGroupsResult_t`].
+///
+/// Java's `ListGroupsResult` has no per-key future at all: one source future
+/// resolves to a mixed collection, which `valid()` and `errors()` split into a
+/// listing list and an unkeyed error list (`ListGroupsResult.java:82,95`). The
+/// two lists are independent and generally of different lengths, so this handle
+/// exposes them as two separate sequences rather than as parallel arrays.
+struct ListGroupsResultInner {
+    valid: Vec<GroupListingInner>,
+    errors: Vec<KafkaErrorInner>,
+}
+
+/// Flattens the `listGroups` outcome into the C handle.
+fn box_list_groups_result(outcome: ListGroupsOutcome) -> *mut kafka_admin_ListGroupsResult_t {
+    let (valid, errors) = outcome;
+    Box::into_raw(Box::new(ListGroupsResultInner {
+        valid: valid.iter().map(GroupListingInner::new).collect(),
+        errors: errors.into_iter().map(error_inner).collect(),
+    })) as *mut kafka_admin_ListGroupsResult_t
+}
+
+/// Casts a `*const kafka_admin_ListGroupsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_groups` call.
+unsafe fn list_groups_result_ref(result: *const kafka_admin_ListGroupsResult_t) -> &'static ListGroupsResultInner {
+    unsafe { &*(result as *const ListGroupsResultInner) }
+}
+
+/// Returns the number of successfully listed groups (Java's `valid()`).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid_count(
+    result: *const kafka_admin_ListGroupsResult_t,
+) -> i32 {
+    unsafe { list_groups_result_ref(result) }.valid.len() as i32
+}
+
+/// Returns the listing at `index` (borrowed), or null if out of range. Listings
+/// keep the order the brokers reported them in, as Java's `valid()` does.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
+    result: *const kafka_admin_ListGroupsResult_t,
+    index: i32,
+) -> *const kafka_admin_GroupListing_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_groups_result_ref(result) }.valid.get(index as usize) {
+        Some(listing) => listing as *const GroupListingInner as *const kafka_admin_GroupListing_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of per-broker errors (Java's `errors()`).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
+    result: *const kafka_admin_ListGroupsResult_t,
+) -> i32 {
+    unsafe { list_groups_result_ref(result) }.errors.len() as i32
+}
+
+/// Returns the error at `index` (borrowed), or null if out of range. Do not
+/// destroy it.
+///
+/// **This list is not parallel to the listings.** Java's `errors()` is an
+/// unkeyed `Collection<Throwable>` of the failures some brokers reported, while
+/// `valid()` holds the listings the others returned; the two are independent
+/// and generally of different lengths. Index this list with
+/// [`kafka_admin_ListGroupsResult_error_count`], never with
+/// [`kafka_admin_ListGroupsResult_valid_count`]. A non-empty error list plus a
+/// non-empty listing list is Java's normal partial-success outcome, which is
+/// exactly what `all()` would have thrown on.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
+    result: *const kafka_admin_ListGroupsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    error_ptr(unsafe { list_groups_result_ref(result) }.errors.get(index as usize))
+}
+
+/// Destroys a `list_groups` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka_admin_ListGroupsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListGroupsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `ListConsumerGroupsResult`.
+#[repr(C)]
+pub struct kafka_admin_ListConsumerGroupsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListConsumerGroupsResult_t`]. Same
+/// `valid()` / `errors()` split as [`ListGroupsResultInner`].
+struct ListConsumerGroupsResultInner {
+    valid: Vec<ConsumerGroupListingInner>,
+    errors: Vec<KafkaErrorInner>,
+}
+
+/// Flattens the `listConsumerGroups` outcome into the C handle.
+fn box_list_consumer_groups_result(outcome: ListConsumerGroupsOutcome) -> *mut kafka_admin_ListConsumerGroupsResult_t {
+    let (valid, errors) = outcome;
+    Box::into_raw(Box::new(ListConsumerGroupsResultInner {
+        valid: valid.iter().map(ConsumerGroupListingInner::new).collect(),
+        errors: errors.into_iter().map(error_inner).collect(),
+    })) as *mut kafka_admin_ListConsumerGroupsResult_t
+}
+
+/// Casts a `*const kafka_admin_ListConsumerGroupsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_consumer_groups` call.
+unsafe fn list_consumer_groups_result_ref(
+    result: *const kafka_admin_ListConsumerGroupsResult_t,
+) -> &'static ListConsumerGroupsResultInner {
+    unsafe { &*(result as *const ListConsumerGroupsResultInner) }
+}
+
+/// Returns the number of successfully listed consumer groups (Java's
+/// `valid()`).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_valid_count(
+    result: *const kafka_admin_ListConsumerGroupsResult_t,
+) -> i32 {
+    unsafe { list_consumer_groups_result_ref(result) }.valid.len() as i32
+}
+
+/// Returns the listing at `index` (borrowed), or null if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_valid(
+    result: *const kafka_admin_ListConsumerGroupsResult_t,
+    index: i32,
+) -> *const kafka_admin_ConsumerGroupListing_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_consumer_groups_result_ref(result) }.valid.get(index as usize) {
+        Some(listing) => listing as *const ConsumerGroupListingInner as *const kafka_admin_ConsumerGroupListing_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of per-broker errors (Java's `errors()`).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_error_count(
+    result: *const kafka_admin_ListConsumerGroupsResult_t,
+) -> i32 {
+    unsafe { list_consumer_groups_result_ref(result) }.errors.len() as i32
+}
+
+/// Returns the error at `index` (borrowed), or null if out of range. Do not
+/// destroy it.
+///
+/// **This list is not parallel to the listings** — see
+/// [`kafka_admin_ListGroupsResult_get_error`], which has the same shape.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_error(
+    result: *const kafka_admin_ListConsumerGroupsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    error_ptr(unsafe { list_consumer_groups_result_ref(result) }.errors.get(index as usize))
+}
+
+/// Destroys a `list_consumer_groups` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_destroy(
+    result: *mut kafka_admin_ListConsumerGroupsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListConsumerGroupsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeConsumerGroupsResult`, keyed by group
+/// id.
+#[repr(C)]
+pub struct kafka_admin_DescribeConsumerGroupsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeConsumerGroupsResult_t`].
+///
+/// Java's `describedGroups()` is `Map<String, KafkaFuture<ConsumerGroupDescription>>`
+/// — one future per group carrying a value — so this handle has both
+/// `_get_value(i)` and `_get_error(i)`.
+struct DescribeConsumerGroupsResultInner {
+    group_ids: Vec<CString>,
+    descriptions: Vec<Option<ConsumerGroupDescriptionInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-group `describeConsumerGroups` outcomes into the C handle.
+fn box_describe_consumer_groups_result(
+    outcomes: DescribeConsumerGroupsOutcomes,
+) -> *mut kafka_admin_DescribeConsumerGroupsResult_t {
+    let entries = sorted_entries(outcomes);
+    let mut group_ids = Vec::with_capacity(entries.len());
+    let mut descriptions = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (group_id, outcome) in entries {
+        group_ids.push(to_cstring(&group_id));
+        match outcome {
+            Ok(description) => {
+                descriptions.push(Some(ConsumerGroupDescriptionInner::new(&description)));
+                errors.push(None);
+            },
+            Err(e) => {
+                descriptions.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DescribeConsumerGroupsResultInner { group_ids, descriptions, errors }))
+        as *mut kafka_admin_DescribeConsumerGroupsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeConsumerGroupsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_consumer_groups` call.
+unsafe fn describe_consumer_groups_result_ref(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+) -> &'static DescribeConsumerGroupsResultInner {
+    unsafe { &*(result as *const DescribeConsumerGroupsResultInner) }
+}
+
+/// Returns the number of described groups.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_count(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+) -> i32 {
+    unsafe { describe_consumer_groups_result_ref(result) }.group_ids.len() as i32
+}
+
+/// Returns the group id of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by group id.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_group_id(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_consumer_groups_result_ref(result) }.group_ids, index)
+}
+
+/// Returns the description of the entry at `index` (borrowed), or null if the
+/// group failed or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+    index: i32,
+) -> *const kafka_admin_ConsumerGroupDescription_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_consumer_groups_result_ref(result) }
+        .descriptions
+        .get(index as usize)
+    {
+        Some(Some(description)) => {
+            description as *const ConsumerGroupDescriptionInner as *const kafka_admin_ConsumerGroupDescription_t
+        },
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the group
+/// was described successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_consumer_groups_result_ref(result) }
+        .errors
+        .get(index as usize)
+    {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_consumer_groups` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_destroy(
+    result: *mut kafka_admin_DescribeConsumerGroupsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeConsumerGroupsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeClassicGroupsResult`, keyed by group
+/// id.
+#[repr(C)]
+pub struct kafka_admin_DescribeClassicGroupsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeClassicGroupsResult_t`]. Same
+/// per-key value-and-error shape as
+/// [`DescribeConsumerGroupsResultInner`], with `ClassicGroupDescription` as the
+/// value.
+struct DescribeClassicGroupsResultInner {
+    group_ids: Vec<CString>,
+    descriptions: Vec<Option<ClassicGroupDescriptionInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-group `describeClassicGroups` outcomes into the C handle.
+fn box_describe_classic_groups_result(
+    outcomes: DescribeClassicGroupsOutcomes,
+) -> *mut kafka_admin_DescribeClassicGroupsResult_t {
+    let entries = sorted_entries(outcomes);
+    let mut group_ids = Vec::with_capacity(entries.len());
+    let mut descriptions = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (group_id, outcome) in entries {
+        group_ids.push(to_cstring(&group_id));
+        match outcome {
+            Ok(description) => {
+                descriptions.push(Some(ClassicGroupDescriptionInner::new(&description)));
+                errors.push(None);
+            },
+            Err(e) => {
+                descriptions.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DescribeClassicGroupsResultInner { group_ids, descriptions, errors }))
+        as *mut kafka_admin_DescribeClassicGroupsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeClassicGroupsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_classic_groups` call.
+unsafe fn describe_classic_groups_result_ref(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+) -> &'static DescribeClassicGroupsResultInner {
+    unsafe { &*(result as *const DescribeClassicGroupsResultInner) }
+}
+
+/// Returns the number of described groups.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_count(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+) -> i32 {
+    unsafe { describe_classic_groups_result_ref(result) }.group_ids.len() as i32
+}
+
+/// Returns the group id of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by group id.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_group_id(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_classic_groups_result_ref(result) }.group_ids, index)
+}
+
+/// Returns the description of the entry at `index` (borrowed), or null if the
+/// group failed or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+    index: i32,
+) -> *const kafka_admin_ClassicGroupDescription_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_classic_groups_result_ref(result) }
+        .descriptions
+        .get(index as usize)
+    {
+        Some(Some(description)) => {
+            description as *const ClassicGroupDescriptionInner as *const kafka_admin_ClassicGroupDescription_t
+        },
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the group
+/// was described successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_classic_groups_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_classic_groups` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_classic_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
+    result: *mut kafka_admin_DescribeClassicGroupsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeClassicGroupsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `ListConsumerGroupOffsetsResult`, keyed by
+/// group id.
+#[repr(C)]
+pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListConsumerGroupOffsetsResult_t`].
+///
+/// Two-level: Java's per-group future carries a whole
+/// `Map<TopicPartition, OffsetAndMetadata>`, so `_get_value(i)` hands out a
+/// borrowed [`kafka_admin_OffsetAndMetadataMap_t`] rather than a scalar.
+struct ListConsumerGroupOffsetsResultInner {
+    group_ids: Vec<CString>,
+    offsets: Vec<Option<OffsetAndMetadataMapInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-group `listConsumerGroupOffsets` outcomes into the C handle.
+fn box_list_consumer_group_offsets_result(
+    outcomes: ListConsumerGroupOffsetsOutcomes,
+) -> *mut kafka_admin_ListConsumerGroupOffsetsResult_t {
+    let entries = sorted_entries(outcomes);
+    let mut group_ids = Vec::with_capacity(entries.len());
+    let mut offsets = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (group_id, outcome) in entries {
+        group_ids.push(to_cstring(&group_id));
+        match outcome {
+            Ok(group_offsets) => {
+                offsets.push(Some(OffsetAndMetadataMapInner::new(group_offsets)));
+                errors.push(None);
+            },
+            Err(e) => {
+                offsets.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(ListConsumerGroupOffsetsResultInner { group_ids, offsets, errors }))
+        as *mut kafka_admin_ListConsumerGroupOffsetsResult_t
+}
+
+/// Casts a `*const kafka_admin_ListConsumerGroupOffsetsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_consumer_group_offsets`
+/// call.
+unsafe fn list_consumer_group_offsets_result_ref(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+) -> &'static ListConsumerGroupOffsetsResultInner {
+    unsafe { &*(result as *const ListConsumerGroupOffsetsResultInner) }
+}
+
+/// Returns the number of groups offsets were listed for.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_count(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+) -> i32 {
+    unsafe { list_consumer_group_offsets_result_ref(result) }.group_ids.len() as i32
+}
+
+/// Returns the group id of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by group id.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { list_consumer_group_offsets_result_ref(result) }.group_ids, index)
+}
+
+/// Returns the group's committed offsets at `index` (borrowed), or null if the
+/// group failed or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const kafka_admin_OffsetAndMetadataMap_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_consumer_group_offsets_result_ref(result) }
+        .offsets
+        .get(index as usize)
+    {
+        Some(Some(map)) => map as *const OffsetAndMetadataMapInner as *const kafka_admin_OffsetAndMetadataMap_t,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the
+/// group's offsets were listed successfully or `index` is out of range. Do not
+/// destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_consumer_group_offsets_result_ref(result) }
+        .errors
+        .get(index as usize)
+    {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `list_consumer_group_offsets` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_consumer_group_offsets` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
+    result: *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListConsumerGroupOffsetsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `AlterConsumerGroupOffsetsResult`, keyed by
+/// topic partition.
+#[repr(C)]
+pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_AlterConsumerGroupOffsetsResult_t`].
+///
+/// Java's `partitionResult(tp)` is a `KafkaFuture<Void>`, so there is no
+/// per-key value: a null `_get_error(i)` is the success signal.
+struct AlterConsumerGroupOffsetsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `alterConsumerGroupOffsets` outcomes into the C
+/// handle.
+fn box_alter_consumer_group_offsets_result(
+    outcomes: PartitionVoidOutcomes,
+) -> *mut kafka_admin_AlterConsumerGroupOffsetsResult_t {
+    let (topics, partitions, errors) = flatten_partition_void_outcomes(outcomes);
+    Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { topics, partitions, errors }))
+        as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t
+}
+
+/// Casts a `*const kafka_admin_AlterConsumerGroupOffsetsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `alter_consumer_group_offsets`
+/// call.
+unsafe fn alter_consumer_group_offsets_result_ref(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) -> &'static AlterConsumerGroupOffsetsResultInner {
+    unsafe { &*(result as *const AlterConsumerGroupOffsetsResultInner) }
+}
+
+/// Returns the number of partitions whose offsets were altered.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_count(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) -> i32 {
+    unsafe { alter_consumer_group_offsets_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> i32 {
+    partition_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.partitions, index)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the
+/// partition's offset was altered successfully or `index` is out of range. Do
+/// not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.errors, index)
+}
+
+/// Destroys an `alter_consumer_group_offsets` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `alter_consumer_group_offsets` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
+    result: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut AlterConsumerGroupOffsetsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DeleteConsumerGroupOffsetsResult`, keyed by
+/// topic partition.
+#[repr(C)]
+pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`]. Same
+/// per-key-error-only shape as [`AlterConsumerGroupOffsetsResultInner`].
+struct DeleteConsumerGroupOffsetsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `deleteConsumerGroupOffsets` outcomes into the C
+/// handle.
+fn box_delete_consumer_group_offsets_result(
+    outcomes: PartitionVoidOutcomes,
+) -> *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t {
+    let (topics, partitions, errors) = flatten_partition_void_outcomes(outcomes);
+    Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { topics, partitions, errors }))
+        as *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t
+}
+
+/// Casts a `*const kafka_admin_DeleteConsumerGroupOffsetsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `delete_consumer_group_offsets`
+/// call.
+unsafe fn delete_consumer_group_offsets_result_ref(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> &'static DeleteConsumerGroupOffsetsResultInner {
+    unsafe { &*(result as *const DeleteConsumerGroupOffsetsResultInner) }
+}
+
+/// Returns the number of partitions whose offsets were deleted.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_count(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> i32 {
+    unsafe { delete_consumer_group_offsets_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> i32 {
+    partition_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.partitions, index)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the
+/// partition's offset was deleted successfully or `index` is out of range. Do
+/// not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.errors, index)
+}
+
+/// Destroys a `delete_consumer_group_offsets` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `delete_consumer_group_offsets` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
+    result: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DeleteConsumerGroupOffsetsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DeleteConsumerGroupsResult`, keyed by group id.
+#[repr(C)]
+pub struct kafka_admin_DeleteConsumerGroupsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DeleteConsumerGroupsResult_t`].
+///
+/// Java's `deletedGroups()` is `Map<String, KafkaFuture<Void>>`, so there is no
+/// per-key value: a null `_get_error(i)` is the success signal.
+struct DeleteConsumerGroupsResultInner {
+    group_ids: Vec<CString>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-group `deleteConsumerGroups` outcomes into the C handle.
+fn box_delete_consumer_groups_result(outcomes: GroupVoidOutcomes) -> *mut kafka_admin_DeleteConsumerGroupsResult_t {
+    let (group_ids, errors) = flatten_keyed_void_outcomes(outcomes);
+    Box::into_raw(Box::new(DeleteConsumerGroupsResultInner { group_ids, errors }))
+        as *mut kafka_admin_DeleteConsumerGroupsResult_t
+}
+
+/// Casts a `*const kafka_admin_DeleteConsumerGroupsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `delete_consumer_groups` call.
+unsafe fn delete_consumer_groups_result_ref(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+) -> &'static DeleteConsumerGroupsResultInner {
+    unsafe { &*(result as *const DeleteConsumerGroupsResultInner) }
+}
+
+/// Returns the number of groups a deletion was attempted for.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_count(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+) -> i32 {
+    unsafe { delete_consumer_groups_result_ref(result) }.group_ids.len() as i32
+}
+
+/// Returns the group id of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by group id.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { delete_consumer_groups_result_ref(result) }.group_ids, index)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the group
+/// was deleted successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { delete_consumer_groups_result_ref(result) }.errors, index)
+}
+
+/// Destroys a `delete_consumer_groups` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `delete_consumer_groups` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
+    result: *mut kafka_admin_DeleteConsumerGroupsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DeleteConsumerGroupsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `RemoveMembersFromConsumerGroupResult`, keyed
+/// by group instance id.
+#[repr(C)]
+pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`].
+///
+/// Java's `memberResult(MemberToRemove)` is a `KafkaFuture<Void>`, so there is
+/// no per-key value. In `removeAll` mode Java *refuses* `memberResult` entirely
+/// ("The method: memberResult is not applicable in 'removeAll' mode") and
+/// `all()` is the only observable, so the C handle is then empty and the
+/// outcome is the call's error.
+struct RemoveMembersFromConsumerGroupResultInner {
+    group_instance_ids: Vec<CString>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-member `removeMembersFromConsumerGroup` outcomes into the C
+/// handle.
+fn box_remove_members_from_consumer_group_result(
+    outcomes: GroupVoidOutcomes,
+) -> *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t {
+    let (group_instance_ids, errors) = flatten_keyed_void_outcomes(outcomes);
+    Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner {
+        group_instance_ids,
+        errors,
+    })) as *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t
+}
+
+/// Casts a `*const kafka_admin_RemoveMembersFromConsumerGroupResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a
+/// `remove_members_from_consumer_group` call.
+unsafe fn remove_members_result_ref(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) -> &'static RemoveMembersFromConsumerGroupResultInner {
+    unsafe { &*(result as *const RemoveMembersFromConsumerGroupResultInner) }
+}
+
+/// Returns the number of members a removal was attempted for. This is 0 in
+/// `remove_all` mode, where Java exposes no per-member outcome.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_count(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) -> i32 {
+    unsafe { remove_members_result_ref(result) }.group_instance_ids.len() as i32
+}
+
+/// Returns the group instance id of the entry at `index` (borrowed), or null if
+/// out of range. Entries are sorted by group instance id.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { remove_members_result_ref(result) }.group_instance_ids, index)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the member
+/// was removed successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { remove_members_result_ref(result) }.errors, index)
+}
+
+/// Destroys a `remove_members_from_consumer_group` result handle. Safe with
+/// null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `remove_members_from_consumer_group` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(
+    result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut RemoveMembersFromConsumerGroupResultInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// listGroups
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_list_groups_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ListGroupsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-broker listing failure arrives
+/// inside `result` (see [`kafka_admin_ListGroupsResult_get_error`]), not as
+/// `error`.
+pub type kafka_admin_AdminClient_list_groups_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Lists the groups in the cluster, blocking until the listing has resolved
+/// (synchronous).
+///
+/// This is `listGroups(ListGroupsOptions)`.
+///
+/// On success writes a [`kafka_admin_ListGroupsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_ListGroupsResult_destroy`]) and returns null.
+/// **A per-broker failure is not a call failure**: Java splits the outcome into
+/// `valid()` listings and an unkeyed `errors()` collection, which the result
+/// handle exposes as two independent lists. A non-null return means the listing
+/// could not be run at all, and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `group_states` / `group_state_count`: filter by `GroupState`, using Java's
+///   `toString()` names (`"Stable"`, `"Empty"`, `"PreparingRebalance"`, …).
+///   Matching is case-insensitive and an unrecognised name becomes `UNKNOWN`,
+///   as in `GroupState.parse(String)`. Pass NULL / 0 for every state.
+/// - `protocol_types` / `protocol_type_count`: filter by protocol type, e.g.
+///   `"consumer"` — the wire protocol-type string, which is lower-case and
+///   unrelated to the `GroupType` names above. Pass NULL / 0 for every
+///   protocol type.
+/// - `types` / `type_count`: filter by `GroupType`, using Java's `toString()`
+///   names (`"Consumer"`, `"Classic"`, `"Share"`, `"Streams"`). Pass NULL / 0
+///   for every type. Java's `ListGroupsOptions.forConsumerGroups()` and
+///   friends are convenience presets over exactly these two filters.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; each name array must be null or have its
+/// stated number of valid C strings; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
+    admin: *const kafka_admin_AdminClient_t,
+    group_states: *const *const c_char,
+    group_state_count: i32,
+    protocol_types: *const *const c_char,
+    protocol_type_count: i32,
+    types: *const *const c_char,
+    type_count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ListGroupsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let options = unsafe {
+        list_groups_options(
+            group_states,
+            group_state_count,
+            protocol_types,
+            protocol_type_count,
+            types,
+            type_count,
+            timeout_ms,
+        )
+    };
+    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_groups(a, options))) };
+    unsafe { finish_sync(outcome, out_result, box_list_groups_result) }
+}
+
+/// Lists the groups asynchronously. See [`kafka_admin_AdminClient_list_groups`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; each name array must be null or have its
+/// stated number of valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_states: *const *const c_char,
+    group_state_count: i32,
+    protocol_types: *const *const c_char,
+    protocol_type_count: i32,
+    types: *const *const c_char,
+    type_count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_list_groups_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = unsafe {
+        list_groups_options(
+            group_states,
+            group_state_count,
+            protocol_types,
+            protocol_type_count,
+            types,
+            type_count,
+            timeout_ms,
+        )
+    };
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_list_groups(a, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcome) => (box_list_groups_result(outcome), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// listConsumerGroups
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_list_consumer_groups_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ListConsumerGroupsResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`.
+pub type kafka_admin_AdminClient_list_consumer_groups_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListConsumerGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Lists the consumer groups in the cluster, blocking until the listing has
+/// resolved (synchronous).
+///
+/// This is `listConsumerGroups(ListConsumerGroupsOptions)`, which is
+/// **deprecated since Kafka 4.1** in favour of
+/// [`kafka_admin_AdminClient_list_groups`] — that call returns `GroupListing`s
+/// covering every group type, not just consumer groups. It is exposed here for
+/// parity with the Java `Admin` surface, which still declares it.
+///
+/// On success writes a [`kafka_admin_ListConsumerGroupsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_ListConsumerGroupsResult_destroy`]) and returns null. A
+/// per-broker failure is not a call failure; see
+/// [`kafka_admin_AdminClient_list_groups`], which has the same result shape.
+///
+/// # Parameters
+///
+/// - `group_states` / `group_state_count`: filter by `GroupState`, using Java's
+///   `toString()` names. Java's deprecated `inStates(Set<ConsumerGroupState>)`
+///   is defined as `inGroupStates(...)` over `GroupState.parse(...)` of those
+///   same names, so a caller holding `ConsumerGroupState` names passes them in
+///   this array too.
+/// - `types` / `type_count`: filter by `GroupType`, using Java's `toString()`
+///   names.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; each name array must be null or have its
+/// stated number of valid C strings; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups(
+    admin: *const kafka_admin_AdminClient_t,
+    group_states: *const *const c_char,
+    group_state_count: i32,
+    types: *const *const c_char,
+    type_count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ListConsumerGroupsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let options =
+        unsafe { list_consumer_groups_options(group_states, group_state_count, types, type_count, timeout_ms) };
+    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_consumer_groups(a, options))) };
+    unsafe { finish_sync(outcome, out_result, box_list_consumer_groups_result) }
+}
+
+/// Lists the consumer groups asynchronously. See
+/// [`kafka_admin_AdminClient_list_consumer_groups`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; each name array must be null or have its
+/// stated number of valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_states: *const *const c_char,
+    group_state_count: i32,
+    types: *const *const c_char,
+    type_count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_list_consumer_groups_callback_t,
+    user_data: *mut c_void,
+) {
+    let options =
+        unsafe { list_consumer_groups_options(group_states, group_state_count, types, type_count, timeout_ms) };
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_list_consumer_groups(a, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcome) => (box_list_consumer_groups_result(outcome), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeConsumerGroups
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_consumer_groups_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeConsumerGroupsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-group failure arrives
+/// inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeConsumerGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes consumer groups, blocking until every per-group future has
+/// resolved (synchronous).
+///
+/// This is
+/// `describeConsumerGroups(Collection<String>, DescribeConsumerGroupsOptions)`.
+/// It describes both classic and consumer (KIP-848) protocol groups; the
+/// classic-only sibling is
+/// [`kafka_admin_AdminClient_describe_classic_groups`].
+///
+/// On success writes a [`kafka_admin_DescribeConsumerGroupsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeConsumerGroupsResult_destroy`]) and returns null.
+/// **A per-group failure is not a call failure**: it is reported by
+/// [`kafka_admin_DescribeConsumerGroupsResult_get_error`] for that key. A
+/// non-null return means the request could not be submitted at all, and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `group_ids` / `count`: the group ids to describe. A NULL entry is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `include_authorized_operations`: Java's
+///   `DescribeConsumerGroupsOptions.includeAuthorizedOperations(boolean)`. When
+///   false, [`kafka_admin_ConsumerGroupDescription_authorized_operation_count`]
+///   is 0.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids` must be null or have `count`
+/// entries, each NULL or a valid C string; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    out_result: *mut *mut kafka_admin_DescribeConsumerGroupsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let ids = unsafe { read_strings(group_ids, count) };
+    let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_consumer_groups(a, &ids, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_consumer_groups_result) }
+}
+
+/// Describes consumer groups asynchronously. See
+/// [`kafka_admin_AdminClient_describe_consumer_groups`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids` must be null or have `count`
+/// entries, each NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    callback: kafka_admin_AdminClient_describe_consumer_groups_callback_t,
+    user_data: *mut c_void,
+) {
+    let ids = unsafe { read_strings(group_ids, count) };
+    let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_consumer_groups(a, &ids, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_consumer_groups_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeClassicGroups
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_classic_groups_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeClassicGroupsResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. A per-group failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_classic_groups_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeClassicGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes classic groups, blocking until every per-group future has resolved
+/// (synchronous).
+///
+/// This is
+/// `describeClassicGroups(Collection<String>, DescribeClassicGroupsOptions)`.
+/// Unlike [`kafka_admin_AdminClient_describe_consumer_groups`] it covers only
+/// classic-protocol groups, and its description carries the group's `protocol`
+/// and `protocolData` rather than a group epoch.
+///
+/// On success writes a [`kafka_admin_DescribeClassicGroupsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeClassicGroupsResult_destroy`]) and returns null. A
+/// per-group failure is not a call failure; it is reported by
+/// [`kafka_admin_DescribeClassicGroupsResult_get_error`] for that key.
+///
+/// # Parameters
+///
+/// - `group_ids` / `count`: the group ids to describe. A NULL entry is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `include_authorized_operations`: Java's
+///   `DescribeClassicGroupsOptions.includeAuthorizedOperations(boolean)`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids` must be null or have `count`
+/// entries, each NULL or a valid C string; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    out_result: *mut *mut kafka_admin_DescribeClassicGroupsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let ids = unsafe { read_strings(group_ids, count) };
+    let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_classic_groups(a, &ids, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_classic_groups_result) }
+}
+
+/// Describes classic groups asynchronously. See
+/// [`kafka_admin_AdminClient_describe_classic_groups`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids` must be null or have `count`
+/// entries, each NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    callback: kafka_admin_AdminClient_describe_classic_groups_callback_t,
+    user_data: *mut c_void,
+) {
+    let ids = unsafe { read_strings(group_ids, count) };
+    let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_classic_groups(a, &ids, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_classic_groups_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// listConsumerGroupOffsets
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_list_consumer_group_offsets_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-group failure arrives
+/// inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Lists committed offsets for one or more consumer groups, blocking until
+/// every per-group future has resolved (synchronous).
+///
+/// This is
+/// `listConsumerGroupOffsets(Map<String, ListConsumerGroupOffsetsSpec>, ListConsumerGroupOffsetsOptions)`.
+///
+/// The request is two-level — a set of groups, each with its own partition
+/// selection — so the arrays are ragged: index `i` addresses group `i`, and
+/// `topics[i]` / `partitions[i]` are that group's own arrays of
+/// `partition_counts[i]` entries. The result is two-level too:
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_get_value`] hands out a
+/// [`kafka_admin_OffsetAndMetadataMap_t`] per group.
+///
+/// On success writes a [`kafka_admin_ListConsumerGroupOffsetsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`]) and returns null. A
+/// per-group failure is not a call failure; it is reported by
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_get_error`] for that key.
+///
+/// # Parameters
+///
+/// - `group_ids` / `group_count`: the groups to query. A NULL group id is
+///   rejected, and so is a duplicate one — Java takes a `Map`, where the second
+///   entry would silently have replaced the first.
+/// - `all_partitions`: per group, pass `true` for Java's unset
+///   `ListConsumerGroupOffsetsSpec.topicPartitions()`, i.e. "every partition
+///   the group has committed offsets for". `topics[i]` / `partitions[i]` /
+///   `partition_counts[i]` are then ignored. An explicit flag, so "all
+///   partitions" and "an empty selection" stay distinguishable.
+/// - `topics` / `partitions` / `partition_counts`: per group `i`, parallel
+///   arrays of `partition_counts[i]` entries; entry `j` is
+///   `(topics[i][j], partitions[i][j])`. An entry with a NULL topic is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `require_stable`: Java's
+///   `ListConsumerGroupOffsetsOptions.requireStable(boolean)`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids`, `all_partitions`, `topics`,
+/// `partitions` and `partition_counts` must be null or have `group_count`
+/// entries each; for a group whose `all_partitions` flag is false, `topics[i]`
+/// and `partitions[i]` must have `partition_counts[i]` valid entries;
+/// `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    all_partitions: *const bool,
+    topics: *const *const *const c_char,
+    partitions: *const *const i32,
+    partition_counts: *const i32,
+    group_count: i32,
+    timeout_ms: i32,
+    require_stable: bool,
+    out_result: *mut *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let specs = unsafe {
+        read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
+    };
+    let options = list_consumer_group_offsets_options(timeout_ms, require_stable);
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| submit_list_consumer_group_offsets(a, &specs?, options)) };
+    unsafe { finish_sync(outcome, out_result, box_list_consumer_group_offsets_result) }
+}
+
+/// Lists consumer group offsets asynchronously. See
+/// [`kafka_admin_AdminClient_list_consumer_group_offsets`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL group id, or the same group
+/// id twice). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
+/// Destroying the handle does not cause that — an outstanding operation holds
+/// its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread. Do
+/// not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the group arrays must be null or have
+/// `group_count` entries each, and each group's partition arrays must have that
+/// group's `partition_counts` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    all_partitions: *const bool,
+    topics: *const *const *const c_char,
+    partitions: *const *const i32,
+    partition_counts: *const i32,
+    group_count: i32,
+    timeout_ms: i32,
+    require_stable: bool,
+    callback: kafka_admin_AdminClient_list_consumer_group_offsets_callback_t,
+    user_data: *mut c_void,
+) {
+    let specs = unsafe {
+        read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
+    };
+    let options = list_consumer_group_offsets_options(timeout_ms, require_stable);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_list_consumer_group_offsets(a, &specs?, options),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_list_consumer_group_offsets_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// alterConsumerGroupOffsets
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-partition failure
+/// arrives inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Commits offsets on behalf of a consumer group, blocking until every
+/// per-partition future has resolved (synchronous).
+///
+/// This is
+/// `alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
+///
+/// On success writes a [`kafka_admin_AlterConsumerGroupOffsetsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`]) and returns null.
+/// **A per-partition failure is not a call failure**: it is reported by
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] for that key. A
+/// non-null return means the request could not be submitted at all — or that
+/// `count` was 0, in which case there is no per-key slot for the outcome and
+/// the whole-request error is returned instead, mirroring Java, where `all()`
+/// is then the only observable.
+///
+/// # Parameters
+///
+/// - `group_id`: the consumer group whose offsets are being committed.
+/// - `topics` / `partitions` / `offsets`: parallel arrays of `count` entries;
+///   entry `i` commits `offsets[i]` for `(topics[i], partitions[i])`. A NULL
+///   topic or a negative offset is rejected, the latter mirroring Java's
+///   `OffsetAndMetadata` constructor.
+/// - `metadata`: per entry, the commit metadata, or NULL for Java's null
+///   metadata (which its constructor normalises to `""`). The whole array may
+///   also be NULL.
+/// - `leader_epochs` / `has_leader_epoch`: per entry, Java's
+///   `Optional<Integer> leaderEpoch`. The flag is the discriminant, so epoch 0
+///   stays distinguishable from an absent epoch; `leader_epochs[i]` is read
+///   only when `has_leader_epoch[i]` is true.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_id` must be a valid C string; every
+/// non-null array must have `count` valid entries; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    group_id: *const c_char,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    metadata: *const *const c_char,
+    leader_epochs: *const i32,
+    has_leader_epoch: *const bool,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let parsed = unsafe {
+        read_alter_group_offsets(topics, partitions, offsets, metadata, leader_epochs, has_leader_epoch, count)
+    };
+    let options = alter_consumer_group_offsets_options(timeout_ms);
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            Ok(submit_alter_consumer_group_offsets(a, &group?, &parsed?, options))
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_alter_consumer_group_offsets_result) }
+}
+
+/// Commits consumer group offsets asynchronously. See
+/// [`kafka_admin_AdminClient_alter_consumer_group_offsets`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL `group_id`, a NULL topic
+/// entry, or a negative offset). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
+/// Destroying the handle does not cause that — an outstanding operation holds
+/// its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread. Do
+/// not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_id` must be a valid C string; every
+/// non-null array must have `count` valid entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_id: *const c_char,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    metadata: *const *const c_char,
+    leader_epochs: *const i32,
+    has_leader_epoch: *const bool,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t,
+    user_data: *mut c_void,
+) {
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let parsed = unsafe {
+        read_alter_group_offsets(topics, partitions, offsets, metadata, leader_epochs, has_leader_epoch, count)
+    };
+    let options = alter_consumer_group_offsets_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_alter_consumer_group_offsets(a, &group?, &parsed?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_alter_consumer_group_offsets_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// deleteConsumerGroupOffsets
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-partition failure
+/// arrives inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Deletes committed offsets for a set of partitions in a consumer group,
+/// blocking until every per-partition future has resolved (synchronous).
+///
+/// This is
+/// `deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
+///
+/// On success writes a [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`]) and returns null.
+/// **A per-partition failure is not a call failure**: it is reported by
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] for that key. A
+/// non-null return means the request could not be submitted at all — or that
+/// `count` was 0, in which case there is no per-key slot for the outcome and
+/// the whole-request error is returned instead.
+///
+/// # Parameters
+///
+/// - `group_id`: the consumer group whose offsets are being deleted.
+/// - `topics` / `partitions` / `count`: parallel arrays; entry `i` is
+///   `(topics[i], partitions[i])`. An entry with a NULL topic is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///   `DeleteConsumerGroupOffsetsOptions` has no other field in Java.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_id` must be a valid C string;
+/// `topics` and `partitions` must be null or have `count` valid entries each;
+/// `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    group_id: *const c_char,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let selection: HashSet<TopicPartition> = unsafe { read_topic_partitions(topics, partitions, count) }
+        .into_iter()
+        .collect();
+    let options = delete_consumer_group_offsets_options(timeout_ms);
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            submit_delete_consumer_group_offsets(a, &group?, &selection, options)
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_delete_consumer_group_offsets_result) }
+}
+
+/// Deletes consumer group offsets asynchronously. See
+/// [`kafka_admin_AdminClient_delete_consumer_group_offsets`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_id` must be a valid C string;
+/// `topics` and `partitions` must be null or have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_id: *const c_char,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t,
+    user_data: *mut c_void,
+) {
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let selection: HashSet<TopicPartition> = unsafe { read_topic_partitions(topics, partitions, count) }
+        .into_iter()
+        .collect();
+    let options = delete_consumer_group_offsets_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_delete_consumer_group_offsets(a, &group?, &selection, options),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_delete_consumer_group_offsets_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// deleteConsumerGroups
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_delete_consumer_groups_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DeleteConsumerGroupsResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. A per-group failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_delete_consumer_groups_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Deletes consumer groups, blocking until every per-group future has resolved
+/// (synchronous).
+///
+/// This is
+/// `deleteConsumerGroups(Collection<String>, DeleteConsumerGroupsOptions)`.
+///
+/// On success writes a [`kafka_admin_DeleteConsumerGroupsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DeleteConsumerGroupsResult_destroy`]) and returns null.
+/// **A per-group failure is not a call failure**: it is reported by
+/// [`kafka_admin_DeleteConsumerGroupsResult_get_error`] for that key. A
+/// non-null return means the request could not be submitted at all.
+///
+/// # Parameters
+///
+/// - `group_ids` / `count`: the group ids to delete. A NULL entry is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///   `DeleteConsumerGroupsOptions` has no other field in Java.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids` must be null or have `count`
+/// entries, each NULL or a valid C string; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DeleteConsumerGroupsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let ids = unsafe { read_strings(group_ids, count) };
+    let options = delete_consumer_groups_options(timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_consumer_groups(a, &ids, options))) };
+    unsafe { finish_sync(outcome, out_result, box_delete_consumer_groups_result) }
+}
+
+/// Deletes consumer groups asynchronously. See
+/// [`kafka_admin_AdminClient_delete_consumer_groups`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_ids` must be null or have `count`
+/// entries, each NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_ids: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_delete_consumer_groups_callback_t,
+    user_data: *mut c_void,
+) {
+    let ids = unsafe { read_strings(group_ids, count) };
+    let options = delete_consumer_groups_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_delete_consumer_groups(a, &ids, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_delete_consumer_groups_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// removeMembersFromConsumerGroup
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]
+/// or `error` with `kafka_common_KafkaError_destroy`. A per-member failure
+/// arrives inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Removes members from a consumer group, blocking until every per-member
+/// future has resolved (synchronous).
+///
+/// This is
+/// `removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)`.
+///
+/// On success writes a
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`] to `*out_result`
+/// (free it with
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]) and returns
+/// null. **A per-member failure is not a call failure**: it is reported by
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_get_error`] for that
+/// member. A non-null return means the request could not be submitted at all —
+/// or that `remove_all` was true, where Java exposes no per-member outcome at
+/// all and `all()` is the only observable, so the result handle is empty and
+/// any failure is returned here.
+///
+/// # Parameters
+///
+/// - `group_id`: the consumer group to remove members from.
+/// - `remove_all`: pass `true` for Java's no-argument
+///   `RemoveMembersFromConsumerGroupOptions()` constructor, i.e. "remove every
+///   member of the group"; `group_instance_ids` and `member_count` are then
+///   ignored. Pass `false` to remove only the listed members. An explicit flag
+///   rather than an empty array, because Java's `Collection` constructor
+///   *rejects* an empty collection
+///   (`IllegalArgumentException("Invalid empty members has been provided")`),
+///   so an empty array must not silently mean "remove everything".
+/// - `group_instance_ids` / `member_count`: the static members to remove, by
+///   `group.instance.id`. A NULL entry is skipped; if that leaves none and
+///   `remove_all` is false, Java's empty-members
+///   `IllegalArgumentException` is returned.
+/// - `reason`: Java's `RemoveMembersFromConsumerGroupOptions.reason(String)`,
+///   or NULL to leave it unset.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_id` must be a valid C string; unless
+/// `remove_all` is true, `group_instance_ids` must be null or have
+/// `member_count` entries, each NULL or a valid C string; `reason` must be null
+/// or a valid C string; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_group(
+    admin: *const kafka_admin_AdminClient_t,
+    group_id: *const c_char,
+    remove_all: bool,
+    group_instance_ids: *const *const c_char,
+    member_count: i32,
+    reason: *const c_char,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| submit_remove_members_from_consumer_group(a, &group?, options?)) };
+    unsafe { finish_sync(outcome, out_result, box_remove_members_from_consumer_group_result) }
+}
+
+/// Removes members from a consumer group asynchronously. See
+/// [`kafka_admin_AdminClient_remove_members_from_consumer_group`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL `group_id`, or `remove_all`
+/// false with no group instance id supplied). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when the result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks are not guaranteed to be serialised
+/// on one thread. Do not hold a lock across this call and re-acquire it in the
+/// callback, and publish everything the callback needs (including `user_data`)
+/// before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `group_id` must be a valid C string; unless
+/// `remove_all` is true, `group_instance_ids` must be null or have
+/// `member_count` entries, each NULL or a valid C string; `reason` must be null
+/// or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+    admin: *const kafka_admin_AdminClient_t,
+    group_id: *const c_char,
+    remove_all: bool,
+    group_instance_ids: *const *const c_char,
+    member_count: i32,
+    reason: *const c_char,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t,
+    user_data: *mut c_void,
+) {
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_remove_members_from_consumer_group(a, &group?, options?),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_remove_members_from_consumer_group_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
 // MockAdminClient drivers
 //
 // Mock-only configuration methods (inherent on `MockAdminClient`, not part of
@@ -8214,7 +12127,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
 // drivers. They take the same handle and return an error if it does not wrap a
 // mock.
 //
-// Only the drivers the B1 topic RPCs can exercise are exposed. `add_topic` and
+// A driver is exposed once a landed slice's tests need it. `add_topic` and
 // `mark_topic_for_deletion` additionally need `TopicPartitionInfo` input
 // marshaling and a non-panicking Rust surface (both currently `panic!` on
 // duplicate/missing topics, mirroring Java's `IllegalArgumentException`, which
@@ -8335,6 +12248,46 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     }
 }
 
+/// Seeds the committed offsets the mock's `listConsumerGroupOffsets` reports.
+///
+/// Mirrors `MockAdminClient.updateConsumerGroupOffsets(Map<TopicPartition, Long>)`
+/// (`MockAdminClient.java:1493-1495`), which **merges** into rather than
+/// replaces the existing map. Entry `i` is
+/// `(topics[i], partitions[i]) -> offsets[i]`; an entry with a NULL topic is
+/// skipped.
+///
+/// `MockAdminClient` keys its committed offsets by partition only and ignores
+/// the group id — its `listConsumerGroupOffsets` answers every request from one
+/// shared map, and throws `UnsupportedOperationException` for more than one
+/// requested group (`MockAdminClient.java:748-760`) — so there is no group
+/// parameter here. The production client has no such restriction.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle if `admin` does not wrap a mock
+/// (free it with `kafka_common_KafkaError_destroy`).
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    count: i32,
+) -> *mut kafka_common_KafkaError_t {
+    match unsafe { mock_ref(admin) } {
+        Ok(mock) => {
+            mock.update_consumer_group_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
+    }
+}
+
 /// Reads `count` `(topic, partition) -> offset` triples, skipping entries whose
 /// topic is NULL.
 ///
@@ -8390,7 +12343,7 @@ unsafe fn read_partition_offsets(
 mod tests {
     use super::*;
     use crate::admin::{ConfigSynonym, ReplicaInfo};
-    use crate::common::{Errors, KafkaGenericError};
+    use crate::common::{ClassicGroupState, Errors, KafkaGenericError};
 
     fn text(value: &CString) -> &str {
         value.to_str().expect("CString holds UTF-8")
@@ -9093,6 +13046,846 @@ mod tests {
             assert!(kafka_admin_ListOffsetsResult_get_value(result, 3).is_null());
             assert!(kafka_admin_ListOffsetsResult_get_error(result, -1).is_null());
             kafka_admin_ListOffsetsResult_destroy(result);
+        }
+    }
+
+    // -- B4: group option builders, input marshaling and flatteners ---------
+
+    /// Builds the `*const *const c_char` array a C caller would pass.
+    fn c_strings(values: &[&str]) -> Vec<CString> {
+        values.iter().map(|v| CString::new(*v).unwrap()).collect()
+    }
+
+    fn c_ptrs(values: &[CString]) -> Vec<*const c_char> {
+        values.iter().map(|v| v.as_ptr()).collect()
+    }
+
+    #[test]
+    fn list_groups_options_routes_each_array_to_its_own_filter() {
+        // Deliberately different lengths and values, so swapping any two of the
+        // three arrays at the call site changes at least one assertion.
+        let states = c_strings(&["Stable"]);
+        let protocols = c_strings(&["consumer", "connect"]);
+        let types = c_strings(&["Classic", "Consumer", "Share"]);
+        let (sp, pp, tp) = (c_ptrs(&states), c_ptrs(&protocols), c_ptrs(&types));
+
+        let options = unsafe { list_groups_options(sp.as_ptr(), 1, pp.as_ptr(), 2, tp.as_ptr(), 3, 7_000) };
+        assert_eq!(options.group_states(), &HashSet::from([GroupState::Stable]));
+        assert_eq!(
+            options.protocol_types(),
+            &HashSet::from(["consumer".to_string(), "connect".to_string()])
+        );
+        assert_eq!(
+            options.types(),
+            &HashSet::from([GroupType::Classic, GroupType::Consumer, GroupType::Share])
+        );
+        assert_eq!(options.timeout(), Some(7_000));
+
+        // Null arrays leave every filter empty, i.e. "everything".
+        let options = unsafe { list_groups_options(std::ptr::null(), 0, std::ptr::null(), 0, std::ptr::null(), 0, -1) };
+        assert!(options.group_states().is_empty());
+        assert!(options.protocol_types().is_empty());
+        assert!(options.types().is_empty());
+        assert_eq!(options.timeout(), None);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn list_consumer_groups_options_routes_each_array_to_its_own_filter() {
+        let states = c_strings(&["Empty"]);
+        let types = c_strings(&["Consumer", "Classic"]);
+        let (sp, tp) = (c_ptrs(&states), c_ptrs(&types));
+
+        let options = unsafe { list_consumer_groups_options(sp.as_ptr(), 1, tp.as_ptr(), 2, 8_000) };
+        assert_eq!(options.group_states(), &HashSet::from([GroupState::Empty]));
+        assert_eq!(options.types(), &HashSet::from([GroupType::Consumer, GroupType::Classic]));
+        assert_eq!(options.timeout(), Some(8_000));
+    }
+
+    #[test]
+    fn read_group_states_matches_java_parse_including_the_unknown_fallback() {
+        // Java's `GroupState.parse` upper-cases before lookup and falls back to
+        // UNKNOWN, so casing is irrelevant and a bogus name is not an error.
+        let names = c_strings(&["stable", "PREPARINGREBALANCE", "NotReady", "not-a-state"]);
+        let ptrs = c_ptrs(&names);
+        let parsed = unsafe { read_group_states(ptrs.as_ptr(), 4) };
+        assert_eq!(
+            parsed,
+            HashSet::from([
+                GroupState::Stable,
+                GroupState::PreparingRebalance,
+                GroupState::NotReady,
+                GroupState::Unknown,
+            ])
+        );
+    }
+
+    #[test]
+    fn read_group_types_matches_java_parse_including_the_unknown_fallback() {
+        let names = c_strings(&["CONSUMER", "streams", "nope"]);
+        let ptrs = c_ptrs(&names);
+        let parsed = unsafe { read_group_types(ptrs.as_ptr(), 3) };
+        assert_eq!(
+            parsed,
+            HashSet::from([GroupType::Consumer, GroupType::Streams, GroupType::Unknown])
+        );
+    }
+
+    #[test]
+    fn describe_group_options_map_each_flag_to_its_own_field() {
+        let options = describe_consumer_groups_options(1_500, true);
+        assert_eq!(options.timeout(), Some(1_500));
+        assert!(options.should_include_authorized_operations());
+        let options = describe_consumer_groups_options(-1, false);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_include_authorized_operations());
+
+        let options = describe_classic_groups_options(2_500, true);
+        assert_eq!(options.timeout(), Some(2_500));
+        assert!(options.should_include_authorized_operations());
+        let options = describe_classic_groups_options(-1, false);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_include_authorized_operations());
+    }
+
+    #[test]
+    fn list_consumer_group_offsets_options_maps_each_flag_to_its_own_field() {
+        let options = list_consumer_group_offsets_options(9_000, true);
+        assert_eq!(options.timeout(), Some(9_000));
+        assert!(options.should_require_stable());
+
+        let options = list_consumer_group_offsets_options(-1, false);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.should_require_stable());
+    }
+
+    #[test]
+    fn single_field_group_options_carry_only_the_timeout() {
+        assert_eq!(alter_consumer_group_offsets_options(11_000).timeout(), Some(11_000));
+        assert_eq!(alter_consumer_group_offsets_options(-1).timeout(), None);
+        assert_eq!(delete_consumer_group_offsets_options(12_000).timeout(), Some(12_000));
+        assert_eq!(delete_consumer_group_offsets_options(-1).timeout(), None);
+        assert_eq!(delete_consumer_groups_options(13_000).timeout(), Some(13_000));
+        assert_eq!(delete_consumer_groups_options(-1).timeout(), None);
+    }
+
+    #[test]
+    fn remove_members_options_distinguishes_remove_all_from_a_member_list() {
+        let ids = c_strings(&["instance-1", "instance-2"]);
+        let ptrs = c_ptrs(&ids);
+        let reason = CString::new("rolling restart").unwrap();
+
+        let options =
+            unsafe { remove_members_options(false, ptrs.as_ptr(), 2, reason.as_ptr(), 14_000) }.expect("valid members");
+        assert!(!options.remove_all());
+        assert_eq!(
+            options.members(),
+            &HashSet::from([MemberToRemove::new("instance-1"), MemberToRemove::new("instance-2")])
+        );
+        assert_eq!(options.reason_value(), Some("rolling restart"));
+        assert_eq!(options.timeout(), Some(14_000));
+
+        // `remove_all` ignores the member array entirely: Java's no-argument
+        // constructor. A NULL reason leaves it unset.
+        let options = unsafe { remove_members_options(true, ptrs.as_ptr(), 2, std::ptr::null(), -1) }
+            .expect("remove-all is always valid");
+        assert!(options.remove_all());
+        assert!(options.members().is_empty());
+        assert_eq!(options.reason_value(), None);
+        assert_eq!(options.timeout(), None);
+    }
+
+    #[test]
+    fn remove_members_options_rejects_an_empty_member_list() {
+        // Java's `RemoveMembersFromConsumerGroupOptions(Collection)` throws for
+        // an empty collection, so an empty array must not silently mean
+        // "remove everything".
+        let error = unsafe { remove_members_options(false, std::ptr::null(), 0, std::ptr::null(), -1) }
+            .expect_err("empty members is rejected");
+        assert_eq!(error.message(), "Invalid empty members has been provided");
+    }
+
+    #[test]
+    fn read_group_offsets_specs_gives_each_group_its_own_selection() {
+        let group_names = c_strings(&["g-all", "g-some"]);
+        let group_ptrs = c_ptrs(&group_names);
+        let all_partitions = [true, false];
+
+        let some_topics = c_strings(&["t1", "t2"]);
+        let some_topic_ptrs = c_ptrs(&some_topics);
+        let some_partitions = [3i32, 4];
+        // The first group is in `all_partitions` mode, so its arrays are never
+        // read; NULL proves it.
+        let topics: [*const *const c_char; 2] = [std::ptr::null(), some_topic_ptrs.as_ptr()];
+        let partitions: [*const i32; 2] = [std::ptr::null(), some_partitions.as_ptr()];
+        let counts = [0i32, 2];
+
+        let specs = unsafe {
+            read_group_offsets_specs(
+                group_ptrs.as_ptr(),
+                all_partitions.as_ptr(),
+                topics.as_ptr(),
+                partitions.as_ptr(),
+                counts.as_ptr(),
+                2,
+            )
+        }
+        .expect("well-formed request");
+        assert_eq!(specs.len(), 2);
+        // Java's unset `topicPartitions()`: every partition.
+        assert_eq!(specs["g-all"].get_topic_partitions(), None);
+        assert_eq!(
+            specs["g-some"].get_topic_partitions(),
+            Some([TopicPartition::new("t1", 3), TopicPartition::new("t2", 4)].as_slice())
+        );
+    }
+
+    #[test]
+    fn read_group_offsets_specs_rejects_a_null_or_duplicate_group_id() {
+        let all_partitions = [true, true];
+        let good = CString::new("g").unwrap();
+
+        let with_null: [*const c_char; 2] = [good.as_ptr(), std::ptr::null()];
+        let error = unsafe {
+            read_group_offsets_specs(
+                with_null.as_ptr(),
+                all_partitions.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+            )
+        }
+        .expect_err("a null group id is rejected");
+        assert_eq!(error.message(), "group id at index 1 must not be null");
+
+        // Java takes a Map, where the second entry would silently replace the
+        // first, so a duplicate is a marshaling error rather than a silent drop.
+        let duplicated: [*const c_char; 2] = [good.as_ptr(), good.as_ptr()];
+        let error = unsafe {
+            read_group_offsets_specs(
+                duplicated.as_ptr(),
+                all_partitions.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+            )
+        }
+        .expect_err("a duplicate group id is rejected");
+        assert_eq!(error.message(), "group id `g` appears more than once at index 1");
+    }
+
+    #[test]
+    fn read_alter_group_offsets_keeps_the_leader_epoch_flag_load_bearing() {
+        let topics = c_strings(&["t", "t"]);
+        let topic_ptrs = c_ptrs(&topics);
+        let partitions = [0i32, 1];
+        let offsets = [10i64, 20];
+        let meta = c_strings(&["first", "second"]);
+        let meta_ptrs = c_ptrs(&meta);
+        // Identical epoch values with opposite flags: the flag, not the value,
+        // has to decide. Epoch 0 is a real epoch, which a sentinel could not
+        // express.
+        let epochs = [0i32, 0];
+        let has_epoch = [true, false];
+
+        let parsed = unsafe {
+            read_alter_group_offsets(
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                offsets.as_ptr(),
+                meta_ptrs.as_ptr(),
+                epochs.as_ptr(),
+                has_epoch.as_ptr(),
+                2,
+            )
+        }
+        .expect("well-formed offsets");
+
+        let first = &parsed[&TopicPartition::new("t", 0)];
+        assert_eq!(first.offset(), 10);
+        assert_eq!(first.metadata(), "first");
+        assert_eq!(first.leader_epoch(), Some(0));
+
+        let second = &parsed[&TopicPartition::new("t", 1)];
+        assert_eq!(second.offset(), 20);
+        assert_eq!(second.metadata(), "second");
+        assert_eq!(second.leader_epoch(), None);
+    }
+
+    #[test]
+    fn read_alter_group_offsets_maps_null_metadata_to_the_empty_string() {
+        let topics = c_strings(&["t"]);
+        let topic_ptrs = c_ptrs(&topics);
+        let partitions = [0i32];
+        let offsets = [7i64];
+        let meta: [*const c_char; 1] = [std::ptr::null()];
+
+        let parsed = unsafe {
+            read_alter_group_offsets(
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                offsets.as_ptr(),
+                meta.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        }
+        .expect("well-formed offsets");
+        // Java's `OffsetAndMetadata` constructor normalises null metadata to "".
+        assert_eq!(parsed[&TopicPartition::new("t", 0)].metadata(), "");
+    }
+
+    #[test]
+    fn read_alter_group_offsets_rejects_a_null_topic_and_a_negative_offset() {
+        let partitions = [0i32];
+        let offsets = [-1i64];
+        let null_topic: [*const c_char; 1] = [std::ptr::null()];
+        let error = unsafe {
+            read_alter_group_offsets(
+                null_topic.as_ptr(),
+                partitions.as_ptr(),
+                offsets.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        }
+        .expect_err("a null topic is rejected");
+        assert_eq!(error.message(), "topic at index 0 must not be null");
+
+        let topics = c_strings(&["t"]);
+        let topic_ptrs = c_ptrs(&topics);
+        let error = unsafe {
+            read_alter_group_offsets(
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                offsets.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        }
+        .expect_err("a negative offset is rejected");
+        // Java's `OffsetAndMetadata` constructor throws for a negative offset
+        // with exactly this message; the index prefix tells a C caller which
+        // array entry was at fault, which a Java `Map` call site does not need.
+        assert_eq!(error.message(), "offset at index 0: Invalid negative offset");
+    }
+
+    #[test]
+    fn read_required_string_rejects_null_and_names_the_parameter() {
+        let error = unsafe { read_required_string(std::ptr::null(), "group_id") }.expect_err("null is rejected");
+        assert_eq!(error.message(), "group_id must not be null");
+        let good = CString::new("g1").unwrap();
+        assert_eq!(unsafe { read_required_string(good.as_ptr(), "group_id") }.unwrap(), "g1");
+    }
+
+    // -- B4 flatteners ------------------------------------------------------
+
+    /// A member with every optional field populated, so a transposition between
+    /// two same-typed accessors changes an assertion.
+    fn member_fixture() -> MemberDescription {
+        MemberDescription::new(
+            "consumer-7",
+            Some("instance-7".to_string()),
+            Some("rack-7".to_string()),
+            "client-7",
+            "host-7",
+            MemberAssignment::new(HashSet::from([TopicPartition::new("tb", 1), TopicPartition::new("ta", 0)])),
+            Some(MemberAssignment::new(HashSet::from([TopicPartition::new("tc", 2)]))),
+            Some(17),
+            Some(true),
+        )
+    }
+
+    #[test]
+    fn member_description_exposes_every_field_and_both_assignments() {
+        let inner = MemberDescriptionInner::new(&member_fixture());
+        let member = &inner as *const MemberDescriptionInner as *const kafka_admin_MemberDescription_t;
+        unsafe {
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberDescription_consumer_id(member)).to_str(),
+                Ok("consumer-7")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberDescription_group_instance_id(member)).to_str(),
+                Ok("instance-7")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberDescription_rack_id(member)).to_str(),
+                Ok("rack-7")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberDescription_client_id(member)).to_str(),
+                Ok("client-7")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberDescription_host(member)).to_str(),
+                Ok("host-7")
+            );
+
+            // The current assignment is sorted by (topic, partition).
+            let assignment = kafka_admin_MemberDescription_assignment(member);
+            assert_eq!(kafka_admin_MemberAssignment_count(assignment), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberAssignment_get_topic(assignment, 0)).to_str(),
+                Ok("ta")
+            );
+            assert_eq!(kafka_admin_MemberAssignment_get_partition(assignment, 0), 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberAssignment_get_topic(assignment, 1)).to_str(),
+                Ok("tb")
+            );
+            assert_eq!(kafka_admin_MemberAssignment_get_partition(assignment, 1), 1);
+            assert!(kafka_admin_MemberAssignment_get_topic(assignment, 2).is_null());
+            assert_eq!(kafka_admin_MemberAssignment_get_partition(assignment, -1), -1);
+
+            // The target assignment is a *different* handle with different
+            // contents, so returning the wrong one is caught.
+            let target = kafka_admin_MemberDescription_target_assignment(member);
+            assert!(!target.is_null());
+            assert_eq!(kafka_admin_MemberAssignment_count(target), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_MemberAssignment_get_topic(target, 0)).to_str(),
+                Ok("tc")
+            );
+            assert_eq!(kafka_admin_MemberAssignment_get_partition(target, 0), 2);
+
+            let mut epoch = -99i32;
+            assert!(kafka_admin_MemberDescription_member_epoch(member, &mut epoch));
+            assert_eq!(epoch, 17);
+            let mut upgraded = false;
+            assert!(kafka_admin_MemberDescription_upgraded(member, &mut upgraded));
+            assert!(upgraded);
+        }
+    }
+
+    #[test]
+    fn member_description_reports_absent_optionals_as_null_or_false() {
+        let member = MemberDescription::new(
+            "c",
+            None,
+            None,
+            "cid",
+            "h",
+            MemberAssignment::new(HashSet::new()),
+            None,
+            None,
+            None,
+        );
+        let inner = MemberDescriptionInner::new(&member);
+        let ptr = &inner as *const MemberDescriptionInner as *const kafka_admin_MemberDescription_t;
+        unsafe {
+            assert!(kafka_admin_MemberDescription_group_instance_id(ptr).is_null());
+            assert!(kafka_admin_MemberDescription_rack_id(ptr).is_null());
+            // An absent target assignment is a null handle, distinct from a
+            // present-but-empty one (the current assignment below).
+            assert!(kafka_admin_MemberDescription_target_assignment(ptr).is_null());
+            let assignment = kafka_admin_MemberDescription_assignment(ptr);
+            assert!(!assignment.is_null());
+            assert_eq!(kafka_admin_MemberAssignment_count(assignment), 0);
+
+            let mut epoch = -99i32;
+            assert!(!kafka_admin_MemberDescription_member_epoch(ptr, &mut epoch));
+            assert_eq!(epoch, -99);
+            let mut upgraded = true;
+            assert!(!kafka_admin_MemberDescription_upgraded(ptr, &mut upgraded));
+            assert!(upgraded);
+            // A null out-param is tolerated.
+            assert!(!kafka_admin_MemberDescription_member_epoch(ptr, std::ptr::null_mut()));
+            assert!(!kafka_admin_MemberDescription_upgraded(ptr, std::ptr::null_mut()));
+        }
+    }
+
+    #[test]
+    fn describe_consumer_groups_result_carries_values_and_errors_per_group() {
+        let description = ConsumerGroupDescription::new(
+            "g-ok",
+            false,
+            vec![member_fixture()],
+            "range",
+            GroupType::Consumer,
+            GroupState::Stable,
+            Some(Node::new(3, "h3".to_string(), 9093)),
+            BTreeSet::from([AclOperation::Describe, AclOperation::Read]),
+            Some(11),
+            Some(12),
+        );
+        let outcomes = HashMap::from([
+            ("g-ok".to_string(), Ok(description)),
+            ("g-bad".to_string(), Err(KafkaError::new(Errors::GroupIdNotFound))),
+        ]);
+        let result = box_describe_consumer_groups_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeConsumerGroupsResult_count(result), 2);
+            // Sorted by group id: "g-bad" then "g-ok".
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 0)).to_str(),
+                Ok("g-bad")
+            );
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_value(result, 0).is_null());
+            let error = kafka_admin_DescribeConsumerGroupsResult_get_error(result, 0);
+            assert_eq!(
+                common::kafka_common_KafkaError_code(error),
+                Errors::GroupIdNotFound.code() as i32
+            );
+
+            let value = kafka_admin_DescribeConsumerGroupsResult_get_value(result, 1);
+            assert!(!value.is_null());
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_error(result, 1).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_group_id(value)).to_str(),
+                Ok("g-ok")
+            );
+            assert!(!kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(value));
+            assert_eq!(kafka_admin_ConsumerGroupDescription_member_count(value), 1);
+            assert!(!kafka_admin_ConsumerGroupDescription_get_member(value, 0).is_null());
+            assert!(kafka_admin_ConsumerGroupDescription_get_member(value, 1).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_partition_assignor(value)).to_str(),
+                Ok("range")
+            );
+            // `type()`, `state()` and `groupState()` are three distinct strings.
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_group_type(value)).to_str(),
+                Ok("Consumer")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_state(value)).to_str(),
+                Ok("Stable")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_group_state(value)).to_str(),
+                Ok("Stable")
+            );
+            assert!(!kafka_admin_ConsumerGroupDescription_coordinator(value).is_null());
+            assert_eq!(kafka_admin_ConsumerGroupDescription_authorized_operation_count(value), 2);
+            assert_eq!(
+                kafka_admin_ConsumerGroupDescription_authorized_operation(value, 0),
+                i32::from(AclOperation::Read.code())
+            );
+            assert_eq!(kafka_admin_ConsumerGroupDescription_authorized_operation(value, 2), -1);
+
+            // Distinct epoch values catch a transposition between the two.
+            let mut epoch = -99i32;
+            assert!(kafka_admin_ConsumerGroupDescription_group_epoch(value, &mut epoch));
+            assert_eq!(epoch, 11);
+            assert!(kafka_admin_ConsumerGroupDescription_target_assignment_epoch(value, &mut epoch));
+            assert_eq!(epoch, 12);
+
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 2).is_null());
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_error(result, -1).is_null());
+            kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn describe_classic_groups_result_carries_protocol_and_protocol_data() {
+        let description = ClassicGroupDescription::new(
+            "cg",
+            "consumer",
+            "range",
+            vec![member_fixture()],
+            ClassicGroupState::Stable,
+            Some(Node::new(1, "h1".to_string(), 9091)),
+            BTreeSet::from([AclOperation::Delete]),
+        );
+        let outcomes = HashMap::from([("cg".to_string(), Ok(description))]);
+        let result = box_describe_classic_groups_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeClassicGroupsResult_count(result), 1);
+            let value = kafka_admin_DescribeClassicGroupsResult_get_value(result, 0);
+            assert!(!value.is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ClassicGroupDescription_group_id(value)).to_str(),
+                Ok("cg")
+            );
+            // `protocol` and `protocolData` are different strings, so swapping
+            // them at the call site fails here.
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ClassicGroupDescription_protocol(value)).to_str(),
+                Ok("consumer")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ClassicGroupDescription_protocol_data(value)).to_str(),
+                Ok("range")
+            );
+            assert!(!kafka_admin_ClassicGroupDescription_is_simple_consumer_group(value));
+            assert_eq!(kafka_admin_ClassicGroupDescription_member_count(value), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ClassicGroupDescription_state(value)).to_str(),
+                Ok("Stable")
+            );
+            assert!(!kafka_admin_ClassicGroupDescription_coordinator(value).is_null());
+            assert_eq!(kafka_admin_ClassicGroupDescription_authorized_operation_count(value), 1);
+            assert_eq!(
+                kafka_admin_ClassicGroupDescription_authorized_operation(value, 0),
+                i32::from(AclOperation::Delete.code())
+            );
+            assert!(kafka_admin_DescribeClassicGroupsResult_get_error(result, 0).is_null());
+            kafka_admin_DescribeClassicGroupsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn list_groups_result_keeps_the_valid_and_error_lists_independent() {
+        // Deliberately different lengths: two listings, one error. A caller who
+        // indexed the errors with the listing count would read past the end.
+        let outcome = (
+            vec![
+                GroupListing::new("g1", Some(GroupType::Consumer), "consumer", Some(GroupState::Stable)),
+                GroupListing::new("g2", None, "consumer", None),
+                GroupListing::new("g3", Some(GroupType::Classic), "", Some(GroupState::Empty)),
+            ],
+            vec![KafkaError::new(Errors::CoordinatorNotAvailable)],
+        );
+        let result = box_list_groups_result(outcome);
+        unsafe {
+            assert_eq!(kafka_admin_ListGroupsResult_valid_count(result), 3);
+            assert_eq!(kafka_admin_ListGroupsResult_error_count(result), 1);
+
+            let first = kafka_admin_ListGroupsResult_get_valid(result, 0);
+            assert_eq!(CStr::from_ptr(kafka_admin_GroupListing_group_id(first)).to_str(), Ok("g1"));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_GroupListing_group_type(first)).to_str(),
+                Ok("Consumer")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_GroupListing_protocol(first)).to_str(),
+                Ok("consumer")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_GroupListing_group_state(first)).to_str(),
+                Ok("Stable")
+            );
+            assert!(!kafka_admin_GroupListing_is_simple_consumer_group(first));
+
+            // Absent `Optional`s are null strings.
+            let second = kafka_admin_ListGroupsResult_get_valid(result, 1);
+            assert_eq!(CStr::from_ptr(kafka_admin_GroupListing_group_id(second)).to_str(), Ok("g2"));
+            assert!(kafka_admin_GroupListing_group_type(second).is_null());
+            assert!(kafka_admin_GroupListing_group_state(second).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_GroupListing_protocol(second)).to_str(),
+                Ok("consumer")
+            );
+            assert!(!kafka_admin_GroupListing_is_simple_consumer_group(second));
+
+            // Java's `isSimpleConsumerGroup()` is "a CLASSIC group with an empty
+            // protocol", so it needs both, not just the empty protocol.
+            let third = kafka_admin_ListGroupsResult_get_valid(result, 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_GroupListing_group_type(third)).to_str(),
+                Ok("Classic")
+            );
+            assert_eq!(CStr::from_ptr(kafka_admin_GroupListing_protocol(third)).to_str(), Ok(""));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_GroupListing_group_state(third)).to_str(),
+                Ok("Empty")
+            );
+            assert!(kafka_admin_GroupListing_is_simple_consumer_group(third));
+
+            let error = kafka_admin_ListGroupsResult_get_error(result, 0);
+            assert_eq!(
+                common::kafka_common_KafkaError_code(error),
+                Errors::CoordinatorNotAvailable.code() as i32
+            );
+            // Index 1 is a valid listing index but not a valid error index.
+            assert!(kafka_admin_ListGroupsResult_get_error(result, 1).is_null());
+            assert!(kafka_admin_ListGroupsResult_get_valid(result, 3).is_null());
+            assert!(kafka_admin_ListGroupsResult_get_valid(result, -1).is_null());
+            kafka_admin_ListGroupsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn list_consumer_groups_result_exposes_both_state_views() {
+        let outcome = (
+            vec![ConsumerGroupListing::new(
+                "cg1",
+                Some(GroupState::Stable),
+                Some(GroupType::Classic),
+                true,
+            )],
+            vec![KafkaError::new(Errors::GroupAuthorizationFailed)],
+        );
+        let result = box_list_consumer_groups_result(outcome);
+        unsafe {
+            assert_eq!(kafka_admin_ListConsumerGroupsResult_valid_count(result), 1);
+            assert_eq!(kafka_admin_ListConsumerGroupsResult_error_count(result), 1);
+            let listing = kafka_admin_ListConsumerGroupsResult_get_valid(result, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupListing_group_id(listing)).to_str(),
+                Ok("cg1")
+            );
+            assert!(kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupListing_group_state(listing)).to_str(),
+                Ok("Stable")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupListing_state(listing)).to_str(),
+                Ok("Stable")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupListing_group_type(listing)).to_str(),
+                Ok("Classic")
+            );
+            let error = kafka_admin_ListConsumerGroupsResult_get_error(result, 0);
+            assert_eq!(
+                common::kafka_common_KafkaError_code(error),
+                Errors::GroupAuthorizationFailed.code() as i32
+            );
+            kafka_admin_ListConsumerGroupsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn list_consumer_group_offsets_result_is_two_level_and_keeps_null_offsets() {
+        let offsets: GroupOffsets = HashMap::from([
+            (
+                TopicPartition::new("ta", 0),
+                Some(OffsetAndMetadata::with_leader_epoch(100, Some(4), "meta-a").unwrap()),
+            ),
+            // Java reports a requested partition the group never committed for
+            // as present with a null value.
+            (TopicPartition::new("tb", 1), None),
+        ]);
+        let outcomes = HashMap::from([
+            ("g-ok".to_string(), Ok(offsets)),
+            ("g-bad".to_string(), Err(KafkaError::unsupported_version("Not implemented yet"))),
+        ]);
+        let result = box_list_consumer_group_offsets_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_ListConsumerGroupOffsetsResult_count(result), 2);
+            // Sorted by group id: "g-bad" then "g-ok".
+            assert!(kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 0).is_null());
+            let error = kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, 0);
+            assert_eq!(
+                CStr::from_ptr(common::kafka_common_KafkaError_message(error)).to_str(),
+                Ok("Not implemented yet")
+            );
+
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(result, 1)).to_str(),
+                Ok("g-ok")
+            );
+            assert!(kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, 1).is_null());
+            let map = kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 1);
+            assert!(!map.is_null());
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_count(map), 2);
+
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_OffsetAndMetadataMap_get_topic(map, 0)).to_str(),
+                Ok("ta")
+            );
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_get_partition(map, 0), 0);
+            assert!(kafka_admin_OffsetAndMetadataMap_has_offset(map, 0));
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_get_offset(map, 0), 100);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_OffsetAndMetadataMap_get_metadata(map, 0)).to_str(),
+                Ok("meta-a")
+            );
+            let mut epoch = -99i32;
+            assert!(kafka_admin_OffsetAndMetadataMap_get_leader_epoch(map, 0, &mut epoch));
+            assert_eq!(epoch, 4);
+
+            // The uncommitted partition is present with no offset: `has_offset`
+            // is the discriminant, and the other accessors report absence.
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_OffsetAndMetadataMap_get_topic(map, 1)).to_str(),
+                Ok("tb")
+            );
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_get_partition(map, 1), 1);
+            assert!(!kafka_admin_OffsetAndMetadataMap_has_offset(map, 1));
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_get_offset(map, 1), -1);
+            assert!(kafka_admin_OffsetAndMetadataMap_get_metadata(map, 1).is_null());
+            assert!(!kafka_admin_OffsetAndMetadataMap_get_leader_epoch(map, 1, &mut epoch));
+
+            assert!(!kafka_admin_OffsetAndMetadataMap_has_offset(map, 2));
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_get_partition(map, -1), -1);
+            kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn partition_keyed_void_results_report_success_as_a_null_error() {
+        let outcomes: PartitionVoidOutcomes = HashMap::from([
+            (TopicPartition::new("t", 0), Ok(())),
+            (TopicPartition::new("t", 1), Err(KafkaError::new(Errors::UnknownMemberId))),
+        ]);
+        let altered = box_alter_consumer_group_offsets_result(outcomes.clone());
+        let deleted = box_delete_consumer_group_offsets_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(altered), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(altered, 0)).to_str(),
+                Ok("t")
+            );
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 0), 0);
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 0).is_null());
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 1), 1);
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 1)),
+                Errors::UnknownMemberId.code() as i32
+            );
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 2), -1);
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(altered, -1).is_null());
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+
+            assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_count(deleted), 2);
+            assert!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 0).is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
+                    deleted, 1
+                )),
+                Errors::UnknownMemberId.code() as i32
+            );
+            assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(deleted, -1), -1);
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(deleted);
+        }
+    }
+
+    #[test]
+    fn string_keyed_void_results_report_success_as_a_null_error() {
+        let outcomes: GroupVoidOutcomes = HashMap::from([
+            ("a".to_string(), Ok(())),
+            ("b".to_string(), Err(KafkaError::new(Errors::GroupIdNotFound))),
+        ]);
+        let groups = box_delete_consumer_groups_result(outcomes.clone());
+        let members = box_remove_members_from_consumer_group_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_DeleteConsumerGroupsResult_count(groups), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DeleteConsumerGroupsResult_get_group_id(groups, 0)).to_str(),
+                Ok("a")
+            );
+            assert!(kafka_admin_DeleteConsumerGroupsResult_get_error(groups, 0).is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_DeleteConsumerGroupsResult_get_error(groups, 1)),
+                Errors::GroupIdNotFound.code() as i32
+            );
+            assert!(kafka_admin_DeleteConsumerGroupsResult_get_group_id(groups, 2).is_null());
+            kafka_admin_DeleteConsumerGroupsResult_destroy(groups);
+
+            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(members), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
+                    members, 1
+                ))
+                .to_str(),
+                Ok("b")
+            );
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 0).is_null());
+            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 1).is_null());
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, -1).is_null());
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(members);
         }
     }
 }
