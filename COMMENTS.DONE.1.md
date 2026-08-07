@@ -1410,3 +1410,231 @@ are covered by the Rust FFI unit test but not end to end, because
 
 DoD #10 (hot-path allocation audit) is N/A for Admin per `admin-client.md` §10;
 #11 does not apply. Scope was task 1 plus B4; B5 was not started.
+
+---
+
+# Actor 1 — round 8 resolutions (Critic 1 round 8) + slice B5a
+
+Critic round 8 reported no defects in shipped code. It raised one plan gap
+(LOW 1, already amended by the Manager in `4e32342f`), one adjudication
+(LOW 2), and one tooling proposal (Priority 3). Both actionable items are
+resolved below, followed by the B5a self-review.
+
+## LOW 2 — `describe_identity` vs Java's generated `toString()` — RESOLVED
+
+Fixed locally, as the Critic recommended, in the fixup commit on top of
+`8a77a694`.
+
+`describe_identity` printed two of `MemberIdentity`'s three declared fields and
+did not quote strings, so where Java renders
+
+    MemberIdentity(memberId='', groupInstanceId='inst-1', reason=null)
+
+Rust rendered
+
+    MemberIdentity(memberId=, groupInstanceId=inst-1)
+
+Verified against the submodule rather than the review text:
+`MessageDataGenerator.generateFieldToString` emits, for a string field,
+`"<name>=" + ((<name> == null) ? "null" : "'" + <name> + "'")`, over all of
+`struct.fields()`; `LeaveGroupRequest.json` declares `MemberId`,
+`GroupInstanceId` and `Reason` on `MemberIdentity`. Unknown tagged fields are
+not printed — the generated loop iterates only declared fields.
+
+One thing the fix exposes that the review did not name:
+`MemberToRemove.toMemberIdentity()` sets the member id to `UNKNOWN_MEMBER_ID`,
+the **empty string**, which Java quotes as `''` rather than printing as `null`.
+The empty-versus-null distinction is asserted directly.
+
+Both user-visible messages are now pinned with exact-text assertions instead of
+`contains`, plus a dedicated test of the three renderings (all-default, all-set,
+and empty-but-present nullable strings).
+
+Not attempted, per the Critic's own recommendation: the systematic generator
+fix. `generator/src/lib.rs:1994` emits `Display` as `{:?}` for every message
+struct, so a faithful change there alters the public `Display` of all of them at
+once and must handle each field kind the way `MessageDataGenerator` does. That
+is its own slice.
+
+## Priority 3 — the arity sweep is now a gate — RESOLVED
+
+`cargo xtask check-bindings`, wired into `make verify` and `make
+verify-sandbox`. Reimplemented in Rust rather than ported, per CLAUDE.md #6.
+
+It strips comments, tracks string and character literals, splits arguments on
+depth-zero commas only, concatenates adjacent string literals, and counts
+format units under the correct grammar per function — the two-argument units
+(`s#`, `O&`, `es`), the three-argument `es#`, the parse-only `|`/`$`, the
+`:`/`;` terminators (which are dict separators, not terminators, in a build
+format) and the structural `()[]{}`.
+
+Two decisions worth flagging:
+
+  - **A non-literal format is a failure, not a skip.** A site the gate cannot
+    verify is a hole in the gate. This is not hypothetical — it fired on B5a's
+    own `PyArg_ParseTuple(item, nullable ? "izizzii" : "isissii", ...)`, which
+    is now two literal-format calls.
+  - **The target runs `cargo test -p xtask` first.** `cargo test` at the
+    workspace root only tests the root package, so nothing else exercises the
+    scanner's 21 unit tests. For the same reason `cargo xtask lint`/`lint-fix`
+    now include `-p xtask`; the build tooling had been escaping the lint gate
+    entirely.
+
+**This is a repo-wide gap, not an xtask one — flagging it for the Manager
+rather than fixing it unilaterally.** `cargo test` and `cargo clippy` at the
+workspace root cover only the root package. Every other workspace member
+(`generator`, `xtask`, `consumer-perf`, `multilanguage-test-server`) is in the
+same position. Measured: **`cargo test -p generator` runs 57 unit tests that
+`cargo test` never runs** — the wire-protocol code generator's own suite is in
+no standard gate, and `make test-rust` (`cargo test`) misses them too. Lint is
+narrower but similar: `cargo xtask lint` reaches `generator` only because it
+names that manifest explicitly, and reached nothing else until this slice added
+`-p xtask`. I limited my change to `xtask`, which I had just added 500 lines
+to; whether `test-rust` should become `--workspace` is a Manager call.
+
+Teeth, the way the Critic did it: run against `761da3b2^` it reports exactly
+that revision's one defect —
+`prefix.c:4140 fmt='(sONsssNNNN)' 10 units / 11 args` — and nothing else, and
+exits 1. Against HEAD it inspects 42 `Py_BuildValue` and 144 `PyArg_Parse*`
+sites and finds nothing, independently reproducing the Critic's counts exactly.
+
+It does **not** close the ordering gap, and nothing in this slice claims it
+does.
+
+## Slice B5a — ACLs and client quotas (5 RPCs)
+
+`createAcls`, `describeAcls`, `deleteAcls`, `describeClientQuotas`,
+`alterClientQuotas`. Both a bare sync and an `_async` variant each (D1);
+result handles per the amended D2. `PLAN-bindings.md` §4 records the B5 split.
+
+### Three result shapes, all already in D2's table
+
+  - `Map<K, KafkaFuture<Void>>` → per-key error, no value: `createAcls` (keyed
+    by `AclBinding`), `alterClientQuotas` (keyed by `ClientQuotaEntity`).
+  - One future for the whole call → a listing and **no** `_get_error`; a
+    failure is the call's error: `describeAcls`, `describeClientQuotas`.
+  - `Map<K, KafkaFuture<V>>` where `V` is itself a collection → `deleteAcls`,
+    which needs two index levels: `_get_error(i)` for the filter's own future,
+    and `_get_binding(i, j)` / `_get_result_error(i, j)` over the
+    `FilterResults`. Java's `FilterResult` holds exactly one of a binding or an
+    exception, so for an in-range entry precisely one of the two is non-null.
+
+D2 needs no further amendment for B5a.
+
+### Namespacing: three new `kafka_common_*` types
+
+`AclBinding`, `AclBindingFilter` (`org.apache.kafka.common.acl`) and
+`ClientQuotaEntity` (`.quota`) are `kafka_common_*`, not `kafka_admin_*`. This
+is round 7's rule applied in the direction that *creates* types rather than
+forbidding reuse; the existing precedent is `kafka_common_Node_t` /
+`kafka_common_KafkaError_t`. Naming them `kafka_admin_*` would have repeated
+the `kafka_consumer_TopicPartition_t` error in a second public surface.
+
+All three are **output-only and borrowed**; requests cross as parallel arrays,
+so no handle in the module is both caller-owned and borrowed.
+`AclBinding.pattern()` / `.entry()` are flattened onto the binding, following
+B2's `LogDirDescription.ReplicaInfo`.
+
+### Null-versus-absent, decided per kind rather than uniformly
+
+B3's rule was "give every Java `Optional` an explicit discriminant". Applied
+literally that would add redundant discriminants here, so the sharper rule used
+is:
+
+  - Nullable **string** → a null pointer, no discriminant. It cannot collide
+    with a pointer to `""`, and an empty resource name / principal / host /
+    quota-entity name is a legal, distinct value. Asserted both ways, in Rust,
+    C and Python.
+  - Nullable **number** → an explicit `bool`. `op_has_values[i][j] == false` is
+    Java's `Op(key, null)`, i.e. *remove*; every `double` including 0 is a legal
+    quota value, so no sentinel could carry it. The same reasoning makes
+    `DescribeClientQuotasResult_get_quota_value` an out-param rather than a
+    sentinel return.
+  - A tri-state that is **not** string-nullability → an explicit `int32`. A
+    quota filter component's match is EXACT / DEFAULT / ANY, and DEFAULT and
+    ANY both carry no name, so a null name alone could not separate them — and
+    they differ in equality *and* in the wire match-type byte. The discriminant
+    reuses Kafka's own constants (`MATCH_TYPE_EXACT` 0, `DEFAULT` 1,
+    `SPECIFIED` 2), not invented codes.
+
+The four ACL enums cross as Java `code()` values per the B2 rule, pinned as
+literals by a test.
+
+### Verification
+
+  - **Gates:** `cargo build` both feature settings, `cargo test` (3047),
+    `cargo xtask format-check`, `cargo clippy --all-targets --features ffi -D
+    warnings`, `cargo xtask lint`, `cargo xtask check-bindings`, all six
+    `ctest` binaries, and the Python suite in Docker.
+  - **Header:** regenerated with `--features ffi` (a plain release build
+    silently produces none). All 13 new cbindgen entries resolve; each of the
+    five RPCs has exactly one sync and one `_async` declaration; and all 35
+    `kafka_admin_*_async` declarations — the five new ones included — carry all
+    six clauses of the callback-thread contract at block level, checked after
+    stripping the ` * ` line prefixes.
+  - **Tests:** 21 Rust FFI unit tests (59 → 80 in `ffi::admin`), 21 C tests
+    (117 → 138 in `mock_admin`), and 30 Python tests (113 → 143; 25 functions,
+    one of them a five-case `parametrize` over the constructor rejections).
+  - **Teeth, Rust/C:** five call-site mutations that compile cleanly —
+    transposing principal/host in `AclBindingInner`; swapping the resource-type
+    and pattern-type arrays; swapping the entity-type and entity-name arrays;
+    inverting the `op_has_values` discriminant; and substituting `op_counts`
+    for `entity_counts`. Each failed exactly its own tests. A sixth, deleting
+    the discriminant read outright, was rejected by `unused_variable` instead —
+    which is why the check has to be an argument swap, not a field deletion.
+  - **Teeth, Python:** two mutations. Transposing principal/host in
+    `_acl_binding_rows` failed exactly 3 tests. The second —
+    `float(o.value or 0.0)`, collapsing a `None` op value into `0.0`, i.e.
+    turning *remove this quota* into *set it to zero* — **passed the entire
+    suite**, and that is reported below as a coverage hole I then closed rather
+    than as a badly chosen mutation.
+
+### The Python teeth run found a real coverage hole
+
+Java's mock throws before echoing any op back, so the **outbound** half of
+`alterClientQuotas` had no end-to-end observable at all: nothing in the suite
+could tell "remove this quota" from "set it to 0.0". Earlier slices applied
+round 5's "unit-test the pure flatteners" rule only to the *response*
+direction; this is the same rule owed to the *request* direction.
+
+Fix: the row builders are now pure static methods with their own tests —
+`_acl_binding_rows`, `_acl_filter_rows` and the newly extracted
+`_quota_alteration_rows`. Re-running the same mutation now fails exactly one
+test, `test_quota_alteration_rows_keep_both_nulls`, with
+`('consumer_byte_rate', 0.0) != ('consumer_byte_rate', None)`.
+
+Generalisation for B5b/B6: **for every mock-unsupported RPC, ask what part of
+the request the mock discards** — that part needs a direct test of the row
+builder, because no end-to-end test can reach it.
+
+  - **A fixture correction the teeth found:** the C and Rust
+    `alterClientQuotas` fixtures both used entity counts `(2, 1)` and op counts
+    `(2, 1)`. Identical, so reading one count array where the other belonged
+    would have passed both suites. They are now `(2, 1)` and `(1, 2)`, and that
+    fifth mutation fails both. The lesson is about fixture **shape**, not only
+    fixture values: whenever two arrays of the same C type sit side by side in
+    a signature, their per-row lengths must differ.
+
+### Panic audit
+
+Clean, but traced rather than assumed. `ResourcePatternFilter::matches` **can**
+`panic!` on an unsupported pattern type, but nothing outside its own unit tests
+calls it, so it is unreachable from these entry points.
+`AccessControlEntry::principal()` / `host()` `.expect()` a present value; every
+construction site in the crate goes through `AccessControlEntry::new`, which
+always stores both, and the wire decoders propagate the constructor's `Result`
+rather than unwrapping it.
+
+### What this slice does not claim
+
+Java's own `MockAdminClient` throws for all five RPCs
+(`MockAdminClient.java:806`, `:811`, `:816`, `:1243`, `:1248`), so the success
+path of every drain here is unreachable end to end. The Rust FFI unit tests
+against hand-built fixtures, and the new arity gate, are the coverage those
+paths have; field *order* in the Python tuples rests on review against the
+matching `_to_*` unpacker, which the gate explicitly cannot check.
+
+No core `src/admin/` bug was found, so no scope escalation. DoD #10 (hot-path
+allocation audit) is N/A for Admin per `admin-client.md` §10 — admin calls are
+batch/administrative with no per-record path; #11 does not apply. Scope was
+tasks 1 and 2 only; B5b was not started.
