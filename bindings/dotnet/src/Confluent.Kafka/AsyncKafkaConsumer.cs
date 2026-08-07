@@ -79,8 +79,77 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
         _native.UnsubscribeWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
-        _native.SeekWithCallback(partition.Topic, partition.Partition, offset, cancellationToken);
+    public void Seek(TopicPartition partition, long offset) =>
+        _native.Seek(partition.Topic, partition.Partition, offset);
+
+    /// <inheritdoc/>
+    public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
+        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+
+    /// <inheritdoc/>
+    public long? CurrentLag(TopicPartition partition) =>
+        _native.CurrentLag(partition.Topic, partition.Partition);
+
+    /// <inheritdoc/>
+    public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.AssignWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Pause(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.PauseWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Resume(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.ResumeWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.SeekToBeginningWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SeekToEnd(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.SeekToEndWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default) =>
+        _native.PositionWithCallback(partition, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(offsets, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.CommittedWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default) =>
+        _native.OffsetsForTimesWithCallback(timestampsToSearch, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.BeginningOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.EndOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
+        _native.PartitionsForWithCallback(topic, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default) =>
+        _native.ListTopicsWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
@@ -91,6 +160,21 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer
 
     /// <inheritdoc/>
     public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<string> Subscription() => _native.Subscription();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+
+    /// <inheritdoc/>
+    public void CommitAsync() => _native.CommitAsync();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

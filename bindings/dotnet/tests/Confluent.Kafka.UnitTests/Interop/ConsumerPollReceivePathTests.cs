@@ -48,12 +48,12 @@ public sealed class ConsumerPollReceivePathTests
     // update_fetch_position is skipped when the position is already valid, so no
     // beginning/end-offset reset config is needed — mirrors the canonical Rust
     // mock-poll test's assign→seek→add_record→poll setup).
-    private static async Task<NativeConsumer> MockReadyToPoll(string topic = Topic, int partition = Partition)
+    private static Task<NativeConsumer> MockReadyToPoll(string topic = Topic, int partition = Partition)
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (topic, partition) });
-        await consumer.SeekWithCallback(topic, partition, offset: 0);
-        return consumer;
+        consumer.Seek(topic, partition, offset: 0); // sync (M5/P7) — no await; callers still await the setup Task
+        return Task.FromResult(consumer);
     }
 
     [Fact]

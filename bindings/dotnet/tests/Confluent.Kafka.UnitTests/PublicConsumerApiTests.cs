@@ -68,14 +68,14 @@ public sealed class PublicConsumerApiTests
     }
 
     [Fact]
-    public async Task Seek_UnassignedPartition_FaultsWithKafkaException()
+    public void Seek_UnassignedPartition_ThrowsKafkaException()
     {
-        // Seeking an unassigned partition is a genuine broker-free failure — the void
-        // bridge's error path faults the Task (carried from M3/P1).
+        // Seeking an unassigned partition is a genuine broker-free failure. Seek is now
+        // SYNC (M5/P7), so the failure surfaces as a SYNCHRONOUS KafkaException from the
+        // sync ABI's returned error handle (replacing the old faulted-Task).
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
 
-        await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L), s_deadline));
+        Assert.Throws<KafkaException>(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
     }
 
     [Fact]
@@ -96,11 +96,13 @@ public sealed class PublicConsumerApiTests
     // ---- Seek negative-offset message (§5.3, DoD §3 error-message fidelity) ----
 
     [Fact]
-    public async Task Seek_NegativeOffset_ThrowsExactJavaMessage()
+    public void Seek_NegativeOffset_ThrowsExactJavaMessage()
     {
+        // Q1 = KEEP: the Java-fidelity negative-offset guard (the one place .NET is stricter
+        // than Python). Seek is sync (M5/P7), so this is a synchronous Assert.Throws.
         using AsyncMockConsumer consumer = new AsyncMockConsumer();
 
-        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek(new TopicPartition("t", 0), offset: -1));
 
         Assert.Equal("offset", ex.ParamName);
@@ -111,11 +113,12 @@ public sealed class PublicConsumerApiTests
     public async Task Seek_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
     {
         // The precondition is validated before any native call — a closed consumer still
-        // throws the offset precondition first, not ObjectDisposedException.
+        // throws the offset precondition first, not ObjectDisposedException (the argument
+        // check precedes ThrowIfClosed, Q1).
         AsyncMockConsumer consumer = new AsyncMockConsumer();
         await consumer.DisposeAsync();
 
-        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek(new TopicPartition("t", 0), offset: -3));
         Assert.Equal("offset", ex.ParamName);
     }

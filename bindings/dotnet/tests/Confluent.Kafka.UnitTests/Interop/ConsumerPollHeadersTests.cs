@@ -61,7 +61,7 @@ public sealed class ConsumerPollHeadersTests
         // an empty (shared, non-null) header list. (add_record carries no headers.)
         using NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (Topic, Partition) });
-        await consumer.SeekWithCallback(Topic, Partition, offset: 0);
+        consumer.Seek(Topic, Partition, offset: 0); // sync (M5/P7)
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
         ConsumerRecords records = await consumer.PollWithCallback(s_pollTimeout);
