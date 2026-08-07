@@ -4906,14 +4906,22 @@ static PyObject* consumer_group_description_to_py(const kafka_admin_ConsumerGrou
         return NULL;
     }
     return Py_BuildValue(
-        "(sONsssNNNN)", kafka_admin_ConsumerGroupDescription_group_id(d),
+        // Eleven format units for eleven arguments, in the order
+        // `_to_consumer_group_description` unpacks them:
+        //   s     O          N        s                   s           s
+        //   group is_simple  members  partition_assignor  group_type  state
+        //   s            N            N     N            N
+        //   group_state  coordinator  acls  group_epoch  target_epoch
+        // Worth counting by hand: no test can reach this branch, because Java's
+        // own MockAdminClient throws for describeConsumerGroups, so a wrong
+        // arity would surface only against a real broker.
+        "(sONssssNNNN)", kafka_admin_ConsumerGroupDescription_group_id(d),
         kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(d) ? Py_True : Py_False,
         members, kafka_admin_ConsumerGroupDescription_partition_assignor(d),
         kafka_admin_ConsumerGroupDescription_group_type(d),
         kafka_admin_ConsumerGroupDescription_state(d),
-        // 'N' from here on; the two strings above are copied by 's'.
-        PyUnicode_FromString(kafka_admin_ConsumerGroupDescription_group_state(d)), coordinator,
-        acls, group_epoch, target_epoch);
+        kafka_admin_ConsumerGroupDescription_group_state(d), coordinator, acls, group_epoch,
+        target_epoch);
 }
 
 // (group_id, protocol, protocol_data, is_simple, members, state, coordinator,
