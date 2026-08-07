@@ -90,6 +90,29 @@ public sealed class MockConsumer : IConsumer
         _native.CommitSyncOffsets(offsets);
 
     /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(
+        IReadOnlyCollection<TopicPartition> partitions) => _native.Committed(partitions);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) =>
+        _native.OffsetsForTimes(timestampsToSearch);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions) => _native.BeginningOffsets(partitions);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, long> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions) => _native.EndOffsets(partitions);
+
+    /// <inheritdoc/>
+    public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _native.PartitionsFor(topic);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics() => _native.ListTopics();
+
+    /// <inheritdoc/>
     public void Close() => _native.CloseSync();
 
     /// <inheritdoc/>

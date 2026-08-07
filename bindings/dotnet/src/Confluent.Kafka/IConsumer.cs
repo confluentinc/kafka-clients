@@ -52,12 +52,13 @@ namespace Confluent.Kafka;
 /// wakes it).
 /// </para>
 /// <para>
-/// <b>Additive-growth surface.</b> This is a deliberate <em>subset</em> of Java's
-/// <c>Consumer</c> — the core loop (subscribe / assign / poll / seek / pause / resume /
-/// position / commit / close). The query family (<c>committed</c> / <c>offsetsForTimes</c> /
-/// <c>beginningOffsets</c> / <c>endOffsets</c> / <c>partitionsFor</c> / <c>listTopics</c>)
-/// arrives as <b>additive</b> members on this same interface in a later phase. The binding
-/// is pre-publish with no external implementers, so the interface grows additively.
+/// <b>Additive-growth surface.</b> Grown across two sub-phases: the core loop (subscribe /
+/// assign / poll / seek / pause / resume / position / commit / close) shipped in M5/P8a, and
+/// the query family (<see cref="Committed"/> / <see cref="OffsetsForTimes"/> /
+/// <see cref="BeginningOffsets"/> / <see cref="EndOffsets"/> / <see cref="PartitionsFor"/> /
+/// <see cref="ListTopics"/>) added <b>additively</b> in M5/P8b. Both mirror Java's
+/// synchronous <c>Consumer</c>. The binding is pre-publish with no external implementers, so
+/// the interface can grow additively without a breaking change.
 /// </para>
 /// </remarks>
 public interface IConsumer : IConsumerCommon, IDisposable
@@ -213,6 +214,100 @@ public interface IConsumer : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit failure.</exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
+
+    /// <summary>
+    /// Returns the last committed offset for each of <paramref name="partitions"/> (Java
+    /// <c>committed(Set&lt;TopicPartition&gt;)</c>) — <b>blocks</b> and returns an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}"/>, or throws a
+    /// <see cref="KafkaException"/> on failure. Partitions with no committed offset are
+    /// <b>omitted</b> from the result (an empty dictionary if none are committed).
+    /// </summary>
+    /// <remarks>
+    /// No <c>TimeSpan</c> overload this phase — Java's timed
+    /// <c>committed(Set, Duration)</c> is deferred until the C ABI exposes a timed variant.
+    /// </remarks>
+    /// <param name="partitions">The topic-partitions whose committed offsets to read.</param>
+    /// <returns>The committed offset (and metadata) for each partition that has one.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a committed-query failure.</exception>
+    IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions);
+
+    /// <summary>
+    /// Looks up the offset of the first record at or after each timestamp in
+    /// <paramref name="timestampsToSearch"/> (Java
+    /// <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;)</c>) — <b>blocks</b> and returns an
+    /// owned <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndTimestamp}"/>, or throws a
+    /// <see cref="KafkaException"/> on failure. A <b>negative</b> timestamp is a Kafka-valid
+    /// sentinel (EARLIEST/LATEST) and is passed through, not rejected.
+    /// </summary>
+    /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
+    /// <returns>The first offset at or after each timestamp, per partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported an offsets-for-times failure.</exception>
+    IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch);
+
+    /// <summary>
+    /// Returns the earliest available offset for each of <paramref name="partitions"/> (Java
+    /// <c>beginningOffsets(Collection&lt;TopicPartition&gt;)</c>) — <b>blocks</b> and returns an
+    /// owned <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/>, or throws a
+    /// <see cref="KafkaException"/> on failure.
+    /// </summary>
+    /// <param name="partitions">The topic-partitions whose beginning offsets to read.</param>
+    /// <returns>The earliest available offset for each partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a beginning-offsets failure.</exception>
+    IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions);
+
+    /// <summary>
+    /// Returns the latest offset (log-end offset) for each of <paramref name="partitions"/> (Java
+    /// <c>endOffsets(Collection&lt;TopicPartition&gt;)</c>) — <b>blocks</b> and returns an owned
+    /// <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/>, or throws a
+    /// <see cref="KafkaException"/> on failure.
+    /// </summary>
+    /// <param name="partitions">The topic-partitions whose end offsets to read.</param>
+    /// <returns>The latest offset for each partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported an end-offsets failure.</exception>
+    IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions);
+
+    /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> (Java
+    /// <c>partitionsFor(String)</c>) — <b>blocks</b> and returns an owned
+    /// <see cref="IReadOnlyList{PartitionInfo}"/> (an empty list for a topic with no known
+    /// partitions), or throws a <see cref="KafkaException"/> on failure.
+    /// </summary>
+    /// <remarks>An <b>empty</b> topic is forwarded to the core (Java/Python-faithful), not rejected.</remarks>
+    /// <param name="topic">The topic whose partition metadata to read.</param>
+    /// <returns>The partition metadata for the topic.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a partitions-for failure.</exception>
+    IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
+
+    /// <summary>
+    /// Returns metadata for all topics the consumer is authorized to view (Java
+    /// <c>listTopics()</c>) — <b>blocks</b> and returns an owned
+    /// <see cref="IReadOnlyDictionary{String, IReadOnlyList}"/> of topic →
+    /// <see cref="PartitionInfo"/> list (an empty dictionary when none), or throws a
+    /// <see cref="KafkaException"/> on failure.
+    /// </summary>
+    /// <returns>The partition metadata for every visible topic, keyed by topic.</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a list-topics failure.</exception>
+    IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics();
 
     /// <summary>
     /// Closes the consumer gracefully with the default timeout (Java <c>close()</c>), joining
