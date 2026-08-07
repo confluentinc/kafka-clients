@@ -904,6 +904,42 @@ fn option_timeout(timeout_ms: i32) -> Option<i32> {
     if timeout_ms < 0 { None } else { Some(timeout_ms) }
 }
 
+/// The `UNKNOWN` wire code, which is `0` for every Kafka enum in this module
+/// that has such a member: `ResourceType`, `PatternType`, `AclOperation`,
+/// `AclPermissionType` and `ConfigResourceType`.
+const UNKNOWN_ENUM_CODE: i8 = 0;
+
+/// Narrows a C `int32_t` enum code to the `int8_t` Kafka defines its enums
+/// over, returning `None` when the value does not fit.
+///
+/// **The rule for every `int32_t` enum code crossing this boundary: never
+/// `as i8`.** A bare cast *truncates* — `259 as i8` is `3`, a valid code in
+/// most of these enums — so a caller's out-of-range value would be read as a
+/// different, legitimate member instead of being rejected or landing on
+/// `UNKNOWN`.
+///
+/// What a miss means depends on the enum, and there are exactly two cases:
+///
+///   - **The enum has an `UNKNOWN` member.** Fall through to it with
+///     [`enum_code_or_unknown`]. That extends the enum's own total function
+///     (Java's `CODE_TO_VALUE.getOrDefault(code, UNKNOWN)`, mirrored by
+///     `AclOperation::from_code` and `ConfigResourceType::for_id`) to the wider
+///     C input type.
+///   - **The enum has none** — the quota filter's `MATCH_TYPE_*` are bare wire
+///     constants, and `AlterConfigOp::OpType::for_id` returns an `Option` —
+///     so there is nothing to fall through to and the caller returns an
+///     `IllegalArgument` naming the offending value.
+fn narrow_enum_code(value: i32) -> Option<i8> {
+    i8::try_from(value).ok()
+}
+
+/// [`narrow_enum_code`] for an enum that has an `UNKNOWN` member: anything that
+/// does not fit in an `int8_t` becomes `UNKNOWN` rather than aliasing onto
+/// another member.
+fn enum_code_or_unknown(value: i32) -> i8 {
+    narrow_enum_code(value).unwrap_or(UNKNOWN_ENUM_CODE)
+}
+
 /// Sorts a per-key outcome map into a deterministic, index-addressable order.
 ///
 /// Java's `*Result` maps are unordered too, but C addresses entries by index, so
@@ -3999,7 +4035,7 @@ unsafe fn read_config_resources(
             continue;
         }
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
-        let resource_type = ConfigResourceType::for_id(unsafe { *type_codes.add(i) } as i8);
+        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *type_codes.add(i) }));
         out.push(ConfigResource::new(resource_type, name));
     }
     out
@@ -4075,10 +4111,13 @@ unsafe fn read_alter_config_ops(
             continue;
         }
         let op_code = unsafe { *op_type_codes.add(i) };
-        let op_type = OpType::for_id(op_code as i8).ok_or_else(|| {
+        // `OpType` has no UNKNOWN member, so a code that does not narrow to an
+        // `int8_t` is rejected rather than folded onto a valid op (see
+        // `narrow_enum_code`).
+        let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
             KafkaError::illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
-        let resource_type = ConfigResourceType::for_id(unsafe { *resource_type_codes.add(i) } as i8);
+        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
         let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
         let value = if config_values.is_null() {
@@ -5571,7 +5610,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
 unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<ConfigResourceType> {
     unsafe { read_i32s(type_codes, count) }
         .into_iter()
-        .map(|code| ConfigResourceType::for_id(code as i8))
+        .map(|code| ConfigResourceType::for_id(enum_code_or_unknown(code)))
         .collect()
 }
 
@@ -12707,16 +12746,16 @@ unsafe fn read_acl_binding_at(
 ) -> Result<AclBinding, KafkaError> {
     let context = |e: KafkaError| KafkaError::illegal_argument(format!("acl at index {index}: {}", e.message()));
     let pattern = ResourcePattern::new(
-        ResourceType::from_code(unsafe { *resource_types.add(index) } as i8),
+        ResourceType::from_code(enum_code_or_unknown(unsafe { *resource_types.add(index) })),
         unsafe { required_string_at(resource_names, index, "resource name")? },
-        PatternType::from_code(unsafe { *pattern_types.add(index) } as i8),
+        PatternType::from_code(enum_code_or_unknown(unsafe { *pattern_types.add(index) })),
     )
     .map_err(context)?;
     let entry = AccessControlEntry::new(
         unsafe { required_string_at(principals, index, "principal")? },
         unsafe { required_string_at(hosts, index, "host")? },
-        AclOperation::from_code(unsafe { *operations.add(index) } as i8),
-        AclPermissionType::from_code(unsafe { *permission_types.add(index) } as i8),
+        AclOperation::from_code(enum_code_or_unknown(unsafe { *operations.add(index) })),
+        AclPermissionType::from_code(enum_code_or_unknown(unsafe { *permission_types.add(index) })),
     )
     .map_err(context)?;
     Ok(AclBinding::new(pattern, entry))
@@ -12795,15 +12834,15 @@ unsafe fn build_acl_binding_filter(
     };
     AclBindingFilter::new(
         ResourcePatternFilter::new(
-            ResourceType::from_code(resource_type as i8),
+            ResourceType::from_code(enum_code_or_unknown(resource_type)),
             text(resource_name),
-            PatternType::from_code(pattern_type as i8),
+            PatternType::from_code(enum_code_or_unknown(pattern_type)),
         ),
         AccessControlEntryFilter::new(
             text(principal),
             text(host),
-            AclOperation::from_code(operation as i8),
-            AclPermissionType::from_code(permission_type as i8),
+            AclOperation::from_code(enum_code_or_unknown(operation)),
+            AclPermissionType::from_code(enum_code_or_unknown(permission_type)),
         ),
     )
 }
@@ -12902,7 +12941,10 @@ unsafe fn read_client_quota_filter(
         let entity_type = unsafe { required_string_at(entity_types, index, "entity type")? };
         let match_type = unsafe { *match_types.add(index) };
         let name = unsafe { optional_string_at(match_names, index) };
-        let component = match i8::try_from(match_type).ok() {
+        // The `MATCH_TYPE_*` constants are bare wire values with no UNKNOWN
+        // member, so a code that does not narrow is rejected rather than folded
+        // onto a valid match type (see `narrow_enum_code`).
+        let component = match narrow_enum_code(match_type) {
             Some(MATCH_TYPE_EXACT) => {
                 let name = name.ok_or_else(|| {
                     KafkaError::illegal_argument(format!(
@@ -12975,9 +13017,24 @@ unsafe fn read_client_quota_entity(
 /// # Errors
 ///
 /// Propagates the per-row errors of [`read_client_quota_entity`], and rejects a
-/// duplicate entity across rows: Java's `alterClientQuotas` collects into a
-/// `Map<ClientQuotaEntity, ...>` keyed by entity, so two alterations of the
-/// same entity cannot both be represented.
+/// duplicate entity across rows.
+///
+/// **Deviation from Java, deliberate.** Java does *not* reject: it keeps the
+/// `Collection<ClientQuotaAlteration>` intact and hands it verbatim to
+/// `new AlterClientQuotasRequest.Builder(entries, ...)`, so both alterations
+/// reach the broker; only the *future* map collapses, because
+/// `futures.put(entry.entity(), ...)` overwrites the earlier entry
+/// (`KafkaAdminClient.java:4301-4313`). `src/admin/kafka_admin_client.rs`
+/// mirrors that. The C layer is stricter because the collapse is not
+/// attributable here: the result crosses as a flat, index-addressed array of
+/// entities built from that map, so a duplicate silently yields fewer rows than
+/// the request had and the caller — who passed parallel arrays, not a map —
+/// has no way to learn which of its two rows the surviving outcome describes.
+/// A Java caller holds the map and can see it shrink. Rejecting at the exact
+/// row index turns unattributable data loss into a named error; the cost is
+/// that a C caller cannot express "send two alterations for one entity and let
+/// the broker apply both in order", which is the only thing Java can do here
+/// that this cannot.
 ///
 /// # Safety
 ///
@@ -17016,8 +17073,9 @@ mod tests {
         .expect_err("rejected");
         assert_eq!(err.message(), "quota alteration at index 0 repeats entity type `user`");
 
-        // The same entity twice across two alterations: Java keys the result by
-        // entity, so the second would silently replace the first.
+        // The same entity twice across two alterations. Java accepts it and
+        // sends both; this layer rejects because the flat C result could not
+        // attribute the one surviving outcome to either row.
         let (_t, t) = c_array(&["user"]);
         let (_n, n) = c_array_opt(&[Some("alice")]);
         let entity_types = [t.as_ptr(), t.as_ptr()];
