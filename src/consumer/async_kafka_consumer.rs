@@ -3032,8 +3032,20 @@ where
             )
             .await;
 
-        // Reset the listener field — the previous subscription is gone.
-        *self.rebalance_listener.lock().unwrap() = None;
+        // NOTE: the app-side `rebalance_listener` mirror is deliberately NOT
+        // cleared here. Java's `SubscriptionState.unsubscribe()`
+        // (`SubscriptionState.java:347-355`) clears the subscription, the
+        // assignment, the pattern and the subscription type but leaves
+        // `rebalanceListener` alone — `registerRebalanceListener` is only ever
+        // called from the three `subscribe(...)` overloads — and
+        // `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`) does not touch it
+        // either. Since Java has ONE slot and the mirror is what
+        // `process_background_events` reads to invoke the callback, clearing it
+        // here would silently skip a `ConsumerRebalanceListenerCallbackNeeded`
+        // that the bg task enqueued while the registration was still live but
+        // the app drains after `unsubscribe()` returns. The retained listener
+        // is released by the next `subscribe(...)` (which writes the mirror
+        // unconditionally, `None` included) or when the consumer is dropped.
 
         // Java: `resetGroupMetadata()` at `AsyncKafkaConsumer.java:1848`,
         // called UNCONDITIONALLY after `processBackgroundEvents(...)` —
@@ -6601,6 +6613,142 @@ mod tests {
             stored.is_none(),
             "a listener-less subscribe must clear the previously stored listener"
         );
+        completer.abort();
+    }
+
+    /// The other half of the single-slot invariant: `unsubscribe()` must
+    /// **keep** the registered listener.
+    ///
+    /// `SubscriptionState.unsubscribe()` (`SubscriptionState.java:347-355`)
+    /// clears the subscription, group subscription, assignment, assigned topic
+    /// ids, pattern and subscription type and bumps `assignmentId` — it does
+    /// not touch `rebalanceListener`, which is only ever written by the three
+    /// `subscribe(...)` overloads (`:193`, `:199`, `:205`, `:219`). Neither
+    /// does `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`).
+    ///
+    /// Rust duplicates Java's one slot (bg-side `SubscriptionState`, app-side
+    /// mirror, because §31 invokes the callback on the caller's task) and the
+    /// **mirror** is what `process_background_events` reads. So the observable
+    /// consequence of clearing it here is a
+    /// `ConsumerRebalanceListenerCallbackNeeded` enqueued by the bg task while
+    /// the registration was still live, but drained by the app after
+    /// `unsubscribe()` returned, silently taking the `None => Ok(())` arm and
+    /// skipping the user's `on_partitions_revoked`. That behaviour — not just
+    /// the field state — is what this test pins, together with the fact that a
+    /// later listener-less `subscribe(...)` (Java's
+    /// `registerRebalanceListener(Optional.empty())`) is what ends the
+    /// registration.
+    #[tokio::test]
+    async fn unsubscribe_keeps_the_registered_listener() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct RecordingListener {
+            revoked: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for RecordingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        /// Enqueues the callback-needed event the bg task would raise and
+        /// drains it, returning the ack result.
+        async fn drive_revoked_callback(
+            consumer: &mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+            bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        ) -> Result<(), KafkaError> {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("send ok");
+            consumer.process_background_events().await.expect("drain ok");
+            ack_rx.await.expect("ack received")
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_all_events(handles.app_event_rx);
+        let listener: Arc<RecordingListener> = Arc::new(RecordingListener { revoked: AtomicUsize::new(0) });
+        let erased: Arc<dyn ConsumerRebalanceListener> = Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>;
+
+        consumer
+            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&erased))
+            .await
+            .expect("subscribe ok");
+        // The fixture has no background task, so apply the registration the
+        // `ApplicationEventProcessor` would perform for
+        // `TopicSubscriptionChange` — that is the bg-side half of the slot.
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t".to_string()].into_iter().collect(), Some(Arc::clone(&erased)))
+            .expect("subscribe_topics ok");
+
+        consumer.unsubscribe().await.expect("unsubscribe ok");
+        // ...and the bg-side half of `Unsubscribe`.
+        handles.subscriptions.lock().unwrap().unsubscribe();
+
+        // Both copies of Java's single slot must still hold the listener.
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_some(),
+            "SubscriptionState::unsubscribe must not clear the listener (Java parity)"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_some(),
+            "the app-side mirror must track SubscriptionState's slot across unsubscribe()"
+        );
+
+        // Observable behaviour: a callback the bg task raised while the
+        // registration was live is still delivered to the user.
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "a rebalance callback drained after unsubscribe() must still reach the retained listener"
+        );
+
+        // A listener-less `subscribe(...)` is what ends the registration
+        // (`registerRebalanceListener(Optional.empty())`), on both copies.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("subscribe ok");
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t2".to_string()].into_iter().collect(), None)
+            .expect("subscribe_topics ok");
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_none(),
+            "a listener-less subscribe clears SubscriptionState's slot"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_none(),
+            "...and the app-side mirror with it"
+        );
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "the de-registered listener must not be invoked again"
+        );
+
         completer.abort();
     }
 
