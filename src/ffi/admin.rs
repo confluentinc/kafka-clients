@@ -98,18 +98,19 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry,
-    ConfigSource, ConfigType, ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions,
+    Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
+    AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
+    ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType, ConsumerGroupDescription,
+    CreateAclsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
     DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DeletedRecords, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions,
-    DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    ElectLeadersOptions, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MemberAssignment, MemberDescription,
-    MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
-    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, ReplicaLogDirInfo, TopicDescription,
-    TopicListing, TopicMetadataAndConfig,
+    DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, FilterResults, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 // `listClientMetricsResources` (superseded by `listConfigResources` filtered to
 // CLIENT_METRICS) and `listConsumerGroups` (superseded by `listGroups`) are both
@@ -121,12 +122,21 @@ use crate::admin::{
 use crate::admin::{
     ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
 };
-use crate::common::acl::AclOperation;
+use crate::common::acl::{
+    AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
+};
 use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::quota::{
+    ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, Op as ClientQuotaOp,
+};
+use crate::common::requests::describe_client_quotas_request::{
+    MATCH_TYPE_DEFAULT, MATCH_TYPE_EXACT, MATCH_TYPE_SPECIFIED,
+};
 use crate::common::requests::list_offsets_request::{
     EARLIEST_LOCAL_TIMESTAMP, EARLIEST_PENDING_UPLOAD_TIMESTAMP, EARLIEST_TIMESTAMP, LATEST_TIERED_TIMESTAMP,
     LATEST_TIMESTAMP, MAX_TIMESTAMP,
 };
+use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use crate::common::{
     ElectionType, GroupState, GroupType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection,
     TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
@@ -12120,6 +12130,2425 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 }
 
 // ---------------------------------------------------------------------------
+// B5a — ACL and client-quota value types
+//
+// Every Java class bound here lives in `org.apache.kafka.common` (`.acl`,
+// `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §3 the C
+// spelling is `kafka_common_*`. `kafka_common_Node_t` and
+// `kafka_common_KafkaError_t` are the existing precedent. Naming these
+// `kafka_admin_*` would repeat the `kafka_consumer_TopicPartition_t` mistake
+// in a second public surface.
+//
+// The three handles below are **output-only and borrowed**: they are interior
+// references into the owning result handle's allocation, so they live until
+// that result is destroyed and must never be freed. Request-side ACL bindings,
+// filters and quota entities cross as parallel arrays instead — the shape
+// `alterPartitionReassignments`, `alterConsumerGroupOffsets` and
+// `listConsumerGroupOffsets` already use — which keeps ownership unambiguous:
+// no handle in this module is ever both caller-owned and borrowed.
+//
+// `AclBinding.pattern()` (a `ResourcePattern`) and `.entry()` (an
+// `AccessControlEntry`) are flattened onto the binding rather than getting
+// handles of their own, following B2's treatment of
+// `LogDirDescription.ReplicaInfo`. The accessor names keep Java's field names,
+// so `kafka_common_AclBinding_resource_name` is `pattern().name()` and
+// `..._principal` is `entry().principal()`.
+//
+// All four ACL enums have a numeric `code()` in Java
+// (`AclOperation.code()`, `AclPermissionType.code()`, `ResourceType.code()`,
+// `PatternType.code()`), so per the B2 rule they cross as `int32_t` codes
+// rather than as `toString()` names. The codes are Java's, listed on each
+// accessor.
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to an `AclBinding` (Java's
+/// `org.apache.kafka.common.acl.AclBinding`).
+///
+/// Borrowed from the owning `create_acls` / `describe_acls` / `delete_acls`
+/// result handle; valid until that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_common_AclBinding_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_common_AclBinding_t`].
+///
+/// `AclBinding`'s two components are flattened: `pattern()`'s three fields and
+/// `entry()`'s four. Every string is non-nullable on a *binding* (only a
+/// *filter* has nullable ones), because `AccessControlEntry::new` always stores
+/// a principal and a host and `ResourcePattern` always stores a name.
+struct AclBindingInner {
+    resource_type: i32,
+    resource_name_c: CString,
+    pattern_type: i32,
+    principal_c: CString,
+    host_c: CString,
+    operation: i32,
+    permission_type: i32,
+}
+
+impl AclBindingInner {
+    fn new(binding: &AclBinding) -> Self {
+        let pattern = binding.pattern();
+        let entry = binding.entry();
+        Self {
+            resource_type: i32::from(pattern.resource_type().code()),
+            resource_name_c: to_cstring(pattern.name()),
+            pattern_type: i32::from(pattern.pattern_type().code()),
+            principal_c: to_cstring(entry.principal()),
+            host_c: to_cstring(entry.host()),
+            operation: i32::from(entry.operation().code()),
+            permission_type: i32::from(entry.permission_type().code()),
+        }
+    }
+
+    /// Deterministic ordering key. Java's `*Result` maps are unordered, but C
+    /// addresses entries by index, so the flattened entries are sorted;
+    /// `AclBinding` is `Hash + Eq` in Java and here, but not `Ord`.
+    fn sort_key(&self) -> (i32, &str, i32, &str, &str, i32, i32) {
+        (
+            self.resource_type,
+            self.resource_name_c.to_str().unwrap_or_default(),
+            self.pattern_type,
+            self.principal_c.to_str().unwrap_or_default(),
+            self.host_c.to_str().unwrap_or_default(),
+            self.operation,
+            self.permission_type,
+        )
+    }
+
+    fn as_ptr(&self) -> *const kafka_common_AclBinding_t {
+        self as *const AclBindingInner as *const kafka_common_AclBinding_t
+    }
+}
+
+/// Casts a `*const kafka_common_AclBinding_t` to a reference.
+///
+/// # Safety
+///
+/// `binding` must be a non-null borrowed pointer from an ACL result getter.
+unsafe fn acl_binding_ref(binding: *const kafka_common_AclBinding_t) -> &'static AclBindingInner {
+    unsafe { &*(binding as *const AclBindingInner) }
+}
+
+/// Returns `pattern().resourceType().code()`: UNKNOWN=0, ANY=1, TOPIC=2,
+/// GROUP=3, CLUSTER=4, TRANSACTIONAL_ID=5, DELEGATION_TOKEN=6, USER=7.
+///
+/// A binding never carries ANY (`ResourcePattern` rejects it), but UNKNOWN is
+/// possible when the broker reports a resource type this client does not know.
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+    unsafe { acl_binding_ref(binding) }.resource_type
+}
+
+/// Returns `pattern().name()` (borrowed). Never null on a binding.
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
+    binding: *const kafka_common_AclBinding_t,
+) -> *const c_char {
+    unsafe { acl_binding_ref(binding) }.resource_name_c.as_ptr()
+}
+
+/// Returns `pattern().patternType().code()`: UNKNOWN=0, ANY=1, MATCH=2,
+/// LITERAL=3, PREFIXED=4.
+///
+/// A binding never carries ANY or MATCH (`ResourcePattern` rejects both);
+/// those are filter-only pattern types.
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+    unsafe { acl_binding_ref(binding) }.pattern_type
+}
+
+/// Returns `entry().principal()` (borrowed), e.g. `"User:alice"`. Never null on
+/// a binding.
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka_common_AclBinding_t) -> *const c_char {
+    unsafe { acl_binding_ref(binding) }.principal_c.as_ptr()
+}
+
+/// Returns `entry().host()` (borrowed), e.g. `"*"`. Never null on a binding.
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_common_AclBinding_t) -> *const c_char {
+    unsafe { acl_binding_ref(binding) }.host_c.as_ptr()
+}
+
+/// Returns `entry().operation().code()`: UNKNOWN=0, ANY=1, ALL=2, READ=3,
+/// WRITE=4, CREATE=5, DELETE=6, ALTER=7, DESCRIBE=8, CLUSTER_ACTION=9,
+/// DESCRIBE_CONFIGS=10, ALTER_CONFIGS=11, IDEMPOTENT_WRITE=12,
+/// CREATE_TOKENS=13, DESCRIBE_TOKENS=14, TWO_PHASE_COMMIT=15.
+///
+/// A binding never carries ANY (`AccessControlEntry` rejects it).
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka_common_AclBinding_t) -> i32 {
+    unsafe { acl_binding_ref(binding) }.operation
+}
+
+/// Returns `entry().permissionType().code()`: UNKNOWN=0, ANY=1, DENY=2,
+/// ALLOW=3.
+///
+/// A binding never carries ANY (`AccessControlEntry` rejects it).
+///
+/// # Safety
+///
+/// `binding` must be a valid borrowed ACL-binding pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+    unsafe { acl_binding_ref(binding) }.permission_type
+}
+
+/// Opaque handle to an `AclBindingFilter` (Java's
+/// `org.apache.kafka.common.acl.AclBindingFilter`).
+///
+/// Borrowed from the owning `delete_acls` result handle; valid until that
+/// handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_common_AclBindingFilter_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_common_AclBindingFilter_t`].
+///
+/// A *filter* differs from a binding in exactly two ways, both of which the C
+/// surface has to preserve: its three string fields are genuinely nullable
+/// (Java's `ResourcePatternFilter.name()` / `AccessControlEntryFilter
+/// .principal()` / `.host()` return null to mean "match any"), and its enums
+/// may be ANY or MATCH.
+///
+/// A null `const char *` is the right encoding for those three, and needs no
+/// companion discriminant: it is distinguishable from a pointer to `""`, and an
+/// empty name is a legal, distinct filter. That is the B3 rule applied, not
+/// waived — a discriminant is required only where the sentinel would *collide*
+/// with a real value, as it would for a nullable number.
+struct AclBindingFilterInner {
+    resource_type: i32,
+    resource_name_c: Option<CString>,
+    pattern_type: i32,
+    principal_c: Option<CString>,
+    host_c: Option<CString>,
+    operation: i32,
+    permission_type: i32,
+}
+
+impl AclBindingFilterInner {
+    fn new(filter: &AclBindingFilter) -> Self {
+        let pattern = filter.pattern_filter();
+        let entry = filter.entry_filter();
+        Self {
+            resource_type: i32::from(pattern.resource_type().code()),
+            resource_name_c: pattern.name().map(to_cstring),
+            pattern_type: i32::from(pattern.pattern_type().code()),
+            principal_c: entry.principal().map(to_cstring),
+            host_c: entry.host().map(to_cstring),
+            operation: i32::from(entry.operation().code()),
+            permission_type: i32::from(entry.permission_type().code()),
+        }
+    }
+
+    /// Deterministic ordering key; see [`AclBindingInner::sort_key`]. An absent
+    /// (match-any) string sorts before any present one.
+    fn sort_key(&self) -> (i32, Option<&str>, i32, Option<&str>, Option<&str>, i32, i32) {
+        fn text(value: &Option<CString>) -> Option<&str> {
+            value.as_ref().map(|s| s.to_str().unwrap_or_default())
+        }
+        (
+            self.resource_type,
+            text(&self.resource_name_c),
+            self.pattern_type,
+            text(&self.principal_c),
+            text(&self.host_c),
+            self.operation,
+            self.permission_type,
+        )
+    }
+}
+
+/// Casts a `*const kafka_common_AclBindingFilter_t` to a reference.
+///
+/// # Safety
+///
+/// `filter` must be a non-null borrowed pointer from a `delete_acls` result
+/// getter.
+unsafe fn acl_binding_filter_ref(filter: *const kafka_common_AclBindingFilter_t) -> &'static AclBindingFilterInner {
+    unsafe { &*(filter as *const AclBindingFilterInner) }
+}
+
+/// Returns `patternFilter().resourceType().code()`. See
+/// [`kafka_common_AclBinding_resource_type`] for the codes; a filter may also
+/// carry ANY=1, which matches every resource type.
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> i32 {
+    unsafe { acl_binding_filter_ref(filter) }.resource_type
+}
+
+/// Returns `patternFilter().name()` (borrowed), or null when the filter matches
+/// any resource name (Java's null name). Null is distinct from a pointer to the
+/// empty string, which filters on the name `""`.
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.resource_name_c)
+}
+
+/// Returns `patternFilter().patternType().code()`. See
+/// [`kafka_common_AclBinding_pattern_type`] for the codes; a filter may also
+/// carry ANY=1 (any pattern type) and MATCH=2 (literal, prefixed and wildcard
+/// patterns that would match the name).
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> i32 {
+    unsafe { acl_binding_filter_ref(filter) }.pattern_type
+}
+
+/// Returns `entryFilter().principal()` (borrowed), or null when the filter
+/// matches any principal.
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.principal_c)
+}
+
+/// Returns `entryFilter().host()` (borrowed), or null when the filter matches
+/// any host.
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_host(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> *const c_char {
+    optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.host_c)
+}
+
+/// Returns `entryFilter().operation().code()`. See
+/// [`kafka_common_AclBinding_operation`] for the codes; a filter may also carry
+/// ANY=1.
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_operation(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> i32 {
+    unsafe { acl_binding_filter_ref(filter) }.operation
+}
+
+/// Returns `entryFilter().permissionType().code()`. See
+/// [`kafka_common_AclBinding_permission_type`] for the codes; a filter may also
+/// carry ANY=1.
+///
+/// # Safety
+///
+/// `filter` must be a valid borrowed ACL-filter pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
+    filter: *const kafka_common_AclBindingFilter_t,
+) -> i32 {
+    unsafe { acl_binding_filter_ref(filter) }.permission_type
+}
+
+/// Opaque handle to a `ClientQuotaEntity` (Java's
+/// `org.apache.kafka.common.quota.ClientQuotaEntity`).
+///
+/// Borrowed from the owning `describe_client_quotas` / `alter_client_quotas`
+/// result handle; valid until that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_common_ClientQuotaEntity_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_common_ClientQuotaEntity_t`].
+///
+/// Java's entity is a `Map<String, String>` from entity type (`"user"`,
+/// `"client-id"`, `"ip"`) to entity name, with a **null value meaning the
+/// built-in default entity** for that type — the `--entity-default` of the
+/// command-line tools — which is not the same as the type being absent from the
+/// map, and not the same as the name `""`.
+///
+/// C gets the map as an indexed sequence sorted by entity type. Absence is
+/// expressed by the type simply not appearing; "default entity" is a null name
+/// pointer; the name `""` is a pointer to an empty string. All three stay
+/// distinct without an extra discriminant, because a null pointer cannot
+/// collide with a pointer to `""`.
+struct ClientQuotaEntityInner {
+    entry_types_c: Vec<CString>,
+    entry_names_c: Vec<Option<CString>>,
+}
+
+impl ClientQuotaEntityInner {
+    fn new(entity: &ClientQuotaEntity) -> Self {
+        // Sorted by entity type so C's index addressing is reproducible; Java's
+        // map is unordered.
+        let mut entries: Vec<(&String, &Option<String>)> = entity.entries().iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        Self {
+            entry_types_c: entries.iter().map(|(t, _)| to_cstring(t)).collect(),
+            entry_names_c: entries.iter().map(|(_, n)| n.as_deref().map(to_cstring)).collect(),
+        }
+    }
+
+    /// Deterministic ordering key across entities. `ClientQuotaEntity` is
+    /// `Hash + Eq` but not `Ord`, and its entries are already type-sorted, so
+    /// the pair sequence orders entities reproducibly.
+    fn sort_key(&self) -> Vec<(&str, Option<&str>)> {
+        self.entry_types_c
+            .iter()
+            .zip(&self.entry_names_c)
+            .map(|(t, n)| {
+                (
+                    t.to_str().unwrap_or_default(),
+                    n.as_ref().map(|n| n.to_str().unwrap_or_default()),
+                )
+            })
+            .collect()
+    }
+
+    fn as_ptr(&self) -> *const kafka_common_ClientQuotaEntity_t {
+        self as *const ClientQuotaEntityInner as *const kafka_common_ClientQuotaEntity_t
+    }
+}
+
+/// Casts a `*const kafka_common_ClientQuotaEntity_t` to a reference.
+///
+/// # Safety
+///
+/// `entity` must be a non-null borrowed pointer from a client-quota result
+/// getter.
+unsafe fn client_quota_entity_ref(entity: *const kafka_common_ClientQuotaEntity_t) -> &'static ClientQuotaEntityInner {
+    unsafe { &*(entity as *const ClientQuotaEntityInner) }
+}
+
+/// Returns the number of entity-type entries (the size of Java's
+/// `entries()` map).
+///
+/// # Safety
+///
+/// `entity` must be a valid borrowed client-quota-entity pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
+    entity: *const kafka_common_ClientQuotaEntity_t,
+) -> i32 {
+    unsafe { client_quota_entity_ref(entity) }.entry_types_c.len() as i32
+}
+
+/// Returns the entity type at `index` (borrowed) — `"user"`, `"client-id"` or
+/// `"ip"` — or null if out of range. Entries are sorted by entity type.
+///
+/// # Safety
+///
+/// `entity` must be a valid borrowed client-quota-entity pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
+    entity: *const kafka_common_ClientQuotaEntity_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { client_quota_entity_ref(entity) }.entry_types_c, index)
+}
+
+/// Returns the entity name at `index` (borrowed), or null if out of range **or
+/// if the entry names the built-in default entity** for its type.
+///
+/// The two nulls are told apart by [`kafka_common_ClientQuotaEntity_entry_count`]:
+/// an `index` below the count always denotes a present entry, so a null there
+/// means "default entity", Java's null map value. A name of `""` is a real,
+/// distinct name and comes back as a pointer to an empty string.
+///
+/// # Safety
+///
+/// `entity` must be a valid borrowed client-quota-entity pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
+    entity: *const kafka_common_ClientQuotaEntity_t,
+    index: i32,
+) -> *const c_char {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { client_quota_entity_ref(entity) }.entry_names_c.get(index as usize) {
+        Some(name) => optional_cstring_ptr(name),
+        None => std::ptr::null(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B5a — ACL and client-quota input marshaling and submission helpers
+//
+// Request-side ACL bindings, filters and quota entities cross as parallel
+// arrays, following `alterPartitionReassignments` /
+// `alterConsumerGroupOffsets` (flat) and `listConsumerGroupOffsets` (ragged
+// two-level). Per CLAUDE.md §3 a NULL *required array* is a caller
+// programming error and is not diagnosed; it is read as "no entries", exactly
+// as `read_alter_group_offsets` already does. A NULL *element* of a
+// non-nullable string array is diagnosed, because it is indistinguishable from
+// a legitimate absent value otherwise and Java's constructor would reject it.
+// ---------------------------------------------------------------------------
+
+/// Per-binding outcomes of `createAcls`.
+type CreateAclsOutcomes = HashMap<AclBinding, Result<(), KafkaError>>;
+
+/// Per-filter outcomes of `deleteAcls`.
+type DeleteAclsOutcomes = HashMap<AclBindingFilter, Result<FilterResults, KafkaError>>;
+
+/// Per-entity outcomes of `alterClientQuotas`.
+type AlterClientQuotasOutcomes = HashMap<ClientQuotaEntity, Result<(), KafkaError>>;
+
+/// The whole-map outcome of `describeClientQuotas`.
+type DescribeClientQuotasOutcome = HashMap<ClientQuotaEntity, HashMap<String, f64>>;
+
+/// Reads the `index`th entry of a *required* C string array.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] naming `field` and `index` when the
+/// entry is NULL.
+///
+/// # Safety
+///
+/// `strings` must be non-null with at least `index + 1` entries.
+unsafe fn required_string_at(strings: *const *const c_char, index: usize, field: &str) -> Result<String, KafkaError> {
+    let ptr = unsafe { *strings.add(index) };
+    if ptr.is_null() {
+        return Err(KafkaError::illegal_argument(format!(
+            "{field} at index {index} must not be null"
+        )));
+    }
+    Ok(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
+}
+
+/// Reads the `index`th entry of a *nullable* C string array, preserving NULL as
+/// `None`.
+///
+/// Unlike [`read_strings`], which drops NULL entries, this keeps the array
+/// index aligned with its siblings — essential for parallel arrays, where a
+/// dropped entry would silently shift every later field onto the wrong row.
+///
+/// # Safety
+///
+/// `strings` must be null, or non-null with at least `index + 1` entries.
+unsafe fn optional_string_at(strings: *const *const c_char, index: usize) -> Option<String> {
+    if strings.is_null() {
+        return None;
+    }
+    let ptr = unsafe { *strings.add(index) };
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
+}
+
+/// Builds one [`AclBinding`] from the `index`th row of the request arrays.
+///
+/// # Errors
+///
+/// Propagates the `IllegalArgumentException`s Java's `ResourcePattern` and
+/// `AccessControlEntry` constructors throw — an ANY resource type, an ANY or
+/// MATCH pattern type, an ANY operation or an ANY permission type — prefixed
+/// with the row index, since C has no other way to say which entry was wrong.
+///
+/// # Safety
+///
+/// Every array must be non-null with at least `index + 1` entries.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_acl_binding_at(
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    index: usize,
+) -> Result<AclBinding, KafkaError> {
+    let context = |e: KafkaError| KafkaError::illegal_argument(format!("acl at index {index}: {}", e.message()));
+    let pattern = ResourcePattern::new(
+        ResourceType::from_code(unsafe { *resource_types.add(index) } as i8),
+        unsafe { required_string_at(resource_names, index, "resource name")? },
+        PatternType::from_code(unsafe { *pattern_types.add(index) } as i8),
+    )
+    .map_err(context)?;
+    let entry = AccessControlEntry::new(
+        unsafe { required_string_at(principals, index, "principal")? },
+        unsafe { required_string_at(hosts, index, "host")? },
+        AclOperation::from_code(unsafe { *operations.add(index) } as i8),
+        AclPermissionType::from_code(unsafe { *permission_types.add(index) } as i8),
+    )
+    .map_err(context)?;
+    Ok(AclBinding::new(pattern, entry))
+}
+
+/// Reads `count` rows of parallel arrays into [`AclBinding`]s.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries; string entries must be
+/// NULL or valid C strings.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_acl_bindings(
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+) -> Result<Vec<AclBinding>, KafkaError> {
+    let n = count.max(0) as usize;
+    if resource_types.is_null()
+        || resource_names.is_null()
+        || pattern_types.is_null()
+        || principals.is_null()
+        || hosts.is_null()
+        || operations.is_null()
+        || permission_types.is_null()
+    {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        out.push(unsafe {
+            read_acl_binding_at(
+                resource_types,
+                resource_names,
+                pattern_types,
+                principals,
+                hosts,
+                operations,
+                permission_types,
+                index,
+            )?
+        });
+    }
+    Ok(out)
+}
+
+/// Builds one [`AclBindingFilter`] from scalar fields.
+///
+/// Unlike a binding this is infallible: Java's filter constructors accept ANY
+/// and MATCH, which is the whole point of a filter, and their three strings are
+/// nullable (null = match any).
+///
+/// # Safety
+///
+/// The three string pointers must be NULL or valid C strings.
+unsafe fn build_acl_binding_filter(
+    resource_type: i32,
+    resource_name: *const c_char,
+    pattern_type: i32,
+    principal: *const c_char,
+    host: *const c_char,
+    operation: i32,
+    permission_type: i32,
+) -> AclBindingFilter {
+    let text = |ptr: *const c_char| {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
+        }
+    };
+    AclBindingFilter::new(
+        ResourcePatternFilter::new(
+            ResourceType::from_code(resource_type as i8),
+            text(resource_name),
+            PatternType::from_code(pattern_type as i8),
+        ),
+        AccessControlEntryFilter::new(
+            text(principal),
+            text(host),
+            AclOperation::from_code(operation as i8),
+            AclPermissionType::from_code(permission_type as i8),
+        ),
+    )
+}
+
+/// Reads `count` rows of parallel arrays into [`AclBindingFilter`]s.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries; string entries must be
+/// NULL or valid C strings.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_acl_binding_filters(
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+) -> Vec<AclBindingFilter> {
+    let n = count.max(0) as usize;
+    if resource_types.is_null() || pattern_types.is_null() || operations.is_null() || permission_types.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        out.push(unsafe {
+            build_acl_binding_filter(
+                *resource_types.add(index),
+                if resource_names.is_null() {
+                    std::ptr::null()
+                } else {
+                    *resource_names.add(index)
+                },
+                *pattern_types.add(index),
+                if principals.is_null() {
+                    std::ptr::null()
+                } else {
+                    *principals.add(index)
+                },
+                if hosts.is_null() {
+                    std::ptr::null()
+                } else {
+                    *hosts.add(index)
+                },
+                *operations.add(index),
+                *permission_types.add(index),
+            )
+        });
+    }
+    out
+}
+
+/// Reads `count` filter components into a [`ClientQuotaFilter`].
+///
+/// `match_types` carries the wire match-type constants
+/// (`MATCH_TYPE_EXACT` = 0, `MATCH_TYPE_DEFAULT` = 1,
+/// `MATCH_TYPE_SPECIFIED` = 2), which are the real Kafka protocol values, not
+/// invented codes. They are needed as an explicit discriminant because a
+/// component's match is a genuine tri-state (Java
+/// `ClientQuotaFilterComponent.match()` is `Optional<String>` that may also be
+/// null) whose DEFAULT and ANY arms both carry no name — so a null name alone
+/// could not tell them apart, unlike the nullable strings elsewhere in this
+/// slice.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] for an unrecognised match type, or
+/// for an EXACT component with no name.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries; string entries must be
+/// NULL or valid C strings.
+unsafe fn read_client_quota_filter(
+    entity_types: *const *const c_char,
+    match_types: *const i32,
+    match_names: *const *const c_char,
+    count: i32,
+    strict: bool,
+) -> Result<ClientQuotaFilter, KafkaError> {
+    let n = count.max(0) as usize;
+    if entity_types.is_null() || match_types.is_null() {
+        // No components at all: Java's `ClientQuotaFilter.all()` when not
+        // strict, or `containsOnly([])` when strict — which matches only the
+        // entity with no components.
+        return Ok(if strict {
+            ClientQuotaFilter::contains_only(Vec::new())
+        } else {
+            ClientQuotaFilter::all()
+        });
+    }
+    let mut components = Vec::with_capacity(n);
+    for index in 0..n {
+        let entity_type = unsafe { required_string_at(entity_types, index, "entity type")? };
+        let match_type = unsafe { *match_types.add(index) };
+        let name = unsafe { optional_string_at(match_names, index) };
+        let component = match i8::try_from(match_type).ok() {
+            Some(MATCH_TYPE_EXACT) => {
+                let name = name.ok_or_else(|| {
+                    KafkaError::illegal_argument(format!(
+                        "quota filter component at index {index} has match type EXACT but no match name"
+                    ))
+                })?;
+                ClientQuotaFilterComponent::of_entity(entity_type, name)
+            },
+            Some(MATCH_TYPE_DEFAULT) => ClientQuotaFilterComponent::of_default_entity(entity_type),
+            Some(MATCH_TYPE_SPECIFIED) => ClientQuotaFilterComponent::of_entity_type(entity_type),
+            _ => {
+                return Err(KafkaError::illegal_argument(format!(
+                    "quota filter component at index {index} has unknown match type {match_type}"
+                )));
+            },
+        };
+        components.push(component);
+    }
+    Ok(if strict {
+        ClientQuotaFilter::contains_only(components)
+    } else {
+        ClientQuotaFilter::contains(components)
+    })
+}
+
+/// Reads one ragged row of `(entity type, entity name)` pairs into a
+/// [`ClientQuotaEntity`].
+///
+/// A NULL name entry is Java's null map value: the built-in **default entity**
+/// for that type, not an absent entry and not the empty name.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] when a type is NULL, or when the row
+/// repeats an entity type — Java takes a `Map`, so a duplicate key could only
+/// be silently dropped otherwise.
+///
+/// # Safety
+///
+/// `types` must be non-null with `count` entries; `names` must be null or have
+/// `count` entries.
+unsafe fn read_client_quota_entity(
+    types: *const *const c_char,
+    names: *const *const c_char,
+    count: i32,
+    row: usize,
+) -> Result<ClientQuotaEntity, KafkaError> {
+    let n = count.max(0) as usize;
+    let mut entries: HashMap<String, Option<String>> = HashMap::with_capacity(n);
+    for index in 0..n {
+        let entity_type = unsafe { required_string_at(types, index, "entity type")? };
+        let name = unsafe { optional_string_at(names, index) };
+        if entries.insert(entity_type.clone(), name).is_some() {
+            return Err(KafkaError::illegal_argument(format!(
+                "quota alteration at index {row} repeats entity type `{entity_type}`"
+            )));
+        }
+    }
+    Ok(ClientQuotaEntity::new(entries))
+}
+
+/// Reads `count` ragged rows into [`ClientQuotaAlteration`]s.
+///
+/// The two-level shape follows `listConsumerGroupOffsets`: an array of arrays
+/// plus a per-row count. `op_has_values` is the explicit discriminant for
+/// Java's nullable `Double` op value — a nullable *number* needs one, because
+/// every sentinel `double` is also a legal quota value — and `false` means
+/// **remove this quota**, Java's `ClientQuotaAlteration.Op(key, null)`.
+///
+/// # Errors
+///
+/// Propagates the per-row errors of [`read_client_quota_entity`], and rejects a
+/// duplicate entity across rows: Java's `alterClientQuotas` collects into a
+/// `Map<ClientQuotaEntity, ...>` keyed by entity, so two alterations of the
+/// same entity cannot both be represented.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries, each of which is null or
+/// has the matching per-row count of entries.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_client_quota_alterations(
+    entity_types: *const *const *const c_char,
+    entity_names: *const *const *const c_char,
+    entity_counts: *const i32,
+    op_keys: *const *const *const c_char,
+    op_values: *const *const f64,
+    op_has_values: *const *const bool,
+    op_counts: *const i32,
+    count: i32,
+) -> Result<Vec<ClientQuotaAlteration>, KafkaError> {
+    let n = count.max(0) as usize;
+    if entity_types.is_null() || entity_counts.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<ClientQuotaAlteration> = Vec::with_capacity(n);
+    let mut seen: HashSet<ClientQuotaEntity> = HashSet::with_capacity(n);
+    for row in 0..n {
+        let types = unsafe { *entity_types.add(row) };
+        if types.is_null() {
+            return Err(KafkaError::illegal_argument(format!(
+                "quota alteration at index {row} has no entity types"
+            )));
+        }
+        let names = if entity_names.is_null() {
+            std::ptr::null()
+        } else {
+            unsafe { *entity_names.add(row) }
+        };
+        let entity = unsafe { read_client_quota_entity(types, names, *entity_counts.add(row), row)? };
+        if !seen.insert(entity.clone()) {
+            return Err(KafkaError::illegal_argument(format!(
+                "quota alteration at index {row} repeats an entity already altered by an earlier entry"
+            )));
+        }
+
+        let op_count = if op_counts.is_null() {
+            0
+        } else {
+            unsafe { *op_counts.add(row) }
+        };
+        let keys = if op_keys.is_null() {
+            std::ptr::null()
+        } else {
+            unsafe { *op_keys.add(row) }
+        };
+        let values = if op_values.is_null() {
+            std::ptr::null()
+        } else {
+            unsafe { *op_values.add(row) }
+        };
+        let has_values = if op_has_values.is_null() {
+            std::ptr::null()
+        } else {
+            unsafe { *op_has_values.add(row) }
+        };
+        let mut ops = Vec::with_capacity(op_count.max(0) as usize);
+        if !keys.is_null() {
+            for index in 0..op_count.max(0) as usize {
+                let key = unsafe { required_string_at(keys, index, "quota op key")? };
+                let present = !has_values.is_null() && unsafe { *has_values.add(index) };
+                let value = if present && !values.is_null() {
+                    Some(unsafe { *values.add(index) })
+                } else {
+                    None
+                };
+                ops.push(ClientQuotaOp::new(key, value));
+            }
+        }
+        out.push(ClientQuotaAlteration::new(entity, ops));
+    }
+    Ok(out)
+}
+
+/// Submits `createAcls` and returns the collect-all future over its per-binding
+/// futures.
+fn submit_create_acls(
+    admin: &dyn Admin,
+    acls: &[AclBinding],
+    options: CreateAclsOptions,
+) -> KafkaFuture<CreateAclsOutcomes> {
+    let result = admin.create_acls(acls, options);
+    // Driven from the result's own map (Java's `values()`), which is the
+    // authority on which bindings got a future.
+    let entries: Vec<(AclBinding, KafkaFuture<()>)> =
+        result.values().iter().map(|(b, f)| (b.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `describeAcls` and returns its single listing future.
+fn submit_describe_acls(
+    admin: &dyn Admin,
+    filter: &AclBindingFilter,
+    options: DescribeAclsOptions,
+) -> KafkaFuture<Vec<AclBinding>> {
+    admin.describe_acls(filter, options).values().clone()
+}
+
+/// Submits `deleteAcls` and returns the collect-all future over its per-filter
+/// futures.
+fn submit_delete_acls(
+    admin: &dyn Admin,
+    filters: &[AclBindingFilter],
+    options: DeleteAclsOptions,
+) -> KafkaFuture<DeleteAclsOutcomes> {
+    let result = admin.delete_acls(filters, options);
+    let entries: Vec<(AclBindingFilter, KafkaFuture<FilterResults>)> =
+        result.values().iter().map(|(f, fut)| (f.clone(), fut.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `describeClientQuotas` and returns its single whole-map future.
+fn submit_describe_client_quotas(
+    admin: &dyn Admin,
+    filter: &ClientQuotaFilter,
+    options: DescribeClientQuotasOptions,
+) -> KafkaFuture<DescribeClientQuotasOutcome> {
+    admin.describe_client_quotas(filter, options).entities().clone()
+}
+
+/// Submits `alterClientQuotas` and returns the collect-all future over its
+/// per-entity futures.
+fn submit_alter_client_quotas(
+    admin: &dyn Admin,
+    entries: &[ClientQuotaAlteration],
+    options: AlterClientQuotasOptions,
+) -> KafkaFuture<AlterClientQuotasOutcomes> {
+    let result = admin.alter_client_quotas(entries, options);
+    let futures: Vec<(ClientQuotaEntity, KafkaFuture<()>)> =
+        result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(futures)
+}
+
+// ---------------------------------------------------------------------------
+// B5a — ACL and client-quota result handles
+//
+// Accessors follow each Java `*Result`'s future shape (`PLAN-bindings.md` D2 as
+// amended after B4), not a fixed template:
+//
+//   - `Map<K, KafkaFuture<Void>>`   -> `_get_error(i)` only, no value
+//     (`createAcls`, `alterClientQuotas`)
+//   - one `KafkaFuture<Collection<V>>` / `KafkaFuture<Map<K, V>>` for the whole
+//     call                          -> `_count` plus value accessors, and **no**
+//     `_get_error`: a failure is the call's error
+//     (`describeAcls`, `describeClientQuotas`)
+//   - `Map<K, KafkaFuture<V>>` where `V` is itself a collection
+//                                   -> `_get_error(i)` for the key's future
+//     plus a second index level over `V`
+//     (`deleteAcls`, whose `FilterResults` holds one `FilterResult` per matched
+//      ACL, each carrying *either* a binding *or* its own exception)
+// ---------------------------------------------------------------------------
+
+// [`sorted_entries`] cannot order these results: it needs `K: Ord`, which
+// `AclBinding`, `AclBindingFilter` and `ClientQuotaEntity` are not — they are
+// `Hash + Eq` in Java too, and inventing an `Ord` for a Java type that has none
+// would be a fabricated contract. Each `box_*` below instead sorts the
+// already-flattened rows by their C-visible field tuple (`sort_key`), which
+// gives the same reproducible index addressing. The comparison closure is
+// written out at each site rather than shared, because a `Fn(&I) -> K` helper
+// cannot express that `K` borrows from `I`.
+
+/// Opaque handle to a flattened `CreateAclsResult`.
+#[repr(C)]
+pub struct kafka_admin_CreateAclsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_CreateAclsResult_t`].
+///
+/// `CreateAclsResult.values()` is `Map<AclBinding, KafkaFuture<Void>>`: a
+/// per-binding future that carries no value, so the handle exposes the binding
+/// and its error and nothing else.
+struct CreateAclsResultInner {
+    bindings: Vec<AclBindingInner>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-binding `createAcls` outcomes into the C handle.
+fn box_create_acls_result(outcomes: CreateAclsOutcomes) -> *mut kafka_admin_CreateAclsResult_t {
+    let mut rows: Vec<(AclBindingInner, Option<KafkaErrorInner>)> = outcomes
+        .into_iter()
+        .map(|(binding, outcome)| (AclBindingInner::new(&binding), outcome.err().map(error_inner)))
+        .collect();
+    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+    let (bindings, errors) = rows.into_iter().unzip();
+    Box::into_raw(Box::new(CreateAclsResultInner { bindings, errors })) as *mut kafka_admin_CreateAclsResult_t
+}
+
+/// Casts a `*const kafka_admin_CreateAclsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `create_acls` call.
+unsafe fn create_acls_result_ref(result: *const kafka_admin_CreateAclsResult_t) -> &'static CreateAclsResultInner {
+    unsafe { &*(result as *const CreateAclsResultInner) }
+}
+
+/// Returns the number of ACL bindings in the result.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka_admin_CreateAclsResult_t) -> i32 {
+    unsafe { create_acls_result_ref(result) }.bindings.len() as i32
+}
+
+/// Returns the binding at `index` (borrowed), or null if out of range. Do not
+/// free it; it dies with the result handle. Entries are sorted by resource
+/// type, resource name, pattern type, principal, host, operation and permission
+/// type.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
+    result: *const kafka_admin_CreateAclsResult_t,
+    index: i32,
+) -> *const kafka_common_AclBinding_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { create_acls_result_ref(result) }.bindings.get(index as usize) {
+        Some(binding) => binding.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the binding at `index` (borrowed), or null if it was
+/// created successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
+    result: *const kafka_admin_CreateAclsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { create_acls_result_ref(result) }.errors, index)
+}
+
+/// Destroys a `create_acls` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `create_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(result: *mut kafka_admin_CreateAclsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut CreateAclsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeAclsResult`.
+#[repr(C)]
+pub struct kafka_admin_DescribeAclsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeAclsResult_t`].
+///
+/// `DescribeAclsResult` holds a single `KafkaFuture<Collection<AclBinding>>`
+/// and has no `all()` and no per-key future at all, so there is nothing for a
+/// `_get_error(i)` to report: any failure is the call's error.
+struct DescribeAclsResultInner {
+    bindings: Vec<AclBindingInner>,
+}
+
+/// Flattens the described bindings into the C handle.
+fn box_describe_acls_result(bindings: Vec<AclBinding>) -> *mut kafka_admin_DescribeAclsResult_t {
+    Box::into_raw(Box::new(DescribeAclsResultInner {
+        bindings: bindings.iter().map(AclBindingInner::new).collect(),
+    })) as *mut kafka_admin_DescribeAclsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeAclsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_acls` call.
+unsafe fn describe_acls_result_ref(
+    result: *const kafka_admin_DescribeAclsResult_t,
+) -> &'static DescribeAclsResultInner {
+    unsafe { &*(result as *const DescribeAclsResultInner) }
+}
+
+/// Returns the number of matching ACL bindings.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kafka_admin_DescribeAclsResult_t) -> i32 {
+    unsafe { describe_acls_result_ref(result) }.bindings.len() as i32
+}
+
+/// Returns the binding at `index` (borrowed), or null if out of range. Do not
+/// free it. Bindings keep the order the broker reported them in, as Java's
+/// `values()` collection does.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
+    result: *const kafka_admin_DescribeAclsResult_t,
+    index: i32,
+) -> *const kafka_common_AclBinding_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_acls_result_ref(result) }.bindings.get(index as usize) {
+        Some(binding) => binding.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_acls` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(result: *mut kafka_admin_DescribeAclsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeAclsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DeleteAclsResult`.
+#[repr(C)]
+pub struct kafka_admin_DeleteAclsResult_t {
+    _private: [u8; 0],
+}
+
+/// One `DeleteAclsResult.FilterResult`: exactly one of the two is present.
+struct DeleteAclsFilterResultInner {
+    binding: Option<AclBindingInner>,
+    error: Option<KafkaErrorInner>,
+}
+
+/// Backing state for [`kafka_admin_DeleteAclsResult_t`].
+///
+/// `DeleteAclsResult.values()` is `Map<AclBindingFilter,
+/// KafkaFuture<FilterResults>>`, so there are two index levels: the filter, and
+/// within it the ACLs that filter matched. `errors[i]` is the *filter's* future
+/// failing (nothing was deleted for it); a per-ACL failure lives inside
+/// `results[i][j]` instead, which is Java's `FilterResult.exception()`.
+struct DeleteAclsResultInner {
+    filters: Vec<AclBindingFilterInner>,
+    errors: Vec<Option<KafkaErrorInner>>,
+    results: Vec<Vec<DeleteAclsFilterResultInner>>,
+}
+
+/// Flattens the per-filter `deleteAcls` outcomes into the C handle.
+fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_DeleteAclsResult_t {
+    type Row = (
+        AclBindingFilterInner,
+        (Option<KafkaErrorInner>, Vec<DeleteAclsFilterResultInner>),
+    );
+    let mut rows: Vec<Row> = outcomes
+        .into_iter()
+        .map(|(filter, outcome)| {
+            let flattened = match outcome {
+                Ok(results) => (
+                    None,
+                    results
+                        .values()
+                        .iter()
+                        .map(|r| DeleteAclsFilterResultInner {
+                            binding: r.binding().map(AclBindingInner::new),
+                            error: r.exception().cloned().map(error_inner),
+                        })
+                        .collect(),
+                ),
+                Err(e) => (Some(error_inner(e)), Vec::new()),
+            };
+            (AclBindingFilterInner::new(&filter), flattened)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+
+    let mut filters = Vec::with_capacity(rows.len());
+    let mut errors = Vec::with_capacity(rows.len());
+    let mut results = Vec::with_capacity(rows.len());
+    for (filter, (error, filter_results)) in rows {
+        filters.push(filter);
+        errors.push(error);
+        results.push(filter_results);
+    }
+    Box::into_raw(Box::new(DeleteAclsResultInner { filters, errors, results })) as *mut kafka_admin_DeleteAclsResult_t
+}
+
+/// Casts a `*const kafka_admin_DeleteAclsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `delete_acls` call.
+unsafe fn delete_acls_result_ref(result: *const kafka_admin_DeleteAclsResult_t) -> &'static DeleteAclsResultInner {
+    unsafe { &*(result as *const DeleteAclsResultInner) }
+}
+
+/// Returns the number of filters in the result.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka_admin_DeleteAclsResult_t) -> i32 {
+    unsafe { delete_acls_result_ref(result) }.filters.len() as i32
+}
+
+/// Returns the filter at `index` (borrowed), or null if out of range. Do not
+/// free it. Entries are sorted by the filter's fields.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+) -> *const kafka_common_AclBindingFilter_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { delete_acls_result_ref(result) }.filters.get(index as usize) {
+        Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the filter at `index` (borrowed), or null if the
+/// filter was applied successfully or `index` is out of range. Do not destroy
+/// it.
+///
+/// This is the *filter's* future failing, meaning nothing was deleted for it.
+/// An individual matched ACL that could not be deleted is reported by
+/// [`kafka_admin_DeleteAclsResult_get_result_error`] instead, and leaves this
+/// null.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { delete_acls_result_ref(result) }.errors, index)
+}
+
+/// Returns how many ACLs the filter at `index` matched (the size of Java's
+/// `FilterResults.values()`), or 0 if the filter failed or `index` is out of
+/// range.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return 0;
+    }
+    match unsafe { delete_acls_result_ref(result) }.results.get(index as usize) {
+        Some(results) => results.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns the ACL binding deleted by the filter at `index`, entry
+/// `result_index` (borrowed), or null when that entry carries an exception
+/// instead, or when either index is out of range. Do not free it.
+///
+/// Java's `FilterResult` holds exactly one of a binding or an exception, so
+/// this and [`kafka_admin_DeleteAclsResult_get_result_error`] are
+/// complementary: for an in-range entry, precisely one of them is non-null.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+    result_index: i32,
+) -> *const kafka_common_AclBinding_t {
+    match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
+        Some(entry) => match &entry.binding {
+            Some(binding) => binding.as_ptr(),
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the exception for the filter at `index`, entry `result_index`
+/// (borrowed), or null when that entry carries a deleted binding instead, or
+/// when either index is out of range. Do not destroy it.
+///
+/// This is Java's `FilterResult.exception()`: the filter matched this ACL but
+/// deleting it failed. It is independent of
+/// [`kafka_admin_DeleteAclsResult_get_error`], which reports the whole filter
+/// failing.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_error(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+    result_index: i32,
+) -> *const kafka_common_KafkaError_t {
+    match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
+        Some(entry) => error_ptr(entry.error.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Looks up one `FilterResult` by its two indices, or `None` if either is out
+/// of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+unsafe fn delete_acls_filter_result_at(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+    result_index: i32,
+) -> Option<&'static DeleteAclsFilterResultInner> {
+    if index < 0 || result_index < 0 {
+        return None;
+    }
+    unsafe { delete_acls_result_ref(result) }
+        .results
+        .get(index as usize)?
+        .get(result_index as usize)
+}
+
+/// Destroys a `delete_acls` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `delete_acls` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka_admin_DeleteAclsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DeleteAclsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeClientQuotasResult`.
+#[repr(C)]
+pub struct kafka_admin_DescribeClientQuotasResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeClientQuotasResult_t`].
+///
+/// `DescribeClientQuotasResult` holds a single
+/// `KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>>` for the whole
+/// call, so there is no per-entity error to expose: a failure is the call's
+/// error. The inner quota map is flattened into parallel key/value vectors —
+/// it is a plain `Map<String, Double>`, not a Java class, so it gets indexed
+/// accessors on the parent rather than a handle (the B2 `ReplicaInfo` rule).
+struct DescribeClientQuotasResultInner {
+    entities: Vec<ClientQuotaEntityInner>,
+    quota_keys: Vec<Vec<CString>>,
+    quota_values: Vec<Vec<f64>>,
+}
+
+/// Flattens the described quotas into the C handle.
+fn box_describe_client_quotas_result(
+    outcome: DescribeClientQuotasOutcome,
+) -> *mut kafka_admin_DescribeClientQuotasResult_t {
+    let mut rows: Vec<(ClientQuotaEntityInner, HashMap<String, f64>)> = outcome
+        .into_iter()
+        .map(|(entity, quotas)| (ClientQuotaEntityInner::new(&entity), quotas))
+        .collect();
+    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+
+    let mut entities = Vec::with_capacity(rows.len());
+    let mut quota_keys = Vec::with_capacity(rows.len());
+    let mut quota_values = Vec::with_capacity(rows.len());
+    for (entity, quotas) in rows {
+        // Sorted by quota key so index addressing is reproducible.
+        let sorted = sorted_entries(quotas);
+        entities.push(entity);
+        quota_keys.push(sorted.iter().map(|(k, _)| to_cstring(k)).collect());
+        quota_values.push(sorted.iter().map(|(_, v)| *v).collect());
+    }
+    Box::into_raw(Box::new(DescribeClientQuotasResultInner { entities, quota_keys, quota_values }))
+        as *mut kafka_admin_DescribeClientQuotasResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeClientQuotasResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_client_quotas` call.
+unsafe fn describe_client_quotas_result_ref(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+) -> &'static DescribeClientQuotasResultInner {
+    unsafe { &*(result as *const DescribeClientQuotasResultInner) }
+}
+
+/// Returns the number of entities that matched the filter.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+) -> i32 {
+    unsafe { describe_client_quotas_result_ref(result) }.entities.len() as i32
+}
+
+/// Returns the entity at `index` (borrowed), or null if out of range. Do not
+/// free it. Entities are sorted by their `(entity type, entity name)` pairs.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+    index: i32,
+) -> *const kafka_common_ClientQuotaEntity_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_client_quotas_result_ref(result) }
+        .entities
+        .get(index as usize)
+    {
+        Some(entity) => entity.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns how many quota values the entity at `index` has, or 0 if out of
+/// range. A quota type the entity has no value for is simply absent.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return 0;
+    }
+    match unsafe { describe_client_quotas_result_ref(result) }
+        .quota_keys
+        .get(index as usize)
+    {
+        Some(keys) => keys.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns the quota key at `(index, quota_index)` (borrowed) — e.g.
+/// `"producer_byte_rate"`, `"consumer_byte_rate"`, `"request_percentage"`,
+/// `"controller_mutation_rate"` — or null if either index is out of range.
+/// Keys are sorted.
+///
+/// Quota keys are opaque broker-defined strings in Java too; there is no enum.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+    index: i32,
+    quota_index: i32,
+) -> *const c_char {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_client_quotas_result_ref(result) }
+        .quota_keys
+        .get(index as usize)
+    {
+        Some(keys) => cstring_at(keys, quota_index),
+        None => std::ptr::null(),
+    }
+}
+
+/// Writes the quota value at `(index, quota_index)` to `out`, returning whether
+/// both indices were in range.
+///
+/// Unlike the other index accessors this cannot signal "out of range" with a
+/// sentinel: every `double`, including every negative one and 0, is a legal
+/// quota value. So it takes an out-parameter, as
+/// [`kafka_admin_ListOffsetsResultInfo_leader_epoch`] does for an optional
+/// number.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle; `out` must
+/// be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+    index: i32,
+    quota_index: i32,
+    out: *mut f64,
+) -> bool {
+    if index < 0 || quota_index < 0 {
+        return false;
+    }
+    let value = unsafe { describe_client_quotas_result_ref(result) }
+        .quota_values
+        .get(index as usize)
+        .and_then(|values| values.get(quota_index as usize))
+        .copied();
+    unsafe { write_optional(value, out) }
+}
+
+/// Destroys a `describe_client_quotas` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
+    result: *mut kafka_admin_DescribeClientQuotasResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeClientQuotasResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `AlterClientQuotasResult`.
+#[repr(C)]
+pub struct kafka_admin_AlterClientQuotasResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_AlterClientQuotasResult_t`].
+///
+/// `AlterClientQuotasResult.values()` is `Map<ClientQuotaEntity,
+/// KafkaFuture<Void>>` — the mirror image of `describeClientQuotas`, which has
+/// one future for the whole map — so this handle exposes a per-entity error and
+/// no value.
+struct AlterClientQuotasResultInner {
+    entities: Vec<ClientQuotaEntityInner>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-entity `alterClientQuotas` outcomes into the C handle.
+fn box_alter_client_quotas_result(outcomes: AlterClientQuotasOutcomes) -> *mut kafka_admin_AlterClientQuotasResult_t {
+    let mut rows: Vec<(ClientQuotaEntityInner, Option<KafkaErrorInner>)> = outcomes
+        .into_iter()
+        .map(|(entity, outcome)| (ClientQuotaEntityInner::new(&entity), outcome.err().map(error_inner)))
+        .collect();
+    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+    let (entities, errors) = rows.into_iter().unzip();
+    Box::into_raw(Box::new(AlterClientQuotasResultInner { entities, errors }))
+        as *mut kafka_admin_AlterClientQuotasResult_t
+}
+
+/// Casts a `*const kafka_admin_AlterClientQuotasResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `alter_client_quotas` call.
+unsafe fn alter_client_quotas_result_ref(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+) -> &'static AlterClientQuotasResultInner {
+    unsafe { &*(result as *const AlterClientQuotasResultInner) }
+}
+
+/// Returns the number of entities whose quotas were altered.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+) -> i32 {
+    unsafe { alter_client_quotas_result_ref(result) }.entities.len() as i32
+}
+
+/// Returns the entity at `index` (borrowed), or null if out of range. Do not
+/// free it. Entities are sorted by their `(entity type, entity name)` pairs.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+    index: i32,
+) -> *const kafka_common_ClientQuotaEntity_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { alter_client_quotas_result_ref(result) }.entities.get(index as usize) {
+        Some(entity) => entity.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the entity at `index` (borrowed), or null if its
+/// quotas were altered successfully or `index` is out of range. Do not destroy
+/// it.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { alter_client_quotas_result_ref(result) }.errors, index)
+}
+
+/// Destroys an `alter_client_quotas` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `alter_client_quotas` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_destroy(
+    result: *mut kafka_admin_AlterClientQuotasResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut AlterClientQuotasResultInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// createAcls
+// ---------------------------------------------------------------------------
+
+/// Builds `CreateAclsOptions` from the flat C option parameters.
+fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
+    CreateAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_create_acls_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_CreateAclsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-binding failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_create_acls_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_CreateAclsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Creates ACL bindings, blocking until every per-binding future has resolved
+/// (synchronous).
+///
+/// This is `createAcls(Collection<AclBinding>, CreateAclsOptions)`. The
+/// bindings cross as seven parallel arrays rather than as handles, following
+/// `alterPartitionReassignments` and `alterConsumerGroupOffsets`; row `i` of
+/// each array describes one `AclBinding`.
+///
+/// On success writes a [`kafka_admin_CreateAclsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_CreateAclsResult_destroy`]) and returns null.
+/// **A per-binding failure is not a call failure**: it is reported by
+/// [`kafka_admin_CreateAclsResult_get_error`] for that binding. A non-null
+/// return means the request could not be submitted at all, and `*out_result` is
+/// left untouched.
+///
+/// # Parameters
+///
+/// - `resource_types`: `ResourceType` codes; see
+///   [`kafka_common_AclBinding_resource_type`]. ANY (1) is rejected, as Java's
+///   `ResourcePattern` constructor rejects it.
+/// - `resource_names`: resource names; a NULL entry is rejected.
+/// - `pattern_types`: `PatternType` codes; ANY (1) and MATCH (2) are rejected,
+///   as Java's `ResourcePattern` constructor rejects them.
+/// - `principals` / `hosts`: e.g. `"User:alice"` and `"*"`; a NULL entry is
+///   rejected.
+/// - `operations`: `AclOperation` codes; ANY (1) is rejected, as Java's
+///   `AccessControlEntry` constructor rejects it.
+/// - `permission_types`: `AclPermissionType` codes; ANY (1) is likewise
+///   rejected.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// An unrecognised enum code becomes UNKNOWN, exactly as Java's `fromCode`
+/// does, and UNKNOWN is accepted by the constructors — the broker rejects it.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings; `out_result` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_CreateAclsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let acls = unsafe {
+        read_acl_bindings(
+            resource_types,
+            resource_names,
+            pattern_types,
+            principals,
+            hosts,
+            operations,
+            permission_types,
+            count,
+        )
+    };
+    let options = create_acls_options(timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_acls(a, &acls?, options))) };
+    unsafe { finish_sync(outcome, out_result, box_create_acls_result) }
+}
+
+/// Creates ACL bindings asynchronously. See
+/// [`kafka_admin_AdminClient_create_acls`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL resource name, principal or
+/// host entry, or an enum code Java's `ResourcePattern` /
+/// `AccessControlEntry` constructor rejects). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_create_acls_callback_t,
+    user_data: *mut c_void,
+) {
+    let acls = unsafe {
+        read_acl_bindings(
+            resource_types,
+            resource_names,
+            pattern_types,
+            principals,
+            hosts,
+            operations,
+            permission_types,
+            count,
+        )
+    };
+    let options = create_acls_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_create_acls(a, &acls?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_create_acls_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeAcls
+// ---------------------------------------------------------------------------
+
+/// Builds `DescribeAclsOptions` from the flat C option parameters.
+fn describe_acls_options(timeout_ms: i32) -> DescribeAclsOptions {
+    DescribeAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_describe_acls_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeAclsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. `describeAcls` has a single future for
+/// the whole call, so **any** failure arrives as `error`.
+pub type kafka_admin_AdminClient_describe_acls_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeAclsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the ACL bindings matching one filter, blocking until the result
+/// arrives (synchronous).
+///
+/// This is `describeAcls(AclBindingFilter, DescribeAclsOptions)`. Java takes a
+/// single filter, not a collection, so the seven fields cross as scalars.
+///
+/// On success writes a [`kafka_admin_DescribeAclsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_DescribeAclsResult_destroy`]) and returns null.
+/// Unlike the keyed RPCs there is no per-key error here: `DescribeAclsResult`
+/// holds one future for the whole call, so any failure is returned from this
+/// function and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `resource_type`: a `ResourceType` code; ANY (1) matches every type.
+/// - `resource_name`: the resource name, or NULL to match any name. NULL is
+///   distinct from a pointer to `""`, which filters on the empty name.
+/// - `pattern_type`: a `PatternType` code; ANY (1) matches every pattern type
+///   and MATCH (2) selects literal, prefixed and wildcard patterns that would
+///   match the name.
+/// - `principal` / `host`: or NULL to match any.
+/// - `operation` / `permission_type`: codes; ANY (1) matches every value.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// Unlike [`kafka_admin_AdminClient_create_acls`], no combination is rejected:
+/// Java's filter constructors accept ANY and MATCH, which is what a filter is
+/// for.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the three string parameters must be NULL or
+/// valid C strings; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_type: i32,
+    resource_name: *const c_char,
+    pattern_type: i32,
+    principal: *const c_char,
+    host: *const c_char,
+    operation: i32,
+    permission_type: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeAclsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let filter = unsafe {
+        build_acl_binding_filter(
+            resource_type,
+            resource_name,
+            pattern_type,
+            principal,
+            host,
+            operation,
+            permission_type,
+        )
+    };
+    let options = describe_acls_options(timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_acls(a, &filter, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_acls_result) }
+}
+
+/// Describes ACL bindings asynchronously. See
+/// [`kafka_admin_AdminClient_describe_acls`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the three string parameters must be NULL or
+/// valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_type: i32,
+    resource_name: *const c_char,
+    pattern_type: i32,
+    principal: *const c_char,
+    host: *const c_char,
+    operation: i32,
+    permission_type: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_acls_callback_t,
+    user_data: *mut c_void,
+) {
+    let filter = unsafe {
+        build_acl_binding_filter(
+            resource_type,
+            resource_name,
+            pattern_type,
+            principal,
+            host,
+            operation,
+            permission_type,
+        )
+    };
+    let options = describe_acls_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_acls(a, &filter, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(bindings) => (box_describe_acls_result(bindings), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// deleteAcls
+// ---------------------------------------------------------------------------
+
+/// Builds `DeleteAclsOptions` from the flat C option parameters.
+fn delete_acls_options(timeout_ms: i32) -> DeleteAclsOptions {
+    DeleteAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_delete_acls_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DeleteAclsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-filter failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_delete_acls_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DeleteAclsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Deletes the ACL bindings matching each filter, blocking until every
+/// per-filter future has resolved (synchronous).
+///
+/// This is `deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`. The
+/// filters cross as seven parallel arrays; row `i` describes one
+/// `AclBindingFilter`. As with
+/// [`kafka_admin_AdminClient_describe_acls`], a NULL string entry means "match
+/// any" and no enum combination is rejected.
+///
+/// On success writes a [`kafka_admin_DeleteAclsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_DeleteAclsResult_destroy`]) and returns null.
+/// **Neither a per-filter nor a per-ACL failure is a call failure**: the first
+/// is reported by [`kafka_admin_DeleteAclsResult_get_error`], the second by
+/// [`kafka_admin_DeleteAclsResult_get_result_error`]. A non-null return means
+/// the request could not be submitted at all.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings; `out_result` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DeleteAclsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let filters = unsafe {
+        read_acl_binding_filters(
+            resource_types,
+            resource_names,
+            pattern_types,
+            principals,
+            hosts,
+            operations,
+            permission_types,
+            count,
+        )
+    };
+    let options = delete_acls_options(timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_acls(a, &filters, options))) };
+    unsafe { finish_sync(outcome, out_result, box_delete_acls_result) }
+}
+
+/// Deletes ACL bindings asynchronously. See
+/// [`kafka_admin_AdminClient_delete_acls`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_delete_acls_callback_t,
+    user_data: *mut c_void,
+) {
+    let filters = unsafe {
+        read_acl_binding_filters(
+            resource_types,
+            resource_names,
+            pattern_types,
+            principals,
+            hosts,
+            operations,
+            permission_types,
+            count,
+        )
+    };
+    let options = delete_acls_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_delete_acls(a, &filters, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_delete_acls_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeClientQuotas
+// ---------------------------------------------------------------------------
+
+/// Builds `DescribeClientQuotasOptions` from the flat C option parameters.
+fn describe_client_quotas_options(timeout_ms: i32) -> DescribeClientQuotasOptions {
+    DescribeClientQuotasOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_client_quotas_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeClientQuotasResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. `describeClientQuotas` has a single
+/// future for the whole call, so **any** failure arrives as `error`.
+pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeClientQuotasResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the client quotas matching a filter, blocking until the result
+/// arrives (synchronous).
+///
+/// This is `describeClientQuotas(ClientQuotaFilter,
+/// DescribeClientQuotasOptions)`.
+///
+/// On success writes a [`kafka_admin_DescribeClientQuotasResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeClientQuotasResult_destroy`]) and returns null.
+/// `DescribeClientQuotasResult` holds one future for the whole call, so any
+/// failure is returned from this function and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `entity_types` / `match_types` / `match_names` / `count`: the filter's
+///   components. `match_types[i]` is the wire match type — 0 = EXACT (match
+///   `match_names[i]` exactly), 1 = DEFAULT (match the built-in default entity
+///   for the type), 2 = SPECIFIED (match any *named* entity of the type). These
+///   are Kafka's own protocol constants. The discriminant is required because
+///   DEFAULT and SPECIFIED both carry no name, so a null name alone could not
+///   tell them apart. `match_names[i]` is read only for EXACT, and a NULL there
+///   is rejected.
+/// - `strict`: Java's `ClientQuotaFilter.containsOnly(...)` rather than
+///   `contains(...)` — the entity must have *only* the given components.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// Passing `count` 0 with `strict` false is Java's `ClientQuotaFilter.all()`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings; `out_result` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
+    admin: *const kafka_admin_AdminClient_t,
+    entity_types: *const *const c_char,
+    match_types: *const i32,
+    match_names: *const *const c_char,
+    count: i32,
+    strict: bool,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeClientQuotasResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let filter = unsafe { read_client_quota_filter(entity_types, match_types, match_names, count, strict) };
+    let options = describe_client_quotas_options(timeout_ms);
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_client_quotas(a, &filter?, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_client_quotas_result) }
+}
+
+/// Describes client quotas asynchronously. See
+/// [`kafka_admin_AdminClient_describe_client_quotas`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL entity type, an unknown
+/// match type, or an EXACT component with no match name). And it runs on a
+/// **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when the result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
+/// guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in the callback, and publish everything the callback
+/// needs (including `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
+    admin: *const kafka_admin_AdminClient_t,
+    entity_types: *const *const c_char,
+    match_types: *const i32,
+    match_names: *const *const c_char,
+    count: i32,
+    strict: bool,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_client_quotas_callback_t,
+    user_data: *mut c_void,
+) {
+    let filter = unsafe { read_client_quota_filter(entity_types, match_types, match_names, count, strict) };
+    let options = describe_client_quotas_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_client_quotas(a, &filter?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(entities) => (box_describe_client_quotas_result(entities), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// alterClientQuotas
+// ---------------------------------------------------------------------------
+
+/// Builds `AlterClientQuotasOptions` from the flat C option parameters.
+fn alter_client_quotas_options(timeout_ms: i32, validate_only: bool) -> AlterClientQuotasOptions {
+    AlterClientQuotasOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .validate_only(validate_only)
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_alter_client_quotas_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_AlterClientQuotasResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. A per-entity failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_AlterClientQuotasResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Alters client quotas, blocking until every per-entity future has resolved
+/// (synchronous).
+///
+/// This is `alterClientQuotas(Collection<ClientQuotaAlteration>,
+/// AlterClientQuotasOptions)`. Each alteration is a quota entity plus a list of
+/// operations, so both levels cross as arrays of arrays with per-row counts,
+/// following `listConsumerGroupOffsets`.
+///
+/// On success writes a [`kafka_admin_AlterClientQuotasResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_AlterClientQuotasResult_destroy`]) and returns null. **A
+/// per-entity failure is not a call failure**: it is reported by
+/// [`kafka_admin_AlterClientQuotasResult_get_error`]. A non-null return means
+/// the request could not be submitted at all.
+///
+/// # Parameters
+///
+/// - `entity_types[i]` / `entity_names[i]` / `entity_counts[i]`: the entity of
+///   alteration `i`, as `entity_counts[i]` `(type, name)` pairs. A NULL
+///   `entity_names[i][j]` is Java's null map value: the **built-in default
+///   entity** for that type, which is not the same as omitting the type and not
+///   the same as the name `""`.
+/// - `op_keys[i]` / `op_values[i]` / `op_has_values[i]` / `op_counts[i]`: the
+///   operations of alteration `i`. `op_has_values[i][j] == false` is Java's
+///   `Op(key, null)`: **remove** that quota rather than set it. The flag is
+///   required because every `double`, including 0, is a legal quota value, so
+///   no sentinel could carry the distinction.
+/// - `validate_only`: `AlterClientQuotasOptions.validateOnly` — validate
+///   without applying.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// A repeated entity type within one alteration, or a repeated entity across
+/// alterations, is rejected: Java keys both by a `Map`, so a duplicate could
+/// only be silently dropped.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null outer array must have `count`
+/// entries, and each non-null inner array the matching per-row count of
+/// entries; string entries must be NULL or valid C strings; `out_result` must
+/// be null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
+    admin: *const kafka_admin_AdminClient_t,
+    entity_types: *const *const *const c_char,
+    entity_names: *const *const *const c_char,
+    entity_counts: *const i32,
+    op_keys: *const *const *const c_char,
+    op_values: *const *const f64,
+    op_has_values: *const *const bool,
+    op_counts: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    out_result: *mut *mut kafka_admin_AlterClientQuotasResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let entries = unsafe {
+        read_client_quota_alterations(
+            entity_types,
+            entity_names,
+            entity_counts,
+            op_keys,
+            op_values,
+            op_has_values,
+            op_counts,
+            count,
+        )
+    };
+    let options = alter_client_quotas_options(timeout_ms, validate_only);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_client_quotas(a, &entries?, options))) };
+    unsafe { finish_sync(outcome, out_result, box_alter_client_quotas_result) }
+}
+
+/// Alters client quotas asynchronously. See
+/// [`kafka_admin_AdminClient_alter_client_quotas`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL entity type or op key, an
+/// alteration with no entity types, or a repeated entity type or entity). And
+/// it runs on a **tokio worker thread** if the dispatcher's completion queue
+/// can no longer be reached when the result arrives. Destroying the handle does
+/// not cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
+/// guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in the callback, and publish everything the callback
+/// needs (including `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null outer array must have `count`
+/// entries, and each non-null inner array the matching per-row count of
+/// entries; string entries must be NULL or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
+    admin: *const kafka_admin_AdminClient_t,
+    entity_types: *const *const *const c_char,
+    entity_names: *const *const *const c_char,
+    entity_counts: *const i32,
+    op_keys: *const *const *const c_char,
+    op_values: *const *const f64,
+    op_has_values: *const *const bool,
+    op_counts: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    callback: kafka_admin_AdminClient_alter_client_quotas_callback_t,
+    user_data: *mut c_void,
+) {
+    let entries = unsafe {
+        read_client_quota_alterations(
+            entity_types,
+            entity_names,
+            entity_counts,
+            op_keys,
+            op_values,
+            op_has_values,
+            op_counts,
+            count,
+        )
+    };
+    let options = alter_client_quotas_options(timeout_ms, validate_only);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_alter_client_quotas(a, &entries?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_alter_client_quotas_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
 // MockAdminClient drivers
 //
 // Mock-only configuration methods (inherent on `MockAdminClient`, not part of
@@ -12342,7 +14771,7 @@ unsafe fn read_partition_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::{ConfigSynonym, ReplicaInfo};
+    use crate::admin::{ConfigSynonym, FilterResult, ReplicaInfo};
     use crate::common::{ClassicGroupState, Errors, KafkaGenericError};
 
     fn text(value: &CString) -> &str {
@@ -13886,6 +16315,859 @@ mod tests {
             assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, 1).is_null());
             assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(members, -1).is_null());
             kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(members);
+        }
+    }
+
+    // -- B5a: ACLs and client quotas ----------------------------------------
+    //
+    // Java's own `MockAdminClient` throws `UnsupportedOperationException` for
+    // all five of these RPCs — `createAcls` (MockAdminClient.java:806),
+    // `describeAcls` (:811), `deleteAcls` (:816), `describeClientQuotas`
+    // (:1243) and `alterClientQuotas` (:1248) — so the Rust mock fails every
+    // future it hands out and **the success path of every drain in this slice
+    // is unreachable end-to-end**. Hand-built fixtures against the pure
+    // marshaling helpers are therefore the only coverage those paths can have.
+
+    /// Builds a binding whose seven fields are all distinct, so that a
+    /// transposition of any two of them fails an assertion.
+    fn acl_binding(name: &str, principal: &str) -> AclBinding {
+        AclBinding::new(
+            ResourcePattern::new(ResourceType::Topic, name, PatternType::Prefixed).expect("valid pattern"),
+            AccessControlEntry::new(principal, "10.0.0.1", AclOperation::Write, AclPermissionType::Deny)
+                .expect("valid entry"),
+        )
+    }
+
+    fn quota_entity(pairs: &[(&str, Option<&str>)]) -> ClientQuotaEntity {
+        ClientQuotaEntity::new(pairs.iter().map(|(t, n)| ((*t).to_string(), n.map(str::to_string))).collect())
+    }
+
+    /// Turns a slice of `&str` into the NUL-terminated pointer array the C
+    /// entry points take. The returned `CString`s must outlive the pointers.
+    fn c_array(values: &[&str]) -> (Vec<CString>, Vec<*const c_char>) {
+        let owned: Vec<CString> = values.iter().map(|v| to_cstring(v)).collect();
+        let ptrs = owned.iter().map(|c| c.as_ptr()).collect();
+        (owned, ptrs)
+    }
+
+    /// Same, but a `None` becomes a NULL entry rather than being dropped.
+    fn c_array_opt(values: &[Option<&str>]) -> (Vec<Option<CString>>, Vec<*const c_char>) {
+        let owned: Vec<Option<CString>> = values.iter().map(|v| v.map(to_cstring)).collect();
+        let ptrs = owned
+            .iter()
+            .map(|c| match c {
+                Some(s) => s.as_ptr(),
+                None => std::ptr::null(),
+            })
+            .collect();
+        (owned, ptrs)
+    }
+
+    // -- Option builders ----------------------------------------------------
+
+    #[test]
+    fn acl_and_quota_options_map_the_timeout_to_its_own_field() {
+        assert_eq!(create_acls_options(1_000).timeout(), Some(1_000));
+        assert_eq!(create_acls_options(-1).timeout(), None);
+        assert_eq!(describe_acls_options(2_000).timeout(), Some(2_000));
+        assert_eq!(describe_acls_options(-1).timeout(), None);
+        assert_eq!(delete_acls_options(3_000).timeout(), Some(3_000));
+        assert_eq!(delete_acls_options(-1).timeout(), None);
+        assert_eq!(describe_client_quotas_options(4_000).timeout(), Some(4_000));
+        assert_eq!(describe_client_quotas_options(-1).timeout(), None);
+    }
+
+    #[test]
+    fn alter_client_quotas_options_maps_each_flag_to_its_own_field() {
+        let options = alter_client_quotas_options(5_000, true);
+        assert_eq!(options.timeout(), Some(5_000));
+        assert!(options.is_validate_only());
+
+        // Reversed, so a transposition cannot satisfy both cases.
+        let options = alter_client_quotas_options(-1, false);
+        assert_eq!(options.timeout(), None);
+        assert!(!options.is_validate_only());
+    }
+
+    // -- AclBinding / AclBindingFilter value handles -------------------------
+
+    #[test]
+    fn acl_binding_exposes_all_seven_java_fields_with_their_code_values() {
+        let inner = AclBindingInner::new(&acl_binding("orders-", "User:alice"));
+        let b = inner.as_ptr();
+        unsafe {
+            assert_eq!(kafka_common_AclBinding_resource_type(b), i32::from(ResourceType::Topic.code()));
+            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_resource_name(b)).to_str(), Ok("orders-"));
+            assert_eq!(kafka_common_AclBinding_pattern_type(b), i32::from(PatternType::Prefixed.code()));
+            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_principal(b)).to_str(), Ok("User:alice"));
+            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_host(b)).to_str(), Ok("10.0.0.1"));
+            assert_eq!(kafka_common_AclBinding_operation(b), i32::from(AclOperation::Write.code()));
+            assert_eq!(
+                kafka_common_AclBinding_permission_type(b),
+                i32::from(AclPermissionType::Deny.code())
+            );
+        }
+    }
+
+    #[test]
+    fn acl_binding_codes_are_javas_and_are_pairwise_distinct() {
+        // The four enums cross as `code()` values because Java defines one for
+        // each; these are the constants a C caller compares against. Asserted
+        // as literals so a renumbering is caught here rather than on the wire.
+        assert_eq!(
+            (
+                ResourceType::Unknown.code(),
+                ResourceType::Any.code(),
+                ResourceType::Topic.code(),
+                ResourceType::Group.code(),
+                ResourceType::Cluster.code(),
+                ResourceType::TransactionalId.code(),
+                ResourceType::DelegationToken.code(),
+                ResourceType::User.code(),
+            ),
+            (0, 1, 2, 3, 4, 5, 6, 7)
+        );
+        assert_eq!(
+            (
+                PatternType::Unknown.code(),
+                PatternType::Any.code(),
+                PatternType::Match.code(),
+                PatternType::Literal.code(),
+                PatternType::Prefixed.code(),
+            ),
+            (0, 1, 2, 3, 4)
+        );
+        assert_eq!(
+            (
+                AclPermissionType::Unknown.code(),
+                AclPermissionType::Any.code(),
+                AclPermissionType::Deny.code(),
+                AclPermissionType::Allow.code(),
+            ),
+            (0, 1, 2, 3)
+        );
+        assert_eq!(
+            (
+                AclOperation::Unknown.code(),
+                AclOperation::Any.code(),
+                AclOperation::All.code(),
+                AclOperation::Read.code(),
+                AclOperation::Write.code(),
+                AclOperation::Describe.code(),
+                AclOperation::TwoPhaseCommit.code(),
+            ),
+            (0, 1, 2, 3, 4, 8, 15)
+        );
+    }
+
+    #[test]
+    fn acl_binding_filter_distinguishes_a_null_string_from_an_empty_one() {
+        // Java's filter strings are nullable: null means "match any". The empty
+        // string is a real, different filter, which is why a null pointer is a
+        // sufficient encoding and no extra discriminant is needed.
+        let any = AclBindingFilterInner::new(&AclBindingFilter::any());
+        let empty = AclBindingFilterInner::new(&AclBindingFilter::new(
+            ResourcePatternFilter::new(ResourceType::Topic, Some(String::new()), PatternType::Literal),
+            AccessControlEntryFilter::new(
+                Some(String::new()),
+                Some(String::new()),
+                AclOperation::Read,
+                AclPermissionType::Allow,
+            ),
+        ));
+        unsafe {
+            let a = &any as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t;
+            assert!(kafka_common_AclBindingFilter_resource_name(a).is_null());
+            assert!(kafka_common_AclBindingFilter_principal(a).is_null());
+            assert!(kafka_common_AclBindingFilter_host(a).is_null());
+            // `AclBindingFilter::any()` is ANY on all four enums.
+            assert_eq!(
+                kafka_common_AclBindingFilter_resource_type(a),
+                i32::from(ResourceType::Any.code())
+            );
+            assert_eq!(
+                kafka_common_AclBindingFilter_pattern_type(a),
+                i32::from(PatternType::Any.code())
+            );
+            assert_eq!(kafka_common_AclBindingFilter_operation(a), i32::from(AclOperation::Any.code()));
+            assert_eq!(
+                kafka_common_AclBindingFilter_permission_type(a),
+                i32::from(AclPermissionType::Any.code())
+            );
+
+            let e = &empty as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t;
+            assert!(!kafka_common_AclBindingFilter_resource_name(e).is_null());
+            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(e)).to_str(), Ok(""));
+            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_principal(e)).to_str(), Ok(""));
+            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_host(e)).to_str(), Ok(""));
+        }
+    }
+
+    // -- ACL request marshaling ---------------------------------------------
+
+    #[test]
+    fn read_acl_bindings_keeps_each_parallel_array_on_its_own_field() {
+        let (_names, name_ptrs) = c_array(&["topic-a", "topic-b"]);
+        let (_principals, principal_ptrs) = c_array(&["User:alice", "User:bob"]);
+        let (_hosts, host_ptrs) = c_array(&["10.0.0.1", "10.0.0.2"]);
+        // Every column carries a different value in each row, and no two
+        // columns share a value, so a swapped pair of arguments is visible.
+        let resource_types = [ResourceType::Topic.code() as i32, ResourceType::Group.code() as i32];
+        let pattern_types = [PatternType::Literal.code() as i32, PatternType::Prefixed.code() as i32];
+        let operations = [AclOperation::Read.code() as i32, AclOperation::Write.code() as i32];
+        let permission_types = [
+            AclPermissionType::Allow.code() as i32,
+            AclPermissionType::Deny.code() as i32,
+        ];
+
+        let acls = unsafe {
+            read_acl_bindings(
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+            )
+        }
+        .expect("valid bindings");
+
+        assert_eq!(acls.len(), 2);
+        assert_eq!(acls[0].pattern().resource_type(), ResourceType::Topic);
+        assert_eq!(acls[0].pattern().name(), "topic-a");
+        assert_eq!(acls[0].pattern().pattern_type(), PatternType::Literal);
+        assert_eq!(acls[0].entry().principal(), "User:alice");
+        assert_eq!(acls[0].entry().host(), "10.0.0.1");
+        assert_eq!(acls[0].entry().operation(), AclOperation::Read);
+        assert_eq!(acls[0].entry().permission_type(), AclPermissionType::Allow);
+        assert_eq!(acls[1].pattern().resource_type(), ResourceType::Group);
+        assert_eq!(acls[1].pattern().name(), "topic-b");
+        assert_eq!(acls[1].pattern().pattern_type(), PatternType::Prefixed);
+        assert_eq!(acls[1].entry().principal(), "User:bob");
+        assert_eq!(acls[1].entry().host(), "10.0.0.2");
+        assert_eq!(acls[1].entry().operation(), AclOperation::Write);
+        assert_eq!(acls[1].entry().permission_type(), AclPermissionType::Deny);
+    }
+
+    #[test]
+    fn read_acl_bindings_propagates_javas_constructor_messages_with_the_row_index() {
+        let (_names, name_ptrs) = c_array(&["t0", "t1"]);
+        let (_principals, principal_ptrs) = c_array(&["User:a", "User:b"]);
+        let (_hosts, host_ptrs) = c_array(&["*", "*"]);
+        let literal = PatternType::Literal.code() as i32;
+        let allow = AclPermissionType::Allow.code() as i32;
+        let read = AclOperation::Read.code() as i32;
+        let topic = ResourceType::Topic.code() as i32;
+
+        // (expected message, resource types, pattern types, operations, permission types)
+        type Case = (&'static str, [i32; 2], [i32; 2], [i32; 2], [i32; 2]);
+        let cases: [Case; 4] = [
+            // ANY resource type, on row 1.
+            (
+                "acl at index 1: resourceType must not be ANY",
+                [topic, ResourceType::Any.code() as i32],
+                [literal, literal],
+                [read, read],
+                [allow, allow],
+            ),
+            // MATCH pattern type, on row 0.
+            (
+                "acl at index 0: patternType must not be MATCH",
+                [topic, topic],
+                [PatternType::Match.code() as i32, literal],
+                [read, read],
+                [allow, allow],
+            ),
+            // ANY operation, on row 1.
+            (
+                "acl at index 1: operation must not be ANY",
+                [topic, topic],
+                [literal, literal],
+                [read, AclOperation::Any.code() as i32],
+                [allow, allow],
+            ),
+            // ANY permission type, on row 0.
+            (
+                "acl at index 0: permissionType must not be ANY",
+                [topic, topic],
+                [literal, literal],
+                [read, read],
+                [AclPermissionType::Any.code() as i32, allow],
+            ),
+        ];
+        for (expected, resource_types, pattern_types, operations, permission_types) in cases {
+            let err = unsafe {
+                read_acl_bindings(
+                    resource_types.as_ptr(),
+                    name_ptrs.as_ptr(),
+                    pattern_types.as_ptr(),
+                    principal_ptrs.as_ptr(),
+                    host_ptrs.as_ptr(),
+                    operations.as_ptr(),
+                    permission_types.as_ptr(),
+                    2,
+                )
+            }
+            .expect_err("rejected");
+            assert!(matches!(err, KafkaError::IllegalArgument(_)));
+            assert_eq!(err.message(), expected);
+        }
+    }
+
+    #[test]
+    fn read_acl_bindings_rejects_a_null_entry_in_a_non_nullable_string_array() {
+        let (_names, name_ptrs) = c_array_opt(&[Some("t0"), None]);
+        let (_principals, principal_ptrs) = c_array(&["User:a", "User:b"]);
+        let (_hosts, host_ptrs) = c_array(&["*", "*"]);
+        let topic = [ResourceType::Topic.code() as i32; 2];
+        let literal = [PatternType::Literal.code() as i32; 2];
+        let read = [AclOperation::Read.code() as i32; 2];
+        let allow = [AclPermissionType::Allow.code() as i32; 2];
+
+        let err = unsafe {
+            read_acl_bindings(
+                topic.as_ptr(),
+                name_ptrs.as_ptr(),
+                literal.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                read.as_ptr(),
+                allow.as_ptr(),
+                2,
+            )
+        }
+        .expect_err("rejected");
+        assert_eq!(err.message(), "resource name at index 1 must not be null");
+    }
+
+    #[test]
+    fn read_acl_bindings_maps_an_unrecognised_code_to_unknown_as_java_does() {
+        // Java's `fromCode` returns UNKNOWN rather than throwing, and the
+        // constructors accept UNKNOWN (only ANY is rejected). The broker is
+        // what refuses it.
+        let (_names, name_ptrs) = c_array(&["t"]);
+        let (_principals, principal_ptrs) = c_array(&["User:a"]);
+        let (_hosts, host_ptrs) = c_array(&["*"]);
+        let acls = unsafe {
+            read_acl_bindings(
+                [99i32].as_ptr(),
+                name_ptrs.as_ptr(),
+                [PatternType::Literal.code() as i32].as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                [98i32].as_ptr(),
+                [AclPermissionType::Allow.code() as i32].as_ptr(),
+                1,
+            )
+        }
+        .expect("UNKNOWN is accepted");
+        assert_eq!(acls[0].pattern().resource_type(), ResourceType::Unknown);
+        assert_eq!(acls[0].entry().operation(), AclOperation::Unknown);
+    }
+
+    #[test]
+    fn read_acl_binding_filters_preserve_null_entries_rather_than_dropping_them() {
+        // The critical difference from `read_strings`, which skips NULLs: a
+        // dropped entry would shift every later row's fields onto the wrong
+        // filter. Row 0 has a null name, row 1 a null principal.
+        let (_names, name_ptrs) = c_array_opt(&[None, Some("topic-b")]);
+        let (_principals, principal_ptrs) = c_array_opt(&[Some("User:alice"), None]);
+        let (_hosts, host_ptrs) = c_array_opt(&[Some("10.0.0.1"), None]);
+        let resource_types = [ResourceType::Any.code() as i32, ResourceType::Topic.code() as i32];
+        let pattern_types = [PatternType::Match.code() as i32, PatternType::Literal.code() as i32];
+        let operations = [AclOperation::Any.code() as i32, AclOperation::Describe.code() as i32];
+        let permission_types = [
+            AclPermissionType::Any.code() as i32,
+            AclPermissionType::Allow.code() as i32,
+        ];
+
+        let filters = unsafe {
+            read_acl_binding_filters(
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+            )
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].pattern_filter().resource_type(), ResourceType::Any);
+        assert_eq!(filters[0].pattern_filter().name(), None);
+        assert_eq!(filters[0].pattern_filter().pattern_type(), PatternType::Match);
+        assert_eq!(filters[0].entry_filter().principal(), Some("User:alice"));
+        assert_eq!(filters[0].entry_filter().host(), Some("10.0.0.1"));
+        assert_eq!(filters[1].pattern_filter().name(), Some("topic-b"));
+        assert_eq!(filters[1].pattern_filter().pattern_type(), PatternType::Literal);
+        assert_eq!(filters[1].entry_filter().principal(), None);
+        assert_eq!(filters[1].entry_filter().host(), None);
+        assert_eq!(filters[1].entry_filter().operation(), AclOperation::Describe);
+    }
+
+    // -- ACL result flattening ----------------------------------------------
+
+    #[test]
+    fn create_acls_result_reports_success_as_a_null_error_and_sorts_by_binding() {
+        let ok = acl_binding("a-topic", "User:alice");
+        let failed = acl_binding("z-topic", "User:zoe");
+        let outcomes: CreateAclsOutcomes = HashMap::from([
+            (ok.clone(), Ok(())),
+            (failed.clone(), Err(KafkaError::new(Errors::SecurityDisabled))),
+        ]);
+        let result = box_create_acls_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_CreateAclsResult_count(result), 2);
+            // Sorted by resource name, so "a-topic" comes first.
+            let first = kafka_admin_CreateAclsResult_get_binding(result, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBinding_resource_name(first)).to_str(),
+                Ok("a-topic")
+            );
+            assert!(kafka_admin_CreateAclsResult_get_error(result, 0).is_null());
+
+            let second = kafka_admin_CreateAclsResult_get_binding(result, 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBinding_principal(second)).to_str(),
+                Ok("User:zoe")
+            );
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_CreateAclsResult_get_error(result, 1)),
+                Errors::SecurityDisabled.code() as i32
+            );
+
+            assert!(kafka_admin_CreateAclsResult_get_binding(result, 2).is_null());
+            assert!(kafka_admin_CreateAclsResult_get_binding(result, -1).is_null());
+            assert!(kafka_admin_CreateAclsResult_get_error(result, -1).is_null());
+            kafka_admin_CreateAclsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn describe_acls_result_keeps_the_broker_order_and_has_no_per_key_error() {
+        // `DescribeAclsResult` holds one future for the whole call, so the
+        // listing is unsorted (broker order) and there is no `_get_error`.
+        let result =
+            box_describe_acls_result(vec![acl_binding("z-topic", "User:zoe"), acl_binding("a-topic", "User:alice")]);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeAclsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBinding_resource_name(
+                    kafka_admin_DescribeAclsResult_get_binding(result, 0)
+                ))
+                .to_str(),
+                Ok("z-topic")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBinding_resource_name(
+                    kafka_admin_DescribeAclsResult_get_binding(result, 1)
+                ))
+                .to_str(),
+                Ok("a-topic")
+            );
+            assert!(kafka_admin_DescribeAclsResult_get_binding(result, 2).is_null());
+            assert!(kafka_admin_DescribeAclsResult_get_binding(result, -1).is_null());
+            kafka_admin_DescribeAclsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn delete_acls_result_separates_a_filter_failure_from_a_per_acl_failure() {
+        // Three filters exercising all three outcomes Java can report: the
+        // filter's own future failing, a matched ACL that could not be deleted,
+        // and a matched ACL that was.
+        let deleted = acl_binding("deleted-topic", "User:alice");
+        let matched_but_failed = acl_binding("stuck-topic", "User:bob");
+
+        fn filter(name: &str) -> AclBindingFilter {
+            AclBindingFilter::new(
+                ResourcePatternFilter::new(ResourceType::Topic, Some(name.to_string()), PatternType::Literal),
+                AccessControlEntryFilter::any(),
+            )
+        }
+        let outcomes: DeleteAclsOutcomes = HashMap::from([
+            (
+                filter("a-filter"),
+                Ok(FilterResults::new(vec![
+                    FilterResult::new(Some(deleted.clone()), None),
+                    FilterResult::new(None, Some(KafkaError::new(Errors::SecurityDisabled))),
+                ])),
+            ),
+            (
+                filter("m-filter"),
+                Ok(FilterResults::new(vec![FilterResult::new(Some(matched_but_failed), None)])),
+            ),
+            (filter("z-filter"), Err(KafkaError::new(Errors::ClusterAuthorizationFailed))),
+        ]);
+        let result = box_delete_acls_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_DeleteAclsResult_count(result), 3);
+
+            // Sorted by the filter's fields, so "a-filter" is index 0.
+            let f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(f0)).to_str(),
+                Ok("a-filter")
+            );
+            assert!(kafka_admin_DeleteAclsResult_get_error(result, 0).is_null());
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 0), 2);
+            // Entry 0: a binding, no exception.
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBinding_resource_name(kafka_admin_DeleteAclsResult_get_binding(
+                    result, 0, 0
+                )))
+                .to_str(),
+                Ok("deleted-topic")
+            );
+            assert!(kafka_admin_DeleteAclsResult_get_result_error(result, 0, 0).is_null());
+            // Entry 1: an exception, no binding. The two are complementary.
+            assert!(kafka_admin_DeleteAclsResult_get_binding(result, 0, 1).is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_DeleteAclsResult_get_result_error(result, 0, 1)),
+                Errors::SecurityDisabled.code() as i32
+            );
+
+            // Filter 2 failed outright: its error is set and it has no results,
+            // which is a different thing from a filter that matched nothing.
+            let f2 = kafka_admin_DeleteAclsResult_get_filter(result, 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(f2)).to_str(),
+                Ok("z-filter")
+            );
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_DeleteAclsResult_get_error(result, 2)),
+                Errors::ClusterAuthorizationFailed.code() as i32
+            );
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 2), 0);
+
+            // Out of range on either index.
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 3), 0);
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, -1), 0);
+            assert!(kafka_admin_DeleteAclsResult_get_filter(result, 3).is_null());
+            assert!(kafka_admin_DeleteAclsResult_get_binding(result, 0, 2).is_null());
+            assert!(kafka_admin_DeleteAclsResult_get_binding(result, 0, -1).is_null());
+            assert!(kafka_admin_DeleteAclsResult_get_result_error(result, 5, 0).is_null());
+            kafka_admin_DeleteAclsResult_destroy(result);
+        }
+    }
+
+    // -- Client-quota request marshaling -------------------------------------
+
+    #[test]
+    fn read_client_quota_filter_maps_each_wire_match_type_to_its_own_arm() {
+        use crate::common::quota::ClientQuotaMatch;
+        let (_types, type_ptrs) = c_array(&["user", "client-id", "ip"]);
+        let (_names, name_ptrs) = c_array_opt(&[Some("alice"), None, None]);
+        let match_types = [
+            i32::from(MATCH_TYPE_EXACT),
+            i32::from(MATCH_TYPE_DEFAULT),
+            i32::from(MATCH_TYPE_SPECIFIED),
+        ];
+        let filter =
+            unsafe { read_client_quota_filter(type_ptrs.as_ptr(), match_types.as_ptr(), name_ptrs.as_ptr(), 3, false) }
+                .expect("valid filter");
+
+        assert!(!filter.strict());
+        let components = filter.components();
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0].entity_type(), "user");
+        assert_eq!(components[0].match_spec(), &ClientQuotaMatch::Exact("alice".to_string()));
+        assert_eq!(components[1].entity_type(), "client-id");
+        // DEFAULT and SPECIFIED both carry no name; the discriminant is the
+        // only thing separating them, and conflating them would change both
+        // equality and the wire match-type byte.
+        assert_eq!(components[1].match_spec(), &ClientQuotaMatch::Default);
+        assert_eq!(components[2].entity_type(), "ip");
+        assert_eq!(components[2].match_spec(), &ClientQuotaMatch::Any);
+        assert_ne!(components[1].match_spec(), components[2].match_spec());
+    }
+
+    #[test]
+    fn read_client_quota_filter_honours_strict_and_the_no_component_case() {
+        let (_types, type_ptrs) = c_array(&["user"]);
+        let (_names, name_ptrs) = c_array_opt(&[Some("alice")]);
+        let exact = [i32::from(MATCH_TYPE_EXACT)];
+
+        let strict =
+            unsafe { read_client_quota_filter(type_ptrs.as_ptr(), exact.as_ptr(), name_ptrs.as_ptr(), 1, true) }
+                .expect("valid filter");
+        assert!(strict.strict());
+        assert_eq!(strict.components().len(), 1);
+
+        // No components, not strict: Java's `ClientQuotaFilter.all()`.
+        let all = unsafe { read_client_quota_filter(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, false) }
+            .expect("valid filter");
+        assert_eq!(all, ClientQuotaFilter::all());
+        // No components, strict: `containsOnly([])`, a different filter.
+        let none = unsafe { read_client_quota_filter(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, true) }
+            .expect("valid filter");
+        assert_eq!(none, ClientQuotaFilter::contains_only(Vec::new()));
+        assert_ne!(all, none);
+    }
+
+    #[test]
+    fn read_client_quota_filter_rejects_a_bad_match_type_or_a_nameless_exact() {
+        let (_types, type_ptrs) = c_array(&["user"]);
+        let (_names, name_ptrs) = c_array_opt(&[None]);
+        let err = unsafe {
+            read_client_quota_filter(
+                type_ptrs.as_ptr(),
+                [i32::from(MATCH_TYPE_EXACT)].as_ptr(),
+                name_ptrs.as_ptr(),
+                1,
+                false,
+            )
+        }
+        .expect_err("rejected");
+        assert_eq!(
+            err.message(),
+            "quota filter component at index 0 has match type EXACT but no match name"
+        );
+
+        let err =
+            unsafe { read_client_quota_filter(type_ptrs.as_ptr(), [7i32].as_ptr(), name_ptrs.as_ptr(), 1, false) }
+                .expect_err("rejected");
+        assert_eq!(err.message(), "quota filter component at index 0 has unknown match type 7");
+    }
+
+    #[test]
+    fn read_client_quota_alterations_maps_both_ragged_levels_onto_their_own_rows() {
+        let (_t0, t0) = c_array(&["user", "client-id"]);
+        let (_t1, t1) = c_array(&["ip"]);
+        let (_n0, n0) = c_array_opt(&[Some("alice"), None]);
+        let (_n1, n1) = c_array_opt(&[Some("10.0.0.1")]);
+        let (_k0, k0) = c_array(&["producer_byte_rate", "consumer_byte_rate"]);
+        let (_k1, k1) = c_array(&["request_percentage"]);
+
+        let entity_types = [t0.as_ptr(), t1.as_ptr()];
+        let entity_names = [n0.as_ptr(), n1.as_ptr()];
+        let entity_counts = [2i32, 1];
+        let op_keys = [k0.as_ptr(), k1.as_ptr()];
+        let v0 = [1024.0f64, 0.0];
+        let v1 = [50.0f64];
+        let op_values = [v0.as_ptr(), v1.as_ptr()];
+        // Row 0 op 1 has no value: Java's `Op(key, null)`, i.e. remove. Its
+        // slot in `op_values` holds 0.0, a perfectly legal quota value, which
+        // is exactly why the flag rather than a sentinel carries the meaning.
+        let h0 = [true, false];
+        let h1 = [true];
+        let op_has_values = [h0.as_ptr(), h1.as_ptr()];
+        let op_counts = [2i32, 1];
+
+        let alterations = unsafe {
+            read_client_quota_alterations(
+                entity_types.as_ptr(),
+                entity_names.as_ptr(),
+                entity_counts.as_ptr(),
+                op_keys.as_ptr(),
+                op_values.as_ptr(),
+                op_has_values.as_ptr(),
+                op_counts.as_ptr(),
+                2,
+            )
+        }
+        .expect("valid alterations");
+
+        assert_eq!(alterations.len(), 2);
+        let first = &alterations[0];
+        assert_eq!(first.entity().entries().len(), 2);
+        assert_eq!(first.entity().entries().get("user"), Some(&Some("alice".to_string())));
+        // A null name is the built-in DEFAULT entity for that type, not an
+        // absent entry and not the empty name.
+        assert_eq!(first.entity().entries().get("client-id"), Some(&None));
+        assert_eq!(first.ops().len(), 2);
+        assert_eq!(first.ops()[0].key(), "producer_byte_rate");
+        assert_eq!(first.ops()[0].value(), Some(1024.0));
+        assert_eq!(first.ops()[1].key(), "consumer_byte_rate");
+        assert_eq!(first.ops()[1].value(), None);
+
+        let second = &alterations[1];
+        assert_eq!(second.entity().entries().get("ip"), Some(&Some("10.0.0.1".to_string())));
+        assert_eq!(second.ops().len(), 1);
+        assert_eq!(second.ops()[0].key(), "request_percentage");
+        assert_eq!(second.ops()[0].value(), Some(50.0));
+    }
+
+    #[test]
+    fn read_client_quota_alterations_rejects_duplicate_entity_types_and_entities() {
+        let (_dup, dup) = c_array(&["user", "user"]);
+        let (_names, names) = c_array_opt(&[Some("alice"), Some("bob")]);
+        let entity_types = [dup.as_ptr()];
+        let entity_names = [names.as_ptr()];
+        let err = unsafe {
+            read_client_quota_alterations(
+                entity_types.as_ptr(),
+                entity_names.as_ptr(),
+                [2i32].as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        }
+        .expect_err("rejected");
+        assert_eq!(err.message(), "quota alteration at index 0 repeats entity type `user`");
+
+        // The same entity twice across two alterations: Java keys the result by
+        // entity, so the second would silently replace the first.
+        let (_t, t) = c_array(&["user"]);
+        let (_n, n) = c_array_opt(&[Some("alice")]);
+        let entity_types = [t.as_ptr(), t.as_ptr()];
+        let entity_names = [n.as_ptr(), n.as_ptr()];
+        let err = unsafe {
+            read_client_quota_alterations(
+                entity_types.as_ptr(),
+                entity_names.as_ptr(),
+                [1i32, 1].as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+            )
+        }
+        .expect_err("rejected");
+        assert_eq!(
+            err.message(),
+            "quota alteration at index 1 repeats an entity already altered by an earlier entry"
+        );
+    }
+
+    // -- Client-quota result flattening --------------------------------------
+
+    #[test]
+    fn client_quota_entity_distinguishes_the_default_entity_from_the_empty_name() {
+        let inner = ClientQuotaEntityInner::new(&quota_entity(&[
+            ("user", None),
+            ("client-id", Some("")),
+            ("ip", Some("10.0.0.1")),
+        ]));
+        let e = inner.as_ptr();
+        unsafe {
+            assert_eq!(kafka_common_ClientQuotaEntity_entry_count(e), 3);
+            // Sorted by entity type: client-id, ip, user.
+            assert_eq!(
+                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 0)).to_str(),
+                Ok("client-id")
+            );
+            // Present but empty: a pointer to "", not null.
+            let empty = kafka_common_ClientQuotaEntity_get_entry_name(e, 0);
+            assert!(!empty.is_null());
+            assert_eq!(CStr::from_ptr(empty).to_str(), Ok(""));
+
+            assert_eq!(
+                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 1)).to_str(),
+                Ok("ip")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(e, 1)).to_str(),
+                Ok("10.0.0.1")
+            );
+
+            assert_eq!(
+                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 2)).to_str(),
+                Ok("user")
+            );
+            // The default entity: a null name at an in-range index.
+            assert!(kafka_common_ClientQuotaEntity_get_entry_name(e, 2).is_null());
+
+            assert!(kafka_common_ClientQuotaEntity_get_entry_type(e, 3).is_null());
+            assert!(kafka_common_ClientQuotaEntity_get_entry_name(e, 3).is_null());
+            assert!(kafka_common_ClientQuotaEntity_get_entry_type(e, -1).is_null());
+        }
+    }
+
+    #[test]
+    fn describe_client_quotas_result_flattens_the_nested_quota_map() {
+        let outcome: DescribeClientQuotasOutcome = HashMap::from([
+            (
+                quota_entity(&[("user", Some("alice"))]),
+                HashMap::from([
+                    ("producer_byte_rate".to_string(), 1024.0),
+                    ("consumer_byte_rate".to_string(), 2048.0),
+                ]),
+            ),
+            (quota_entity(&[("user", Some("bob"))]), HashMap::new()),
+        ]);
+        let result = box_describe_client_quotas_result(outcome);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_count(result), 2);
+
+            // Entities sorted by their (type, name) pairs: alice before bob.
+            let alice = kafka_admin_DescribeClientQuotasResult_get_entity(result, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                Ok("alice")
+            );
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, 0), 2);
+            // Quota keys sorted: consumer_byte_rate before producer_byte_rate.
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeClientQuotasResult_get_quota_key(result, 0, 0)).to_str(),
+                Ok("consumer_byte_rate")
+            );
+            let mut value = 0.0f64;
+            assert!(kafka_admin_DescribeClientQuotasResult_get_quota_value(result, 0, 0, &mut value));
+            assert_eq!(value, 2048.0);
+            assert!(kafka_admin_DescribeClientQuotasResult_get_quota_value(result, 0, 1, &mut value));
+            assert_eq!(value, 1024.0);
+
+            // An entity with no quota values at all.
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, 1), 0);
+
+            // Out of range: the value accessor reports false and leaves `out`
+            // untouched, because no `double` sentinel could be unambiguous.
+            value = -12.5;
+            assert!(!kafka_admin_DescribeClientQuotasResult_get_quota_value(
+                result, 0, 2, &mut value
+            ));
+            assert_eq!(value, -12.5);
+            assert!(!kafka_admin_DescribeClientQuotasResult_get_quota_value(
+                result, 9, 0, &mut value
+            ));
+            assert!(!kafka_admin_DescribeClientQuotasResult_get_quota_value(
+                result, -1, 0, &mut value
+            ));
+            assert!(!kafka_admin_DescribeClientQuotasResult_get_quota_value(
+                result, 0, -1, &mut value
+            ));
+            assert_eq!(value, -12.5);
+            assert!(kafka_admin_DescribeClientQuotasResult_get_quota_key(result, 5, 0).is_null());
+            assert!(kafka_admin_DescribeClientQuotasResult_get_entity(result, 2).is_null());
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, -1), 0);
+            kafka_admin_DescribeClientQuotasResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn alter_client_quotas_result_reports_success_as_a_null_error() {
+        let outcomes: AlterClientQuotasOutcomes = HashMap::from([
+            (quota_entity(&[("user", Some("alice"))]), Ok(())),
+            (
+                quota_entity(&[("user", Some("bob"))]),
+                Err(KafkaError::new(Errors::InvalidRequest)),
+            ),
+        ]);
+        let result = box_alter_client_quotas_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_AlterClientQuotasResult_count(result), 2);
+            let alice = kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                Ok("alice")
+            );
+            assert!(kafka_admin_AlterClientQuotasResult_get_error(result, 0).is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(kafka_admin_AlterClientQuotasResult_get_error(result, 1)),
+                Errors::InvalidRequest.code() as i32
+            );
+            assert!(kafka_admin_AlterClientQuotasResult_get_entity(result, 2).is_null());
+            assert!(kafka_admin_AlterClientQuotasResult_get_entity(result, -1).is_null());
+            assert!(kafka_admin_AlterClientQuotasResult_get_error(result, -1).is_null());
+            kafka_admin_AlterClientQuotasResult_destroy(result);
         }
     }
 }
