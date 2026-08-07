@@ -4826,8 +4826,11 @@ static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void)
                              kafka_common_KafkaError_message(error));
     kafka_common_KafkaError_destroy(error);
 
-    /* The same entity in two alterations: Java keys the result by entity, so
-     * the second would silently replace the first. */
+    /* The same entity in two alterations. Java accepts this -- it sends both
+     * and only the future map collapses (KafkaAdminClient.java:4301-4313) --
+     * but the C result is a flat array built from that map, so the caller
+     * could not tell which of its two rows the surviving outcome describes.
+     * Rejected at the exact row instead; see read_client_quota_alterations. */
     const char *types[1] = {"user"};
     const char *names[1] = {"alice"};
     const char *const *const two_types[2] = {types, types};
