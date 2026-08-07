@@ -97,3 +97,4 @@
 - [M11 bindings B0+B1](m11_bindings_b0_b1_notes.md) — admin FFI no guard; opaque-handle free trap; cbindgen skips module docs; ffi-archive clobbering; deadline clamp twice; clock-advancing test client
 - [M11 bindings B2](m11_bindings_b2_notes.md) — edition-2024 RPIT `use<>`; Java enums w/o numeric id cross as names; cbindgen callback-typedef grep
 - [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims
+- [M11 bindings Critic r5](m11_bindings_critic_round5_patterns.md) — name which Java (mock vs prod) in shipped docs; 'N' steals on Py_BuildValue failure; asymmetric-flag option tests
