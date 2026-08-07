@@ -415,7 +415,7 @@ async fn await_non_empty_records_count(
         let count = records
             .into_iter()
             .filter(|r| r.topic() == partition.topic() && r.partition() == partition.partition())
-            .filter(|r| r.key().as_deref().map(|k| k.as_slice()) != Some(b"__provisioner__".as_slice()))
+            .filter(|r| r.key().map(|k| k.as_slice()) != Some(b"__provisioner__".as_slice()))
             .count();
         if count > 0 {
             return count;
