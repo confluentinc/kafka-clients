@@ -917,6 +917,285 @@ class MemberToRemove:
         return f"MemberToRemove(group_instance_id={self.group_instance_id!r})"
 
 
+class ScramMechanism:
+    """SASL/SCRAM mechanisms (Java ``ScramMechanism``).
+
+    The values are Java's ``ScramMechanism.type()`` wire indicators. ``UNKNOWN``
+    is what an unrecognised indicator decodes to, mirroring Java's ``fromType``;
+    the broker rejects it.
+    """
+
+    UNKNOWN = 0
+    SCRAM_SHA_256 = 1
+    SCRAM_SHA_512 = 2
+
+    _NAMES = {0: "UNKNOWN", 1: "SCRAM-SHA-256", 2: "SCRAM-SHA-512"}
+
+    @staticmethod
+    def mechanism_name(mechanism):
+        """The SASL mechanism name for a type indicator (Java
+        ``mechanismName()``)."""
+        return ScramMechanism._NAMES.get(int(mechanism), "UNKNOWN")
+
+
+class ScramCredentialInfo:
+    """A SCRAM mechanism and its iteration count (Java
+    ``ScramCredentialInfo``)."""
+
+    __slots__ = ("mechanism", "iterations")
+
+    def __init__(self, mechanism, iterations):
+        self.mechanism = int(mechanism)
+        self.iterations = int(iterations)
+
+    def __eq__(self, other):
+        return (isinstance(other, ScramCredentialInfo)
+                and self.mechanism == other.mechanism and self.iterations == other.iterations)
+
+    def __hash__(self):
+        return hash((self.mechanism, self.iterations))
+
+    def __repr__(self):
+        return (f"ScramCredentialInfo(mechanism={ScramMechanism.mechanism_name(self.mechanism)}, "
+                f"iterations={self.iterations})")
+
+
+class UserScramCredentialUpsertion:
+    """A request to insert or update a user's SCRAM credential (Java
+    ``UserScramCredentialUpsertion``).
+
+    ``password`` is raw ``bytes``; a ``str`` is encoded as UTF-8, matching
+    Java's ``(String user, ScramCredentialInfo, String password)`` constructor.
+    Leave ``salt`` as ``None`` to have the client generate one, which selects
+    Java's three-argument constructor.
+    """
+
+    __slots__ = ("user", "credential_info", "password", "salt")
+
+    def __init__(self, user, credential_info, password, salt=None):
+        self.user = str(user)
+        self.credential_info = credential_info
+        self.password = password.encode("utf-8") if isinstance(password, str) else bytes(password)
+        self.salt = None if salt is None else bytes(salt)
+
+    def __repr__(self):
+        return (f"UserScramCredentialUpsertion(user={self.user!r}, "
+                f"credential_info={self.credential_info!r})")
+
+
+class UserScramCredentialDeletion:
+    """A request to delete a user's SCRAM credential for one mechanism (Java
+    ``UserScramCredentialDeletion``)."""
+
+    __slots__ = ("user", "mechanism")
+
+    def __init__(self, user, mechanism):
+        self.user = str(user)
+        self.mechanism = int(mechanism)
+
+    def __repr__(self):
+        return (f"UserScramCredentialDeletion(user={self.user!r}, "
+                f"mechanism={ScramMechanism.mechanism_name(self.mechanism)})")
+
+
+class UserScramCredentialsDescription:
+    """A user's SCRAM credentials (Java ``UserScramCredentialsDescription``).
+
+    A user the broker reports as having no credential is described with an empty
+    ``credential_infos``, not as an error -- Java's ``all()`` treats
+    ``RESOURCE_NOT_FOUND`` the same way.
+    """
+
+    __slots__ = ("name", "credential_infos")
+
+    def __init__(self, name, credential_infos):
+        self.name = str(name)
+        self.credential_infos = list(credential_infos)
+
+    def __eq__(self, other):
+        return (isinstance(other, UserScramCredentialsDescription)
+                and self.name == other.name and self.credential_infos == other.credential_infos)
+
+    def __repr__(self):
+        return (f"UserScramCredentialsDescription(name={self.name!r}, "
+                f"credential_infos={self.credential_infos!r})")
+
+
+class KafkaPrincipal:
+    """A Kafka principal (Java ``KafkaPrincipal``), e.g. ``User:alice``."""
+
+    USER_TYPE = "User"
+
+    __slots__ = ("principal_type", "name", "token_authenticated")
+
+    def __init__(self, principal_type, name, token_authenticated=False):
+        self.principal_type = str(principal_type)
+        self.name = str(name)
+        self.token_authenticated = bool(token_authenticated)
+
+    def __eq__(self, other):
+        # Java's `equals` compares only the type and the name;
+        # `tokenAuthenticated` is deliberately excluded.
+        return (isinstance(other, KafkaPrincipal)
+                and self.principal_type == other.principal_type and self.name == other.name)
+
+    def __hash__(self):
+        return hash((self.principal_type, self.name))
+
+    def __str__(self):
+        return f"{self.principal_type}:{self.name}"
+
+    def __repr__(self):
+        return (f"KafkaPrincipal(principal_type={self.principal_type!r}, name={self.name!r}, "
+                f"token_authenticated={self.token_authenticated})")
+
+
+class TokenInformation:
+    """A delegation token's metadata (Java ``TokenInformation``).
+
+    ``token_requester`` is the principal that asked for the token, which differs
+    from ``owner`` when a superuser creates one on another principal's behalf
+    (KIP-373). All three timestamps are milliseconds since the epoch.
+    """
+
+    __slots__ = ("token_id", "owner", "token_requester", "renewers", "issue_timestamp",
+                 "expiry_timestamp", "max_timestamp")
+
+    def __init__(self, token_id, owner, token_requester, renewers, issue_timestamp,
+                 expiry_timestamp, max_timestamp):
+        self.token_id = str(token_id)
+        self.owner = owner
+        self.token_requester = token_requester
+        self.renewers = list(renewers)
+        self.issue_timestamp = int(issue_timestamp)
+        self.expiry_timestamp = int(expiry_timestamp)
+        self.max_timestamp = int(max_timestamp)
+
+    def __repr__(self):
+        return (f"TokenInformation(token_id={self.token_id!r}, owner={self.owner!r}, "
+                f"renewers={self.renewers!r}, expiry_timestamp={self.expiry_timestamp})")
+
+
+class DelegationToken:
+    """A delegation token (Java ``DelegationToken``).
+
+    ``hmac`` is raw ``bytes`` -- it is a MAC and can contain NUL, so it is not a
+    ``str``. Pass it back verbatim to :meth:`Admin.renew_delegation_token` /
+    :meth:`Admin.expire_delegation_token`.
+    """
+
+    __slots__ = ("token_info", "hmac", "hmac_as_base64_string")
+
+    def __init__(self, token_info, hmac, hmac_as_base64_string):
+        self.token_info = token_info
+        self.hmac = bytes(hmac)
+        self.hmac_as_base64_string = str(hmac_as_base64_string)
+
+    def __repr__(self):
+        return (f"DelegationToken(token_info={self.token_info!r}, "
+                f"hmac_as_base64_string={self.hmac_as_base64_string!r})")
+
+
+class UpgradeType:
+    """How a feature update should be applied (Java
+    ``FeatureUpdate.UpgradeType``).
+
+    The values are Java's ``code()``. ``UNKNOWN`` marshals fine and is rejected
+    by the broker, mirroring Java's ``fromCode``.
+    """
+
+    UNKNOWN = 0
+    UPGRADE = 1
+    SAFE_DOWNGRADE = 2
+    UNSAFE_DOWNGRADE = 3
+
+
+class FeatureUpdate:
+    """An update to one finalized feature (Java ``FeatureUpdate``).
+
+    ``max_version_level`` of 0 deletes the finalized feature and must be paired
+    with a downgrade ``upgrade_type``; the C layer rejects the combination Java's
+    constructor rejects.
+    """
+
+    __slots__ = ("max_version_level", "upgrade_type")
+
+    def __init__(self, max_version_level, upgrade_type):
+        self.max_version_level = int(max_version_level)
+        self.upgrade_type = int(upgrade_type)
+
+    def __eq__(self, other):
+        return (isinstance(other, FeatureUpdate)
+                and self.max_version_level == other.max_version_level
+                and self.upgrade_type == other.upgrade_type)
+
+    def __repr__(self):
+        return (f"FeatureUpdate(max_version_level={self.max_version_level}, "
+                f"upgrade_type={self.upgrade_type})")
+
+
+class FinalizedVersionRange:
+    """The finalized version range of a feature (Java
+    ``FinalizedVersionRange``)."""
+
+    __slots__ = ("min_version_level", "max_version_level")
+
+    def __init__(self, min_version_level, max_version_level):
+        self.min_version_level = int(min_version_level)
+        self.max_version_level = int(max_version_level)
+
+    def __eq__(self, other):
+        return (isinstance(other, FinalizedVersionRange)
+                and self.min_version_level == other.min_version_level
+                and self.max_version_level == other.max_version_level)
+
+    def __repr__(self):
+        return (f"FinalizedVersionRange(min_version_level={self.min_version_level}, "
+                f"max_version_level={self.max_version_level})")
+
+
+class SupportedVersionRange:
+    """The version range a feature supports (Java ``SupportedVersionRange``)."""
+
+    __slots__ = ("min_version", "max_version")
+
+    def __init__(self, min_version, max_version):
+        self.min_version = int(min_version)
+        self.max_version = int(max_version)
+
+    def __eq__(self, other):
+        return (isinstance(other, SupportedVersionRange)
+                and self.min_version == other.min_version
+                and self.max_version == other.max_version)
+
+    def __repr__(self):
+        return (f"SupportedVersionRange(min_version={self.min_version}, "
+                f"max_version={self.max_version})")
+
+
+class FeatureMetadata:
+    """The cluster's finalized and supported features (Java
+    ``FeatureMetadata``).
+
+    ``finalized_features`` and ``supported_features`` are independent maps: they
+    need not have the same keys. ``finalized_features_epoch`` is ``None`` when
+    the broker reported none -- every integer, 0 included, is a legal epoch, so
+    absence cannot be a sentinel.
+    """
+
+    __slots__ = ("finalized_features", "finalized_features_epoch", "supported_features")
+
+    def __init__(self, finalized_features, finalized_features_epoch, supported_features):
+        self.finalized_features = dict(finalized_features)
+        self.finalized_features_epoch = finalized_features_epoch
+        self.supported_features = dict(supported_features)
+
+    def __repr__(self):
+        return (f"FeatureMetadata(finalized_features={self.finalized_features!r}, "
+                f"finalized_features_epoch={self.finalized_features_epoch}, "
+                f"supported_features={self.supported_features!r})")
+
+
 class AclOperation:
     """ACL operations (Java ``AclOperation``).
 
@@ -1640,6 +1919,65 @@ def _to_alter_client_quotas(raw):
     return {_to_client_quota_entity(key): _to_error(error) for key, error in raw.items()}
 
 
+def _to_kafka_principal(raw):
+    """``(principal_type, name, token_authenticated)`` -> KafkaPrincipal."""
+    return None if raw is None else KafkaPrincipal(*raw)
+
+
+def _to_delegation_token(raw):
+    """``(token_id, owner, requester, [renewers], issue_ts, expiry_ts, max_ts,
+    hmac, hmac_base64)`` -> DelegationToken."""
+    if raw is None:
+        return None
+    (token_id, owner, requester, renewers, issue_ts, expiry_ts, max_ts, hmac, hmac_base64) = raw
+    info = TokenInformation(token_id, _to_kafka_principal(owner), _to_kafka_principal(requester),
+                            [_to_kafka_principal(r) for r in renewers],
+                            issue_ts, expiry_ts, max_ts)
+    return DelegationToken(info, hmac, hmac_base64)
+
+
+def _to_describe_delegation_token(raw):
+    """``[token_tuple]`` -> ``[DelegationToken]``.
+
+    A list, not a dict: ``describeDelegationToken`` has one future for the whole
+    call and no key to map from.
+    """
+    return [_to_delegation_token(t) for t in raw]
+
+
+def _to_describe_user_scram_credentials(raw):
+    """``{user: (error, [(mechanism, iterations)])}``
+    -> ``{user: UserScramCredentialsDescription | KafkaError}``.
+
+    A user whose own description failed maps to its error; every other user maps
+    to its credentials, which may be an empty list when the broker reports it as
+    having none.
+    """
+    out = {}
+    for user, (error, infos) in raw.items():
+        if error is not None:
+            out[user] = _to_error(error)
+        else:
+            out[user] = UserScramCredentialsDescription(
+                user, [ScramCredentialInfo(mechanism, iterations) for mechanism, iterations in infos])
+    return out
+
+
+def _to_feature_metadata(raw):
+    """``([(feature, min, max)], epoch_or_None, [(feature, min, max)])``
+    -> FeatureMetadata.
+
+    The first list is the *finalized* features and the second the *supported*
+    ones; they are independent and need not agree in size or in keys.
+    """
+    finalized, epoch, supported = raw
+    return FeatureMetadata(
+        {name: FinalizedVersionRange(low, high) for name, low, high in finalized},
+        epoch,
+        {name: SupportedVersionRange(low, high) for name, low, high in supported},
+    )
+
+
 def _to_keyed_errors(raw):
     """{key: error} -> {key: None | KafkaError}
 
@@ -2211,6 +2549,137 @@ class _AdminBase:
                 self._free_value(drain))
 
 
+    # ---- B5b: SCRAM, delegation tokens and features ------------------------
+    #
+    # SCRAM mechanisms cross as Java's `ScramMechanism.type()` indicators and
+    # feature upgrades as `FeatureUpdate.UpgradeType.code()`; both are real
+    # protocol numbers, not names or invented codes.
+    #
+    # Java's `MockAdminClient` throws for both SCRAM RPCs
+    # (`MockAdminClient.java:1251-1259`), so nothing the suite can run observes
+    # what their requests carry -- which is why the two row builders below are
+    # pure static methods with direct tests, as B5a established for the request
+    # direction.
+
+    @staticmethod
+    def _scram_alteration_rows(alterations):
+        """Upsertions and deletions -> the 6-tuples the C extension unpacks.
+
+        The ``is_deletion`` flag is load-bearing and cannot be inferred: both
+        forms carry a user and a mechanism, and a deletion simply has no
+        password, so "password is None" would conflate a deletion with a
+        malformed upsertion. A ``None`` salt is Java's three-argument
+        constructor, which generates one.
+        """
+        rows = []
+        for alteration in alterations:
+            if isinstance(alteration, UserScramCredentialDeletion):
+                rows.append((str(alteration.user), True, int(alteration.mechanism), 0, None, None))
+            else:
+                info = alteration.credential_info
+                rows.append((str(alteration.user), False, int(info.mechanism), int(info.iterations),
+                             bytes(alteration.password),
+                             None if alteration.salt is None else bytes(alteration.salt)))
+        return rows
+
+    @staticmethod
+    def _principal_rows(principals):
+        """KafkaPrincipals -> the ``(principal_type, name)`` pairs the C
+        extension unpacks.
+
+        ``token_authenticated`` is not sent: Java's request carries only the
+        type and the name, and the flag is an authentication-side property of a
+        principal the broker reports back.
+        """
+        return [(str(p.principal_type), str(p.name)) for p in (principals or [])]
+
+    @staticmethod
+    def _feature_update_rows(feature_updates):
+        """``{feature: FeatureUpdate}`` -> the
+        ``(feature, max_version_level, upgrade_type)`` rows the C extension
+        unpacks."""
+        return [(str(feature), int(update.max_version_level), int(update.upgrade_type))
+                for feature, update in feature_updates.items()]
+
+    def _describe_user_scram_credentials_spec(self, users, timeout):
+        names = [] if users is None else [str(u) for u in users]
+        ms = _ms(timeout)
+        drain = _lib.DescribeUserScramCredentialsResult_drain
+        return (lambda cb: _lib.Admin_describe_user_scram_credentials_async(self._h, names, ms, cb),
+                self._resolve_value(drain, _to_describe_user_scram_credentials),
+                self._free_value(drain))
+
+    def _alter_user_scram_credentials_spec(self, alterations, timeout):
+        rows = self._scram_alteration_rows(alterations)
+        ms = _ms(timeout)
+        drain = _lib.AlterUserScramCredentialsResult_drain
+        return (lambda cb: _lib.Admin_alter_user_scram_credentials_async(self._h, rows, ms, cb),
+                self._resolve_value(drain, _to_keyed_errors),
+                self._free_value(drain))
+
+    def _create_delegation_token_spec(self, renewers, owner, max_lifetime_ms, timeout):
+        rows = self._principal_rows(renewers)
+        # A None owner leaves Java's field empty, which makes the requesting
+        # principal the owner; both halves must be present or neither.
+        owner_type = None if owner is None else str(owner.principal_type)
+        owner_name = None if owner is None else str(owner.name)
+        ms = _ms(timeout)
+        drain = _lib.CreateDelegationTokenResult_drain
+        return (lambda cb: _lib.Admin_create_delegation_token_async(
+                    self._h, rows, owner_type, owner_name, int(max_lifetime_ms), ms, cb),
+                self._resolve_value(drain, _to_delegation_token),
+                self._free_value(drain))
+
+    def _renew_delegation_token_spec(self, hmac, renew_time_period_ms, timeout):
+        ms = _ms(timeout)
+        drain = _lib.RenewDelegationTokenResult_drain
+        return (lambda cb: _lib.Admin_renew_delegation_token_async(
+                    self._h, bytes(hmac), int(renew_time_period_ms), ms, cb),
+                self._resolve_value(drain, int),
+                self._free_value(drain))
+
+    def _expire_delegation_token_spec(self, hmac, expiry_time_period_ms, timeout):
+        ms = _ms(timeout)
+        drain = _lib.ExpireDelegationTokenResult_drain
+        return (lambda cb: _lib.Admin_expire_delegation_token_async(
+                    self._h, bytes(hmac), int(expiry_time_period_ms), ms, cb),
+                self._resolve_value(drain, int),
+                self._free_value(drain))
+
+    def _describe_delegation_token_spec(self, owners, timeout):
+        # `owners is None` is Java's unset filter: describe every token. It
+        # crosses as an explicit flag so it stays distinct from an empty filter.
+        has_owners = owners is not None
+        rows = self._principal_rows(owners)
+        ms = _ms(timeout)
+        drain = _lib.DescribeDelegationTokenResult_drain
+        return (lambda cb: _lib.Admin_describe_delegation_token_async(
+                    self._h, has_owners, rows, ms, cb),
+                self._resolve_value(drain, _to_describe_delegation_token),
+                self._free_value(drain))
+
+    def _describe_features_spec(self, node_id, timeout):
+        # `node_id is None` is Java's empty OptionalInt: send to an arbitrary
+        # controller/broker. Node id 0 is a legal broker, so the flag is what
+        # carries absence.
+        has_node_id = node_id is not None
+        ms = _ms(timeout)
+        drain = _lib.DescribeFeaturesResult_drain
+        return (lambda cb: _lib.Admin_describe_features_async(
+                    self._h, has_node_id, 0 if node_id is None else int(node_id), ms, cb),
+                self._resolve_value(drain, _to_feature_metadata),
+                self._free_value(drain))
+
+    def _update_features_spec(self, feature_updates, timeout, validate_only):
+        rows = self._feature_update_rows(feature_updates)
+        ms = _ms(timeout)
+        drain = _lib.UpdateFeaturesResult_drain
+        return (lambda cb: _lib.Admin_update_features_async(
+                    self._h, rows, ms, bool(validate_only), cb),
+                self._resolve_value(drain, _to_keyed_errors),
+                self._free_value(drain))
+
+
 class _MockAdminClientMixin:
     """Mock-only operations (test helper)."""
 
@@ -2228,6 +2697,22 @@ class _MockAdminClientMixin:
         than replaces, what was seeded before."""
         spec = [(str(t), int(p), int(o)) for (t, p), o in offsets.items()]
         e = _lib.MockAdminClient_update_beginning_offsets(self._h, spec)
+        if e:
+            raise KafkaError._from_c(e)
+
+    def set_feature_levels(self, feature_levels):
+        """Seed the feature levels ``describe_features`` reports and
+        ``update_features`` validates against, from
+        ``{feature: (level, min_supported, max_supported)}``.
+
+        Mirrors the three ``MockAdminClient.Builder`` setters ``featureLevels``,
+        ``minSupportedFeatureLevels`` and ``maxSupportedFeatureLevels``, which
+        Java takes at construction time. Unlike the offset setters this
+        **replaces** what was seeded before.
+        """
+        spec = [(str(f), int(level), int(low), int(high))
+                for f, (level, low, high) in feature_levels.items()]
+        e = _lib.MockAdminClient_set_feature_levels(self._h, spec)
         if e:
             raise KafkaError._from_c(e)
 
@@ -2651,6 +3136,99 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._alter_client_quotas_spec(entries, timeout, validate_only))
 
+    def describe_user_scram_credentials(self, users=None, timeout=None):
+        """Describe SASL/SCRAM credentials. Returns
+        ``{user: UserScramCredentialsDescription | KafkaError}``.
+
+        ``users`` of ``None`` (or an empty list) describes every user, mirroring
+        Java's null/empty list. A user the broker reports as having no
+        credential is described with an empty ``credential_infos``, not as an
+        error -- Java's ``all()`` treats ``RESOURCE_NOT_FOUND`` the same way; a
+        user whose description genuinely failed maps to its error.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_user_scram_credentials_spec(users, timeout))
+
+    def alter_user_scram_credentials(self, alterations, timeout=None):
+        """Apply ``alterations`` (:class:`UserScramCredentialUpsertion` and
+        :class:`UserScramCredentialDeletion` objects). Returns
+        ``{user: None | KafkaError}``.
+        """
+        self._check_closed()
+        return self._run_sync(*self._alter_user_scram_credentials_spec(alterations, timeout))
+
+    def create_delegation_token(self, renewers=None, owner=None, max_lifetime_ms=-1, timeout=None):
+        """Create a delegation token. Returns a :class:`DelegationToken`.
+
+        ``renewers`` are the principals allowed to renew it; an empty list means
+        only the owner may. ``owner`` of ``None`` leaves Java's field empty,
+        making the requesting principal the owner. ``max_lifetime_ms`` of -1 is
+        Java's "use the broker's ``delegation.token.max.lifetime.ms``".
+
+        One future for the whole call, so a failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(
+            *self._create_delegation_token_spec(renewers, owner, max_lifetime_ms, timeout))
+
+    def renew_delegation_token(self, hmac, renew_time_period_ms=-1, timeout=None):
+        """Renew the token whose raw HMAC is ``hmac``. Returns the new expiry
+        timestamp in milliseconds.
+
+        ``renew_time_period_ms`` of -1 is Java's "use the broker's
+        ``delegation.token.expiry.time.ms``". One future for the whole call, so
+        a failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(*self._renew_delegation_token_spec(hmac, renew_time_period_ms, timeout))
+
+    def expire_delegation_token(self, hmac, expiry_time_period_ms=-1, timeout=None):
+        """Expire the token whose raw HMAC is ``hmac``. Returns the expiry
+        timestamp in milliseconds.
+
+        ``expiry_time_period_ms >= 0`` moves the expiry to
+        ``min(now + period, max_timestamp)``; **negative expires the token
+        immediately**, which is what Java's -1 default means here (unlike
+        :meth:`renew_delegation_token`, where -1 is a broker default). One
+        future for the whole call, so a failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(
+            *self._expire_delegation_token_spec(hmac, expiry_time_period_ms, timeout))
+
+    def describe_delegation_token(self, owners=None, timeout=None):
+        """Describe delegation tokens. Returns a list of
+        :class:`DelegationToken`.
+
+        ``owners`` of ``None`` leaves Java's filter unset, describing every
+        token the caller may see; an empty list is a different request. One
+        future for the whole call, so a failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_delegation_token_spec(owners, timeout))
+
+    def describe_features(self, node_id=None, timeout=None):
+        """Describe the cluster's features. Returns a :class:`FeatureMetadata`.
+
+        ``node_id`` of ``None`` sends the request to an arbitrary
+        controller/broker, mirroring Java's empty ``OptionalInt``. One future
+        for the whole call, so a failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_features_spec(node_id, timeout))
+
+    def update_features(self, feature_updates, timeout=None, validate_only=False):
+        """Apply ``feature_updates`` (``{feature: FeatureUpdate}``). Returns
+        ``{feature: None | KafkaError}``.
+
+        Against a real client an empty map raises, as Java's
+        ``KafkaAdminClient.updateFeatures`` throws ``IllegalArgumentException``
+        for it; Java's ``MockAdminClient`` does not check, so against a mock it
+        yields an empty result.
+        """
+        self._check_closed()
+        return self._run_sync(*self._update_features_spec(feature_updates, timeout, validate_only))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -2891,6 +3469,43 @@ class AsyncAdmin(_AdminBase):
         self._check_closed()
         return await self._run_async(
             *self._alter_client_quotas_spec(entries, timeout, validate_only))
+
+    async def describe_user_scram_credentials(self, users=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_user_scram_credentials_spec(users, timeout))
+
+    async def alter_user_scram_credentials(self, alterations, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._alter_user_scram_credentials_spec(alterations, timeout))
+
+    async def create_delegation_token(self, renewers=None, owner=None, max_lifetime_ms=-1,
+                                      timeout=None):
+        self._check_closed()
+        return await self._run_async(
+            *self._create_delegation_token_spec(renewers, owner, max_lifetime_ms, timeout))
+
+    async def renew_delegation_token(self, hmac, renew_time_period_ms=-1, timeout=None):
+        self._check_closed()
+        return await self._run_async(
+            *self._renew_delegation_token_spec(hmac, renew_time_period_ms, timeout))
+
+    async def expire_delegation_token(self, hmac, expiry_time_period_ms=-1, timeout=None):
+        self._check_closed()
+        return await self._run_async(
+            *self._expire_delegation_token_spec(hmac, expiry_time_period_ms, timeout))
+
+    async def describe_delegation_token(self, owners=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_delegation_token_spec(owners, timeout))
+
+    async def describe_features(self, node_id=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_features_spec(node_id, timeout))
+
+    async def update_features(self, feature_updates, timeout=None, validate_only=False):
+        self._check_closed()
+        return await self._run_async(
+            *self._update_features_spec(feature_updates, timeout, validate_only))
 
     async def close(self, timeout=None):
         if self.closed:

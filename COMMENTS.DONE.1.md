@@ -1772,3 +1772,176 @@ Two clarifications are recorded with it so B6 does not over-apply the rule: a
 (`fenceProducers`), and a record with scalars *and* one collection also
 flattens, scalars at `i` and the collection at `(i, j)`
 (`describeTransactions`).
+
+---
+
+# Slice B5b — SCRAM, delegation tokens and features (self-review)
+
+Eight RPCs, each with a sync entry point and an `_async` one (D1):
+`describeUserScramCredentials`, `alterUserScramCredentials`,
+`createDelegationToken`, `renewDelegationToken`, `expireDelegationToken`,
+`describeDelegationToken`, `describeFeatures`, `updateFeatures`.
+
+### Result shapes, decided by D2's new fifth rule
+
+The rule landed this round (round 9, LOW 4) and B5b is the first slice decided
+by it rather than by taste:
+
+  - **Three handles minted**, all `kafka_common_*` because `KafkaPrincipal` is
+    `org.apache.kafka.common.security.auth` and `DelegationToken` /
+    `TokenInformation` are `...security.token.delegation` — none is under
+    `clients.admin`. `DelegationToken` → `TokenInformation` →
+    `List<KafkaPrincipal>` is three index levels once flattened, and
+    `DelegationToken` is the value of *two* results, so both halves of the rule
+    point the same way. Output-only and borrowed, as B5a's are.
+  - **`ScramCredentialInfo`** is two scalars → flattened to `(i, j)` on
+    `DescribeUserScramCredentialsResult`.
+  - **`FeatureMetadata`, `FinalizedVersionRange`, `SupportedVersionRange`** are
+    a single record keyed directly by the result, holding two maps of
+    two-scalar ranges → everything lives on `DescribeFeaturesResult_t`, nothing
+    minted. The two maps are **independently indexed**, which the accessor
+    rustdoc says explicitly (the `ListGroupsResult.valid()/errors()` shape).
+  - **`FeatureUpdate`** and the SCRAM alterations are *inputs* and cross as
+    parallel arrays, never as handles.
+
+Per-RPC accessor sets follow each Java result's future shape:
+`alterUserScramCredentials` / `updateFeatures` are `Map<K, KafkaFuture<Void>>`
+→ key + error, no value; the four token RPCs and `describeFeatures` hold one
+future for the whole call → value accessors and no `_get_error`, because a
+failure is the call's error. The two `KafkaFuture<Long>` results still get a
+handle rather than passing the timestamp through the callback: D2 is one
+result handle per RPC, and a uniform callback signature across all 46 is worth
+more than saving two allocations.
+
+### Composing Java's three SCRAM-describe views into one C result
+
+`DescribeUserScramCredentialsResult` has `all()`, `users()` and
+`description(user)` over one response future, with different failure semantics.
+C has one handle, so `submit_describe_user_scram_credentials` composes them
+using only public API: `all()`'s map when it succeeds (its keys are then the
+complete user set and no row carries an error); otherwise `users()` plus
+`description(u)` per user, which yields exactly the per-user errors Java
+reports. Nothing Java can reach is lost — the users omitted at that point are
+the ones Java's `all()` also declines to report. The empty-composition case
+returns the `all()` error rather than an empty success, which is the trap B4 hit
+with `removeMembersFromConsumerGroup`.
+
+### Discriminants
+
+Three explicit flags, each because the payload cannot carry the absent case
+(B5a's narrowed rule):
+
+  - `is_deletions[i]` on `alterUserScramCredentials` — an upsertion and a
+    deletion both carry a user and a mechanism, so "password is NULL" would
+    conflate a deletion with a malformed upsertion.
+  - `has_owners_filter` on `describeDelegationToken` — Java's `owners()` is a
+    nullable list where null describes *every* token; a count of zero cannot
+    say that.
+  - `has_node_id` on `describeFeatures` — node id 0 is a legal broker.
+
+And one non-flag: the **salt** is nullable *bytes*, so a NULL pointer already
+means "absent" and selects Java's salt-generating constructor. The nullable
+*number* case appears on the way out — `finalized_features_epoch` uses the
+`bool fn(..., int64_t *out)` shape, because every `int64_t` is a legal epoch.
+
+### Making two dead drains live: the mock feature-level setter
+
+Java's `MockAdminClient` throws for both SCRAM RPCs
+(`MockAdminClient.java:1251-1259`) but *implements* the four token RPCs and
+both feature ones. `describeFeatures` / `updateFeatures` nevertheless returned
+nothing worth asserting until the three feature-level maps were seeded, which
+Java does on its `Builder` (`:188-200`) and the Rust mock exposes as
+`set_feature_levels`. Exporting
+`kafka_admin_MockAdminClient_set_feature_levels` (beside the existing
+`update_beginning_offsets` setters, and rejecting a production handle the same
+way) turned both drains into real end-to-end coverage, including
+`updateFeatures`' apply-versus-`validate_only` difference and its
+`Can't upgrade above 21` per-feature error.
+
+### What is *not* observable, and what covers it instead
+
+The two SCRAM RPCs. Applying the round-9 request-direction lens **while
+writing** rather than afterwards, both directions got pinned directly:
+
+  - request: `_scram_alteration_rows` and `_principal_rows` are pure static
+    methods with their own tests, and `read_scram_alterations` /
+    `read_kafka_principals` have Rust unit tests over hand-built fixtures;
+  - response: `_to_describe_user_scram_credentials` has a converter test, and
+    `box_describe_user_scram_credentials_result` a Rust one.
+
+`cargo xtask check-bindings` covers the `Py_BuildValue` arity of both drains
+(53 build sites now, up from 46).
+
+### Java methods deliberately not on the C surface
+
+`TokenInformation.ownerAsString()` / `renewersAsString()` are
+`principal.toString()` over accessors C already has, and Python's
+`KafkaPrincipal.__str__` provides the same string. `ownerOrRenewer(principal)`
+is a predicate the caller can evaluate from `owner()` and the renewer list.
+`ScramMechanism.mechanismName()` / `fromMechanismName()` are name↔code
+conversions; the C boundary carries the numeric `type()` per the B2 rule, and
+Python exposes `ScramMechanism.mechanism_name`.
+`DescribeUserScramCredentialsResult.users()` is not a separate accessor because
+the per-user rows subsume it (see above).
+
+### Verification
+
+  - **Gates:** `cargo build` both feature settings, `cargo test --workspace`
+    (3047 + 57 generator + 24 xtask + 152 others) **and**
+    `cargo test --features ffi` (3204 — the root `cargo test` does not build
+    the `ffi` feature, so `ffi::admin`'s tests are invisible to
+    `make test-rust` even now that it is `--workspace`),
+    `cargo xtask format-check`, `cargo clippy --all-targets --features ffi -D
+    warnings`, `cargo clippy -p xtask`, `cargo clippy --workspace`,
+    `cargo xtask check-bindings`, all six `ctest` binaries, and the Python
+    suite in Docker.
+  - **Header:** regenerated from scratch with `--features ffi`. All 19 new
+    cbindgen entries resolve (3 `kafka_common_*` value types, 8 `*Result_t`, 8
+    `*_callback_t`); each of the eight RPCs has exactly one sync and one
+    `_async` declaration; and all **43** `kafka_admin_*_async` declarations —
+    the eight new ones included — carry all six clauses of the callback-thread
+    contract, checked at block level after stripping the ` * ` prefixes.
+  - **Tests:** 20 new Rust FFI unit tests (80 → 100 in `ffi::admin`), 17 new C
+    tests (138 → 153 in `mock_admin`, plus 2 in `kafka_admin`), and 16 new
+    Python tests (228 → 244).
+
+### A real defect the C suite caught, in the test itself
+
+`test_mock_admin_delegation_token_lifecycle` first kept the `const char
+*token_id` returned by `kafka_common_TokenInformation_token_id` across the
+owning result handle's `_destroy` and compared it after. That is exactly the
+borrowed-pointer contract these handles document, and it passed on the first
+run and failed on the second — `Expected '\x1C\xA2.\x9Bo`w\xD8...' Was
+'7Wziz54NQVW_QcsIjTY0zg'`. Fixed by copying the id, with a comment saying why.
+Worth recording because it is the failure mode a C consumer will hit: the
+getters return borrows, and an intermittent test is the only warning.
+
+### Teeth — nine call-site mutations, all reverted
+
+Rust (`cargo test --features ffi ffi::admin`, 100 tests):
+
+| mutation | result |
+|---|---|
+| swap `owner` and `token_requester` in `TokenInformationInner::new` | 1 failed |
+| invert the `is_deletions` read in `read_scram_alterations` | 3 failed |
+| swap the finalized min/max columns in `box_describe_features_result` | 1 failed |
+| swap `min_levels`/`max_levels` at the `read_feature_levels` call site | **0 failed in Rust.** The mock setter has no Rust-side unit test, so this one is caught end to end instead: rebuilt and re-run, it fails 3 of the 153 C tests (`describe_features_reports_seeded_levels`, `update_features_applies_and_validates`, `b5b_token_and_feature_async`). Reverted, rebuilt, 153/153 green again |
+
+Python (`pytest test/unit/test_admin.py`):
+
+| mutation | result |
+|---|---|
+| `_scram_alteration_rows`: invert the is-deletion column | 4 failed |
+| `_describe_delegation_token_spec`: invert the owners-filter flag | 1 failed |
+| `_feature_update_rows`: swap max-version-level and upgrade-type | 4 failed |
+| `_to_feature_metadata`: swap the finalized and supported lists | 4 failed |
+| `_to_delegation_token`: swap owner and requester | 1 failed -- only its converter test, because the mock's owner and requester are the same principal end to end |
+
+### DoD
+
+No core `src/admin/` bug was found, so no scope escalation. **DoD #10 (hot-path
+allocation audit) is N/A** per `admin-client.md` §10 — admin calls are
+batch/administrative with no per-record path. **DoD #11 does not apply** to the
+Admin trait, but its spirit holds: every per-RPC entry point is a plain
+`extern "C" fn`, no `#[async_trait]` reaches the `Call`/driver types. No TODO
+or FIXME. Scope was tasks 1–4; **B6 was not started.**

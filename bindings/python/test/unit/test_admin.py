@@ -34,6 +34,10 @@ from admin import (
     AclBinding, AclBindingFilter, AclOperation, AclPermissionType, PatternType, ResourceType,
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent,
     ClientQuotaOp,
+    DelegationToken, FeatureUpdate, FinalizedVersionRange, KafkaPrincipal, ScramCredentialInfo,
+    ScramMechanism, SupportedVersionRange, UpgradeType, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion,
+    _to_delegation_token, _to_describe_user_scram_credentials, _to_feature_metadata,
     _to_acl_binding, _to_acl_binding_filter, _to_alter_client_quotas, _to_create_acls,
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
@@ -2267,3 +2271,287 @@ def test_remove_members_rows_keep_remove_all_apart_from_an_empty_list():
     assert MockAdminClient._remove_members_rows(
         [MemberToRemove("instance-1"), MemberToRemove("instance-2")]) == (
             False, ["instance-1", "instance-2"])
+
+
+# ---- B5b: SCRAM, delegation tokens and features -----------------------------
+#
+# Java's MockAdminClient throws for both SCRAM RPCs
+# (MockAdminClient.java:1251-1259), so neither direction of their marshaling is
+# reachable end to end: the request row builder is pinned directly below and the
+# response drain by a `_to_*` converter test. The four delegation-token RPCs and
+# both feature RPCs *are* implemented by the mock, so those run end to end.
+
+
+def test_scram_alteration_rows_keep_deletions_and_upsertions_apart():
+    """The is-deletion flag cannot be inferred: both forms carry a user and a
+    mechanism. Nothing the suite can run observes this, because the mock throws
+    before echoing the request back."""
+    rows = MockAdminClient._scram_alteration_rows([
+        UserScramCredentialUpsertion(
+            "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b"pw1",
+            salt=b"\xaa\xbb"),
+        UserScramCredentialDeletion("bob", ScramMechanism.SCRAM_SHA_512),
+        UserScramCredentialUpsertion(
+            "carol", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192), "pw234"),
+    ])
+    # Every column differs between the rows, and the two passwords have
+    # different lengths, so a transposition is visible.
+    assert rows[0] == ("alice", False, ScramMechanism.SCRAM_SHA_256, 4096, b"pw1", b"\xaa\xbb")
+    assert rows[1] == ("bob", True, ScramMechanism.SCRAM_SHA_512, 0, None, None)
+    # A str password is UTF-8 encoded, as Java's String constructor does, and a
+    # None salt selects the client-generated form.
+    assert rows[2] == ("carol", False, ScramMechanism.SCRAM_SHA_512, 8192, b"pw234", None)
+    assert rows[0][1] != rows[1][1]
+
+
+def test_principal_rows_send_only_type_and_name():
+    """`token_authenticated` is a property of a principal the broker reports
+    back, not part of the request, so it must not appear in the row."""
+    rows = MockAdminClient._principal_rows([
+        KafkaPrincipal("User", "alice"),
+        KafkaPrincipal("Group", "admins", token_authenticated=True),
+    ])
+    assert rows == [("User", "alice"), ("Group", "admins")]
+    assert MockAdminClient._principal_rows(None) == []
+
+
+def test_feature_update_rows_keep_each_column_in_its_own_place():
+    rows = MockAdminClient._feature_update_rows({
+        "metadata.version": FeatureUpdate(17, UpgradeType.UPGRADE),
+        "transaction.version": FeatureUpdate(2, UpgradeType.SAFE_DOWNGRADE),
+    })
+    assert rows == [
+        ("metadata.version", 17, UpgradeType.UPGRADE),
+        ("transaction.version", 2, UpgradeType.SAFE_DOWNGRADE),
+    ]
+
+
+def test_to_delegation_token_unpacks_the_whole_chain():
+    """The drain's success path for `createDelegationToken` is reachable end to
+    end, but this pins the field order of the tuple directly, which the arity
+    gate explicitly cannot check."""
+    raw = ("token-1", ("User", "owner", False), ("User", "requester", True),
+           [("User", "renewer-1", False), ("Group", "renewer-2", False)],
+           1000, 5000, 9000, b"\x01\x00\x02", "AQAC")
+    token = _to_delegation_token(raw)
+    assert token.token_info.token_id == "token-1"
+    assert token.token_info.owner.name == "owner"
+    assert token.token_info.token_requester.name == "requester"
+    assert token.token_info.token_requester.token_authenticated is True
+    assert [r.name for r in token.token_info.renewers] == ["renewer-1", "renewer-2"]
+    assert token.token_info.renewers[1].principal_type == "Group"
+    # The three timestamps are all different, so a transposition changes the
+    # object.
+    assert token.token_info.issue_timestamp == 1000
+    assert token.token_info.expiry_timestamp == 5000
+    assert token.token_info.max_timestamp == 9000
+    # The HMAC survives an interior NUL, which a str would have truncated.
+    assert token.hmac == b"\x01\x00\x02"
+    assert token.hmac_as_base64_string == "AQAC"
+    assert str(token.token_info.owner) == "User:owner"
+
+
+def test_to_describe_user_scram_credentials_splits_errors_from_descriptions():
+    """The mock throws before any of this is reachable end to end."""
+    raw = {
+        "alice": (None, [(ScramMechanism.SCRAM_SHA_256, 4096),
+                         (ScramMechanism.SCRAM_SHA_512, 8192)]),
+        "bob": (None, []),
+        "carol": ((87, "No such user: carol", 0, 0), []),
+    }
+    out = _to_describe_user_scram_credentials(raw)
+    assert out["alice"].credential_infos == [
+        ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
+        ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192),
+    ]
+    # A user with no credential is a description, not an error: Java's `all()`
+    # folds RESOURCE_NOT_FOUND into an empty list.
+    assert out["bob"].credential_infos == []
+    assert isinstance(out["carol"], KafkaError)
+    assert str(out["carol"]) == "No such user: carol"
+
+
+def test_to_feature_metadata_keeps_the_two_maps_independent():
+    raw = ([("metadata.version", 14, 17)], 123,
+           [("metadata.version", 3, 21), ("group.version", 0, 1)])
+    metadata = _to_feature_metadata(raw)
+    # Different sizes on purpose: reading one list's length for the other would
+    # overrun.
+    assert len(metadata.finalized_features) == 1
+    assert len(metadata.supported_features) == 2
+    assert metadata.finalized_features["metadata.version"] == FinalizedVersionRange(14, 17)
+    assert metadata.supported_features["metadata.version"] == SupportedVersionRange(3, 21)
+    assert metadata.supported_features["group.version"] == SupportedVersionRange(0, 1)
+    assert metadata.finalized_features_epoch == 123
+
+    # Every integer is a legal epoch, so absence is None and not a sentinel.
+    assert _to_feature_metadata(([], None, [])).finalized_features_epoch is None
+    assert _to_feature_metadata(([], 0, [])).finalized_features_epoch == 0
+
+
+def test_describe_user_scram_credentials_raises():
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.describe_user_scram_credentials(["alice"])
+        assert str(exc.value) == "Not implemented yet"
+        # An empty/None user list means "every user" and reaches the same
+        # refusal.
+        with pytest.raises(KafkaError):
+            admin.describe_user_scram_credentials()
+
+
+def test_alter_user_scram_credentials_reports_unsupported_per_user():
+    with MockAdminClient(1) as admin:
+        out = admin.alter_user_scram_credentials([
+            UserScramCredentialUpsertion(
+                "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b"pw"),
+            UserScramCredentialDeletion("bob", ScramMechanism.SCRAM_SHA_512),
+        ])
+        assert sorted(out) == ["alice", "bob"]
+        for user in ("alice", "bob"):
+            assert isinstance(out[user], KafkaError)
+            assert str(out[user]) == "Not implemented yet"
+
+
+def test_alter_user_scram_credentials_rejects_a_passwordless_upsertion():
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.alter_user_scram_credentials([
+                UserScramCredentialUpsertion(
+                    "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b""),
+            ])
+        assert str(exc.value) == "scram alteration at index 0 is an upsertion with no password"
+        # The same row as a deletion needs no password at all.
+        out = admin.alter_user_scram_credentials(
+            [UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256)])
+        assert list(out) == ["alice"]
+
+
+def test_delegation_token_lifecycle():
+    with MockAdminClient(1) as admin:
+        # The mock makes the first renewer the owner.
+        token = admin.create_delegation_token(
+            renewers=[KafkaPrincipal("User", "owner-principal"),
+                      KafkaPrincipal("User", "second-renewer")],
+            max_lifetime_ms=86400000)
+        assert isinstance(token, DelegationToken)
+        assert token.token_info.owner == KafkaPrincipal("User", "owner-principal")
+        assert [r.name for r in token.token_info.renewers] == ["owner-principal", "second-renewer"]
+        assert token.token_info.max_timestamp == 86400000
+        assert isinstance(token.hmac, bytes) and token.hmac
+        assert token.hmac_as_base64_string
+
+        described = admin.describe_delegation_token()
+        assert [t.token_info.token_id for t in described] == [token.token_info.token_id]
+
+        assert admin.renew_delegation_token(token.hmac, renew_time_period_ms=4242) == 4242
+
+        # A wrong HMAC is an error, not a silent no-op.
+        with pytest.raises(KafkaError):
+            admin.renew_delegation_token(b"\x01\x02\x03", renew_time_period_ms=1)
+
+        # -1 expires immediately.
+        assert admin.expire_delegation_token(token.hmac, expiry_time_period_ms=-1) == -1
+        assert admin.describe_delegation_token() == []
+
+
+def test_describe_delegation_token_keeps_no_filter_apart_from_a_filter():
+    with MockAdminClient(1) as admin:
+        admin.create_delegation_token(renewers=[KafkaPrincipal("User", "alice")])
+        admin.create_delegation_token(renewers=[KafkaPrincipal("User", "bob")])
+
+        assert len(admin.describe_delegation_token()) == 2
+        only_alice = admin.describe_delegation_token(owners=[KafkaPrincipal("User", "alice")])
+        assert [t.token_info.owner.name for t in only_alice] == ["alice"]
+        # An empty filter is a different request from no filter; the mock treats
+        # it as "describe all", matching the real client's null-describes-all
+        # contract, but the two must not be the same call.
+        assert len(admin.describe_delegation_token(owners=[])) == 2
+
+
+def test_create_delegation_token_rejects_a_non_user_renewer():
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError):
+            admin.create_delegation_token(renewers=[KafkaPrincipal("Group", "admins")])
+
+
+def test_describe_features_reports_seeded_levels():
+    with MockAdminClient(1) as admin:
+        # Every number distinct, so transposing any two of the three level
+        # columns is visible.
+        admin.set_feature_levels({
+            "metadata.version": (17, 14, 21),
+            "transaction.version": (2, 1, 3),
+        })
+        metadata = admin.describe_features()
+        assert metadata.finalized_features["metadata.version"] == FinalizedVersionRange(17, 17)
+        assert metadata.supported_features["metadata.version"] == SupportedVersionRange(14, 21)
+        assert metadata.finalized_features["transaction.version"] == FinalizedVersionRange(2, 2)
+        assert metadata.supported_features["transaction.version"] == SupportedVersionRange(1, 3)
+        assert metadata.finalized_features_epoch == 123
+
+        # Pinning a node id is a different request; the mock ignores options, so
+        # the answer is the same.
+        assert admin.describe_features(node_id=0).finalized_features_epoch == 123
+
+
+def test_update_features_applies_and_validates():
+    with MockAdminClient(1) as admin:
+        admin.set_feature_levels({"metadata.version": (17, 14, 21)})
+        updates = {"metadata.version": FeatureUpdate(19, UpgradeType.UPGRADE)}
+
+        # validate_only leaves the level alone.
+        assert admin.update_features(updates, validate_only=True) == {"metadata.version": None}
+        assert (admin.describe_features().finalized_features["metadata.version"]
+                == FinalizedVersionRange(17, 17))
+
+        assert admin.update_features(updates) == {"metadata.version": None}
+        assert (admin.describe_features().finalized_features["metadata.version"]
+                == FinalizedVersionRange(19, 19))
+
+        # Above the seeded maximum is a per-feature error, not a call failure.
+        out = admin.update_features({"metadata.version": FeatureUpdate(99, UpgradeType.UPGRADE)})
+        assert isinstance(out["metadata.version"], KafkaError)
+        assert str(out["metadata.version"]) == (
+            "Invalid update version 99 for feature metadata.version. Can't upgrade above 21")
+
+
+def test_update_features_rejects_what_javas_feature_update_constructor_rejects():
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.update_features({"metadata.version": FeatureUpdate(0, UpgradeType.UPGRADE)})
+        assert str(exc.value) == (
+            "feature update at index 0: The upgradeType flag should be set to SAFE_DOWNGRADE or "
+            "UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.")
+
+        with pytest.raises(KafkaError) as exc:
+            admin.update_features({"metadata.version": FeatureUpdate(-1, UpgradeType.UPGRADE)})
+        assert str(exc.value) == "feature update at index 0: Cannot specify a negative version level."
+
+        # Java's MockAdminClient does not check for an empty map (the real
+        # client does), so an empty request yields an empty result here.
+        assert admin.update_features({}) == {}
+
+
+@pytest.mark.asyncio
+async def test_async_b5b_rpcs():
+    async with AsyncMockAdminClient(1) as admin:
+        with pytest.raises(KafkaError):
+            await admin.describe_user_scram_credentials(["alice"])
+
+        out = await admin.alter_user_scram_credentials(
+            [UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256)])
+        assert isinstance(out["alice"], KafkaError)
+
+        token = await admin.create_delegation_token(renewers=[KafkaPrincipal("User", "alice")])
+        assert token.token_info.owner.name == "alice"
+        assert len(await admin.describe_delegation_token()) == 1
+        assert await admin.renew_delegation_token(token.hmac, renew_time_period_ms=7) == 7
+        assert await admin.expire_delegation_token(token.hmac, expiry_time_period_ms=-1) == -1
+
+        admin.set_feature_levels({"metadata.version": (17, 14, 21)})
+        metadata = await admin.describe_features()
+        assert metadata.finalized_features["metadata.version"] == FinalizedVersionRange(17, 17)
+        assert await admin.update_features(
+            {"metadata.version": FeatureUpdate(18, UpgradeType.UPGRADE)}) == {
+                "metadata.version": None}
