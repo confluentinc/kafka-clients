@@ -58,6 +58,22 @@ dict whose values are either the result object or a :class:`KafkaError`:
   here, so a failure raises instead of appearing per key)
 * ``list_offsets`` ->
   ``{(topic, partition): ListOffsetsResultInfo | KafkaError}``
+* ``describe_consumer_groups`` / ``describe_classic_groups`` ->
+  ``{group_id: ConsumerGroupDescription | ClassicGroupDescription | KafkaError}``
+* ``list_consumer_group_offsets`` ->
+  ``{group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}``
+  (an inner ``None`` is Java's null map value: no committed offset for that
+  partition, which is not a committed offset of 0)
+* ``alter_consumer_group_offsets`` / ``delete_consumer_group_offsets`` ->
+  ``{(topic, partition): None | KafkaError}``, ``delete_consumer_groups`` ->
+  ``{group_id: None | KafkaError}`` and ``remove_members_from_consumer_group``
+  -> ``{group_instance_id: None | KafkaError}`` (all per-key
+  ``KafkaFuture<Void>``, so ``None`` means success)
+* ``list_groups`` -> ``([GroupListing], [KafkaError])`` and
+  ``list_consumer_groups`` -> ``([ConsumerGroupListing], [KafkaError])`` —
+  Java splits one future into ``valid()`` and an *unkeyed* ``errors()``
+  collection, so these are two independent lists, not a dict and not parallel
+  arrays
 * ``describe_cluster`` -> a single :class:`ClusterDescription` (Java's result is
   four independent futures, not a map, so a failure raises)
 * ``list_config_resources`` -> ``[ConfigResource]``, and
@@ -73,7 +89,10 @@ import datetime as _dt
 import threading
 
 import _confluentkafka as _lib
-from consumer import Node  # shared broker-node type
+from consumer import Node, OffsetAndMetadata  # shared broker-node / committed-offset types
+# `OffsetAndMetadata` is `org.apache.kafka.clients.consumer` in Java, so the
+# consumer module owns it and the admin group-offset RPCs reuse it, exactly as
+# they already reuse `Node`.
 from producer import KafkaError  # shared error type
 
 
@@ -680,6 +699,224 @@ class TopicDescription:
 # --------------------------------------------------------------------------
 # Conversions from the C drain dicts to the Python value types.
 # --------------------------------------------------------------------------
+class GroupListing:
+    """A group as ``list_groups`` reports it (Java ``GroupListing``).
+
+    ``group_type`` and ``group_state`` are the Java enums' ``toString()``
+    names (``"Consumer"``, ``"Classic"``, ``"Stable"``, ...) and are ``None``
+    for Java's empty ``Optional`` — neither enum has a numeric id, so the name
+    is the contract. ``protocol`` is the lower-case wire protocol-type string
+    and is unrelated to ``group_type``.
+    """
+
+    __slots__ = ("group_id", "group_type", "protocol", "group_state",
+                 "is_simple_consumer_group")
+
+    def __init__(self, group_id, group_type, protocol, group_state,
+                 is_simple_consumer_group):
+        self.group_id = group_id
+        self.group_type = group_type
+        self.protocol = protocol
+        self.group_state = group_state
+        self.is_simple_consumer_group = is_simple_consumer_group
+
+    def __eq__(self, other):
+        return (isinstance(other, GroupListing)
+                and self.group_id == other.group_id
+                and self.group_type == other.group_type
+                and self.protocol == other.protocol
+                and self.group_state == other.group_state
+                and self.is_simple_consumer_group == other.is_simple_consumer_group)
+
+    def __repr__(self):
+        return (f"GroupListing(group_id={self.group_id!r}, "
+                f"group_type={self.group_type!r}, protocol={self.protocol!r}, "
+                f"group_state={self.group_state!r})")
+
+
+class ConsumerGroupListing:
+    """A consumer group as ``list_consumer_groups`` reports it (Java
+    ``ConsumerGroupListing``, deprecated since 4.1 in favour of
+    :class:`GroupListing`).
+
+    ``state`` is Java's deprecated ``state()``, i.e. ``group_state`` mapped
+    through ``ConsumerGroupState.parse``; both are ``None`` for an empty
+    ``Optional``.
+    """
+
+    __slots__ = ("group_id", "is_simple_consumer_group", "group_state", "state",
+                 "group_type")
+
+    def __init__(self, group_id, is_simple_consumer_group, group_state, state, group_type):
+        self.group_id = group_id
+        self.is_simple_consumer_group = is_simple_consumer_group
+        self.group_state = group_state
+        self.state = state
+        self.group_type = group_type
+
+    def __eq__(self, other):
+        return (isinstance(other, ConsumerGroupListing)
+                and self.group_id == other.group_id
+                and self.is_simple_consumer_group == other.is_simple_consumer_group
+                and self.group_state == other.group_state
+                and self.state == other.state
+                and self.group_type == other.group_type)
+
+    def __repr__(self):
+        return (f"ConsumerGroupListing(group_id={self.group_id!r}, "
+                f"group_state={self.group_state!r}, group_type={self.group_type!r})")
+
+
+class MemberAssignment:
+    """The partitions assigned to one group member (Java
+    ``MemberAssignment``). ``topic_partitions`` is a list of
+    ``(topic, partition)``, sorted."""
+
+    __slots__ = ("topic_partitions",)
+
+    def __init__(self, topic_partitions):
+        self.topic_partitions = topic_partitions
+
+    def __eq__(self, other):
+        return (isinstance(other, MemberAssignment)
+                and self.topic_partitions == other.topic_partitions)
+
+    def __repr__(self):
+        return f"MemberAssignment(topic_partitions={self.topic_partitions!r})"
+
+
+class MemberDescription:
+    """One member of a described group (Java ``MemberDescription``).
+
+    ``group_instance_id``, ``rack_id``, ``member_epoch`` and ``upgraded`` are
+    ``None`` for Java's empty ``Optional``. ``target_assignment`` is ``None``
+    when Java reported none at all, which is distinct from a
+    :class:`MemberAssignment` holding no partitions; ``assignment`` is never
+    ``None``.
+    """
+
+    __slots__ = ("consumer_id", "group_instance_id", "rack_id", "client_id", "host",
+                 "assignment", "target_assignment", "member_epoch", "upgraded")
+
+    def __init__(self, consumer_id, group_instance_id, rack_id, client_id, host,
+                 assignment, target_assignment, member_epoch, upgraded):
+        self.consumer_id = consumer_id
+        self.group_instance_id = group_instance_id
+        self.rack_id = rack_id
+        self.client_id = client_id
+        self.host = host
+        self.assignment = assignment
+        self.target_assignment = target_assignment
+        self.member_epoch = member_epoch
+        self.upgraded = upgraded
+
+    def __repr__(self):
+        return (f"MemberDescription(consumer_id={self.consumer_id!r}, "
+                f"client_id={self.client_id!r}, host={self.host!r}, "
+                f"assignment={self.assignment!r})")
+
+
+class ConsumerGroupDescription:
+    """A described consumer group (Java ``ConsumerGroupDescription``).
+
+    ``group_type``, ``state`` and ``group_state`` are the Java enums'
+    ``toString()`` names; ``state`` is Java's deprecated ``state()``.
+    ``coordinator`` is a :class:`Node` or ``None``, ``authorized_operations``
+    holds ``AclOperation`` wire codes (empty when the request did not ask for
+    them), and ``group_epoch`` / ``target_assignment_epoch`` are ``None`` for a
+    classic group.
+    """
+
+    __slots__ = ("group_id", "is_simple_consumer_group", "members", "partition_assignor",
+                 "group_type", "state", "group_state", "coordinator",
+                 "authorized_operations", "group_epoch", "target_assignment_epoch")
+
+    def __init__(self, group_id, is_simple_consumer_group, members, partition_assignor,
+                 group_type, state, group_state, coordinator, authorized_operations,
+                 group_epoch, target_assignment_epoch):
+        self.group_id = group_id
+        self.is_simple_consumer_group = is_simple_consumer_group
+        self.members = members
+        self.partition_assignor = partition_assignor
+        self.group_type = group_type
+        self.state = state
+        self.group_state = group_state
+        self.coordinator = coordinator
+        self.authorized_operations = authorized_operations
+        self.group_epoch = group_epoch
+        self.target_assignment_epoch = target_assignment_epoch
+
+    def __repr__(self):
+        return (f"ConsumerGroupDescription(group_id={self.group_id!r}, "
+                f"group_state={self.group_state!r}, members={len(self.members)})")
+
+
+class ClassicGroupDescription:
+    """A described classic group (Java ``ClassicGroupDescription``).
+
+    ``protocol`` is the group's protocol type and ``protocol_data`` the
+    assignment strategy it selected; ``state`` is the ``ClassicGroupState``
+    name.
+    """
+
+    __slots__ = ("group_id", "protocol", "protocol_data", "is_simple_consumer_group",
+                 "members", "state", "coordinator", "authorized_operations")
+
+    def __init__(self, group_id, protocol, protocol_data, is_simple_consumer_group,
+                 members, state, coordinator, authorized_operations):
+        self.group_id = group_id
+        self.protocol = protocol
+        self.protocol_data = protocol_data
+        self.is_simple_consumer_group = is_simple_consumer_group
+        self.members = members
+        self.state = state
+        self.coordinator = coordinator
+        self.authorized_operations = authorized_operations
+
+    def __repr__(self):
+        return (f"ClassicGroupDescription(group_id={self.group_id!r}, "
+                f"protocol={self.protocol!r}, state={self.state!r}, "
+                f"members={len(self.members)})")
+
+
+class ListConsumerGroupOffsetsSpec:
+    """Which partitions to list offsets for, per group (Java
+    ``ListConsumerGroupOffsetsSpec``).
+
+    ``topic_partitions`` is an iterable of ``(topic, partition)``, or ``None``
+    for Java's unset collection: every partition the group has committed
+    offsets for.
+    """
+
+    __slots__ = ("topic_partitions",)
+
+    def __init__(self, topic_partitions=None):
+        self.topic_partitions = topic_partitions
+
+    def __repr__(self):
+        return f"ListConsumerGroupOffsetsSpec(topic_partitions={self.topic_partitions!r})"
+
+
+class MemberToRemove:
+    """A static group member to remove, by ``group.instance.id`` (Java
+    ``MemberToRemove``)."""
+
+    __slots__ = ("group_instance_id",)
+
+    def __init__(self, group_instance_id):
+        self.group_instance_id = group_instance_id
+
+    def __eq__(self, other):
+        return (isinstance(other, MemberToRemove)
+                and self.group_instance_id == other.group_instance_id)
+
+    def __hash__(self):
+        return hash(self.group_instance_id)
+
+    def __repr__(self):
+        return f"MemberToRemove(group_instance_id={self.group_instance_id!r})"
+
+
 def _to_error(raw):
     """``(code, message, is_retriable, is_fatal)`` -> KafkaError, or None."""
     return None if raw is None else KafkaError._from_parts(*raw)
@@ -881,6 +1118,112 @@ def _to_list_offsets(raw):
     for key, (error, info) in raw.items():
         out[key] = _to_error(error) if error is not None else ListOffsetsResultInfo(*info)
     return out
+
+
+def _to_member_assignment(raw):
+    """[(topic, partition)] -> MemberAssignment, or None for Java's absent
+    ``Optional`` (which is not the same as an assignment with no partitions)."""
+    return None if raw is None else MemberAssignment(list(raw))
+
+
+def _to_member_description(raw):
+    (consumer_id, group_instance_id, rack_id, client_id, host, assignment,
+     target_assignment, member_epoch, upgraded) = raw
+    return MemberDescription(consumer_id, group_instance_id, rack_id, client_id, host,
+                             _to_member_assignment(assignment),
+                             _to_member_assignment(target_assignment),
+                             member_epoch, upgraded)
+
+
+def _to_consumer_group_description(raw):
+    if raw is None:
+        return None
+    (group_id, is_simple, members, partition_assignor, group_type, state, group_state,
+     coordinator, authorized_operations, group_epoch, target_assignment_epoch) = raw
+    return ConsumerGroupDescription(
+        group_id, bool(is_simple), [_to_member_description(m) for m in members],
+        partition_assignor, group_type, state, group_state, _to_node(coordinator),
+        list(authorized_operations), group_epoch, target_assignment_epoch)
+
+
+def _to_classic_group_description(raw):
+    if raw is None:
+        return None
+    (group_id, protocol, protocol_data, is_simple, members, state, coordinator,
+     authorized_operations) = raw
+    return ClassicGroupDescription(
+        group_id, protocol, protocol_data, bool(is_simple),
+        [_to_member_description(m) for m in members], state, _to_node(coordinator),
+        list(authorized_operations))
+
+
+def _to_list_groups(raw):
+    """([listing_tuple], [error_tuple]) -> ([GroupListing], [KafkaError])
+
+    Java's ``ListGroupsResult`` splits one future into ``valid()`` and
+    ``errors()``; the two are independent collections of generally different
+    length, so this stays a pair of lists rather than becoming a dict.
+    """
+    valid, errors = raw
+    return ([GroupListing(*row) for row in valid],
+            [_to_error(e) for e in errors])
+
+
+def _to_list_consumer_groups(raw):
+    """([listing_tuple], [error_tuple])
+    -> ([ConsumerGroupListing], [KafkaError])"""
+    valid, errors = raw
+    return ([ConsumerGroupListing(*row) for row in valid],
+            [_to_error(e) for e in errors])
+
+
+def _to_describe_consumer_groups(raw):
+    """{group_id: (error, description)}
+    -> {group_id: ConsumerGroupDescription | KafkaError}"""
+    out = {}
+    for key, (error, description) in raw.items():
+        out[key] = (_to_error(error) if error is not None
+                    else _to_consumer_group_description(description))
+    return out
+
+
+def _to_describe_classic_groups(raw):
+    """{group_id: (error, description)}
+    -> {group_id: ClassicGroupDescription | KafkaError}"""
+    out = {}
+    for key, (error, description) in raw.items():
+        out[key] = (_to_error(error) if error is not None
+                    else _to_classic_group_description(description))
+    return out
+
+
+def _to_group_offsets(raw):
+    """{(topic, partition): (offset, metadata, leader_epoch) | None}
+    -> {(topic, partition): OffsetAndMetadata | None}
+
+    A ``None`` value is Java's null map value: the group has no committed
+    offset for that partition, which is distinct from a committed offset of 0.
+    """
+    return {key: (None if value is None else OffsetAndMetadata(*value))
+            for key, value in raw.items()}
+
+
+def _to_list_consumer_group_offsets(raw):
+    """{group_id: (error, offsets)}
+    -> {group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}"""
+    out = {}
+    for key, (error, offsets) in raw.items():
+        out[key] = _to_error(error) if error is not None else _to_group_offsets(offsets)
+    return out
+
+
+def _to_keyed_errors(raw):
+    """{key: error} -> {key: None | KafkaError}
+
+    The shape every RPC whose per-key future is ``KafkaFuture<Void>`` drains
+    to: ``None`` means that key succeeded.
+    """
+    return {key: _to_error(error) for key, error in raw.items()}
 
 
 def _ms(timeout):
@@ -1155,6 +1498,115 @@ class _AdminBase:
                 self._resolve_value(drain, _to_describe_topics),
                 self._free_value(drain))
 
+    def _list_groups_spec(self, group_states, protocol_types, types, timeout):
+        # Group states and types cross as the Java enums' toString() names:
+        # neither has a numeric id, so the name is the contract. An empty list
+        # leaves the filter unset, i.e. "everything".
+        states = [] if group_states is None else [str(s) for s in group_states]
+        protocols = [] if protocol_types is None else [str(p) for p in protocol_types]
+        kinds = [] if types is None else [str(t) for t in types]
+        ms = _ms(timeout)
+        drain = _lib.ListGroupsResult_drain
+        return (lambda cb: _lib.Admin_list_groups_async(
+                    self._h, states, protocols, kinds, ms, cb),
+                self._resolve_value(drain, _to_list_groups),
+                self._free_value(drain))
+
+    def _list_consumer_groups_spec(self, group_states, types, timeout):
+        states = [] if group_states is None else [str(s) for s in group_states]
+        kinds = [] if types is None else [str(t) for t in types]
+        ms = _ms(timeout)
+        drain = _lib.ListConsumerGroupsResult_drain
+        return (lambda cb: _lib.Admin_list_consumer_groups_async(
+                    self._h, states, kinds, ms, cb),
+                self._resolve_value(drain, _to_list_consumer_groups),
+                self._free_value(drain))
+
+    def _describe_consumer_groups_spec(self, group_ids, timeout,
+                                       include_authorized_operations):
+        ids = [str(g) for g in group_ids]
+        ms = _ms(timeout)
+        drain = _lib.DescribeConsumerGroupsResult_drain
+        return (lambda cb: _lib.Admin_describe_consumer_groups_async(
+                    self._h, ids, ms, bool(include_authorized_operations), cb),
+                self._resolve_value(drain, _to_describe_consumer_groups),
+                self._free_value(drain))
+
+    def _describe_classic_groups_spec(self, group_ids, timeout,
+                                      include_authorized_operations):
+        ids = [str(g) for g in group_ids]
+        ms = _ms(timeout)
+        drain = _lib.DescribeClassicGroupsResult_drain
+        return (lambda cb: _lib.Admin_describe_classic_groups_async(
+                    self._h, ids, ms, bool(include_authorized_operations), cb),
+                self._resolve_value(drain, _to_describe_classic_groups),
+                self._free_value(drain))
+
+    def _list_consumer_group_offsets_spec(self, group_specs, timeout, require_stable):
+        # One ragged partition list per group. A spec whose topic_partitions is
+        # None is Java's unset collection — "every partition the group has
+        # committed offsets for" — and crosses as an explicit flag so it stays
+        # distinct from an empty selection.
+        spec = []
+        for group_id, group_spec in group_specs.items():
+            partitions = None if group_spec is None else group_spec.topic_partitions
+            all_partitions = partitions is None
+            rows = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
+            spec.append((str(group_id), all_partitions, rows))
+        ms = _ms(timeout)
+        drain = _lib.ListConsumerGroupOffsetsResult_drain
+        return (lambda cb: _lib.Admin_list_consumer_group_offsets_async(
+                    self._h, spec, ms, bool(require_stable), cb),
+                self._resolve_value(drain, _to_list_consumer_group_offsets),
+                self._free_value(drain))
+
+    def _alter_consumer_group_offsets_spec(self, group_id, offsets, timeout):
+        # `leader_epoch is None` is Java's empty Optional; it crosses as a
+        # separate flag so epoch 0 stays distinguishable from an absent epoch.
+        spec = [(str(topic), int(partition), int(o.offset),
+                 None if o.metadata is None else str(o.metadata),
+                 o.leader_epoch is not None,
+                 0 if o.leader_epoch is None else int(o.leader_epoch))
+                for (topic, partition), o in offsets.items()]
+        ms = _ms(timeout)
+        drain = _lib.AlterConsumerGroupOffsetsResult_drain
+        return (lambda cb: _lib.Admin_alter_consumer_group_offsets_async(
+                    self._h, str(group_id), spec, ms, cb),
+                self._resolve_value(drain, _to_keyed_errors),
+                self._free_value(drain))
+
+    def _delete_consumer_group_offsets_spec(self, group_id, partitions, timeout):
+        spec = [(str(t), int(p)) for t, p in partitions]
+        ms = _ms(timeout)
+        drain = _lib.DeleteConsumerGroupOffsetsResult_drain
+        return (lambda cb: _lib.Admin_delete_consumer_group_offsets_async(
+                    self._h, str(group_id), spec, ms, cb),
+                self._resolve_value(drain, _to_keyed_errors),
+                self._free_value(drain))
+
+    def _delete_consumer_groups_spec(self, group_ids, timeout):
+        ids = [str(g) for g in group_ids]
+        ms = _ms(timeout)
+        drain = _lib.DeleteConsumerGroupsResult_drain
+        return (lambda cb: _lib.Admin_delete_consumer_groups_async(self._h, ids, ms, cb),
+                self._resolve_value(drain, _to_keyed_errors),
+                self._free_value(drain))
+
+    def _remove_members_from_consumer_group_spec(self, group_id, members, reason, timeout):
+        # `members is None` selects Java's no-argument options constructor
+        # ("remove every member"). An empty *list* is not the same thing: Java's
+        # Collection constructor rejects it, so it must not silently become the
+        # destructive form.
+        remove_all = members is None
+        ids = [] if remove_all else [str(getattr(m, "group_instance_id", m)) for m in members]
+        ms = _ms(timeout)
+        drain = _lib.RemoveMembersFromConsumerGroupResult_drain
+        return (lambda cb: _lib.Admin_remove_members_from_consumer_group_async(
+                    self._h, str(group_id), remove_all, ids,
+                    None if reason is None else str(reason), ms, cb),
+                self._resolve_value(drain, _to_keyed_errors),
+                self._free_value(drain))
+
 
 class _MockAdminClientMixin:
     """Mock-only operations (test helper)."""
@@ -1184,6 +1636,22 @@ class _MockAdminClientMixin:
         replaces, what was seeded before."""
         spec = [(str(t), int(p), int(o)) for (t, p), o in offsets.items()]
         e = _lib.MockAdminClient_update_end_offsets(self._h, spec)
+        if e:
+            raise KafkaError._from_c(e)
+
+    def update_consumer_group_offsets(self, offsets):
+        """Seed the committed offsets ``list_consumer_group_offsets`` reports,
+        from ``{(topic, partition): offset}`` (Java
+        ``MockAdminClient.updateConsumerGroupOffsets``). Merges into, rather
+        than replaces, what was seeded before.
+
+        The mock keys these by partition only and ignores the group id — its
+        ``listConsumerGroupOffsets`` answers every request from one shared map
+        and rejects more than one requested group — so there is no group
+        argument. The real client has no such restriction.
+        """
+        spec = [(str(t), int(p), int(o)) for (t, p), o in offsets.items()]
+        e = _lib.MockAdminClient_update_consumer_group_offsets(self._h, spec)
         if e:
             raise KafkaError._from_c(e)
 
@@ -1407,6 +1875,118 @@ class Admin(_AdminBase):
         return self._run_sync(*self._list_offsets_spec(
             topic_partition_offsets, timeout, isolation_level))
 
+    def list_groups(self, group_states=None, protocol_types=None, types=None, timeout=None):
+        """List every group in the cluster. Returns
+        ``([GroupListing], [KafkaError])``.
+
+        Java's ``ListGroupsResult`` has no per-key future: one source future is
+        split into ``valid()`` listings and an **unkeyed** ``errors()``
+        collection, and the two are independent — a partial success has both
+        non-empty. The two lists are therefore returned as a pair rather than
+        merged, and the error list must not be indexed by listing position.
+
+        The three filters take the Java enums' ``toString()`` names
+        (``"Stable"``, ``"Consumer"``, ...); matching is case-insensitive and
+        an unrecognised name becomes ``UNKNOWN``, as in Java's ``parse``.
+        ``None`` leaves a filter unset.
+        """
+        self._check_closed()
+        return self._run_sync(*self._list_groups_spec(
+            group_states, protocol_types, types, timeout))
+
+    def list_consumer_groups(self, group_states=None, types=None, timeout=None):
+        """List the consumer groups in the cluster. Returns
+        ``([ConsumerGroupListing], [KafkaError])``.
+
+        **Deprecated in Java since 4.1** in favour of :meth:`list_groups`,
+        which covers every group type; mirrored here because it is still part
+        of the Java ``Admin`` surface.
+
+        Java's deprecated ``inStates(Set<ConsumerGroupState>)`` is defined as
+        ``inGroupStates`` over ``GroupState.parse`` of the same names, so
+        ``group_states`` accepts either spelling.
+        """
+        self._check_closed()
+        return self._run_sync(*self._list_consumer_groups_spec(group_states, types, timeout))
+
+    def describe_consumer_groups(self, group_ids, timeout=None,
+                                 include_authorized_operations=False):
+        """Describe ``group_ids``. Returns
+        ``{group_id: ConsumerGroupDescription | KafkaError}``.
+
+        Covers both classic and consumer (KIP-848) protocol groups; the
+        classic-only sibling is :meth:`describe_classic_groups`.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_consumer_groups_spec(
+            group_ids, timeout, include_authorized_operations))
+
+    def describe_classic_groups(self, group_ids, timeout=None,
+                                include_authorized_operations=False):
+        """Describe classic ``group_ids``. Returns
+        ``{group_id: ClassicGroupDescription | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._describe_classic_groups_spec(
+            group_ids, timeout, include_authorized_operations))
+
+    def list_consumer_group_offsets(self, group_specs, timeout=None, require_stable=False):
+        """List committed offsets for ``{group_id: ListConsumerGroupOffsetsSpec
+        | None}``. Returns
+        ``{group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}``.
+
+        A spec of ``None`` (or one whose ``topic_partitions`` is ``None``) is
+        Java's unset collection: every partition the group has committed
+        offsets for. An inner ``None`` value is Java's null map value — the
+        group has no committed offset for that partition, which is not the same
+        as a committed offset of 0.
+        """
+        self._check_closed()
+        return self._run_sync(*self._list_consumer_group_offsets_spec(
+            group_specs, timeout, require_stable))
+
+    def alter_consumer_group_offsets(self, group_id, offsets, timeout=None):
+        """Commit ``{(topic, partition): OffsetAndMetadata}`` on behalf of
+        ``group_id``. Returns ``{(topic, partition): None | KafkaError}``.
+
+        With an empty ``offsets`` there is no per-partition slot for the
+        outcome, so a failure raises instead — which is also the only thing
+        Java's ``all()`` could report.
+        """
+        self._check_closed()
+        return self._run_sync(*self._alter_consumer_group_offsets_spec(
+            group_id, offsets, timeout))
+
+    def delete_consumer_group_offsets(self, group_id, partitions, timeout=None):
+        """Delete ``group_id``'s committed offsets for ``partitions`` (an
+        iterable of ``(topic, partition)``). Returns
+        ``{(topic, partition): None | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._delete_consumer_group_offsets_spec(
+            group_id, partitions, timeout))
+
+    def delete_consumer_groups(self, group_ids, timeout=None):
+        """Delete ``group_ids``. Returns ``{group_id: None | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._delete_consumer_groups_spec(group_ids, timeout))
+
+    def remove_members_from_consumer_group(self, group_id, members, reason=None,
+                                           timeout=None):
+        """Remove ``members`` (an iterable of :class:`MemberToRemove`, or of
+        bare ``group.instance.id`` strings) from ``group_id``. Returns
+        ``{group_instance_id: None | KafkaError}``.
+
+        Pass ``members=None`` for Java's no-argument
+        ``RemoveMembersFromConsumerGroupOptions()``: remove **every** member of
+        the group. That mode has no per-member outcome in Java at all —
+        ``memberResult`` refuses and ``all()`` is the only observable — so the
+        returned dict is empty and a failure raises. An empty iterable is not
+        the same thing: Java's collection constructor rejects it, and so does
+        this, rather than silently selecting the destructive form.
+        """
+        self._check_closed()
+        return self._run_sync(*self._remove_members_from_consumer_group_spec(
+            group_id, members, reason, timeout))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -1567,6 +2147,65 @@ class AsyncAdmin(_AdminBase):
         self._check_closed()
         return await self._run_async(*self._list_offsets_spec(
             topic_partition_offsets, timeout, isolation_level))
+
+    async def list_groups(self, group_states=None, protocol_types=None, types=None,
+                          timeout=None):
+        """See :meth:`Admin.list_groups`."""
+        self._check_closed()
+        return await self._run_async(*self._list_groups_spec(
+            group_states, protocol_types, types, timeout))
+
+    async def list_consumer_groups(self, group_states=None, types=None, timeout=None):
+        """See :meth:`Admin.list_consumer_groups` (deprecated in Java since 4.1)."""
+        self._check_closed()
+        return await self._run_async(*self._list_consumer_groups_spec(
+            group_states, types, timeout))
+
+    async def describe_consumer_groups(self, group_ids, timeout=None,
+                                       include_authorized_operations=False):
+        """See :meth:`Admin.describe_consumer_groups`."""
+        self._check_closed()
+        return await self._run_async(*self._describe_consumer_groups_spec(
+            group_ids, timeout, include_authorized_operations))
+
+    async def describe_classic_groups(self, group_ids, timeout=None,
+                                      include_authorized_operations=False):
+        """See :meth:`Admin.describe_classic_groups`."""
+        self._check_closed()
+        return await self._run_async(*self._describe_classic_groups_spec(
+            group_ids, timeout, include_authorized_operations))
+
+    async def list_consumer_group_offsets(self, group_specs, timeout=None,
+                                          require_stable=False):
+        """See :meth:`Admin.list_consumer_group_offsets`."""
+        self._check_closed()
+        return await self._run_async(*self._list_consumer_group_offsets_spec(
+            group_specs, timeout, require_stable))
+
+    async def alter_consumer_group_offsets(self, group_id, offsets, timeout=None):
+        """See :meth:`Admin.alter_consumer_group_offsets`."""
+        self._check_closed()
+        return await self._run_async(*self._alter_consumer_group_offsets_spec(
+            group_id, offsets, timeout))
+
+    async def delete_consumer_group_offsets(self, group_id, partitions, timeout=None):
+        """See :meth:`Admin.delete_consumer_group_offsets`."""
+        self._check_closed()
+        return await self._run_async(*self._delete_consumer_group_offsets_spec(
+            group_id, partitions, timeout))
+
+    async def delete_consumer_groups(self, group_ids, timeout=None):
+        """See :meth:`Admin.delete_consumer_groups`."""
+        self._check_closed()
+        return await self._run_async(*self._delete_consumer_groups_spec(group_ids, timeout))
+
+    async def remove_members_from_consumer_group(self, group_id, members, reason=None,
+                                                 timeout=None):
+        """See :meth:`Admin.remove_members_from_consumer_group`. ``members`` is
+        required; pass ``None`` explicitly to remove every member."""
+        self._check_closed()
+        return await self._run_async(*self._remove_members_from_consumer_group_spec(
+            group_id, members, reason, timeout))
 
     async def close(self, timeout=None):
         if self.closed:
