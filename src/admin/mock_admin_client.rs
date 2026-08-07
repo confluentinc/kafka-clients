@@ -359,22 +359,37 @@ fn current_time_millis() -> i64 {
 /// Computes the `PartitionReassignment` for a partition from the mock's stored
 /// reassignments and topic metadata.
 ///
-/// Mirrors `MockAdminClient.findPartitionReassignment`. Returns `None` if there
-/// is no stored reassignment for the partition.
+/// Mirrors `MockAdminClient.findPartitionReassignment`
+/// (`MockAdminClient.java:1182-1210`). Returns `Ok(None)` if there is no stored
+/// reassignment for the partition.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics on an internal invariant violation (a stored reassignment references a
-/// partition with no metadata), mirroring Java's `RuntimeException` — this can
-/// only happen if the mock's internal state is corrupted (CLAUDE.md §10.1).
-fn find_partition_reassignment(state: &State, partition: &TopicPartition) -> Option<PartitionReassignment> {
-    let reassignment = state.reassignments.get(partition)?;
-    let metadata = state.all_topics.get(partition.topic()).unwrap_or_else(|| {
-        panic!("Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata")
-    });
-    let info = metadata.partitions.get(partition.partition() as usize).unwrap_or_else(|| {
-        panic!("Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo")
-    });
+/// Returns an error when a stored reassignment references a partition with no
+/// metadata. Java throws a bare `RuntimeException` from both of these branches;
+/// since `list_partition_reassignments` cannot throw, the caller fails the
+/// result's future instead (CLAUDE.md §10.1 — a panic here would unwind into C
+/// through the FFI). This is *not* only reachable through internal corruption:
+/// `delete_topics` removes the topic from `all_topics` without pruning
+/// `reassignments`, exactly as Java's does, so any legal
+/// alter-reassignment/delete-topic/list-reassignments sequence reaches it.
+fn find_partition_reassignment(
+    state: &State,
+    partition: &TopicPartition,
+) -> Result<Option<PartitionReassignment>, KafkaError> {
+    let Some(reassignment) = state.reassignments.get(partition) else {
+        return Ok(None);
+    };
+    let metadata = state.all_topics.get(partition.topic()).ok_or_else(|| {
+        KafkaError::illegal_state(format!(
+            "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata"
+        ))
+    })?;
+    let info = metadata.partitions.get(partition.partition() as usize).ok_or_else(|| {
+        KafkaError::illegal_state(format!(
+            "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo"
+        ))
+    })?;
     let target_replicas = reassignment.target_replicas();
     let mut replicas = Vec::new();
     let mut removing_replicas = Vec::new();
@@ -388,7 +403,7 @@ fn find_partition_reassignment(state: &State, partition: &TopicPartition) -> Opt
             adding_replicas.remove(pos);
         }
     }
-    Some(PartitionReassignment::new(replicas, adding_replicas, removing_replicas))
+    Ok(Some(PartitionReassignment::new(replicas, adding_replicas, removing_replicas)))
 }
 
 fn config_from_new_topic(new_topic: &NewTopic) -> Config {
@@ -1286,6 +1301,13 @@ impl Admin for MockAdminClient {
     }
 
     /// Mirrors `MockAdminClient.listPartitionReassignments`.
+    ///
+    /// Java throws a `RuntimeException` from `findPartitionReassignment` when a
+    /// stored reassignment names a topic that is no longer in `allTopics`
+    /// (`MockAdminClient.java:1186-1192`). A synchronous throw is not
+    /// representable in this signature, so the result's single future is failed
+    /// instead — the same accommodation `list_offsets` makes for a
+    /// `TimestampSpec` (CLAUDE.md §10.1).
     fn list_partition_reassignments(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
@@ -1297,12 +1319,19 @@ impl Admin for MockAdminClient {
             Some(set) => set.into_iter().collect(),
             None => state.reassignments.keys().cloned().collect(),
         };
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>> = KafkaFutureImpl::new();
         for partition in requested {
-            if let Some(reassignment) = find_partition_reassignment(&state, &partition) {
-                map.insert(partition, reassignment);
+            match find_partition_reassignment(&state, &partition) {
+                Ok(Some(reassignment)) => {
+                    map.insert(partition, reassignment);
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    handle.complete_exceptionally(e);
+                    return ListPartitionReassignmentsResult::new(handle.future());
+                },
             }
         }
-        let handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>> = KafkaFutureImpl::new();
         handle.complete(map);
         ListPartitionReassignmentsResult::new(handle.future())
     }
@@ -2545,5 +2574,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed, vec![token_alice]);
+    }
+
+    /// Seeds one topic and reassigns its only partition.
+    async fn admin_with_reassignment() -> (MockAdminClient, TopicPartition) {
+        let client = admin();
+        let new_topic = NewTopic::new("rt", 1, 3);
+        client
+            .create_topics(std::slice::from_ref(&new_topic), CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let tp = TopicPartition::new("rt".to_string(), 0);
+        let target = NewPartitionReassignment::new(vec![1, 2]).unwrap();
+        client
+            .alter_partition_reassignments(
+                &HashMap::from([(tp.clone(), Some(target))]),
+                AlterPartitionReassignmentsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+        (client, tp)
+    }
+
+    #[tokio::test]
+    async fn alter_then_list_partition_reassignments_reports_adding_and_removing() {
+        let (client, tp) = admin_with_reassignment().await;
+
+        let listed = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap();
+        let reassignment = &listed[&tp];
+        // The mock seeds every partition with all three brokers as replicas, so
+        // targeting {1, 2} removes broker 0 and adds nothing.
+        assert_eq!(reassignment.replicas(), &[0, 1, 2]);
+        assert_eq!(reassignment.adding_replicas(), &[] as &[i32]);
+        assert_eq!(reassignment.removing_replicas(), &[0]);
+
+        // An empty `Optional` cancels (`MockAdminClient.java:1160-1162`).
+        client
+            .alter_partition_reassignments(
+                &HashMap::from([(tp.clone(), None)]),
+                AlterPartitionReassignmentsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let listed = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+    }
+
+    /// Regression: `delete_topics` drops the topic from `all_topics` without
+    /// pruning `reassignments` (as Java's does), so a subsequent
+    /// `list_partition_reassignments` reaches `findPartitionReassignment`'s
+    /// "no TopicMetadata" branch. Java throws a `RuntimeException` there; this
+    /// client must fail the future rather than panic, because the panic would
+    /// unwind out of a C FFI entry point.
+    #[tokio::test]
+    async fn list_partition_reassignments_after_topic_deletion_fails_the_future() {
+        let (client, _tp) = admin_with_reassignment().await;
+        client
+            .delete_topics(
+                TopicCollection::of_topic_names(vec!["rt".to_string()]),
+                DeleteTopicsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let error = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Internal MockAdminClient logic error: found reassignment for rt-0, but no TopicMetadata"
+        );
     }
 }
