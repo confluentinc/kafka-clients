@@ -1178,6 +1178,214 @@ class SupportedVersionRange:
                 f"max_version={self.max_version})")
 
 
+class TransactionState:
+    """The state of a transaction (Java ``TransactionState``).
+
+    The values are Java's ``toString()`` names, not codes: ``TransactionState``
+    has no numeric id in Java, so the name is the wire contract. ``parse`` is
+    case-**sensitive**, as Java's ``TransactionState.parse`` is (unlike
+    ``GroupState.parse``, which upper-cases first).
+    """
+
+    ONGOING = "Ongoing"
+    PREPARE_ABORT = "PrepareAbort"
+    PREPARE_COMMIT = "PrepareCommit"
+    COMPLETE_ABORT = "CompleteAbort"
+    COMPLETE_COMMIT = "CompleteCommit"
+    EMPTY = "Empty"
+    PREPARE_EPOCH_FENCE = "PrepareEpochFence"
+    UNKNOWN = "Unknown"
+
+    _NAMES = (ONGOING, PREPARE_ABORT, PREPARE_COMMIT, COMPLETE_ABORT, COMPLETE_COMMIT, EMPTY,
+              PREPARE_EPOCH_FENCE, UNKNOWN)
+
+    @classmethod
+    def parse(cls, name):
+        """Return ``name`` if it is a known state, else ``UNKNOWN`` -- Java's
+        ``NAME_TO_ENUM.getOrDefault(name, UNKNOWN)``."""
+        return name if name in cls._NAMES else cls.UNKNOWN
+
+
+class ProducerState:
+    """One active producer's state on a partition (Java ``ProducerState``).
+
+    ``coordinator_epoch`` and ``current_transaction_start_offset`` are Java's
+    ``OptionalInt`` / ``OptionalLong``, so ``None`` means absent -- every
+    integer, 0 and -1 included, is a legal value for both. The positional order
+    matches Java's constructor.
+    """
+
+    __slots__ = ("producer_id", "producer_epoch", "last_sequence", "last_timestamp",
+                 "coordinator_epoch", "current_transaction_start_offset")
+
+    def __init__(self, producer_id, producer_epoch, last_sequence, last_timestamp,
+                 coordinator_epoch=None, current_transaction_start_offset=None):
+        self.producer_id = int(producer_id)
+        self.producer_epoch = int(producer_epoch)
+        self.last_sequence = int(last_sequence)
+        self.last_timestamp = int(last_timestamp)
+        self.coordinator_epoch = None if coordinator_epoch is None else int(coordinator_epoch)
+        self.current_transaction_start_offset = (
+            None if current_transaction_start_offset is None
+            else int(current_transaction_start_offset))
+
+    def __eq__(self, other):
+        return (isinstance(other, ProducerState)
+                and self.producer_id == other.producer_id
+                and self.producer_epoch == other.producer_epoch
+                and self.last_sequence == other.last_sequence
+                and self.last_timestamp == other.last_timestamp
+                and self.coordinator_epoch == other.coordinator_epoch
+                and self.current_transaction_start_offset == other.current_transaction_start_offset)
+
+    def __hash__(self):
+        return hash((self.producer_id, self.producer_epoch, self.last_sequence,
+                     self.last_timestamp, self.coordinator_epoch,
+                     self.current_transaction_start_offset))
+
+    def __repr__(self):
+        return (f"ProducerState(producer_id={self.producer_id}, "
+                f"producer_epoch={self.producer_epoch}, last_sequence={self.last_sequence}, "
+                f"last_timestamp={self.last_timestamp}, "
+                f"coordinator_epoch={self.coordinator_epoch}, "
+                f"current_transaction_start_offset={self.current_transaction_start_offset})")
+
+
+class PartitionProducerState:
+    """The active producers of one partition (Java
+    ``DescribeProducersResult.PartitionProducerState``)."""
+
+    __slots__ = ("active_producers",)
+
+    def __init__(self, active_producers):
+        self.active_producers = list(active_producers)
+
+    def __repr__(self):
+        return f"PartitionProducerState(active_producers={self.active_producers!r})"
+
+
+class TransactionDescription:
+    """A transaction's coordinator, state and participants (Java
+    ``TransactionDescription``).
+
+    ``transaction_start_time_ms`` is Java's ``OptionalLong``: ``None`` when no
+    transaction is in progress. ``topic_partitions`` is a set of
+    ``(topic, partition)`` tuples. The positional order matches Java's
+    constructor.
+    """
+
+    __slots__ = ("coordinator_id", "state", "producer_id", "producer_epoch",
+                 "transaction_timeout_ms", "transaction_start_time_ms", "topic_partitions")
+
+    def __init__(self, coordinator_id, state, producer_id, producer_epoch,
+                 transaction_timeout_ms, transaction_start_time_ms, topic_partitions):
+        self.coordinator_id = int(coordinator_id)
+        self.state = str(state)
+        self.producer_id = int(producer_id)
+        self.producer_epoch = int(producer_epoch)
+        self.transaction_timeout_ms = int(transaction_timeout_ms)
+        self.transaction_start_time_ms = (None if transaction_start_time_ms is None
+                                         else int(transaction_start_time_ms))
+        self.topic_partitions = set(topic_partitions)
+
+    def __eq__(self, other):
+        return (isinstance(other, TransactionDescription)
+                and self.coordinator_id == other.coordinator_id
+                and self.state == other.state
+                and self.producer_id == other.producer_id
+                and self.producer_epoch == other.producer_epoch
+                and self.transaction_timeout_ms == other.transaction_timeout_ms
+                and self.transaction_start_time_ms == other.transaction_start_time_ms
+                and self.topic_partitions == other.topic_partitions)
+
+    def __repr__(self):
+        return (f"TransactionDescription(coordinator_id={self.coordinator_id}, "
+                f"state={self.state!r}, producer_id={self.producer_id}, "
+                f"producer_epoch={self.producer_epoch}, "
+                f"transaction_timeout_ms={self.transaction_timeout_ms}, "
+                f"transaction_start_time_ms={self.transaction_start_time_ms}, "
+                f"topic_partitions={sorted(self.topic_partitions)!r})")
+
+
+class TransactionListing:
+    """A transaction as reported by ``list_transactions`` (Java
+    ``TransactionListing``)."""
+
+    __slots__ = ("transactional_id", "producer_id", "state")
+
+    def __init__(self, transactional_id, producer_id, state):
+        self.transactional_id = str(transactional_id)
+        self.producer_id = int(producer_id)
+        self.state = str(state)
+
+    def __eq__(self, other):
+        return (isinstance(other, TransactionListing)
+                and self.transactional_id == other.transactional_id
+                and self.producer_id == other.producer_id and self.state == other.state)
+
+    def __hash__(self):
+        return hash((self.transactional_id, self.producer_id, self.state))
+
+    def __repr__(self):
+        return (f"TransactionListing(transactional_id={self.transactional_id!r}, "
+                f"producer_id={self.producer_id}, state={self.state!r})")
+
+
+class ProducerIdAndEpoch:
+    """A producer id and its epoch (Java
+    ``org.apache.kafka.common.utils.ProducerIdAndEpoch``).
+
+    ``NONE`` is Java's sentinel pair (-1, -1), which is what a failed
+    ``fence_producers`` row reports -- 0 is a legal producer id.
+    """
+
+    __slots__ = ("producer_id", "epoch")
+
+    NO_PRODUCER_ID = -1
+    NO_PRODUCER_EPOCH = -1
+
+    def __init__(self, producer_id, epoch):
+        self.producer_id = int(producer_id)
+        self.epoch = int(epoch)
+
+    def is_valid(self):
+        """Java's ``isValid``: a real producer id was assigned."""
+        return self.producer_id > self.NO_PRODUCER_ID
+
+    def __eq__(self, other):
+        return (isinstance(other, ProducerIdAndEpoch)
+                and self.producer_id == other.producer_id and self.epoch == other.epoch)
+
+    def __hash__(self):
+        return hash((self.producer_id, self.epoch))
+
+    def __repr__(self):
+        return f"ProducerIdAndEpoch(producer_id={self.producer_id}, epoch={self.epoch})"
+
+
+class AbortTransactionSpec:
+    """Which open transaction ``abort_transaction`` should abort (Java
+    ``AbortTransactionSpec``).
+
+    Every field comes from a ``describe_producers`` row: the partition, the
+    producer's id and epoch, and the coordinator epoch.
+    """
+
+    __slots__ = ("topic", "partition", "producer_id", "producer_epoch", "coordinator_epoch")
+
+    def __init__(self, topic, partition, producer_id, producer_epoch, coordinator_epoch):
+        self.topic = str(topic)
+        self.partition = int(partition)
+        self.producer_id = int(producer_id)
+        self.producer_epoch = int(producer_epoch)
+        self.coordinator_epoch = int(coordinator_epoch)
+
+    def __repr__(self):
+        return (f"AbortTransactionSpec(topic={self.topic!r}, partition={self.partition}, "
+                f"producer_id={self.producer_id}, producer_epoch={self.producer_epoch}, "
+                f"coordinator_epoch={self.coordinator_epoch})")
+
+
 class FeatureMetadata:
     """The cluster's finalized and supported features (Java
     ``FeatureMetadata``).
@@ -1985,6 +2193,73 @@ def _to_feature_metadata(raw):
     )
 
 
+def _to_describe_producers(raw):
+    """``{(topic, partition): (error, [state_tuple])}``
+    -> ``{(topic, partition): PartitionProducerState | KafkaError}``.
+
+    Each state tuple is ``(producer_id, producer_epoch, last_sequence,
+    last_timestamp, coordinator_epoch_or_None,
+    current_transaction_start_offset_or_None)`` -- Java's ``ProducerState``
+    constructor order.
+    """
+    out = {}
+    for key, (error, states) in raw.items():
+        if error is not None:
+            out[key] = _to_error(error)
+        else:
+            out[key] = PartitionProducerState([ProducerState(*state) for state in states])
+    return out
+
+
+def _to_describe_transactions(raw):
+    """``{transactional_id: (error, description_tuple)}``
+    -> ``{transactional_id: TransactionDescription | KafkaError}``.
+
+    The description tuple is ``(coordinator_id, state_name, producer_id,
+    producer_epoch, transaction_timeout_ms, start_time_ms_or_None,
+    [(topic, partition)])``.
+    """
+    out = {}
+    for tid, (error, description) in raw.items():
+        if error is not None:
+            out[tid] = _to_error(error)
+        else:
+            (coordinator_id, state, producer_id, producer_epoch, timeout_ms, start_time,
+             partitions) = description
+            out[tid] = TransactionDescription(coordinator_id, state, producer_id, producer_epoch,
+                                             timeout_ms, start_time,
+                                             {(t, p) for t, p in partitions})
+    return out
+
+
+def _to_fence_producers(raw):
+    """``{transactional_id: (error, (producer_id, epoch))}``
+    -> ``{transactional_id: ProducerIdAndEpoch | KafkaError}``."""
+    out = {}
+    for tid, (error, producer) in raw.items():
+        out[tid] = _to_error(error) if error is not None else ProducerIdAndEpoch(*producer)
+    return out
+
+
+def _to_list_transactions(raw):
+    """``{broker_id: (error, [(transactional_id, producer_id, state)])}``
+    -> ``{broker_id: [TransactionListing] | KafkaError}``.
+
+    Keyed by broker because that is the only one of Java's three views
+    (``byBrokerId``) that keeps a per-broker error, so a listing that succeeded
+    on one broker and failed on another reports both. Flatten with
+    ``[listing for listings in result.values() if not isinstance(listings,
+    KafkaError) for listing in listings]`` for Java's ``all()``.
+    """
+    out = {}
+    for broker_id, (error, listings) in raw.items():
+        if error is not None:
+            out[broker_id] = _to_error(error)
+        else:
+            out[broker_id] = [TransactionListing(*row) for row in listings]
+    return out
+
+
 def _to_keyed_errors(raw):
     """{key: error} -> {key: None | KafkaError}
 
@@ -2686,6 +2961,90 @@ class _AdminBase:
                 self._resolve_value(drain, _to_keyed_errors),
                 self._free_value(drain))
 
+    # ---- B6: producers and transactions ------------------------------------
+    @staticmethod
+    def _describe_producers_rows(partitions):
+        """``[(topic, partition)]`` -> the ``(topic, partition)`` rows the C
+        extension unpacks.
+
+        Java's ``MockAdminClient.describeProducers`` throws per partition
+        (``MockAdminClient.java:1368-1370``), so it echoes the key set back but
+        nothing else.
+        """
+        return [(str(topic), int(partition)) for topic, partition in partitions]
+
+    def _describe_producers_spec(self, partitions, broker_id, timeout):
+        # `broker_id is None` is Java's empty OptionalInt: query each partition's
+        # leader. Broker id 0 is legal, so the flag carries absence.
+        rows = self._describe_producers_rows(partitions)
+        ms = _ms(timeout)
+        drain = _lib.DescribeProducersResult_drain
+        return (lambda cb: _lib.Admin_describe_producers_async(
+                    self._h, rows, broker_id is not None,
+                    0 if broker_id is None else int(broker_id), ms, cb),
+                self._resolve_value(drain, _to_describe_producers),
+                self._free_value(drain))
+
+    def _describe_transactions_spec(self, transactional_ids, timeout):
+        ids = [str(i) for i in transactional_ids]
+        ms = _ms(timeout)
+        drain = _lib.DescribeTransactionsResult_drain
+        return (lambda cb: _lib.Admin_describe_transactions_async(self._h, ids, ms, cb),
+                self._resolve_value(drain, _to_describe_transactions),
+                self._free_value(drain))
+
+    def _fence_producers_spec(self, transactional_ids, timeout):
+        ids = [str(i) for i in transactional_ids]
+        ms = _ms(timeout)
+        drain = _lib.FenceProducersResult_drain
+        return (lambda cb: _lib.Admin_fence_producers_async(self._h, ids, ms, cb),
+                self._resolve_value(drain, _to_fence_producers),
+                self._free_value(drain))
+
+    @staticmethod
+    def _list_transactions_filters(states, producer_ids, duration_ms, transactional_id_pattern):
+        """Normalise the four ``ListTransactionsOptions`` filters.
+
+        Java's mock fails the whole ``listTransactions`` call, so none of these
+        is observable end to end -- hence the dedicated unit test. ``None`` and
+        ``[]`` collapse for the two collections (Java's own default is an empty
+        set, meaning "no filter"), but ``None`` and ``""`` do **not** collapse
+        for the pattern: an empty pattern is a legal value the broker evaluates.
+        A negative ``duration_ms`` is Java's own -1 "no duration filter".
+        """
+        return ([TransactionState.parse(str(s)) for s in (states or [])],
+                [int(p) for p in (producer_ids or [])],
+                int(duration_ms),
+                None if transactional_id_pattern is None else str(transactional_id_pattern))
+
+    def _list_transactions_spec(self, states, producer_ids, duration_ms,
+                                transactional_id_pattern, timeout):
+        names, ids, duration, pattern = self._list_transactions_filters(
+            states, producer_ids, duration_ms, transactional_id_pattern)
+        ms = _ms(timeout)
+        drain = _lib.ListTransactionsResult_drain
+        return (lambda cb: _lib.Admin_list_transactions_async(
+                    self._h, names, ids, duration, pattern, ms, cb),
+                self._resolve_value(drain, _to_list_transactions),
+                self._free_value(drain))
+
+    def _abort_transaction_spec(self, spec, timeout):
+        # No result handle: Java's AbortTransactionResult exposes only
+        # all() -> KafkaFuture<Void>, so success is a null error.
+        ms = _ms(timeout)
+        return (lambda cb: _lib.Admin_abort_transaction_async(
+                    self._h, str(spec.topic), int(spec.partition), int(spec.producer_id),
+                    int(spec.producer_epoch), int(spec.coordinator_epoch), ms, cb),
+                self._resolve_void, self._free_void)
+
+    def _force_terminate_transaction_spec(self, transactional_id, timeout):
+        # No result handle either: TerminateTransactionResult exposes only
+        # result() -> KafkaFuture<Void>.
+        ms = _ms(timeout)
+        return (lambda cb: _lib.Admin_force_terminate_transaction_async(
+                    self._h, str(transactional_id), ms, cb),
+                self._resolve_void, self._free_void)
+
 
 class _MockAdminClientMixin:
     """Mock-only operations (test helper)."""
@@ -3241,6 +3600,78 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._update_features_spec(feature_updates, timeout, validate_only))
 
+    def describe_producers(self, partitions, broker_id=None, timeout=None):
+        """Describe the active producers of ``partitions`` (an iterable of
+        ``(topic, partition)``). Returns
+        ``{(topic, partition): PartitionProducerState | KafkaError}``.
+
+        ``broker_id`` of ``None`` queries each partition's leader, mirroring
+        Java's empty ``OptionalInt``; broker id 0 is a legal value, so absence
+        is carried by ``None`` rather than a sentinel. A per-partition failure
+        is a value in the returned dict, not a raise.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_producers_spec(partitions, broker_id, timeout))
+
+    def describe_transactions(self, transactional_ids, timeout=None):
+        """Describe the given transactional ids. Returns
+        ``{transactional_id: TransactionDescription | KafkaError}``.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_transactions_spec(transactional_ids, timeout))
+
+    def fence_producers(self, transactional_ids, timeout=None):
+        """Fence out every active producer using the given transactional ids.
+        Returns ``{transactional_id: ProducerIdAndEpoch | KafkaError}`` -- the
+        id and epoch assigned while re-initializing that transaction, which is
+        what Java's ``producerId(id)`` / ``epochId(id)`` project.
+        """
+        self._check_closed()
+        return self._run_sync(*self._fence_producers_spec(transactional_ids, timeout))
+
+    def list_transactions(self, states=None, producer_ids=None, duration_ms=-1,
+                          transactional_id_pattern=None, timeout=None):
+        """List the cluster's transactions. Returns
+        ``{broker_id: [TransactionListing] | KafkaError}``.
+
+        Keyed by broker because that is Java's ``byBrokerId()`` view, the only
+        one of the three that keeps a *per-broker* error -- so a listing that
+        succeeded on one broker and failed on another reports both, where
+        ``all()`` would discard the successful half. Only a failure of the
+        broker-discovery step raises.
+
+        ``states`` are :class:`TransactionState` names (case-sensitive, as
+        Java's ``parse`` is); an unrecognised name becomes ``UNKNOWN`` rather
+        than an error. ``duration_ms`` negative means no duration filter, Java's
+        own -1 default. ``transactional_id_pattern`` of ``None`` means no
+        pattern filter, which is *not* the same as ``""``.
+        """
+        self._check_closed()
+        return self._run_sync(*self._list_transactions_spec(
+            states, producer_ids, duration_ms, transactional_id_pattern, timeout))
+
+    def abort_transaction(self, spec, timeout=None):
+        """Forcefully abort the transaction open on a partition. ``spec`` is an
+        :class:`AbortTransactionSpec`. Returns ``None``.
+
+        Java's ``AbortTransactionResult`` exposes only
+        ``all() -> KafkaFuture<Void>``, so there is nothing to return and a
+        failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(*self._abort_transaction_spec(spec, timeout))
+
+    def force_terminate_transaction(self, transactional_id, timeout=None):
+        """Forcefully terminate the ongoing transaction of ``transactional_id``,
+        which Java implements by fencing the producer. Returns ``None``.
+
+        Java's ``TerminateTransactionResult`` exposes only
+        ``result() -> KafkaFuture<Void>``, so there is nothing to return and a
+        failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(*self._force_terminate_transaction_spec(transactional_id, timeout))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -3518,6 +3949,34 @@ class AsyncAdmin(_AdminBase):
         self._check_closed()
         return await self._run_async(
             *self._update_features_spec(feature_updates, timeout, validate_only))
+
+    async def describe_producers(self, partitions, broker_id=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(
+            *self._describe_producers_spec(partitions, broker_id, timeout))
+
+    async def describe_transactions(self, transactional_ids, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_transactions_spec(transactional_ids, timeout))
+
+    async def fence_producers(self, transactional_ids, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._fence_producers_spec(transactional_ids, timeout))
+
+    async def list_transactions(self, states=None, producer_ids=None, duration_ms=-1,
+                                transactional_id_pattern=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._list_transactions_spec(
+            states, producer_ids, duration_ms, transactional_id_pattern, timeout))
+
+    async def abort_transaction(self, spec, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._abort_transaction_spec(spec, timeout))
+
+    async def force_terminate_transaction(self, transactional_id, timeout=None):
+        self._check_closed()
+        return await self._run_async(
+            *self._force_terminate_transaction_spec(transactional_id, timeout))
 
     async def close(self, timeout=None):
         if self.closed:

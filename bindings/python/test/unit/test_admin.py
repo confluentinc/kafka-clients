@@ -37,7 +37,11 @@ from admin import (
     DelegationToken, FeatureUpdate, FinalizedVersionRange, KafkaPrincipal, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, UpgradeType, UserScramCredentialDeletion,
     UserScramCredentialUpsertion,
-    _to_delegation_token, _to_describe_user_scram_credentials, _to_feature_metadata,
+    AbortTransactionSpec, PartitionProducerState, ProducerIdAndEpoch, ProducerState,
+    TransactionDescription, TransactionListing, TransactionState,
+    _to_delegation_token, _to_describe_producers, _to_describe_transactions,
+    _to_describe_user_scram_credentials, _to_feature_metadata, _to_fence_producers,
+    _to_list_transactions,
     _to_acl_binding, _to_acl_binding_filter, _to_alter_client_quotas, _to_create_acls,
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
@@ -2576,3 +2580,205 @@ async def test_async_b5b_rpcs():
         assert await admin.update_features(
             {"metadata.version": FeatureUpdate(18, UpgradeType.UPGRADE)}) == {
                 "metadata.version": None}
+
+
+# ---------------------------------------------------------------------------
+# B6 -- producers and transactions
+#
+# Java's MockAdminClient throws for all six (MockAdminClient.java:1368-1395), so
+# the success side of every converter is exercised by hand-built payloads while
+# the mock covers the per-key error shape end to end.
+# ---------------------------------------------------------------------------
+
+def test_describe_producers_reports_unsupported_per_partition():
+    with MockAdminClient(1) as admin:
+        # Ragged on purpose: two partitions of one topic and one of another, so a
+        # topic/partition column swap changes the key set.
+        out = admin.describe_producers([("alpha", 0), ("alpha", 4), ("beta", 2)])
+        assert set(out) == {("alpha", 0), ("alpha", 4), ("beta", 2)}
+        for key in out:
+            assert isinstance(out[key], KafkaError)
+            assert str(out[key]) == "Not implemented yet"
+
+        # A duplicate partition collapses to one row, as Java's Map-keyed result
+        # does; broker_id=0 is a legal value, not "absent".
+        assert set(admin.describe_producers([("alpha", 0), ("alpha", 0)], broker_id=0)) == {
+            ("alpha", 0)}
+        # No partitions: nothing to join, so an empty result rather than a raise.
+        assert admin.describe_producers([]) == {}
+
+
+def test_describe_transactions_reports_unsupported_per_id():
+    with MockAdminClient(1) as admin:
+        out = admin.describe_transactions(["txn-b", "txn-a"])
+        assert sorted(out) == ["txn-a", "txn-b"]
+        for tid in out:
+            assert isinstance(out[tid], KafkaError)
+            assert str(out[tid]) == "Not implemented yet"
+        assert admin.describe_transactions([]) == {}
+
+
+def test_fence_producers_reports_unsupported_per_id():
+    with MockAdminClient(1) as admin:
+        out = admin.fence_producers(["txn-y", "txn-x"])
+        assert sorted(out) == ["txn-x", "txn-y"]
+        for tid in out:
+            assert isinstance(out[tid], KafkaError)
+            assert str(out[tid]) == "Not implemented yet"
+        assert admin.fence_producers([]) == {}
+
+
+def test_list_transactions_fails_the_whole_call():
+    # Java's mock fails the top-level broker-discovery future, and that is the
+    # one listTransactions failure mode that is the *call's* error rather than a
+    # per-broker row.
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.list_transactions(states=[TransactionState.ONGOING], producer_ids=[11, 22, 33],
+                                    duration_ms=60000, transactional_id_pattern="txn-.*")
+        assert str(exc.value) == "Not implemented yet"
+
+        # And with every filter left unset.
+        with pytest.raises(KafkaError):
+            admin.list_transactions()
+
+
+def test_abort_and_terminate_transaction_report_unsupported():
+    with MockAdminClient(1) as admin:
+        spec = AbortTransactionSpec("txn-topic", 3, 91234, 7, 42)
+        with pytest.raises(KafkaError) as exc:
+            admin.abort_transaction(spec)
+        assert str(exc.value) == "Not implemented yet"
+
+        with pytest.raises(KafkaError) as exc:
+            admin.force_terminate_transaction("txn-a")
+        assert str(exc.value) == "Not implemented yet"
+
+
+def test_list_transactions_filters_keep_each_column_apart():
+    # The mock fails the whole call, so no end-to-end test can see these; this is
+    # the direct test of the request-direction builder. Deliberately asymmetric --
+    # one state, three producer ids -- so substituting one list for the other
+    # fails.
+    names, ids, duration, pattern = MockAdminClient._list_transactions_filters(
+        [TransactionState.PREPARE_COMMIT], [11, 22, 33], 60000, "txn-.*")
+    assert names == ["PrepareCommit"]
+    assert ids == [11, 22, 33]
+    assert duration == 60000
+    assert pattern == "txn-.*"
+
+    # None and [] collapse for the two collections (Java's default is an empty
+    # set, meaning "no filter")...
+    names, ids, duration, pattern = MockAdminClient._list_transactions_filters(None, None, -1, None)
+    assert names == []
+    assert ids == []
+    assert duration == -1
+    assert pattern is None
+
+    # ...but None and "" do NOT collapse for the pattern, and 0 is a real
+    # duration filter rather than "unset".
+    _, _, duration, pattern = MockAdminClient._list_transactions_filters([], [], 0, "")
+    assert pattern == ""
+    assert duration == 0
+
+    # An unrecognised state name becomes UNKNOWN rather than an error, and
+    # matching is case-sensitive: Java's TransactionState.parse reads its map
+    # directly, unlike GroupState.parse which upper-cases first.
+    names, _, _, _ = MockAdminClient._list_transactions_filters(
+        ["CompleteCommit", "ongoing", "nonsense"], None, -1, None)
+    assert names == ["CompleteCommit", "Unknown", "Unknown"]
+
+
+def test_describe_producers_rows_pin_the_two_columns():
+    assert MockAdminClient._describe_producers_rows([("alpha", 4), ("beta", 0)]) == [
+        ("alpha", 4), ("beta", 0)]
+
+
+def test_to_describe_producers_builds_states_and_keeps_the_optionals_apart():
+    raw = {
+        ("alpha", 3): (None, [(1001, 5, 17, 1700000000000, 9, 4242),
+                              (1002, 6, 18, 1700000000001, None, None)]),
+        ("alpha", 1): ((UNSUPPORTED_VERSION, "Not implemented yet", 0, 0), []),
+    }
+    out = _to_describe_producers(raw)
+    state = out[("alpha", 3)]
+    assert isinstance(state, PartitionProducerState)
+    assert state.active_producers[0] == ProducerState(1001, 5, 17, 1700000000000, 9, 4242)
+    # Both Optionals absent on the second producer, so a constant present flag
+    # would fail.
+    assert state.active_producers[1].coordinator_epoch is None
+    assert state.active_producers[1].current_transaction_start_offset is None
+    assert state.active_producers[1].producer_id == 1002
+    assert isinstance(out[("alpha", 1)], KafkaError)
+    assert str(out[("alpha", 1)]) == "Not implemented yet"
+
+
+def test_to_describe_transactions_builds_the_description():
+    raw = {
+        "txn-a": (None, (3, "PrepareCommit", 7777, 11, 60000, 1700000000500,
+                         [("beta", 0), ("zeta", 2)])),
+        "txn-b": (None, (4, "Empty", 8888, 12, 30000, None, [])),
+        "txn-c": ((UNSUPPORTED_VERSION, "Not implemented yet", 0, 0), None),
+    }
+    out = _to_describe_transactions(raw)
+    assert out["txn-a"] == TransactionDescription(3, TransactionState.PREPARE_COMMIT, 7777, 11,
+                                                  60000, 1700000000500,
+                                                  {("beta", 0), ("zeta", 2)})
+    assert out["txn-b"].transaction_start_time_ms is None
+    assert out["txn-b"].state == TransactionState.EMPTY
+    assert out["txn-b"].topic_partitions == set()
+    assert isinstance(out["txn-c"], KafkaError)
+
+
+def test_to_fence_producers_pairs_the_id_and_the_epoch():
+    raw = {
+        "txn-x": (None, (5000, 3)),
+        "txn-y": ((UNSUPPORTED_VERSION, "Not implemented yet", 0, 0), (-1, -1)),
+    }
+    out = _to_fence_producers(raw)
+    assert out["txn-x"] == ProducerIdAndEpoch(5000, 3)
+    assert out["txn-x"].is_valid()
+    assert isinstance(out["txn-y"], KafkaError)
+    # Java's own NONE sentinel, which is not a valid producer.
+    assert not ProducerIdAndEpoch(ProducerIdAndEpoch.NO_PRODUCER_ID,
+                                  ProducerIdAndEpoch.NO_PRODUCER_EPOCH).is_valid()
+
+
+def test_to_list_transactions_keeps_a_per_broker_error_beside_a_partial_listing():
+    # The point of driving this from Java's byBrokerId(): broker 1 succeeded and
+    # broker 2 failed, and both survive.
+    raw = {
+        1: (None, [("txn-a", 70, "CompleteAbort"), ("txn-z", 71, "Ongoing")]),
+        2: ((UNSUPPORTED_VERSION, "Not implemented yet", 0, 0), []),
+    }
+    out = _to_list_transactions(raw)
+    assert out[1] == [TransactionListing("txn-a", 70, TransactionState.COMPLETE_ABORT),
+                      TransactionListing("txn-z", 71, TransactionState.ONGOING)]
+    assert isinstance(out[2], KafkaError)
+    # Java's all() is this flattening; it discards the per-broker error.
+    flattened = [listing for listings in out.values() if not isinstance(listings, KafkaError)
+                 for listing in listings]
+    assert [l.transactional_id for l in flattened] == ["txn-a", "txn-z"]
+
+
+@pytest.mark.asyncio
+async def test_async_b6_rpcs():
+    async with AsyncMockAdminClient(1) as admin:
+        out = await admin.describe_producers([("alpha", 0), ("beta", 1)])
+        assert set(out) == {("alpha", 0), ("beta", 1)}
+        assert isinstance(out[("alpha", 0)], KafkaError)
+
+        out = await admin.describe_transactions(["txn-a"])
+        assert isinstance(out["txn-a"], KafkaError)
+
+        out = await admin.fence_producers(["txn-a"])
+        assert isinstance(out["txn-a"], KafkaError)
+
+        with pytest.raises(KafkaError):
+            await admin.list_transactions()
+
+        with pytest.raises(KafkaError):
+            await admin.abort_transaction(AbortTransactionSpec("txn-topic", 3, 91234, 7, 42))
+
+        with pytest.raises(KafkaError):
+            await admin.force_terminate_transaction("txn-a")
