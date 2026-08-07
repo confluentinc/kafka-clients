@@ -175,7 +175,7 @@ method phase would dwarf the work). Each slice is Rust FFI → C tests → Pytho
 | **B0 — Foundation** | none | `AdminHandle`, `admin_async_value_op`, options/properties marshaling, `join_map_results`, `mod.rs` + cbindgen wiring, `admin.py` skeleton, one smoke test each side. No RPCs — proves the plumbing before 46 result types pile on. |
 | **B1 — Topics & partitions** | `createTopics`, `deleteTopics`, `listTopics`, `describeTopics`, `createPartitions`, `deleteRecords` | The surface every user hits first, and the one that exercises per-key batch results (`createTopics`) and `TopicCollection` (names xor ids). Design problems surface here or nowhere. |
 | **B2 — Cluster, configs, log dirs** | `describeCluster`, `describeConfigs`, `incrementalAlterConfigs`, `listConfigResources`, `describeLogDirs`, `alterReplicaLogDirs`, `describeReplicaLogDirs`, `listClientMetricsResources` | Introduces `Config`/`ConfigEntry` marshaling; reuses `Node`. |
-| **B3 — Elections, reassignments, offsets** | `electLeaders`, `alterPartitionReassignments`, `listPartitionReassignments`, `listOffsets` | Reuses `TopicPartition` handles already in the consumer FFI. |
+| **B3 — Elections, reassignments, offsets** | `electLeaders`, `alterPartitionReassignments`, `listPartitionReassignments`, `listOffsets` | Partition-keyed throughout. Passes partitions as parallel `topics[]`/`partitions[]` arrays and returns `_get_topic(i)`/`_get_partition(i)`, as `deleteRecords` already does — *not* the consumer's `TopicPartition` handle, which is output-only and, per CLAUDE.md §3, misnamed (`TopicPartition` is `org.apache.kafka.common`, so it should be `kafka_common_TopicPartition_t`). Reusing it would propagate that namespace error into a second public C API. |
 | **B4 — Groups & offsets** (= `PLAN.md` slice A) | the 9 Tier-2 group RPCs | Natural "group administration" boundary. |
 | **B5 — ACLs, quotas, SCRAM, tokens, features** (= slice B) | the 13 Tier-3 RPCs from phases 1–5 | All small, independent, low-call-volume. Needs new ACL/quota/SCRAM C types. |
 | **B6 — Producers & transactions** (= slice C) | `describeProducers`, `describeTransactions`, `abortTransaction`, `forceTerminateTransaction`, `listTransactions`, `fenceProducers` | The richest per-key shapes (`fenceProducers` → `ProducerIdAndEpoch` per id, `describeProducers` per partition) — deliberately last, once the batch-result pattern is settled. |
@@ -243,15 +243,31 @@ Java as possible."* That resolves D1–D3.
   reduce surface area; consistency with the established convention takes
   priority.) Bare name = sync (`block_on`, joining all per-key futures — the C
   equivalent of Java's `result.all().get()`); `_async` = callback-based.
-- **D2 — Per-key results: flattened result handle with per-key error.**
-  One opaque `kafka_admin_*Result_t` per RPC exposing `_count` / `_get_key(i)` /
-  `_get_value(i)` / `_get_error(i)` / `_destroy`, delivered through one
-  callback. Per-key *data and errors* are fully preserved — only independent
-  per-key *timing* is lost, which C has no `KafkaFuture` to express anyway.
+- **D2 — Per-key results: flattened result handle, accessors following the
+  Java result type.** One opaque `kafka_admin_*Result_t` per RPC exposing
+  `_count` / `_get_key(i)` / `_destroy`, delivered through one callback, plus
+  whichever of `_get_value(i)` / `_get_error(i)` the corresponding Java result
+  actually carries:
+
+  | Java result shape | C accessors |
+  |---|---|
+  | `Map<K, KafkaFuture<V>>` | `_get_value(i)` **and** `_get_error(i)` |
+  | `Map<K, KafkaFuture<Void>>` / `Map<K, Optional<Throwable>>` | `_get_error(i)` only |
+  | one `KafkaFuture<Map<K, V>>` for the whole listing | `_get_value(i)` only; failure is the call's error |
+
+  Per-key *data and errors* are preserved wherever Java expresses them — only
+  independent per-key *timing* is lost, which C has no `KafkaFuture` to convey.
   Requires the collect-all join in §2 (`join_map` short-circuits). Rejected the
   one-opaque-future-per-`T` alternative: 46 result types would explode the
   cbindgen allowlist and the Python layer for a capability no caller has asked
   for.
+
+  *(Amended after B3. The original wording said "per-key value **and** error"
+  unconditionally, which is unsatisfiable for three of B3's four RPCs —
+  `electLeaders` carries no per-key value, `listPartitionReassignments` no
+  per-key error — and would recur in B4 and B6. Following Java's result shape
+  is the more faithful reading, is what B3 shipped, and still lets a C caller
+  reach every outcome Java can.)*
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
