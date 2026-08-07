@@ -1058,3 +1058,46 @@ that B2 only made reachable from C; folded in since it stayed a single comment.
   value set is at least enumerated somewhere authoritative.
 - Stating DoD #10/#11 N/A in commit messages — stated in this entry and in the
   commit for this round.
+
+---
+
+# Critic 1 round 6 — verification pass (`c7b5394d..0f7589b7`)
+
+Three of four round-5 resolutions verified clean. One missed sibling, resolved
+below. The two adjudications carried no action.
+
+## Resolved: the C test carries the same mock-as-Java mis-attribution
+
+`bindings/c/tests/test_mock_admin.c:2189-2192` repeated both halves of the
+round-5 defect that the fixup corrected in `src/ffi/admin.rs` and
+`bindings/python/test/unit/test_admin.py`: it attributed a mock-only behaviour
+to "Java's `describeReplicaLogDirs`", and cited `MockAdminClient.java:1110`
+(the `for`) for a quote that lives at `:1112` (the `if (topicMetadata != null)`
+guard). Correct: same file, same commit's blast radius, missed because the
+round-5 grep was for the 885 citation rather than for the claim.
+
+The comment now names `MockAdminClient.describeReplicaLogDirs` explicitly,
+cites 1112, and adds the production contrast — `KafkaAdminClient` seeds one
+future per requested replica (`KafkaAdminClient.java:3066-3068`) and completes
+all of them (`:3141-3145`), so a real broker returns an unknown topic as
+*present* with a null current replica log dir. Wording is now the same account
+as the Python docstring at `test_admin.py:806-813`. Swept the tree for
+`MockAdminClient.java:1110` and for `Java's describeReplicaLogDirs`: no other
+occurrence in `src/` or `bindings/`.
+
+## Noted, no action (adjudications)
+
+- **The async error-arm test move.** Conclusion stands; the operative reason is
+  result *shape*, not per-key-vs-together failure. Both mocks fail every future
+  they own on the timeout branch (`MockAdminClient.java:822-831` and
+  `:346-351`). `_to_describe_configs` has a per-key slot an error can occupy;
+  `_to_cluster_description` collapses four futures into one object with nowhere
+  to put one, so it must raise — and Java agrees, `describeCluster().nodes()
+  .get()` throws. Already documented at `bindings/python/admin.py:25-57`;
+  nothing added. The memory note has been corrected so the wrong reason is not
+  carried into B3+.
+- **The option-flag coverage claim is one hop of three.** The 19 Rust tests pin
+  the FFI-helper → `*Options` hop only. `admin.py`'s `_*_spec` and
+  `_confluentkafka.c`'s `PyArg_ParseTuple` forwarding stay unpinned because the
+  mock ignores `options`, so no end-to-end test can reach them. Not claiming
+  broader coverage in B3.
