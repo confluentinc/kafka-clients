@@ -2186,10 +2186,15 @@ static void test_mock_admin_describe_replica_log_dirs(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "drld-topic", 1, 1);
 
-    /* The second replica names a topic the mock does not know. Java's
-     * describeReplicaLogDirs skips it entirely (`if (topicMetadata != null)`,
-     * MockAdminClient.java:1110) rather than reporting an error for it, so the
-     * result is *shorter* than the request. */
+    /* The second replica names a topic the mock does not know.
+     * `MockAdminClient.describeReplicaLogDirs` skips it entirely
+     * (`if (topicMetadata != null)`, MockAdminClient.java:1112) rather than
+     * reporting an error for it, so the result is *shorter* than the request.
+     *
+     * This is mock-only. `KafkaAdminClient` seeds one future per requested
+     * replica (KafkaAdminClient.java:3066-3068) and completes all of them
+     * (:3141-3145), so against a real broker an unknown topic comes back
+     * *present*, with a null current replica log dir. */
     const char *topics[2] = {"drld-topic", "drld-missing"};
     const int32_t partitions[2] = {0, 0};
     const int32_t broker_ids[2] = {0, 0};
