@@ -16939,23 +16939,27 @@ mod tests {
         let (_t1, t1) = c_array(&["ip"]);
         let (_n0, n0) = c_array_opt(&[Some("alice"), None]);
         let (_n1, n1) = c_array_opt(&[Some("10.0.0.1")]);
-        let (_k0, k0) = c_array(&["producer_byte_rate", "consumer_byte_rate"]);
-        let (_k1, k1) = c_array(&["request_percentage"]);
+        let (_k0, k0) = c_array(&["producer_byte_rate"]);
+        let (_k1, k1) = c_array(&["consumer_byte_rate", "request_percentage"]);
 
         let entity_types = [t0.as_ptr(), t1.as_ptr()];
         let entity_names = [n0.as_ptr(), n1.as_ptr()];
         let entity_counts = [2i32, 1];
         let op_keys = [k0.as_ptr(), k1.as_ptr()];
-        let v0 = [1024.0f64, 0.0];
-        let v1 = [50.0f64];
+        let v0 = [1024.0f64];
+        let v1 = [0.0f64, 50.0];
         let op_values = [v0.as_ptr(), v1.as_ptr()];
-        // Row 0 op 1 has no value: Java's `Op(key, null)`, i.e. remove. Its
+        // Row 1 op 0 has no value: Java's `Op(key, null)`, i.e. remove. Its
         // slot in `op_values` holds 0.0, a perfectly legal quota value, which
         // is exactly why the flag rather than a sentinel carries the meaning.
-        let h0 = [true, false];
-        let h1 = [true];
+        //
+        // The entity counts (2, 1) and op counts (1, 2) are deliberately
+        // different per row, so swapping the two `*const i32` count arrays is
+        // visible rather than a no-op.
+        let h0 = [true];
+        let h1 = [false, true];
         let op_has_values = [h0.as_ptr(), h1.as_ptr()];
-        let op_counts = [2i32, 1];
+        let op_counts = [1i32, 2];
 
         let alterations = unsafe {
             read_client_quota_alterations(
@@ -16978,17 +16982,17 @@ mod tests {
         // A null name is the built-in DEFAULT entity for that type, not an
         // absent entry and not the empty name.
         assert_eq!(first.entity().entries().get("client-id"), Some(&None));
-        assert_eq!(first.ops().len(), 2);
+        assert_eq!(first.ops().len(), 1);
         assert_eq!(first.ops()[0].key(), "producer_byte_rate");
         assert_eq!(first.ops()[0].value(), Some(1024.0));
-        assert_eq!(first.ops()[1].key(), "consumer_byte_rate");
-        assert_eq!(first.ops()[1].value(), None);
 
         let second = &alterations[1];
         assert_eq!(second.entity().entries().get("ip"), Some(&Some("10.0.0.1".to_string())));
-        assert_eq!(second.ops().len(), 1);
-        assert_eq!(second.ops()[0].key(), "request_percentage");
-        assert_eq!(second.ops()[0].value(), Some(50.0));
+        assert_eq!(second.ops().len(), 2);
+        assert_eq!(second.ops()[0].key(), "consumer_byte_rate");
+        assert_eq!(second.ops()[0].value(), None);
+        assert_eq!(second.ops()[1].key(), "request_percentage");
+        assert_eq!(second.ops()[1].value(), Some(50.0));
     }
 
     #[test]
