@@ -1262,3 +1262,151 @@ unification must preserve, rather than only forbidding it.
 `cargo xtask format-check`, `cargo clippy --all-targets --features ffi -D
 warnings`, `test_mock_admin` (88 tests), and the Python admin suite in Docker
 (88 tests, +1). DoD #10 N/A per `admin-client.md` §10; #11 does not apply.
+
+---
+
+# Milestone 11 bindings B4 — self-review (groups and group offsets)
+
+Nine RPCs: `listGroups`, `listConsumerGroups`, `describeConsumerGroups`,
+`describeClassicGroups`, `listConsumerGroupOffsets`,
+`alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets`,
+`deleteConsumerGroups`, `removeMembersFromConsumerGroup`. Each has a bare sync
+and an `_async` C entry point (D1), one flattened result handle, a
+`*_callback_t`, a Python sync method and an `AsyncAdmin` coroutine.
+
+## Design decisions worth stating
+
+1. **Three result shapes, not one.** D2 as amended says accessors mirror the
+   Java future's shape, and B4 is where that stops being a formality:
+
+   | Java shape | RPCs | C accessors |
+   |---|---|---|
+   | `Map<K, KafkaFuture<V>>` | describeConsumerGroups, describeClassicGroups, listConsumerGroupOffsets | `_get_value(i)` + `_get_error(i)` |
+   | `Map<K, KafkaFuture<Void>>` / one future over `Map<K, Errors>` | deleteConsumerGroups, alterConsumerGroupOffsets, deleteConsumerGroupOffsets, removeMembersFromConsumerGroup | `_get_error(i)` only |
+   | one future split by `valid()` / `errors()` | listGroups, listConsumerGroups | two independent sequences, no key |
+
+   The third is new. `ListGroupsResult` has **no** per-key future at all
+   (`ListGroupsResult.java:82,95`): one source future yields a mixed
+   collection, and `valid()` / `errors()` split it into a listing list and an
+   **unkeyed** `Collection<Throwable>` of generally different length. So those
+   two handles expose `_valid_count`/`_get_valid(i)` and
+   `_error_count`/`_get_error(i)`, deliberately *not* `_count`/`_get_error(i)`
+   — the usual naming would invite indexing the errors by the listing count,
+   which reads past the end on any partial success. The rustdoc on
+   `_get_error` says so in as many words, and the Python side returns a
+   `(valid, errors)` pair rather than a dict for the same reason.
+
+2. **No `kafka_admin_OffsetAndMetadata_t`.** `OffsetAndMetadata` is
+   `org.apache.kafka.clients.consumer`, so an `kafka_admin_`-prefixed handle
+   would be mis-namespaced under CLAUDE.md §3 — the same error the round-7
+   review identified in `kafka_consumer_TopicPartition_t`, which I am not going
+   to reproduce in the other direction. The three fields are flattened into
+   indexed accessors on `kafka_admin_OffsetAndMetadataMap_t`, which is what B2
+   already did for `LogDirDescription.ReplicaInfo`. On the Python side the
+   correct move is the opposite one: `admin.py` imports `OffsetAndMetadata`
+   from `consumer.py`, exactly as it already imports `Node`.
+
+3. **`has_offset(i)` is a discriminant, not a convenience.** Java's
+   `Map<TopicPartition, OffsetAndMetadata>` value is nullable —
+   `listConsumerGroupOffsets` reports a requested partition the group has never
+   committed for as *present with a null value*. Without the flag that would be
+   indistinguishable from a committed offset of 0.
+
+4. **`remove_all` is a flag, not an empty array.** Java's
+   `RemoveMembersFromConsumerGroupOptions(Collection)` *rejects* an empty
+   collection while the no-argument constructor means "remove every member", so
+   the two must not share a spelling. In `removeAll` mode Java refuses
+   `memberResult` outright and `all()` is the only observable, so the C result
+   carries no keys and the outcome is the call's error. Same reasoning as B3's
+   `cancel[i]`; the Python method takes `members` positionally-required,
+   applying the round-7 LOW 3 lesson before it could recur.
+
+5. **Empty key set on a single-source-future RPC.** `alterConsumerGroupOffsets`,
+   `deleteConsumerGroupOffsets` and `removeMembersFromConsumerGroup` back every
+   per-key future with one source future. When the request selects no keys there
+   is no per-key slot for a failure, so the source future is awaited directly and
+   its error becomes the call's error — which is what Java's `all()` reports
+   there too. `empty_outcomes` is the one place this happens and it is
+   documented.
+
+6. **Enum names, not invented codes.** `GroupState`, `GroupType`,
+   `ConsumerGroupState` and `ClassicGroupState` have no `id()` in Java, so per
+   the B2 rule they cross as the enum's `toString()` name in both directions.
+   Those names are `"Consumer"` / `"Classic"` — capitalised, and *not* the
+   lower-case `"consumer"` protocol-type string that sits next to them in
+   `GroupListing`. The first draft of the rustdoc and the Rust tests both got
+   this wrong and the tests caught it; both fields are now asserted together in
+   the C, Rust and Python suites precisely because they are adjacent and
+   confusable. Parsing goes through `GroupState::parse` / `GroupType::parse`, so
+   an unrecognised name becomes `UNKNOWN` as in Java rather than erroring.
+
+7. **`listConsumerGroups` is deprecated in Java 4.1** and is mirrored anyway
+   because it is still on the `Admin` trait; the deprecation is stated in the
+   C entry point's rustdoc (and therefore in the shipped header) and in the
+   Python docstring. Java's deprecated `inStates(Set<ConsumerGroupState>)` is
+   *defined* as `inGroupStates` over `GroupState.parse` of the same names, so
+   the C surface exposes one `group_states` array and says why.
+
+## One defect found and fixed in my own work
+
+`consumer_group_description_to_py` shipped with ten `Py_BuildValue` format
+units for eleven arguments, which would have raised on unpack against a real
+broker. **No test could catch it**: Java's own `MockAdminClient.describeConsumerGroups`
+throws, so the Rust mock fails every per-group future and the success branch is
+unreachable from the mock — the suite covers the error branch thoroughly and
+never touches the other one. Found by auditing every new `Py_BuildValue` site's
+unit count against its argument count, not by a failing test. Fixed in a fixup
+commit; the other six sites were audited the same way and are correct. Recorded
+as a memory note, since the same blind spot exists for every mock-unsupported
+RPC in B5 and B6.
+
+## Observation for adjudication (not fixed, not B4's code)
+
+`remove_members_from_consumer_group_result.rs`'s `describe_identity` renders a
+`MemberIdentity` as `MemberIdentity(memberId=x, groupInstanceId=y)`, whereas
+Java concatenates the generated `MemberIdentity.toString()`, which quotes
+non-null strings and includes the `reason` field. The two error messages that
+embed it — `removeAll`'s "Encounter exception when trying to remove: ..." and
+`sub_level_error`'s "Member \"...\" was not included in the removal response" —
+therefore match Java in their wrapper text but not in the embedded rendering.
+This is pre-existing (Tier 2 Phase 3), its rustdoc claims only "renders a
+`MemberIdentity` for error messages" rather than Java parity, and closing it
+properly means teaching the message generator to emit a Java-compatible
+`Display` — a change far wider than this slice. Flagging rather than fixing or
+silently leaving it.
+
+## Coverage
+
+  - 29 Rust FFI unit tests: every option builder called twice with asymmetric
+    values, both ragged-array readers, `read_required_string`, and every
+    flattener over a hand-built fixture exercising the nullable and absent arms.
+    This carries most of the weight, because seven of the nine RPCs are
+    `UnsupportedOperation` in Java's mock and cannot be driven end to end.
+  - 29 C mock tests (88 -> 117) and 2 production-client tests (18 -> 20),
+    including every `_async` inline-firing path and a NULL `out_result` sweep
+    over all nine sync entry points.
+  - 25 Python tests (88 -> 113; 191 pass across the suite), including direct
+    `_to_*` converter tests for the fully populated descriptions the mock
+    cannot produce.
+  - Teeth: three Rust call-site argument swaps (protocol/protocolData sources,
+    clientId/host sources, the protocol-types vs types arrays in
+    `list_groups_options`) and two Python ones (clientId/host in
+    `_to_member_description`, offset vs leader-epoch in
+    `_alter_consumer_group_offsets_spec`). Each failed exactly its own test and
+    nothing else; all reverted.
+  - Gates: `cargo build` both feature settings, `cargo test`,
+    `cargo xtask format-check`, `cargo clippy --all-targets --features ffi -D
+    warnings`, all six `ctest` binaries, and the Python suite in Docker. The
+    generated header was deleted and rebuilt: all 25 new cbindgen entries
+    resolve, all 30 admin `_async` declarations carry the six-clause
+    callback-thread contract (counted at block level — a line grep undercounts
+    because the sentence wraps), and all 29 sync entry points with an
+    `out_result` route through `finish_sync`.
+
+Not claiming more than that: as in B2 and B3, the `*Options` fields the mock
+ignores stay unpinned below the Rust layer. `list_groups`' three filter arrays
+are covered by the Rust FFI unit test but not end to end, because
+`MockAdminClient.listGroups` discards its options argument entirely.
+
+DoD #10 (hot-path allocation audit) is N/A for Admin per `admin-client.md` §10;
+#11 does not apply. Scope was task 1 plus B4; B5 was not started.
