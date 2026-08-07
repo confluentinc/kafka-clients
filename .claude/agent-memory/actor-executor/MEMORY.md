@@ -98,3 +98,4 @@
 - [Critic-3 wakeup + LogState round](critic3_wakeup_and_logstate_round.md) — disabled WakeupTrigger makes close() wakes inert; never hand-roll a prod closure in a fixture; FFI user_data is session-lifetime
 - [Critic-1 FFI contract round](critic1_ffi_contract_round.md) — check Java before doc-vs-code; Rust moves what Java shares (callback hand-back); clear duplicated state, not just set it
 - [Critic-2 Python bindings round](critic2_python_bindings_round.md) — route a blocking wrapper through the async FFI twin (not just ALLOW_THREADS); cache the asyncio loop; mock can't reproduce block_on deadlocks
+- [Critic-0 re-review round](critic0_rereview_round.md) — Java finally→RAII guard; bare KafkaException variant; un-defanging a merged-primitive guard test
