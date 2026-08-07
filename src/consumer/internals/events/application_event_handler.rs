@@ -128,6 +128,25 @@ impl ApplicationEventHandler {
         Ok(())
     }
 
+    /// Wakes the background task without enqueueing an event.
+    ///
+    /// Same primitive [`Self::add`] fires (Java's `wakeupNetworkThread()` →
+    /// `Selector.wakeup()`), just without a queue push: the bg task breaks out
+    /// of its blocking network poll and runs another `run_once` iteration
+    /// immediately instead of waiting up to `MAX_POLL_TIMEOUT_MS`.
+    ///
+    /// Needed by the §31 rebalance-listener handshake: after the app task sends
+    /// the callback ack on its `oneshot`, the bg loop has to re-enter
+    /// `reconcile` (or `drive_pending_release`) to `try_recv` it and advance the
+    /// membership state transition. This is deliberately NOT
+    /// `WakeupTrigger::wakeup()` — that primitive is the *user-facing*
+    /// `Consumer::wakeup()` cancellation token, and cancelling it here would
+    /// make the caller's own `poll()` fail with `KafkaError::Wakeup` even though
+    /// the user never called `wakeup()`.
+    pub(crate) fn wake_background_task(&self) {
+        self.event_notify.notify_one();
+    }
+
     /// Java: `addAndGet(event)`.
     ///
     /// Enqueues the event and awaits the matching

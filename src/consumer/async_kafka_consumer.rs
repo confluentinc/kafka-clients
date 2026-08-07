@@ -3246,10 +3246,22 @@ where
                     // bg loop wakes promptly and `try_recv`s this ack on
                     // its next `reconcile` entry — rather than waiting out
                     // the selector poll timeout. This reuses the existing
-                    // wakeup primitive (Java's `Selector.wakeup()` analog);
+                    // application-event wakeup primitive (Java's
+                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
                     // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
                     // Perf Contract item 2).
-                    self.network_thread_close.wakeup();
+                    //
+                    // It must be the application-event `Notify` and NOT
+                    // `network_thread_close.wakeup()`: the latter fires the
+                    // `WakeupTrigger`, which is the *user-facing*
+                    // `Consumer::wakeup()` cancellation token. Cancelling it
+                    // here made the caller's own `poll()` — the very call that
+                    // just ran this listener callback — return
+                    // `KafkaError::Wakeup` without the user ever calling
+                    // `wakeup()`. Both `Notify`s wake the bg loop's network
+                    // poll (`ConsumerNetworkThread::run_once` `select!` has an
+                    // arm for each); only this one is invisible to the app.
+                    self.application_event_handler.wake_background_task();
 
                     // Java throws if the result is an error — we propagate
                     // via `first_error` so subsequent events are still
@@ -5622,10 +5634,15 @@ mod tests {
         /// pre-populate it.
         subscriptions: Arc<Mutex<SubscriptionState>>,
         /// Set to `true` whenever the consumer's bg-task wakeup fn is invoked
-        /// (Phase 41 Issue 3 observability). Lets a `&mut self`-level component
-        /// test assert that the ack-send path in `process_background_events`
-        /// pokes the bg wakeup `Notify`.
+        /// (Phase 41 Issue 3 observability). That fn fires the *user-facing*
+        /// `WakeupTrigger`, so tests assert it is NOT called on paths that only
+        /// need to nudge the bg loop.
         bg_wakeup_called: Arc<AtomicBool>,
+        /// The same `Notify` the consumer's [`ApplicationEventHandler`] fires —
+        /// Java's `wakeupNetworkThread()`. Lets a component test assert the §31
+        /// listener-ack path poked *this* primitive (invisible to the app)
+        /// rather than the `WakeupTrigger`.
+        app_event_notify: Arc<tokio::sync::Notify>,
     }
 
     /// Builds a consumer along with the test-side channel handles needed
@@ -5648,10 +5665,8 @@ mod tests {
         // Test stand-in for the bg task's app-event receiver. Tests hold
         // this `app_event_rx` and pull events off it themselves.
         let (app_handler_tx, app_event_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let app_handler = Arc::new(ApplicationEventHandler::new(
-            app_handler_tx,
-            Arc::new(tokio::sync::Notify::new()),
-        ));
+        let app_event_notify = Arc::new(tokio::sync::Notify::new());
+        let app_handler = Arc::new(ApplicationEventHandler::new(app_handler_tx, Arc::clone(&app_event_notify)));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let max_time = Arc::new(AtomicI64::new(0));
         let wakeup = WakeupTrigger::new();
@@ -5663,12 +5678,17 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
+        // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
+        // mirror that here as well as setting the flag, so a test asserting
+        // "no wakeup is pending" really exercises what the app would observe.
+        let wakeup_trigger_for_fn = wakeup.clone();
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
+                wakeup_trigger_for_fn.wakeup();
             }),
             join_handle,
         );
@@ -5763,7 +5783,13 @@ mod tests {
         };
         (
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
-            ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions: subs, bg_wakeup_called: wakeup_called },
+            ConsumerTestHandles {
+                app_event_rx,
+                bg_event_tx,
+                subscriptions: subs,
+                bg_wakeup_called: wakeup_called,
+                app_event_notify,
+            },
         )
     }
 
@@ -6934,11 +6960,18 @@ mod tests {
     /// must poke the bg-task wakeup `Notify` so the bg loop observes the ack
     /// promptly (rather than waiting out the selector poll timeout). The
     /// non-Docker component tests otherwise busy-drive the membership loop and
-    /// never exercise this poke — removing it (`network_thread_close.wakeup()`
-    /// after `ack.send(...)`) would fail no local test without this one. We
-    /// register a listener, enqueue a `ConsumerRebalanceListenerCallbackNeeded`
-    /// event, run `process_background_events`, and assert the test fixture's
-    /// `bg_wakeup_called` flag was set by the poke.
+    /// never exercise this poke — removing it (the
+    /// `application_event_handler.wake_background_task()` after `ack.send(...)`)
+    /// would fail no local test without this one.
+    ///
+    /// It also pins **which** primitive is poked. Poking
+    /// `network_thread_close.wakeup()` here also wakes the bg loop, so it looks
+    /// interchangeable — but it fires the `WakeupTrigger`, i.e. the user-facing
+    /// `Consumer::wakeup()` cancellation token, and left the caller's own
+    /// `poll()` (the call that just ran the listener callback) failing with
+    /// `KafkaError::Wakeup` when the user never called `wakeup()`. That broke
+    /// every rebalance-listener integration test until it was caught by the
+    /// multilanguage callback suite; the last two assertions are the guard.
     #[tokio::test]
     async fn process_background_events_ack_pokes_bg_wakeup() {
         use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
@@ -6959,14 +6992,16 @@ mod tests {
             }
         }
 
-        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
         *consumer.rebalance_listener.lock().unwrap() =
             Some(Arc::new(NoopListener) as Arc<dyn ConsumerRebalanceListener>);
 
-        // The wakeup must not have fired before the callback is processed.
+        // Nothing has poked the bg loop yet: no stored `Notify` permit.
         assert!(
-            !handles.bg_wakeup_called.load(Ordering::Acquire),
-            "bg wakeup must not be poked before the callback ack is sent",
+            tokio::time::timeout(Duration::from_millis(50), handles.app_event_notify.notified())
+                .await
+                .is_err(),
+            "the application-event notify must not be poked before the callback ack is sent",
         );
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
@@ -6982,10 +7017,31 @@ mod tests {
         consumer.process_background_events().await.expect("ok");
         assert!(ack_rx.await.expect("ack received").is_ok());
 
-        // The ack-send path must have poked the bg wakeup.
+        // The ack-send path must have poked the bg loop's application-event
+        // notify (a permit is stored even though nobody was parked on it).
         assert!(
-            handles.bg_wakeup_called.load(Ordering::Acquire),
-            "process_background_events must poke the bg wakeup after sending the listener ack",
+            tokio::time::timeout(Duration::from_millis(500), handles.app_event_notify.notified())
+                .await
+                .is_ok(),
+            "process_background_events must poke the application-event notify after sending the listener ack",
+        );
+        // ...without enqueueing an application event, so the permit above is
+        // attributable to the poke and nothing else.
+        assert!(
+            handles.app_event_rx.try_recv().is_err(),
+            "the listener-ack poke must not enqueue an application event",
+        );
+
+        // Regression guard: the poke must NOT be the user-facing wakeup.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "the listener-ack poke must not fire the WakeupTrigger — that is Consumer::wakeup()'s \
+             cancellation token and cancelling it fails the caller's own poll() with Wakeup",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "no wakeup may be pending after a rebalance callback: the next poll() would fail with \
+             KafkaError::Wakeup although the user never called wakeup()",
         );
         drop(handles.subscriptions);
     }
