@@ -351,6 +351,20 @@ format-check:
 lint:
 	cargo xtask lint
 
+# Static arity check of the hand-written CPython extension's variadic calls.
+# A Py_BuildValue / PyArg_Parse* format one unit short of its argument list
+# compiles silently and reads a garbage pointer at run time; for every admin
+# RPC that Java's MockAdminClient leaves unsupported, the affected drain's
+# success path is unreachable from the test suite, so this defect class must
+# be caught statically. Needs no build artifacts, so it is cheap to run.
+#
+# The scanner's own unit tests run first: `cargo test` at the workspace root
+# only tests the root package, so nothing else exercises them, and a gate is
+# only worth as much as the parser behind it.
+check-bindings:
+	cargo test -p xtask
+	cargo xtask check-bindings
+
 clean:
 	cargo clean
 	rm -rf bindings/c/build
