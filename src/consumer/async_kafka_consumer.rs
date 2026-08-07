@@ -2914,6 +2914,17 @@ where
         // `Ok(())` (so a failed submission does not leave the app-side
         // slot pointing at a listener that never landed in
         // `SubscriptionState`).
+        //
+        // The mirror is written UNCONDITIONALLY, including with `None`:
+        // Java has a single slot (`SubscriptionState.rebalanceListener`)
+        // and `subscribe(topics)` without a listener calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so a listener-less subscribe
+        // must CLEAR the previous registration. Skipping the write for
+        // `None` would leave the app-side mirror pointing at the replaced
+        // listener, which `leave_group_on_close` would then wrongly invoke
+        // (and which would keep the listener alive past its release
+        // point).
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
         // Java's `subscribe(...)` does NOT call `setActiveTask` — match
         // by passing `enable_wakeup=false`.
@@ -2925,9 +2936,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -2958,9 +2967,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -2991,9 +2998,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -6313,42 +6318,61 @@ mod tests {
     ) -> tokio::task::JoinHandle<Option<ApplicationEventEnvelope>> {
         tokio::spawn(async move {
             let env = rx.recv().await?;
-            match &env.event {
-                ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::AssignmentChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::Unsubscribe { handle } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::SeekUnvalidated { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResetOffset { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::PausePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResumePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                _ => {
-                    // Unknown variant — leave the handle un-completed; the
-                    // test's `add_and_get` will time out and the
-                    // assertion will be a clear failure.
-                },
-            }
+            complete_event(&env);
             Some(env)
         })
+    }
+
+    /// Same as [`auto_complete_next_event`] but keeps completing every event
+    /// that arrives until the channel closes — for tests that make more than
+    /// one blocking call.
+    fn auto_complete_all_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                complete_event(&env);
+            }
+        })
+    }
+
+    /// Completes the handle carried by an application event, so the app-side
+    /// `add_and_get` resolves without a background task.
+    fn complete_event(env: &ApplicationEventEnvelope) {
+        match &env.event {
+            ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::AssignmentChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::Unsubscribe { handle } => {
+                handle.complete(());
+            },
+            ApplicationEvent::SeekUnvalidated { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResetOffset { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::PausePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResumePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            _ => {
+                // Unknown variant — leave the handle un-completed; the
+                // test's `add_and_get` will time out and the
+                // assertion will be a clear failure.
+            },
+        }
     }
 
     /// Java: `testSubscribeGeneratesEvent`.
@@ -6561,15 +6585,28 @@ mod tests {
             }
         }
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let completer = auto_complete_next_event(handles.app_event_rx);
+        let completer = auto_complete_all_events(handles.app_event_rx);
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
         consumer
             .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
             .await
             .expect("ok");
-        let _ = completer.await;
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
         assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+
+        // Java keeps ONE slot: a listener-less `subscribe(topics)` calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so it must CLEAR the app-side
+        // mirror too — otherwise `leave_group_on_close` would invoke the
+        // replaced listener, and (through the C FFI) its `user_data_destroy`
+        // hook would be withheld until the consumer is dropped.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("ok");
+        let stored = consumer.rebalance_listener.lock().unwrap().clone();
+        assert!(
+            stored.is_none(),
+            "a listener-less subscribe must clear the previously stored listener"
+        );
+        completer.abort();
     }
 
     // ─── Phase 11 commit (8/N) Java test translations ───
