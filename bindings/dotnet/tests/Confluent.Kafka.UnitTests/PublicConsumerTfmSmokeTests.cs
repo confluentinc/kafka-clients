@@ -180,6 +180,50 @@ public sealed class PublicConsumerTfmSmokeTests
     }
 
     [Fact]
+    public void SyncMockConsumer_QueryFamily_MarshalsOnTheTfmMatrix()
+    {
+        // The M5/P8b SYNCHRONOUS query family marshals on ns2.0 / net8.0 / net10.0 (net462 build
+        // leg included), using only netstandard2.0-safe APIs. Committed round-trips a real
+        // offset/metadata/epoch (Assign → Commit → Committed); BeginningOffsets / EndOffsets carry
+        // data via the update helpers; PartitionsFor / ListTopics carry data via UpdatePartitions;
+        // OffsetsForTimes throws unsupported_version on the mock (the honesty case). All resolve
+        // synchronously (no blocking), so no TestTimeout wrapper is needed.
+        MockConsumer consumer = new MockConsumer();
+        try
+        {
+            TopicPartition tp = new TopicPartition(Topic, Partition);
+            consumer.Assign(new[] { tp });
+            consumer.Commit(new System.Collections.Generic.Dictionary<TopicPartition, OffsetAndMetadata>
+            {
+                [tp] = new OffsetAndMetadata(42, "meta-x", 7),
+            });
+
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> committed =
+                consumer.Committed(new[] { tp });
+            Assert.Equal(42, committed[tp].Offset);
+            Assert.Equal("meta-x", committed[tp].Metadata);
+            Assert.Equal(7, committed[tp].LeaderEpoch);
+
+            consumer.UpdateBeginningOffset(Topic, Partition, 5);
+            consumer.UpdateEndOffset(Topic, Partition, 99);
+            Assert.Equal(5, consumer.BeginningOffsets(new[] { tp })[tp]);
+            Assert.Equal(99, consumer.EndOffsets(new[] { tp })[tp]);
+
+            consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+            PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
+            Assert.Equal(Topic, info.Topic);
+            Assert.True(consumer.ListTopics().ContainsKey(Topic));
+
+            Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(
+                new System.Collections.Generic.Dictionary<TopicPartition, long> { [tp] = 1_000L }));
+        }
+        finally
+        {
+            TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
+    [Fact]
     public void SyncMockConsumer_ViaIConsumerInterface_RoundTrips()
     {
         // Hold a MockConsumer, drive it through the IConsumer interface on the TFM matrix.
