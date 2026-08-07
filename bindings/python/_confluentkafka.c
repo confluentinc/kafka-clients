@@ -5498,6 +5498,340 @@ static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
     return d;
 }
 
+// ---------------------------------------------------------------------------
+// B6 — producers and transactions
+//
+// Java's MockAdminClient throws for all six (MockAdminClient.java:1368-1395),
+// so the *success* branch of every drain below is unreachable from the test
+// suite; their Py_BuildValue arity is checked statically by
+// `cargo xtask check-bindings` and their field order by review against the
+// matching `_to_*` unpacker in admin.py. What the suite does exercise is the
+// error branch of each: the mocks that throw per key still echo the requested
+// key set, so key columns and per-key errors flow end to end.
+//
+// `abortTransaction` and `forceTerminateTransaction` have no result handle at
+// all (Java's AbortTransactionResult exposes only all(), and
+// TerminateTransactionResult only result()), so they reuse `admin_op_trampoline`
+// and the `_resolve_void` / `_free_void` pair that `close_async` already uses.
+// ---------------------------------------------------------------------------
+
+static void admin_describe_producers_trampoline(kafka_admin_DescribeProducersResult_t* r,
+                                                kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_transactions_trampoline(kafka_admin_DescribeTransactionsResult_t* r,
+                                                   kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_fence_producers_trampoline(kafka_admin_FenceProducersResult_t* r,
+                                             kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_list_transactions_trampoline(kafka_admin_ListTransactionsResult_t* r,
+                                               kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+static PyObject* py_Admin_describe_producers_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int has_broker_id; int broker_id; int timeout_ms;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOpiiO", &h, &spec, &has_broker_id, &broker_id, &timeout_ms, &cb))
+        return NULL;
+
+    // spec is a sequence of (topic:str, partition:int).
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    size_t slots = (size_t)(n > 0 ? n : 1);
+    const char** topics = PyMem_Malloc(slots * sizeof(char*));
+    int32_t* partitions = PyMem_Malloc(slots * sizeof(int32_t));
+    if (topics == NULL || partitions == NULL) {
+        PyMem_Free((void*)topics); PyMem_Free(partitions);
+        PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        const char* t = NULL; int p = 0;
+        int ok = item && PyArg_ParseTuple(item, "si", &t, &p);
+        Py_XDECREF(item);
+        if (!ok) { PyMem_Free((void*)topics); PyMem_Free(partitions); return NULL; }
+        topics[i] = t; partitions[i] = p;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_producers_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, (int32_t)n,
+        has_broker_id ? true : false, (int32_t)broker_id, timeout_ms,
+        admin_describe_producers_trampoline, cb);
+    PyMem_Free((void*)topics); PyMem_Free(partitions);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_transactions_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* ids_obj; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &ids_obj, &timeout_ms, &cb)) return NULL;
+
+    const char** ids = NULL;
+    Py_ssize_t n = build_string_array(ids_obj, &ids);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_transactions_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
+        admin_describe_transactions_trampoline, cb);
+    PyMem_Free(ids);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_fence_producers_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* ids_obj; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &ids_obj, &timeout_ms, &cb)) return NULL;
+
+    const char** ids = NULL;
+    Py_ssize_t n = build_string_array(ids_obj, &ids);
+    if (n < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_fence_producers_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
+        admin_fence_producers_trampoline, cb);
+    PyMem_Free(ids);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_list_transactions_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* states_obj; PyObject* producer_ids_obj;
+    long long duration_ms; const char* pattern = NULL; int timeout_ms; PyObject* cb;
+    // `z` for the pattern: NULL is Java's "no pattern filter", distinct from "".
+    if (!PyArg_ParseTuple(args, "KOOLziO", &h, &states_obj, &producer_ids_obj, &duration_ms,
+                          &pattern, &timeout_ms, &cb))
+        return NULL;
+
+    const char** states = NULL;
+    Py_ssize_t state_count = build_string_array(states_obj, &states);
+    if (state_count < 0) return NULL;
+
+    Py_ssize_t id_count = PySequence_Size(producer_ids_obj);
+    if (id_count < 0) { PyMem_Free(states); return NULL; }
+    int64_t* producer_ids = PyMem_Malloc((size_t)(id_count > 0 ? id_count : 1) * sizeof(int64_t));
+    if (producer_ids == NULL) { PyMem_Free(states); PyErr_NoMemory(); return NULL; }
+    for (Py_ssize_t i = 0; i < id_count; i++) {
+        PyObject* item = PySequence_GetItem(producer_ids_obj, i);  // new ref
+        long long value = item ? PyLong_AsLongLong(item) : 0;
+        Py_XDECREF(item);
+        if (PyErr_Occurred()) { PyMem_Free(states); PyMem_Free(producer_ids); return NULL; }
+        producer_ids[i] = (int64_t)value;
+    }
+
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_list_transactions_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, states, (int32_t)state_count, producer_ids,
+        (int32_t)id_count, (int64_t)duration_ms, pattern, timeout_ms,
+        admin_list_transactions_trampoline, cb);
+    PyMem_Free(states); PyMem_Free(producer_ids);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_abort_transaction_async(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* topic; int partition; long long producer_id;
+    int producer_epoch; int coordinator_epoch; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsiLiiiO", &h, &topic, &partition, &producer_id, &producer_epoch,
+                          &coordinator_epoch, &timeout_ms, &cb))
+        return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_abort_transaction_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, topic, (int32_t)partition, (int64_t)producer_id,
+        (int32_t)producer_epoch, (int32_t)coordinator_epoch, timeout_ms, admin_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_force_terminate_transaction_async(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* transactional_id; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsiO", &h, &transactional_id, &timeout_ms, &cb)) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_force_terminate_transaction_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, transactional_id, timeout_ms,
+        admin_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+// ---- drains -----------------------------------------------------------------
+
+// {(topic, partition): (error_or_None,
+//                       [(producer_id, producer_epoch, last_sequence,
+//                         last_timestamp, coordinator_epoch_or_None,
+//                         current_transaction_start_offset_or_None)])}
+//
+// The two trailing columns follow Java's ProducerState constructor order,
+// coordinatorEpoch before currentTransactionStartOffset, which is also the order
+// `_to_producer_state` unpacks.
+static PyObject* py_DescribeProducersResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeProducersResult_t* r = (kafka_admin_DescribeProducersResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeProducersResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeProducersResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        int32_t producers = kafka_admin_DescribeProducersResult_get_producer_count(r, i);
+        PyObject* states = PyList_New(producers < 0 ? 0 : producers);
+        if (states == NULL) { Py_DECREF(d); kafka_admin_DescribeProducersResult_destroy(r); return NULL; }
+        for (int32_t j = 0; j < producers; j++) {
+            int64_t start_offset = 0;
+            int32_t coordinator_epoch = 0;
+            bool has_start_offset =
+                kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+                    r, i, j, &start_offset);
+            bool has_coordinator_epoch =
+                kafka_admin_DescribeProducersResult_get_coordinator_epoch(r, i, j, &coordinator_epoch);
+            // The two Optionals are built first and handed over with `N`, which
+            // steals the reference (including on a Py_BuildValue failure); an
+            // `O` here would leak the fresh PyLong.
+            PyObject* py_coordinator_epoch = has_coordinator_epoch
+                                                 ? PyLong_FromLong((long)coordinator_epoch)
+                                                 : (Py_INCREF(Py_None), Py_None);
+            PyObject* py_start_offset = has_start_offset
+                                            ? PyLong_FromLongLong((long long)start_offset)
+                                            : (Py_INCREF(Py_None), Py_None);
+            PyObject* state = (py_coordinator_epoch == NULL || py_start_offset == NULL)
+                ? NULL
+                : Py_BuildValue(
+                      "(LiiLNN)",
+                      (long long)kafka_admin_DescribeProducersResult_get_producer_id(r, i, j),
+                      kafka_admin_DescribeProducersResult_get_producer_epoch(r, i, j),
+                      kafka_admin_DescribeProducersResult_get_last_sequence(r, i, j),
+                      (long long)kafka_admin_DescribeProducersResult_get_last_timestamp(r, i, j),
+                      py_coordinator_epoch, py_start_offset);
+            if (state == NULL) {
+                Py_XDECREF(py_coordinator_epoch);
+                Py_XDECREF(py_start_offset);
+            }
+            // An unfilled slot stays NULL, which list_dealloc's Py_XDECREF
+            // handles, so breaking out here leaks nothing.
+            if (state == NULL) { break; }
+            PyList_SET_ITEM(states, j, state);
+        }
+        PyObject* key = Py_BuildValue("(si)", kafka_admin_DescribeProducersResult_get_topic(r, i),
+                                      kafka_admin_DescribeProducersResult_get_partition(r, i));
+        PyObject* value = error_value_pair(
+            borrowed_error_to_py(kafka_admin_DescribeProducersResult_get_error(r, i)), states);
+        if (!key || !value || PyErr_Occurred() || PyDict_SetItem(d, key, value) < 0) {
+            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
+            kafka_admin_DescribeProducersResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(value);
+    }
+    kafka_admin_DescribeProducersResult_destroy(r);
+    return d;
+}
+
+// {transactional_id: (error_or_None,
+//                     (coordinator_id, state_name, producer_id, producer_epoch,
+//                      transaction_timeout_ms, start_time_ms_or_None,
+//                      [(topic, partition)]))}
+static PyObject* py_DescribeTransactionsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeTransactionsResult_t* r =
+        (kafka_admin_DescribeTransactionsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeTransactionsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeTransactionsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        int32_t partitions = kafka_admin_DescribeTransactionsResult_get_topic_partition_count(r, i);
+        PyObject* topic_partitions = PyList_New(partitions < 0 ? 0 : partitions);
+        if (topic_partitions == NULL) {
+            Py_DECREF(d); kafka_admin_DescribeTransactionsResult_destroy(r); return NULL;
+        }
+        for (int32_t j = 0; j < partitions; j++) {
+            PyObject* tp = Py_BuildValue(
+                "(si)", kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(r, i, j),
+                kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(r, i, j));
+            if (tp == NULL) { break; }
+            PyList_SET_ITEM(topic_partitions, j, tp);
+        }
+        int64_t start_time = 0;
+        bool has_start_time = kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
+            r, i, &start_time);
+        PyObject* py_start_time = has_start_time ? PyLong_FromLongLong((long long)start_time)
+                                                 : (Py_INCREF(Py_None), Py_None);
+        PyObject* description =
+            py_start_time == NULL
+                ? NULL
+                : Py_BuildValue(
+                      "(isLiLNN)", kafka_admin_DescribeTransactionsResult_get_coordinator_id(r, i),
+                      kafka_admin_DescribeTransactionsResult_get_state(r, i),
+                      (long long)kafka_admin_DescribeTransactionsResult_get_producer_id(r, i),
+                      kafka_admin_DescribeTransactionsResult_get_producer_epoch(r, i),
+                      (long long)kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(r, i),
+                      py_start_time, topic_partitions);
+        if (description == NULL) {
+            Py_XDECREF(py_start_time);
+            Py_DECREF(topic_partitions);
+        }
+        PyObject* key = PyUnicode_FromString(
+            kafka_admin_DescribeTransactionsResult_get_transactional_id(r, i));
+        PyObject* value = error_value_pair(
+            borrowed_error_to_py(kafka_admin_DescribeTransactionsResult_get_error(r, i)),
+            description);
+        if (!key || !value || PyErr_Occurred() || PyDict_SetItem(d, key, value) < 0) {
+            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
+            kafka_admin_DescribeTransactionsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(value);
+    }
+    kafka_admin_DescribeTransactionsResult_destroy(r);
+    return d;
+}
+
+// {transactional_id: (error_or_None, (producer_id, epoch))}
+static PyObject* py_FenceProducersResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_FenceProducersResult_t* r = (kafka_admin_FenceProducersResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_FenceProducersResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_FenceProducersResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* producer = Py_BuildValue(
+            "(Li)", (long long)kafka_admin_FenceProducersResult_get_producer_id(r, i),
+            (int)kafka_admin_FenceProducersResult_get_epoch_id(r, i));
+        PyObject* key =
+            PyUnicode_FromString(kafka_admin_FenceProducersResult_get_transactional_id(r, i));
+        PyObject* value = error_value_pair(
+            borrowed_error_to_py(kafka_admin_FenceProducersResult_get_error(r, i)), producer);
+        if (!key || !value || PyErr_Occurred() || PyDict_SetItem(d, key, value) < 0) {
+            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
+            kafka_admin_FenceProducersResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(value);
+    }
+    kafka_admin_FenceProducersResult_destroy(r);
+    return d;
+}
+
+// {broker_id: (error_or_None, [(transactional_id, producer_id, state_name)])}
+static PyObject* py_ListTransactionsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListTransactionsResult_t* r = (kafka_admin_ListTransactionsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_ListTransactionsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_ListTransactionsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        int32_t listings = kafka_admin_ListTransactionsResult_get_listing_count(r, i);
+        PyObject* rows = PyList_New(listings < 0 ? 0 : listings);
+        if (rows == NULL) { Py_DECREF(d); kafka_admin_ListTransactionsResult_destroy(r); return NULL; }
+        for (int32_t j = 0; j < listings; j++) {
+            PyObject* row = Py_BuildValue(
+                "(sLs)", kafka_admin_ListTransactionsResult_get_transactional_id(r, i, j),
+                (long long)kafka_admin_ListTransactionsResult_get_producer_id(r, i, j),
+                kafka_admin_ListTransactionsResult_get_state(r, i, j));
+            if (row == NULL) { break; }
+            PyList_SET_ITEM(rows, j, row);
+        }
+        PyObject* key =
+            PyLong_FromLong((long)kafka_admin_ListTransactionsResult_get_broker_id(r, i));
+        PyObject* value = error_value_pair(
+            borrowed_error_to_py(kafka_admin_ListTransactionsResult_get_error(r, i)), rows);
+        if (!key || !value || PyErr_Occurred() || PyDict_SetItem(d, key, value) < 0) {
+            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
+            kafka_admin_ListTransactionsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(value);
+    }
+    kafka_admin_ListTransactionsResult_destroy(r);
+    return d;
+}
+
 static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
@@ -5753,6 +6087,27 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Drain+destroy a DescribeFeaturesResult handle into (finalized, epoch, supported)"},
     {"UpdateFeaturesResult_drain", py_UpdateFeaturesResult_drain, METH_VARARGS,
      "Drain+destroy an UpdateFeaturesResult handle into a dict"},
+    {"Admin_describe_producers_async", py_Admin_describe_producers_async, METH_VARARGS,
+     "Async describeProducers; cb(result_int, error_int)"},
+    {"Admin_describe_transactions_async", py_Admin_describe_transactions_async, METH_VARARGS,
+     "Async describeTransactions; cb(result_int, error_int)"},
+    {"Admin_fence_producers_async", py_Admin_fence_producers_async, METH_VARARGS,
+     "Async fenceProducers; cb(result_int, error_int)"},
+    {"Admin_list_transactions_async", py_Admin_list_transactions_async, METH_VARARGS,
+     "Async listTransactions; cb(result_int, error_int)"},
+    {"Admin_abort_transaction_async", py_Admin_abort_transaction_async, METH_VARARGS,
+     "Async abortTransaction; cb(error_int) -- Java's result carries no value"},
+    {"Admin_force_terminate_transaction_async", py_Admin_force_terminate_transaction_async,
+     METH_VARARGS,
+     "Async forceTerminateTransaction; cb(error_int) -- Java's result carries no value"},
+    {"DescribeProducersResult_drain", py_DescribeProducersResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeProducersResult handle into a dict"},
+    {"DescribeTransactionsResult_drain", py_DescribeTransactionsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeTransactionsResult handle into a dict"},
+    {"FenceProducersResult_drain", py_FenceProducersResult_drain, METH_VARARGS,
+     "Drain+destroy a FenceProducersResult handle into a dict"},
+    {"ListTransactionsResult_drain", py_ListTransactionsResult_drain, METH_VARARGS,
+     "Drain+destroy a ListTransactionsResult handle into a dict"},
     {NULL, NULL, 0, NULL}
 };
 
