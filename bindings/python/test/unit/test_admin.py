@@ -28,6 +28,8 @@ from admin import (
     AlterConfigOp, ClientMetricsResourceListing, ClusterDescription, Config,
     ConfigEntry, ConfigResource, ConfigResourceType, OpType, ReplicaLogDirInfo,
     TopicPartitionReplica,
+    _to_describe_log_dirs, _to_describe_replica_log_dirs,
+    _to_full_config_entry, _to_log_dir_description,
 )
 from producer import KafkaError
 
@@ -801,9 +803,15 @@ def test_alter_replica_log_dirs_partial_failure():
 
 
 def test_describe_replica_log_dirs_omits_unknown_topics():
-    """Java's describeReplicaLogDirs skips replicas of unknown topics entirely
-    (`if (topicMetadata != null)`, MockAdminClient.java:1110) rather than
-    reporting an error, so the result is shorter than the request."""
+    """MockAdminClient.describeReplicaLogDirs skips replicas of unknown topics
+    entirely (`if (topicMetadata != null)`, MockAdminClient.java:1112) rather
+    than reporting an error, so the result is shorter than the request.
+
+    This is mock-only. KafkaAdminClient seeds one future per requested replica
+    (`KafkaAdminClient.java:3066-3068`) and completes all of them (`:3141-3145`),
+    so against a real broker an unknown topic comes back *present*, with a null
+    `current_replica_log_dir`.
+    """
     with MockAdminClient(1) as admin:
         _created(admin, "drld-topic")
         known = TopicPartitionReplica("drld-topic", 0, 0)
@@ -895,6 +903,116 @@ def test_b2_handles_survive_gc_of_intermediate_objects():
         assert cluster.nodes[0].host == "localhost"
         assert isinstance(configs, Config)
         assert log_dirs["/tmp/kafka-logs"].replica_infos[("gc-b2", 1)].size == 0
+
+
+# -- pure converters ---------------------------------------------------------
+#
+# MockAdminClient builds its config entries with the two-argument
+# ``ConfigEntry(name, value)`` constructor (MockAdminClient.java:889-895), so it
+# never produces a non-UNKNOWN source or type, a documentation string, a
+# synonym, a LogDirDescription error, or a volume size. It also ignores its
+# ``options`` argument. Those tuple shapes therefore cannot be reached
+# end-to-end; the converters are pure functions of their input, so they are
+# asserted directly. A field-order or arity error in the synonym 3-tuple or the
+# entry 9-tuple would otherwise ship silently.
+
+def test_to_full_config_entry_maps_every_field_and_synonym():
+    entry = _to_full_config_entry((
+        "retention.ms", "604800000", 0, 1, 0, "DYNAMIC_TOPIC_CONFIG", "LONG",
+        "The retention window.",
+        # Ordered by precedence in Java; the converter must not sort.
+        [("retention.ms", "604800000", "DYNAMIC_TOPIC_CONFIG"),
+         ("log.retention.ms", None, "STATIC_BROKER_CONFIG")],
+    ))
+    assert isinstance(entry, ConfigEntry)
+    assert entry.name == "retention.ms"
+    assert entry.value == "604800000"
+    assert entry.is_default is False
+    assert entry.is_sensitive is True
+    assert entry.is_read_only is False
+    assert entry.source == "DYNAMIC_TOPIC_CONFIG"
+    assert entry.config_type == "LONG"
+    assert entry.documentation == "The retention window."
+
+    assert [(s.name, s.value, s.source) for s in entry.synonyms] == [
+        ("retention.ms", "604800000", "DYNAMIC_TOPIC_CONFIG"),
+        ("log.retention.ms", None, "STATIC_BROKER_CONFIG"),
+    ]
+
+
+def test_to_full_config_entry_preserves_nulls_and_empty_synonyms():
+    entry = _to_full_config_entry(
+        ("sensitive.config", None, 1, 1, 1, "UNKNOWN", "UNKNOWN", None, []))
+    assert entry.value is None
+    assert entry.documentation is None
+    assert entry.synonyms == []
+    assert entry.is_default is True
+
+
+def test_to_log_dir_description_carries_error_and_volume_bytes():
+    description = _to_log_dir_description(
+        ((KAFKA_STORAGE_ERROR, "offline", 0, 0), 2000, 1000,
+         [("t", 0, 100, 5, 0), ("t", 1, 200, 0, 1)]))
+    assert isinstance(description.error, KafkaError)
+    assert description.error.code == KAFKA_STORAGE_ERROR
+    assert description.total_bytes == 2000
+    assert description.usable_bytes == 1000
+    assert description.replica_infos[("t", 0)].size == 100
+    assert description.replica_infos[("t", 0)].offset_lag == 5
+    assert description.replica_infos[("t", 0)].is_future is False
+    assert description.replica_infos[("t", 1)].is_future is True
+
+
+def test_to_log_dir_description_maps_unknown_volume_bytes_to_none():
+    """-1 is the wire's UNKNOWN_VOLUME_BYTES, i.e. Java's empty OptionalLong."""
+    description = _to_log_dir_description((None, -1, -1, []))
+    assert description.error is None
+    assert description.total_bytes is None
+    assert description.usable_bytes is None
+    assert description.replica_infos == {}
+
+
+def test_to_describe_log_dirs_error_arm_replaces_the_map():
+    """A per-broker failure surfaces as a KafkaError *instead of* the log-dir
+    map. The mock never fails a broker, so this arm is unreachable end-to-end."""
+    out = _to_describe_log_dirs({
+        0: ((UNSUPPORTED_VERSION, "nope", 0, 0), None),
+        1: (None, {"/data/1": (None, -1, -1, [])}),
+    })
+    assert isinstance(out[0], KafkaError)
+    assert out[0].code == UNSUPPORTED_VERSION
+    assert set(out[1]) == {"/data/1"}
+
+
+def test_to_describe_replica_log_dirs_error_arm_replaces_the_info():
+    out = _to_describe_replica_log_dirs({
+        ("t", 0, 1): ((REPLICA_NOT_AVAILABLE, "gone", 1, 0), None),
+        ("t", 1, 1): (None, ("/data/current", 7, None, -1)),
+    })
+    failed = TopicPartitionReplica("t", 0, 1)
+    assert isinstance(out[failed], KafkaError)
+    assert out[failed].code == REPLICA_NOT_AVAILABLE
+
+    info = out[TopicPartitionReplica("t", 1, 1)]
+    assert info.current_replica_log_dir == "/data/current"
+    assert info.current_replica_offset_lag == 7
+    assert info.future_replica_log_dir is None
+    assert info.future_replica_offset_lag == -1
+
+
+async def test_async_describe_cluster_call_failure_raises():
+    """The async error arm of a B2 RPC. The sync mirror is
+    ``test_describe_cluster_call_failure_raises``; without this, ``_run_async``'s
+    error arm is only reached by inherited B0/B1 tests."""
+    admin = AsyncMockAdminClient(1)
+    try:
+        admin.timeout_next_request(1)
+        with pytest.raises(KafkaError):
+            await admin.describe_cluster()
+        # The client is still usable afterwards.
+        assert (await admin.describe_cluster()).controller.id == 0
+    finally:
+        await admin.close()
 
 
 # -- lifetime / interrupt ----------------------------------------------------

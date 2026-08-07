@@ -924,3 +924,137 @@ thread is the normal path rather than a guarantee, names the inline fallbacks as
 the reason, and says callbacks can run on a tokio worker. Blast radius: that file
 is shared with the producer and consumer FFIs, so their internal rustdoc changes
 too — it is an internal comment (not `///`), so no generated header text moves.
+
+# M11 bindings B2 — Critic round 5
+
+Verdict on the slice was **done**; both design decisions I flagged were verified
+and endorsed (the dispatch-helper generalisation by derivation, and
+name-not-ordinal for `ConfigSource`/`ConfigType` — endorsed more strongly than I
+argued it, since `ConfigSource` has had constants inserted mid-list so an ordinal
+contract would have silently renumbered). Three filed findings plus the grouped
+coverage observation, all addressed below.
+
+## Resolved: `DescribeReplicaLogDirsResult_count` documented a mock-only behaviour as Java's general contract
+
+The doc said replicas of an unknown topic are "silently omitted, mirroring Java's
+`describeReplicaLogDirs`". That is `MockAdminClient`'s behaviour only
+(`MockAdminClient.java:1112`). Production Java seeds one future per requested
+replica (`KafkaAdminClient.java:3066-3068`) and completes all of them
+(`:3141-3145`), so an unknown topic yields a *present* entry holding a default
+`ReplicaLogDirInfo` — null current/future log dir, `-1` offset lags. The Rust
+production client is faithful to that, so the divergence really was mock-only,
+and the wrong sentence was shipping in the public header where the reader is
+overwhelmingly using the real client.
+
+Rewrote the rustdoc at `src/ffi/admin.rs` to lead with the production contract,
+state explicitly that absence is *not* the unknown-topic signal (a null current
+log dir is), and attribute the omission to `MockAdminClient.describeReplicaLogDirs`
+by name. Verified in the generated header (`target/include/confluent_kafka.h`),
+not just the source. The same mis-attribution appeared in the Python test
+docstring for `test_describe_replica_log_dirs_omits_unknown_topics`; corrected
+there too, including its line cite (1110 → 1112, the `if`).
+
+## Resolved: wrong Java line cited for the `describeConfigs` BROKER_LOGGER branch
+
+`bindings/c/tests/test_mock_admin.c` cited `MockAdminClient.java:895`; the throw
+is at 885 (895 is the closing brace of `toConfigObject`). Corrected, and appended
+the "at kafka a18251bae0b8" suffix the neighbouring comments carry. Verified
+against the submodule, which is checked out at exactly that revision.
+
+## Resolved: `Py_BuildValue("(NN)", ...)` failure path double-decrefs — swept across B1 and B2
+
+Confirmed the mechanism: on `PyTuple_New` failure CPython's `do_mktuple` calls
+`do_ignore`, which re-runs `do_mkvalue` over the remaining format units and
+releases each result; for `'N'` that consumes the caller's reference. So the
+unconditional `Py_XDECREF` pair after a NULL `Py_BuildValue` is a second release.
+
+Rather than patch five copies, added one `error_value_pair(err, value)` helper in
+`bindings/python/_confluentkafka.c` that consumes both references on every path
+and documents why the caller must not release after a NULL return. All five
+`(NN)` sites now go through it — 2 from B1 (`createTopics`, `describeTopics`) and
+3 from B2 (`describeConfigs`, `describeLogDirs`, `describeReplicaLogDirs`).
+
+Swept the rest of the file for the same shape while I was there. One more site
+had it and was not in the filed list: `py_DeleteRecordsResult_drain`'s
+`Py_BuildValue("(NL)", err, ...)` (B1), whose guard is `(key && err)` rather than
+`(err && value)`, so it needed restructuring rather than the helper — the second
+slot is a plain long, and the `key == NULL` case must still release `err`. Fixed
+in place with a comment pointing at the helper for the shared rule. The remaining
+seven `'N'`-unit call sites are unconditional returns with no follow-up decref
+and are correct as written; checked each.
+
+## Resolved: coverage gap — every field the mock never populates
+
+Agreed this was the largest un-evidenced surface, and the transposition
+demonstration was the convincing part: swapping two boolean option flags anywhere
+along Python → C extension → FFI → `*Options` passed all 66 C and all 63 Python
+tests, because the mock ignores `options` entirely.
+
+Closed by unit-testing the pure helpers directly rather than only end-to-end.
+
+**Rust (`src/ffi/admin.rs`, 19 new tests — the file previously had none, against
+`src/ffi/producer.rs`'s 57):**
+
+- All six option builders, each called twice with *asymmetric* flag values so a
+  transposition cannot satisfy both cases. This is the test that has teeth:
+  covers `describe_cluster`, `describe_configs`, `describe_topics`,
+  `create_topics`, `create_partitions`, `delete_topics`.
+- `option_timeout`, including that `0` is a real timeout and only negatives mean
+  unset.
+- `config_source_name` / `config_type_name` over all 19 constants (the mock only
+  ever produces `UNKNOWN`, so 17 were asserted nowhere).
+- `ConfigEntryC::new` over a hand-built entry with a non-`UNKNOWN` source and
+  type, a documentation string and two synonyms — asserting synonym precedence
+  order is preserved, and a nullable synonym value stays null. Plus the
+  all-nulls entry, the `is_default`-tracks-`DEFAULT_CONFIG` derivation, and
+  `from_config`'s sort-by-name.
+- `LogDirDescriptionInner::new` with an error and real volume bytes, with the
+  `-1` `UNKNOWN_VOLUME_BYTES` sentinels, and the replica sort (which pins that
+  partition ordering is numeric, not lexicographic: 2 before 10).
+  `LogDirDescriptionMapInner::new` sort-by-path. `ReplicaLogDirInfoInner::new`
+  with both dirs present and both null.
+
+**Python (`test/unit/test_admin.py`, 7 new tests, 63 → 70):**
+`_to_full_config_entry` over a full 9-tuple with two synonyms (pins the
+three-tuple field order and arity that would otherwise ship silently) and over
+the all-nulls shape; `_to_log_dir_description` with error + volume bytes and with
+the `-1` sentinels; the per-broker and per-replica error arms of
+`_to_describe_log_dirs` / `_to_describe_replica_log_dirs`, both unreachable from
+the mock. Plus the async error-arm case from the second, smaller observation.
+
+**Teeth verified, not assumed.** Transposed
+`include_authorized_operations`/`include_fenced_brokers` in
+`describe_cluster_options` and confirmed
+`describe_cluster_options_maps_each_flag_to_its_own_field` fails; restored and
+re-confirmed green.
+
+One correction to the suggested async test: I first wrote it against
+`describe_configs`, and it did not raise. That is correct behaviour, not a bug —
+`describe_configs` is a multi-key RPC, so the mock fails each resource's future
+individually (`mock_admin_client.rs`, the `timeout_next_requests` branch) and the
+timeout lands as a per-resource `KafkaError` in the drained dict, matching Java's
+per-key futures. The call-failure arm needs an RPC whose futures all fail
+together, so the test uses `describe_cluster` — the exact async mirror of the
+existing `test_describe_cluster_call_failure_raises`.
+
+## Resolved (folded in): the `describe_log_dirs` NPE divergence needs a comment
+
+Agreed, and agreed the code should not change. Added one comment above the loop
+in `src/admin/mock_admin_client.rs` covering both guards — the
+`partition_log_dirs.first()` stand-in for Java's `partitionLogDirs.get(0)`
+(`IndexOutOfBoundsException`) and the `unwrapped.get_mut(&node.id())` stand-in
+for Java's unchecked `unwrappedResults.get(node.id())` (NPE) — citing
+`MockAdminClient.java:1082-1083` and noting that reproducing either would mean
+panicking in a public API (CLAUDE.md §10.1). This is a Tier-1 Phase-4 artifact
+that B2 only made reachable from C; folded in since it stayed a single comment.
+
+## Not actioned
+
+- The `&'static CStr` suggestion for `ConfigEntryC`'s `source_c` /
+  `config_type_c` and `ConfigSynonymC`'s `source_c` — explicitly raised for B3+
+  rather than as a change here, and DoD #10 is N/A for Admin.
+- Listing the nine/ten enum constants in the `_source` / `_type` rustdoc — noted
+  as "not filing it". The new exhaustive Rust tests now pin every name, so the
+  value set is at least enumerated somewhere authoritative.
+- Stating DoD #10/#11 N/A in commit messages — stated in this entry and in the
+  commit for this round.
