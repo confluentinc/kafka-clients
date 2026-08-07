@@ -100,17 +100,21 @@ use std::time::Duration;
 use crate::admin::{
     Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
     AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
-    ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType, ConsumerGroupDescription,
-    CreateAclsOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, FilterResults, GroupListing,
-    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
-    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
+    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
+    DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
+    DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
+    DescribeTopicsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions,
+    FeatureMetadata, FeatureUpdate, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MemberAssignment,
+    MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
+    OpType, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    ReplicaLogDirInfo, ScramCredentialInfo, ScramMechanism, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    UpdateFeaturesOptions, UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion, UserScramCredentialsDescription,
 };
 // `listClientMetricsResources` (superseded by `listConfigResources` filtered to
 // CLIENT_METRICS) and `listConsumerGroups` (superseded by `listGroups`) are both
@@ -137,6 +141,8 @@ use crate::common::requests::list_offsets_request::{
     LATEST_TIMESTAMP, MAX_TIMESTAMP,
 };
 use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
+use crate::common::security::auth::KafkaPrincipal;
+use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::{
     ElectionType, GroupState, GroupType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection,
     TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
@@ -9508,6 +9514,26 @@ fn partition_at(partitions: &[i32], index: i32) -> i32 {
     partitions.get(index as usize).copied().unwrap_or(-1)
 }
 
+/// Returns `values[index]`, or -1 when `index` is out of range or the row that
+/// owns the slice does not exist. -1 is not a legal value for any of the
+/// callers (a SCRAM mechanism type indicator, an iteration count).
+fn indexed_i32_at(values: Option<&[i32]>, index: i32) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    values.and_then(|values| values.get(index as usize)).copied().unwrap_or(-1)
+}
+
+/// Returns `values[index]`, or -1 when `index` is out of range. -1 is not a
+/// legal feature version level: `FinalizedVersionRange` and
+/// `SupportedVersionRange` both reject a negative bound.
+fn indexed_i16_at(values: &[i16], index: i32) -> i16 {
+    if index < 0 {
+        return -1;
+    }
+    values.get(index as usize).copied().unwrap_or(-1)
+}
+
 /// Returns a borrowed error pointer for `errors[index]`, or null when the key
 /// succeeded or `index` is out of range.
 fn optional_error_at(errors: &[Option<KafkaErrorInner>], index: i32) -> *const kafka_common_KafkaError_t {
@@ -14666,6 +14692,99 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     }
 }
 
+/// Seeds the feature levels the mock's `describeFeatures` reports and
+/// `updateFeatures` validates against.
+///
+/// Mirrors the three `MockAdminClient.Builder` setters `featureLevels`,
+/// `minSupportedFeatureLevels` and `maxSupportedFeatureLevels`
+/// (`MockAdminClient.java:188-200`), which Java takes at construction time and
+/// the Rust mock exposes as one setter. This is mock-only configuration, not a
+/// translated `Admin` method, so it lives beside
+/// `kafka_admin_MockAdminClient_update_beginning_offsets` rather than on the
+/// RPC surface.
+///
+/// Entry `i` is `features[i] -> (levels[i], min_levels[i], max_levels[i])`; the
+/// three maps therefore share one key set. Java allows them to differ and falls
+/// back to `0` for a feature missing from one of them, which a NULL level array
+/// reproduces here: it seeds `0` for every feature, exactly as Java's
+/// `getOrDefault(feature, (short) 0)` does. An entry with a NULL feature name
+/// is skipped.
+///
+/// Unlike the offset setters, this **replaces** the three maps rather than
+/// merging into them, mirroring the Rust mock's `set_feature_levels`.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle if `admin` does not wrap a mock
+/// (free it with `kafka_common_KafkaError_destroy`).
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `features` must be null or have `count` entries, each NULL or a valid C
+/// string; each level array must be null or have `count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
+    admin: *const kafka_admin_AdminClient_t,
+    features: *const *const c_char,
+    levels: *const i16,
+    min_levels: *const i16,
+    max_levels: *const i16,
+    count: i32,
+) -> *mut kafka_common_KafkaError_t {
+    match unsafe { mock_ref(admin) } {
+        Ok(mock) => {
+            let (current, minimum, maximum) =
+                unsafe { read_feature_levels(features, levels, min_levels, max_levels, count) };
+            mock.set_feature_levels(current, minimum, maximum);
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
+    }
+}
+
+/// Reads `count` `(feature, level, min, max)` rows into the three maps
+/// `MockAdminClient::set_feature_levels` takes, skipping rows whose feature
+/// name is NULL and defaulting a NULL level array to `0`.
+///
+/// # Safety
+///
+/// `features` must be null or have `count` entries, each NULL or a valid C
+/// string; each level array must be null or have `count` entries.
+type FeatureLevelMaps = (HashMap<String, i16>, HashMap<String, i16>, HashMap<String, i16>);
+
+unsafe fn read_feature_levels(
+    features: *const *const c_char,
+    levels: *const i16,
+    min_levels: *const i16,
+    max_levels: *const i16,
+    count: i32,
+) -> FeatureLevelMaps {
+    let n = count.max(0) as usize;
+    let mut current = HashMap::with_capacity(n);
+    let mut minimum = HashMap::with_capacity(n);
+    let mut maximum = HashMap::with_capacity(n);
+    if features.is_null() {
+        return (current, minimum, maximum);
+    }
+    let at = |values: *const i16, index: usize| -> i16 {
+        if values.is_null() {
+            0
+        } else {
+            unsafe { *values.add(index) }
+        }
+    };
+    for index in 0..n {
+        let Some(feature) = (unsafe { optional_string_at(features, index) }) else {
+            continue;
+        };
+        current.insert(feature.clone(), at(levels, index));
+        minimum.insert(feature.clone(), at(min_levels, index));
+        maximum.insert(feature, at(max_levels, index));
+    }
+    (current, minimum, maximum)
+}
+
 /// Seeds the beginning offsets the mock's `listOffsets` reports for
 /// `OffsetSpec.earliest()`.
 ///
@@ -14805,6 +14924,2570 @@ unsafe fn read_partition_offsets(
 }
 
 // ---------------------------------------------------------------------------
+// B5b — SCRAM, delegation-token and feature value types
+//
+// `KafkaPrincipal` is `org.apache.kafka.common.security.auth`, and
+// `DelegationToken` / `TokenInformation` are
+// `org.apache.kafka.common.security.token.delegation`; none is under
+// `clients.admin`, so per CLAUDE.md §3 all three are `kafka_common_*`, as
+// `kafka_common_Node_t`, `kafka_common_KafkaError_t` and B5a's three ACL /
+// quota types already are. The SCRAM and feature types *are*
+// `org.apache.kafka.clients.admin`, so anything minted for them would be
+// `kafka_admin_*` — but nothing is, see below.
+//
+// Like B5a's, these three handles are **output-only and borrowed**: interior
+// references into the owning result handle's allocation, valid until it is
+// destroyed and never freed. Every request in this slice crosses as parallel
+// arrays instead, so no handle here is both caller-owned and borrowed.
+//
+// **Why these three get handles and the other five new Java types do not**
+// (`PLAN-bindings.md` §7 D2, fifth rule): flatten a collection-valued result
+// into a second index when its element is scalar-only; mint a handle as soon as
+// that element itself contains a collection, because two index levels is the
+// limit a C signature stays readable at.
+//
+//   - `describeDelegationToken` is one future for a `List<DelegationToken>`,
+//     and a `DelegationToken` holds a `TokenInformation` which holds a
+//     `List<KafkaPrincipal> renewers`. Flattened whole that is
+//     `_get_renewer_name(i, j)` plus the token's own scalars at `i` — three
+//     levels once the owner and requester principals are counted. So the token
+//     is a handle, its `TokenInformation` is a handle, and the renewer list
+//     gets an index space of its own starting at 0. `DelegationToken` is also
+//     the value of *two* results (`createDelegationToken` and
+//     `describeDelegationToken`), which is the independent reuse argument B5a
+//     recorded.
+//   - `ScramCredentialInfo` is two scalars (mechanism type and iterations), so
+//     `describeUserScramCredentials` flattens it to `(i, j)`.
+//   - `FeatureMetadata`, `FinalizedVersionRange` and `SupportedVersionRange`
+//     are a single record keyed directly by the result, holding two maps of
+//     two-scalar ranges: the maps sit at index `i` on the result handle and
+//     the epoch is a scalar on it, which is two levels, so nothing is minted.
+//   - `FeatureUpdate` and the `UserScramCredential*` alterations are *inputs*
+//     and cross as parallel arrays, never as handles.
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `KafkaPrincipal` (Java's
+/// `org.apache.kafka.common.security.auth.KafkaPrincipal`).
+///
+/// Borrowed from the owning delegation-token result handle; valid until that
+/// handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_common_KafkaPrincipal_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_common_KafkaPrincipal_t`].
+struct KafkaPrincipalInner {
+    principal_type_c: CString,
+    name_c: CString,
+    token_authenticated: bool,
+}
+
+impl KafkaPrincipalInner {
+    fn new(principal: &KafkaPrincipal) -> Self {
+        Self {
+            principal_type_c: to_cstring(principal.principal_type()),
+            name_c: to_cstring(principal.name()),
+            token_authenticated: principal.token_authenticated(),
+        }
+    }
+
+    fn as_ptr(&self) -> *const kafka_common_KafkaPrincipal_t {
+        self as *const KafkaPrincipalInner as *const kafka_common_KafkaPrincipal_t
+    }
+}
+
+/// Casts a `*const kafka_common_KafkaPrincipal_t` to a reference.
+///
+/// # Safety
+///
+/// `principal` must be a non-null borrowed pointer from a token getter.
+unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -> &'static KafkaPrincipalInner {
+    unsafe { &*(principal as *const KafkaPrincipalInner) }
+}
+
+/// Returns `principalType()`, e.g. `"User"`. Borrowed; do not free.
+///
+/// # Safety
+///
+/// `principal` must be a valid borrowed principal pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
+    principal: *const kafka_common_KafkaPrincipal_t,
+) -> *const c_char {
+    unsafe { kafka_principal_ref(principal) }.principal_type_c.as_ptr()
+}
+
+/// Returns `getName()`, e.g. `"alice"`. Borrowed; do not free.
+///
+/// # Safety
+///
+/// `principal` must be a valid borrowed principal pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
+    principal: *const kafka_common_KafkaPrincipal_t,
+) -> *const c_char {
+    unsafe { kafka_principal_ref(principal) }.name_c.as_ptr()
+}
+
+/// Returns `tokenAuthenticated()`: whether this principal authenticated with a
+/// delegation token.
+///
+/// # Safety
+///
+/// `principal` must be a valid borrowed principal pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
+    principal: *const kafka_common_KafkaPrincipal_t,
+) -> bool {
+    unsafe { kafka_principal_ref(principal) }.token_authenticated
+}
+
+/// Opaque handle to a `TokenInformation` (Java's
+/// `org.apache.kafka.common.security.token.delegation.TokenInformation`).
+///
+/// Borrowed from the owning [`kafka_common_DelegationToken_t`]; valid until the
+/// result handle that owns the token is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_common_TokenInformation_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_common_TokenInformation_t`].
+struct TokenInformationInner {
+    token_id_c: CString,
+    owner: KafkaPrincipalInner,
+    token_requester: KafkaPrincipalInner,
+    renewers: Vec<KafkaPrincipalInner>,
+    issue_timestamp: i64,
+    expiry_timestamp: i64,
+    max_timestamp: i64,
+}
+
+impl TokenInformationInner {
+    fn new(info: &TokenInformation) -> Self {
+        Self {
+            token_id_c: to_cstring(info.token_id()),
+            owner: KafkaPrincipalInner::new(info.owner()),
+            token_requester: KafkaPrincipalInner::new(info.token_requester()),
+            renewers: info.renewers().iter().map(KafkaPrincipalInner::new).collect(),
+            issue_timestamp: info.issue_timestamp(),
+            expiry_timestamp: info.expiry_timestamp(),
+            max_timestamp: info.max_timestamp(),
+        }
+    }
+
+    fn as_ptr(&self) -> *const kafka_common_TokenInformation_t {
+        self as *const TokenInformationInner as *const kafka_common_TokenInformation_t
+    }
+}
+
+/// Casts a `*const kafka_common_TokenInformation_t` to a reference.
+///
+/// # Safety
+///
+/// `info` must be a non-null borrowed pointer from
+/// [`kafka_common_DelegationToken_token_info`].
+unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) -> &'static TokenInformationInner {
+    unsafe { &*(info as *const TokenInformationInner) }
+}
+
+/// Returns `tokenId()`. Borrowed; do not free.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
+    info: *const kafka_common_TokenInformation_t,
+) -> *const c_char {
+    unsafe { token_information_ref(info) }.token_id_c.as_ptr()
+}
+
+/// Returns `owner()` (borrowed). Do not free it; it dies with the result
+/// handle.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
+    info: *const kafka_common_TokenInformation_t,
+) -> *const kafka_common_KafkaPrincipal_t {
+    unsafe { token_information_ref(info) }.owner.as_ptr()
+}
+
+/// Returns `tokenRequester()` (borrowed). This is the principal that *asked*
+/// for the token, which differs from `owner()` when a superuser creates a token
+/// on another principal's behalf (KIP-373). Do not free it.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
+    info: *const kafka_common_TokenInformation_t,
+) -> *const kafka_common_KafkaPrincipal_t {
+    unsafe { token_information_ref(info) }.token_requester.as_ptr()
+}
+
+/// Returns the number of principals in `renewers()`.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
+    info: *const kafka_common_TokenInformation_t,
+) -> i32 {
+    unsafe { token_information_ref(info) }.renewers.len() as i32
+}
+
+/// Returns the renewer at `index` (borrowed), or null if out of range. Renewers
+/// keep the order the broker reported. Do not free it.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
+    info: *const kafka_common_TokenInformation_t,
+    index: i32,
+) -> *const kafka_common_KafkaPrincipal_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { token_information_ref(info) }.renewers.get(index as usize) {
+        Some(renewer) => renewer.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns `issueTimestamp()`, in milliseconds since the epoch.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
+    info: *const kafka_common_TokenInformation_t,
+) -> i64 {
+    unsafe { token_information_ref(info) }.issue_timestamp
+}
+
+/// Returns `expiryTimestamp()`, in milliseconds since the epoch.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
+    info: *const kafka_common_TokenInformation_t,
+) -> i64 {
+    unsafe { token_information_ref(info) }.expiry_timestamp
+}
+
+/// Returns `maxTimestamp()`, in milliseconds since the epoch: the latest the
+/// token can be renewed to, whatever the renewal period asks for.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed token-information pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
+    info: *const kafka_common_TokenInformation_t,
+) -> i64 {
+    unsafe { token_information_ref(info) }.max_timestamp
+}
+
+/// Opaque handle to a `DelegationToken` (Java's
+/// `org.apache.kafka.common.security.token.delegation.DelegationToken`).
+///
+/// Borrowed from the owning `create_delegation_token` /
+/// `describe_delegation_token` result handle; valid until that handle is
+/// destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_common_DelegationToken_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_common_DelegationToken_t`].
+///
+/// The HMAC is raw bytes, not a string: it is a SHA-512 MAC and can contain
+/// NULs, so it crosses as a pointer plus a length rather than as a `CString`.
+/// Java's `hmacAsBase64String()` is exposed alongside it, because that is the
+/// form a caller passes back to `renewDelegationToken` in most tooling.
+struct DelegationTokenInner {
+    token_info: TokenInformationInner,
+    hmac: Vec<u8>,
+    hmac_base64_c: CString,
+}
+
+impl DelegationTokenInner {
+    fn new(token: &DelegationToken) -> Self {
+        Self {
+            token_info: TokenInformationInner::new(token.token_info()),
+            hmac: token.hmac().to_vec(),
+            hmac_base64_c: to_cstring(&token.hmac_as_base64_string()),
+        }
+    }
+
+    fn as_ptr(&self) -> *const kafka_common_DelegationToken_t {
+        self as *const DelegationTokenInner as *const kafka_common_DelegationToken_t
+    }
+}
+
+/// Casts a `*const kafka_common_DelegationToken_t` to a reference.
+///
+/// # Safety
+///
+/// `token` must be a non-null borrowed pointer from a delegation-token result
+/// getter.
+unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> &'static DelegationTokenInner {
+    unsafe { &*(token as *const DelegationTokenInner) }
+}
+
+/// Returns `tokenInfo()` (borrowed). Do not free it; it dies with the result
+/// handle.
+///
+/// # Safety
+///
+/// `token` must be a valid borrowed delegation-token pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
+    token: *const kafka_common_DelegationToken_t,
+) -> *const kafka_common_TokenInformation_t {
+    unsafe { delegation_token_ref(token) }.token_info.as_ptr()
+}
+
+/// Returns `hmac()`: the raw MAC bytes, borrowed, with the length written to
+/// `out_len` when it is non-null.
+///
+/// The bytes are **not** NUL-terminated and may contain NUL, so `out_len` is
+/// the only way to know how many there are. Pass these bytes back verbatim to
+/// [`kafka_admin_AdminClient_renew_delegation_token`] /
+/// [`kafka_admin_AdminClient_expire_delegation_token`].
+///
+/// # Safety
+///
+/// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
+    token: *const kafka_common_DelegationToken_t,
+    out_len: *mut i32,
+) -> *const u8 {
+    let inner = unsafe { delegation_token_ref(token) };
+    if !out_len.is_null() {
+        unsafe { *out_len = inner.hmac.len() as i32 };
+    }
+    inner.hmac.as_ptr()
+}
+
+/// Returns `hmacAsBase64String()`. Borrowed; do not free.
+///
+/// # Safety
+///
+/// `token` must be a valid borrowed delegation-token pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
+    token: *const kafka_common_DelegationToken_t,
+) -> *const c_char {
+    unsafe { delegation_token_ref(token) }.hmac_base64_c.as_ptr()
+}
+
+// ---------------------------------------------------------------------------
+// B5b — SCRAM, delegation-token and feature input marshaling and submission
+//
+// Requests cross as parallel arrays, as everywhere else in this module. Per
+// CLAUDE.md §3 a NULL *required array* is a caller programming error and is
+// read as "no entries" rather than diagnosed; a NULL *element* of a
+// non-nullable array is diagnosed, because it is otherwise indistinguishable
+// from a legitimate absent value.
+//
+// Two discriminants here are explicit `bool` arrays rather than an inferred
+// absence, following B5a's rule that a discriminant is needed exactly where
+// the payload representation cannot carry the absent case:
+//
+//   - `is_deletion` on `alterUserScramCredentials`. A `UserScramCredentialAlteration`
+//     is an upsertion **xor** a deletion; both carry a user and a mechanism, and
+//     a deletion simply has no password, so "password is NULL" would conflate a
+//     deletion with a malformed upsertion.
+//   - `has_owners_filter` on `describeDelegationToken`. Java's `owners()` is a
+//     nullable `List`: null describes *every* token, an empty list describes
+//     none in the general client. A count of 0 cannot tell those apart, exactly
+//     as `all_partitions` cannot be inferred from an empty partition array.
+//
+// The salt is the third nullable case and needs **no** flag: it is a byte
+// array, so a NULL pointer already means "absent", which selects Java's
+// three-argument `UserScramCredentialUpsertion` constructor and lets the
+// client generate one.
+// ---------------------------------------------------------------------------
+
+/// Per-user outcomes of `describeUserScramCredentials`, in Java's own
+/// `description(user)` shape.
+type ScramDescriptionOutcomes = Vec<(String, Result<UserScramCredentialsDescription, KafkaError>)>;
+
+/// Per-user outcomes of `alterUserScramCredentials`.
+type AlterScramOutcomes = HashMap<String, Result<(), KafkaError>>;
+
+/// Per-feature outcomes of `updateFeatures`.
+type UpdateFeaturesOutcomes = HashMap<String, Result<(), KafkaError>>;
+
+/// Reads `len` bytes into an owned buffer, or an empty one when the pointer is
+/// NULL or the length is not positive.
+///
+/// # Safety
+///
+/// `bytes` must be null, or readable for at least `len` bytes.
+unsafe fn read_bytes(bytes: *const u8, len: i32) -> Vec<u8> {
+    if bytes.is_null() || len <= 0 {
+        return Vec::new();
+    }
+    unsafe { std::slice::from_raw_parts(bytes, len as usize) }.to_vec()
+}
+
+/// Reads `count` `(principal type, name)` pairs into [`KafkaPrincipal`]s.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::illegal_argument`] when a type or a name entry is
+/// NULL: Java's `KafkaPrincipal` constructor throws
+/// `IllegalArgumentException("principalType cannot be null")` /
+/// `("name cannot be null")` for either.
+///
+/// # Safety
+///
+/// Both arrays must be null, or have `count` entries, each NULL or a valid C
+/// string.
+unsafe fn read_kafka_principals(
+    principal_types: *const *const c_char,
+    names: *const *const c_char,
+    count: i32,
+    what: &str,
+) -> Result<Vec<KafkaPrincipal>, KafkaError> {
+    let n = count.max(0) as usize;
+    if principal_types.is_null() || names.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        let principal_type = unsafe { required_string_at(principal_types, index, &format!("{what} principal type")) }?;
+        let name = unsafe { required_string_at(names, index, &format!("{what} principal name")) }?;
+        out.push(KafkaPrincipal::new(principal_type, name));
+    }
+    Ok(out)
+}
+
+/// Reads `count` rows of parallel arrays into [`UserScramCredentialAlteration`]s.
+///
+/// Row `i` is a deletion when `is_deletions[i]` is true and an upsertion
+/// otherwise; see the module note above for why that is a flag rather than an
+/// inferred absence.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::illegal_argument`] when a user entry is NULL, or when
+/// an upsertion carries no password — Java's
+/// `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[])` requires
+/// one, and an empty password is not a legal credential.
+///
+/// # Safety
+///
+/// Every array must be null, or have `count` entries; byte pointers must be
+/// null or readable for their matching length.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_scram_alterations(
+    users: *const *const c_char,
+    is_deletions: *const bool,
+    mechanisms: *const i32,
+    iterations: *const i32,
+    passwords: *const *const u8,
+    password_lens: *const i32,
+    salts: *const *const u8,
+    salt_lens: *const i32,
+    count: i32,
+) -> Result<Vec<UserScramCredentialAlteration>, KafkaError> {
+    let n = count.max(0) as usize;
+    if users.is_null() || is_deletions.is_null() || mechanisms.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        let user = unsafe { required_string_at(users, index, "scram alteration user") }?;
+        // `ScramMechanism.fromType` falls through to UNKNOWN for an
+        // unrecognised indicator, exactly as Java does; the broker rejects it.
+        let mechanism = ScramMechanism::from_type(enum_code_or_unknown(unsafe { *mechanisms.add(index) }));
+        if unsafe { *is_deletions.add(index) } {
+            out.push(UserScramCredentialAlteration::Deletion(UserScramCredentialDeletion::new(
+                user, mechanism,
+            )));
+            continue;
+        }
+        let iteration_count = if iterations.is_null() {
+            0
+        } else {
+            unsafe { *iterations.add(index) }
+        };
+        let password = unsafe { read_indexed_bytes(passwords, password_lens, index) };
+        if password.is_empty() {
+            return Err(KafkaError::illegal_argument(format!(
+                "scram alteration at index {index} is an upsertion with no password"
+            )));
+        }
+        let info = ScramCredentialInfo::new(mechanism, iteration_count);
+        let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
+        let upsertion = if salt.is_empty() {
+            // No salt supplied: Java's three-argument constructor generates one.
+            UserScramCredentialUpsertion::with_password_bytes(user, info, password)
+        } else {
+            UserScramCredentialUpsertion::with_salt(user, info, password, salt)
+        };
+        out.push(UserScramCredentialAlteration::Upsertion(upsertion));
+    }
+    Ok(out)
+}
+
+/// Reads the `index`th entry of a ragged byte-array pair, or an empty buffer
+/// when either array or the entry itself is NULL.
+///
+/// # Safety
+///
+/// Both arrays must be null, or have `index + 1` entries; each non-null byte
+/// pointer must be readable for its matching length.
+unsafe fn read_indexed_bytes(arrays: *const *const u8, lens: *const i32, index: usize) -> Vec<u8> {
+    if arrays.is_null() || lens.is_null() {
+        return Vec::new();
+    }
+    unsafe { read_bytes(*arrays.add(index), *lens.add(index)) }
+}
+
+/// Reads `count` `(feature, max version level, upgrade type)` triples into the
+/// map Java's `updateFeatures` takes.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::illegal_argument`] when a feature name entry is NULL,
+/// when the same feature appears twice (Java takes a `Map`, so a duplicate key
+/// could only silently replace the earlier update), or when
+/// `FeatureUpdate::new` rejects the pair — a zero `max_version_level` with an
+/// UPGRADE upgrade type, or a negative one, both of which Java's `FeatureUpdate`
+/// constructor throws on.
+///
+/// # Safety
+///
+/// Every array must be null, or have `count` entries, with name entries NULL or
+/// valid C strings.
+unsafe fn read_feature_updates(
+    features: *const *const c_char,
+    max_version_levels: *const i16,
+    upgrade_types: *const i32,
+    count: i32,
+) -> Result<HashMap<String, FeatureUpdate>, KafkaError> {
+    let n = count.max(0) as usize;
+    let mut out = HashMap::with_capacity(n);
+    if features.is_null() || max_version_levels.is_null() || upgrade_types.is_null() {
+        return Ok(out);
+    }
+    for index in 0..n {
+        let feature = unsafe { required_string_at(features, index, "feature") }?;
+        // `UpgradeType.fromCode` already takes an `int` in Java and falls
+        // through to UNKNOWN, which `FeatureUpdate` accepts and the broker
+        // rejects; there is no `i8` narrowing to do here.
+        let upgrade_type = UpgradeType::from_code(unsafe { *upgrade_types.add(index) });
+        let update = FeatureUpdate::new(unsafe { *max_version_levels.add(index) }, upgrade_type)
+            .map_err(|e| KafkaError::illegal_argument(format!("feature update at index {index}: {}", e.message())))?;
+        if out.insert(feature.clone(), update).is_some() {
+            return Err(KafkaError::illegal_argument(format!(
+                "feature update at index {index} repeats feature `{feature}`"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// Submits `describeUserScramCredentials` and returns a future over its
+/// per-user outcomes.
+///
+/// Java exposes three views over one response future — `all()`, `users()` and
+/// `description(user)` — and C has room for one result handle, so this
+/// composes them into the per-user shape that subsumes all three:
+///
+///   - `all()` succeeds only when every user's error code is NONE or
+///     RESOURCE_NOT_FOUND, so when it does, its keys are the complete user set
+///     and no row carries an error;
+///   - when it fails, `users()` still lists every user whose error is not
+///     RESOURCE_NOT_FOUND — which necessarily includes the one that failed
+///     `all()` — and `description(user)` yields that user's own error. Users
+///     omitted at that point are exactly the ones Java's `all()` also declines
+///     to report, so nothing Java can reach is lost.
+///
+/// If the response future itself failed, all three fail with the same error and
+/// it becomes the call's error. If the composition somehow yields no rows at
+/// all, the `all()` error is returned rather than dropped — the empty-key-set
+/// trap B4 hit with `removeMembersFromConsumerGroup`.
+fn submit_describe_user_scram_credentials(
+    admin: &dyn Admin,
+    users: &[String],
+    options: DescribeUserScramCredentialsOptions,
+) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, KafkaError>> + Send + use<> {
+    let result = admin.describe_user_scram_credentials(users, options);
+    async move {
+        let all_error = match result.all().get().await {
+            Ok(map) => {
+                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
+            },
+            Err(e) => e,
+        };
+        let listed = result.users().get().await?;
+        let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(listed.len());
+        for user in listed {
+            let outcome = result.description(&user).get().await;
+            rows.push((user, outcome));
+        }
+        if rows.is_empty() {
+            return Err(all_error);
+        }
+        Ok(rows)
+    }
+}
+
+/// Submits `alterUserScramCredentials` and returns the collect-all future over
+/// its per-user futures.
+fn submit_alter_user_scram_credentials(
+    admin: &dyn Admin,
+    alterations: &[UserScramCredentialAlteration],
+    options: AlterUserScramCredentialsOptions,
+) -> KafkaFuture<AlterScramOutcomes> {
+    let result = admin.alter_user_scram_credentials(alterations, options);
+    // Driven from the result's own map (Java's `values()`), which is the
+    // authority on which users got a future.
+    let entries: Vec<(String, KafkaFuture<()>)> =
+        result.values().iter().map(|(user, f)| (user.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `createDelegationToken` and returns its single token future.
+fn submit_create_delegation_token(
+    admin: &dyn Admin,
+    options: CreateDelegationTokenOptions,
+) -> KafkaFuture<DelegationToken> {
+    admin.create_delegation_token(options).delegation_token().clone()
+}
+
+/// Submits `renewDelegationToken` and returns its single expiry-timestamp
+/// future.
+fn submit_renew_delegation_token(
+    admin: &dyn Admin,
+    hmac: &[u8],
+    options: RenewDelegationTokenOptions,
+) -> KafkaFuture<i64> {
+    admin.renew_delegation_token(hmac, options).expiry_timestamp().clone()
+}
+
+/// Submits `expireDelegationToken` and returns its single expiry-timestamp
+/// future.
+fn submit_expire_delegation_token(
+    admin: &dyn Admin,
+    hmac: &[u8],
+    options: ExpireDelegationTokenOptions,
+) -> KafkaFuture<i64> {
+    admin.expire_delegation_token(hmac, options).expiry_timestamp().clone()
+}
+
+/// Submits `describeDelegationToken` and returns its single token-list future.
+fn submit_describe_delegation_token(
+    admin: &dyn Admin,
+    options: DescribeDelegationTokenOptions,
+) -> KafkaFuture<Vec<DelegationToken>> {
+    admin.describe_delegation_token(options).delegation_tokens().clone()
+}
+
+/// Submits `describeFeatures` and returns its single metadata future.
+fn submit_describe_features(admin: &dyn Admin, options: DescribeFeaturesOptions) -> KafkaFuture<FeatureMetadata> {
+    admin.describe_features(options).feature_metadata()
+}
+
+/// Submits `updateFeatures` and returns the collect-all future over its
+/// per-feature futures.
+///
+/// # Errors
+///
+/// `updateFeatures` is the one admin RPC whose client-side validation can fail
+/// before the request is enqueued: Java's real client throws
+/// `IllegalArgumentException` for an empty update map or a blank feature name
+/// (`KafkaAdminClient.java`), and the Rust core returns that as an `Err`
+/// (`src/admin/mod.rs`). It is propagated here rather than being turned into a
+/// failed future, so a C caller sees it on the sync return value and, on the
+/// async path, in an inline callback. Java's `MockAdminClient` does not
+/// validate (`MockAdminClient.java:1285-1300`), and neither does the Rust
+/// mock, so this arm is unreachable through a mock handle.
+fn submit_update_features(
+    admin: &dyn Admin,
+    feature_updates: &HashMap<String, FeatureUpdate>,
+    options: UpdateFeaturesOptions,
+) -> Result<KafkaFuture<UpdateFeaturesOutcomes>, KafkaError> {
+    let result = admin.update_features(feature_updates, options)?;
+    let entries: Vec<(String, KafkaFuture<()>)> = result
+        .values()
+        .iter()
+        .map(|(feature, f)| (feature.clone(), f.clone()))
+        .collect();
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+// ---------------------------------------------------------------------------
+// describeUserScramCredentials
+// ---------------------------------------------------------------------------
+
+/// Builds `DescribeUserScramCredentialsOptions` from the flat C option
+/// parameters.
+fn describe_user_scram_credentials_options(timeout_ms: i32) -> DescribeUserScramCredentialsOptions {
+    DescribeUserScramCredentialsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_user_scram_credentials_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-user failure arrives
+/// inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_DescribeUserScramCredentialsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Describes SASL/SCRAM credentials, blocking until the response has resolved
+/// (synchronous).
+///
+/// This is
+/// `describeUserScramCredentials(List<String>, DescribeUserScramCredentialsOptions)`.
+///
+/// On success writes a
+/// [`kafka_admin_DescribeUserScramCredentialsResult_t`] to `*out_result` (free
+/// it with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`]) and
+/// returns null. **A per-user failure is not a call failure**: it is reported by
+/// [`kafka_admin_DescribeUserScramCredentialsResult_get_error`] for that user. A
+/// non-null return means the request could not be submitted or the whole
+/// response failed, and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `users`: user names to describe. An empty or NULL array describes **every**
+///   user, mirroring Java's null/empty list.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `users` must be null or have `count` entries,
+/// each NULL or a valid C string; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials(
+    admin: *const kafka_admin_AdminClient_t,
+    users: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let users = unsafe { read_strings(users, count) };
+    let options = describe_user_scram_credentials_options(timeout_ms);
+    let outcome =
+        unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_user_scram_credentials(a, &users, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_user_scram_credentials_result) }
+}
+
+/// Describes SASL/SCRAM credentials asynchronously. See
+/// [`kafka_admin_AdminClient_describe_user_scram_credentials`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `users` must be null or have `count` entries,
+/// each NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials_async(
+    admin: *const kafka_admin_AdminClient_t,
+    users: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_user_scram_credentials_callback_t,
+    user_data: *mut c_void,
+) {
+    let users = unsafe { read_strings(users, count) };
+    let options = describe_user_scram_credentials_options(timeout_ms);
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_user_scram_credentials(a, &users, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(rows) => (box_describe_user_scram_credentials_result(rows), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// alterUserScramCredentials
+// ---------------------------------------------------------------------------
+
+/// Builds `AlterUserScramCredentialsOptions` from the flat C option parameters.
+fn alter_user_scram_credentials_options(timeout_ms: i32) -> AlterUserScramCredentialsOptions {
+    AlterUserScramCredentialsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_alter_user_scram_credentials_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_AlterUserScramCredentialsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-user failure arrives
+/// inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_AlterUserScramCredentialsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Upserts and deletes SASL/SCRAM credentials, blocking until every per-user
+/// future has resolved (synchronous).
+///
+/// This is
+/// `alterUserScramCredentials(List<UserScramCredentialAlteration>, AlterUserScramCredentialsOptions)`.
+/// The alterations cross as parallel arrays; row `i` of each describes one
+/// alteration.
+///
+/// On success writes a [`kafka_admin_AlterUserScramCredentialsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_AlterUserScramCredentialsResult_destroy`]) and returns null.
+/// **A per-user failure is not a call failure**: it is reported by
+/// [`kafka_admin_AlterUserScramCredentialsResult_get_error`] for that user. A
+/// non-null return means the request could not be submitted at all, and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `users`: user names; a NULL entry is rejected.
+/// - `is_deletions`: true selects Java's `UserScramCredentialDeletion` for that
+///   row, false its `UserScramCredentialUpsertion`. This is an explicit flag
+///   because both forms carry a user and a mechanism, so no field of the
+///   payload can distinguish them.
+/// - `mechanisms`: `ScramMechanism.type()` indicators — UNKNOWN=0,
+///   SCRAM_SHA_256=1, SCRAM_SHA_512=2. An unrecognised value becomes UNKNOWN,
+///   as Java's `fromType` does, and the broker rejects it.
+/// - `iterations`: iteration count, upsertions only; ignored for deletions.
+/// - `passwords` / `password_lens`: raw password bytes per row, upsertions
+///   only. An upsertion with no password is rejected.
+/// - `salts` / `salt_lens`: raw salt bytes per row, upsertions only. A NULL
+///   entry (or a null array) selects Java's three-argument constructor, which
+///   generates a random salt.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings and each non-null byte
+/// pointer readable for its matching length; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
+    admin: *const kafka_admin_AdminClient_t,
+    users: *const *const c_char,
+    is_deletions: *const bool,
+    mechanisms: *const i32,
+    iterations: *const i32,
+    passwords: *const *const u8,
+    password_lens: *const i32,
+    salts: *const *const u8,
+    salt_lens: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_AlterUserScramCredentialsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let alterations = unsafe {
+        read_scram_alterations(
+            users,
+            is_deletions,
+            mechanisms,
+            iterations,
+            passwords,
+            password_lens,
+            salts,
+            salt_lens,
+            count,
+        )
+    };
+    let options = alter_user_scram_credentials_options(timeout_ms);
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            Ok(submit_alter_user_scram_credentials(a, &alterations?, options))
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_alter_user_scram_credentials_result) }
+}
+
+/// Alters SASL/SCRAM credentials asynchronously. See
+/// [`kafka_admin_AdminClient_alter_user_scram_credentials`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL user entry, or an upsertion
+/// with no password). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when the result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks are not guaranteed to be serialised
+/// on one thread. Do not hold a lock across this call and re-acquire it in the
+/// callback, and publish everything the callback needs (including `user_data`)
+/// before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with string entries NULL or valid C strings and each non-null byte
+/// pointer readable for its matching length.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_async(
+    admin: *const kafka_admin_AdminClient_t,
+    users: *const *const c_char,
+    is_deletions: *const bool,
+    mechanisms: *const i32,
+    iterations: *const i32,
+    passwords: *const *const u8,
+    password_lens: *const i32,
+    salts: *const *const u8,
+    salt_lens: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_alter_user_scram_credentials_callback_t,
+    user_data: *mut c_void,
+) {
+    let alterations = unsafe {
+        read_scram_alterations(
+            users,
+            is_deletions,
+            mechanisms,
+            iterations,
+            passwords,
+            password_lens,
+            salts,
+            salt_lens,
+            count,
+        )
+    };
+    let options = alter_user_scram_credentials_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_alter_user_scram_credentials(a, &alterations?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_alter_user_scram_credentials_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// createDelegationToken
+// ---------------------------------------------------------------------------
+
+/// Builds `CreateDelegationTokenOptions` from the flat C option parameters.
+///
+/// A NULL owner pair leaves Java's `owner` empty, which makes the requesting
+/// principal the owner (KIP-373). `max_lifetime_ms` is passed through
+/// unchanged, so a negative value keeps Java's `-1` "use the broker default"
+/// sentinel.
+fn create_delegation_token_options(
+    renewers: Vec<KafkaPrincipal>,
+    owner: Option<KafkaPrincipal>,
+    max_lifetime_ms: i64,
+    timeout_ms: i32,
+) -> CreateDelegationTokenOptions {
+    let options = CreateDelegationTokenOptions::new()
+        .renewers(renewers)
+        .max_lifetime_ms(max_lifetime_ms)
+        .timeout_ms(option_timeout(timeout_ms));
+    match owner {
+        Some(owner) => options.owner(owner),
+        None => options,
+    }
+}
+
+/// Reads the optional owner pair: both non-NULL yields a principal, either NULL
+/// yields `None`.
+///
+/// # Safety
+///
+/// Both pointers must be null or valid C strings.
+unsafe fn read_optional_principal(principal_type: *const c_char, name: *const c_char) -> Option<KafkaPrincipal> {
+    if principal_type.is_null() || name.is_null() {
+        return None;
+    }
+    Some(KafkaPrincipal::new(
+        unsafe { CStr::from_ptr(principal_type) }.to_string_lossy().to_string(),
+        unsafe { CStr::from_ptr(name) }.to_string_lossy().to_string(),
+    ))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_create_delegation_token_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_CreateDelegationTokenResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. `createDelegationToken` has a single
+/// future for the whole call, so **any** failure arrives as `error`.
+pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_CreateDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Creates a delegation token, blocking until it has been issued
+/// (synchronous).
+///
+/// This is `createDelegationToken(CreateDelegationTokenOptions)`.
+///
+/// On success writes a [`kafka_admin_CreateDelegationTokenResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_CreateDelegationTokenResult_destroy`]) and returns null.
+/// There is one future for the whole call, so any failure is returned and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `renewer_principal_types` / `renewer_names`: the principals allowed to
+///   renew the token, e.g. `"User"` and `"alice"`. A NULL entry in either is
+///   rejected, as Java's `KafkaPrincipal` constructor rejects a null type or
+///   name. An empty list means only the owner may renew.
+/// - `owner_principal_type` / `owner_name`: the token owner. Pass NULL for
+///   both to leave Java's owner empty, making the requesting principal the
+///   owner; passing one without the other is read as NULL.
+/// - `max_lifetime_ms`: the token's maximum lifetime; negative keeps Java's
+///   `-1`, meaning the broker's `delegation.token.max.lifetime.ms`.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the renewer arrays must be null or have
+/// `renewer_count` entries, each NULL or a valid C string; the owner pointers
+/// must be null or valid C strings; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
+    admin: *const kafka_admin_AdminClient_t,
+    renewer_principal_types: *const *const c_char,
+    renewer_names: *const *const c_char,
+    renewer_count: i32,
+    owner_principal_type: *const c_char,
+    owner_name: *const c_char,
+    max_lifetime_ms: i64,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_CreateDelegationTokenResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let renewers = unsafe { read_kafka_principals(renewer_principal_types, renewer_names, renewer_count, "renewer") };
+    let owner = unsafe { read_optional_principal(owner_principal_type, owner_name) };
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            let options = create_delegation_token_options(renewers?, owner, max_lifetime_ms, timeout_ms);
+            Ok(submit_create_delegation_token(a, options))
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_create_delegation_token_result) }
+}
+
+/// Creates a delegation token asynchronously. See
+/// [`kafka_admin_AdminClient_create_delegation_token`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or a NULL renewer principal type or
+/// name entry). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
+/// Destroying the handle does not cause that — an outstanding operation holds
+/// its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread. Do
+/// not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the renewer arrays must be null or have
+/// `renewer_count` entries, each NULL or a valid C string; the owner pointers
+/// must be null or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
+    admin: *const kafka_admin_AdminClient_t,
+    renewer_principal_types: *const *const c_char,
+    renewer_names: *const *const c_char,
+    renewer_count: i32,
+    owner_principal_type: *const c_char,
+    owner_name: *const c_char,
+    max_lifetime_ms: i64,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_create_delegation_token_callback_t,
+    user_data: *mut c_void,
+) {
+    let renewers = unsafe { read_kafka_principals(renewer_principal_types, renewer_names, renewer_count, "renewer") };
+    let owner = unsafe { read_optional_principal(owner_principal_type, owner_name) };
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| {
+                let options = create_delegation_token_options(renewers?, owner, max_lifetime_ms, timeout_ms);
+                Ok(submit_create_delegation_token(a, options))
+            },
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(token) => (box_create_delegation_token_result(token), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// renewDelegationToken
+// ---------------------------------------------------------------------------
+
+/// Builds `RenewDelegationTokenOptions` from the flat C option parameters.
+fn renew_delegation_token_options(renew_time_period_ms: i64, timeout_ms: i32) -> RenewDelegationTokenOptions {
+    RenewDelegationTokenOptions::new()
+        .renew_time_period_ms(renew_time_period_ms)
+        .timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_renew_delegation_token_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_RenewDelegationTokenResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. `renewDelegationToken` has a single
+/// future for the whole call, so **any** failure arrives as `error`.
+pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_RenewDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Renews a delegation token, blocking until the broker has answered
+/// (synchronous).
+///
+/// This is `renewDelegationToken(byte[], RenewDelegationTokenOptions)`.
+///
+/// On success writes a [`kafka_admin_RenewDelegationTokenResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_RenewDelegationTokenResult_destroy`]) and returns null. There
+/// is one future for the whole call, so any failure is returned and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
+///   [`kafka_common_DelegationToken_hmac`]. Not NUL-terminated; the length is
+///   required.
+/// - `renew_time_period_ms`: how much longer the token should live; negative
+///   keeps Java's `-1`, meaning the broker's
+///   `delegation.token.expiry.time.ms`.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `hmac` must be null or readable for
+/// `hmac_len` bytes; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
+    admin: *const kafka_admin_AdminClient_t,
+    hmac: *const u8,
+    hmac_len: i32,
+    renew_time_period_ms: i64,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_RenewDelegationTokenResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let hmac = unsafe { read_bytes(hmac, hmac_len) };
+    let options = renew_delegation_token_options(renew_time_period_ms, timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_renew_delegation_token(a, &hmac, options))) };
+    unsafe { finish_sync(outcome, out_result, box_renew_delegation_token_result) }
+}
+
+/// Renews a delegation token asynchronously. See
+/// [`kafka_admin_AdminClient_renew_delegation_token`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `hmac` must be null or readable for
+/// `hmac_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token_async(
+    admin: *const kafka_admin_AdminClient_t,
+    hmac: *const u8,
+    hmac_len: i32,
+    renew_time_period_ms: i64,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_renew_delegation_token_callback_t,
+    user_data: *mut c_void,
+) {
+    let hmac = unsafe { read_bytes(hmac, hmac_len) };
+    let options = renew_delegation_token_options(renew_time_period_ms, timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_renew_delegation_token(a, &hmac, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(expiry) => (box_renew_delegation_token_result(expiry), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// expireDelegationToken
+// ---------------------------------------------------------------------------
+
+/// Builds `ExpireDelegationTokenOptions` from the flat C option parameters.
+fn expire_delegation_token_options(expiry_time_period_ms: i64, timeout_ms: i32) -> ExpireDelegationTokenOptions {
+    ExpireDelegationTokenOptions::new()
+        .expiry_time_period_ms(expiry_time_period_ms)
+        .timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_expire_delegation_token_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ExpireDelegationTokenResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. `expireDelegationToken` has a single
+/// future for the whole call, so **any** failure arrives as `error`.
+pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ExpireDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Expires a delegation token, blocking until the broker has answered
+/// (synchronous).
+///
+/// This is `expireDelegationToken(byte[], ExpireDelegationTokenOptions)`.
+///
+/// On success writes a [`kafka_admin_ExpireDelegationTokenResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_ExpireDelegationTokenResult_destroy`]) and returns null. There
+/// is one future for the whole call, so any failure is returned and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
+///   [`kafka_common_DelegationToken_hmac`]. Not NUL-terminated; the length is
+///   required.
+/// - `expiry_time_period_ms`: `>= 0` moves the expiry to
+///   `min(now + expiry_time_period_ms, maxTimestamp)`; **negative expires the
+///   token immediately**, which is Java's documented meaning of the `-1`
+///   default rather than "use a broker default".
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `hmac` must be null or readable for
+/// `hmac_len` bytes; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
+    admin: *const kafka_admin_AdminClient_t,
+    hmac: *const u8,
+    hmac_len: i32,
+    expiry_time_period_ms: i64,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ExpireDelegationTokenResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let hmac = unsafe { read_bytes(hmac, hmac_len) };
+    let options = expire_delegation_token_options(expiry_time_period_ms, timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_expire_delegation_token(a, &hmac, options))) };
+    unsafe { finish_sync(outcome, out_result, box_expire_delegation_token_result) }
+}
+
+/// Expires a delegation token asynchronously. See
+/// [`kafka_admin_AdminClient_expire_delegation_token`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `hmac` must be null or readable for
+/// `hmac_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token_async(
+    admin: *const kafka_admin_AdminClient_t,
+    hmac: *const u8,
+    hmac_len: i32,
+    expiry_time_period_ms: i64,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_expire_delegation_token_callback_t,
+    user_data: *mut c_void,
+) {
+    let hmac = unsafe { read_bytes(hmac, hmac_len) };
+    let options = expire_delegation_token_options(expiry_time_period_ms, timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_expire_delegation_token(a, &hmac, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(expiry) => (box_expire_delegation_token_result(expiry), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeDelegationToken
+// ---------------------------------------------------------------------------
+
+/// Builds `DescribeDelegationTokenOptions` from the flat C option parameters.
+///
+/// `has_owners_filter` is the discriminant Java's nullable `owners()` needs: an
+/// unset filter describes **every** token, which a count of zero cannot express
+/// on its own.
+fn describe_delegation_token_options(
+    owners: Vec<KafkaPrincipal>,
+    has_owners_filter: bool,
+    timeout_ms: i32,
+) -> DescribeDelegationTokenOptions {
+    let owners = if has_owners_filter { Some(owners) } else { None };
+    DescribeDelegationTokenOptions::new()
+        .owners(owners)
+        .timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_delegation_token_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeDelegationTokenResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. `describeDelegationToken`
+/// has a single future for the whole call, so **any** failure arrives as
+/// `error`.
+pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes delegation tokens, blocking until the broker has answered
+/// (synchronous).
+///
+/// This is `describeDelegationToken(DescribeDelegationTokenOptions)`.
+///
+/// On success writes a [`kafka_admin_DescribeDelegationTokenResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeDelegationTokenResult_destroy`]) and returns null.
+/// There is one future for the whole call, so any failure is returned and
+/// `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `has_owners_filter`: false leaves Java's `owners` unset, describing
+///   **every** token the caller may see. True applies the filter below, even
+///   when it is empty. The flag is required because an empty filter and no
+///   filter are different requests and a count of zero cannot tell them apart.
+/// - `owner_principal_types` / `owner_names`: the owners to filter by; a NULL
+///   entry in either is rejected. Ignored when `has_owners_filter` is false.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the owner arrays must be null or have
+/// `owner_count` entries, each NULL or a valid C string; `out_result` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
+    admin: *const kafka_admin_AdminClient_t,
+    has_owners_filter: bool,
+    owner_principal_types: *const *const c_char,
+    owner_names: *const *const c_char,
+    owner_count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeDelegationTokenResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let owners = unsafe { read_kafka_principals(owner_principal_types, owner_names, owner_count, "owner") };
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            let options = describe_delegation_token_options(owners?, has_owners_filter, timeout_ms);
+            Ok(submit_describe_delegation_token(a, options))
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_describe_delegation_token_result) }
+}
+
+/// Describes delegation tokens asynchronously. See
+/// [`kafka_admin_AdminClient_describe_delegation_token`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or a NULL owner principal type or
+/// name entry). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when the result arrives.
+/// Destroying the handle does not cause that — an outstanding operation holds
+/// its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread. Do
+/// not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; the owner arrays must be null or have
+/// `owner_count` entries, each NULL or a valid C string.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async(
+    admin: *const kafka_admin_AdminClient_t,
+    has_owners_filter: bool,
+    owner_principal_types: *const *const c_char,
+    owner_names: *const *const c_char,
+    owner_count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_delegation_token_callback_t,
+    user_data: *mut c_void,
+) {
+    let owners = unsafe { read_kafka_principals(owner_principal_types, owner_names, owner_count, "owner") };
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| {
+                let options = describe_delegation_token_options(owners?, has_owners_filter, timeout_ms);
+                Ok(submit_describe_delegation_token(a, options))
+            },
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(tokens) => (box_describe_delegation_token_result(tokens), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeFeatures
+// ---------------------------------------------------------------------------
+
+/// Builds `DescribeFeaturesOptions` from the flat C option parameters.
+///
+/// `has_node_id` is the discriminant Java's `OptionalInt nodeId()` needs: node
+/// id 0 is a legal broker, so no sentinel would work.
+fn describe_features_options(node_id: i32, has_node_id: bool, timeout_ms: i32) -> DescribeFeaturesOptions {
+    let options = DescribeFeaturesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    if has_node_id { options.node_id(node_id) } else { options }
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_describe_features_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeFeaturesResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. `describeFeatures` has a single future
+/// for the whole call, so **any** failure arrives as `error`.
+pub type kafka_admin_AdminClient_describe_features_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeFeaturesResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the cluster's finalized and supported features, blocking until the
+/// broker has answered (synchronous).
+///
+/// This is `describeFeatures(DescribeFeaturesOptions)`.
+///
+/// On success writes a [`kafka_admin_DescribeFeaturesResult_t`] to
+/// `*out_result` (free it with [`kafka_admin_DescribeFeaturesResult_destroy`])
+/// and returns null. There is one future for the whole call, so any failure is
+/// returned and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `has_node_id` / `node_id`: send the request to this specific node. When
+///   `has_node_id` is false the request goes to an arbitrary
+///   controller/broker, mirroring Java's empty `OptionalInt`. The flag is
+///   required because node id 0 is a legal broker.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
+    admin: *const kafka_admin_AdminClient_t,
+    has_node_id: bool,
+    node_id: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeFeaturesResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let options = describe_features_options(node_id, has_node_id, timeout_ms);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_features(a, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_features_result) }
+}
+
+/// Describes the cluster's features asynchronously. See
+/// [`kafka_admin_AdminClient_describe_features`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// it in the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features_async(
+    admin: *const kafka_admin_AdminClient_t,
+    has_node_id: bool,
+    node_id: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_features_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = describe_features_options(node_id, has_node_id, timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_features(a, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(metadata) => (box_describe_features_result(metadata), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// updateFeatures
+// ---------------------------------------------------------------------------
+
+/// Builds `UpdateFeaturesOptions` from the flat C option parameters.
+fn update_features_options(timeout_ms: i32, validate_only: bool) -> UpdateFeaturesOptions {
+    UpdateFeaturesOptions::new()
+        .validate_only(validate_only)
+        .timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_update_features_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_UpdateFeaturesResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-feature failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_update_features_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_UpdateFeaturesResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Applies feature updates, blocking until every per-feature future has
+/// resolved (synchronous).
+///
+/// This is `updateFeatures(Map<String, FeatureUpdate>, UpdateFeaturesOptions)`.
+/// The updates cross as parallel arrays; row `i` of each describes one update.
+///
+/// On success writes a [`kafka_admin_UpdateFeaturesResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_UpdateFeaturesResult_destroy`]) and returns
+/// null. **A per-feature failure is not a call failure**: it is reported by
+/// [`kafka_admin_UpdateFeaturesResult_get_error`] for that feature. A non-null
+/// return means the request could not be submitted at all, and `*out_result` is
+/// left untouched.
+///
+/// `updateFeatures` is the one admin RPC with client-side validation that runs
+/// **before** the request is enqueued: Java's *real* client
+/// (`KafkaAdminClient.updateFeatures`) throws `IllegalArgumentException` for an
+/// empty update map or a blank feature name, and `FeatureUpdate`'s own
+/// constructor throws for a zero `max_version_level` with an UPGRADE upgrade
+/// type or for a negative one. All of those are returned here rather than
+/// reported per feature. Java's `MockAdminClient.updateFeatures` performs
+/// **no** such check (`MockAdminClient.java:1285-1300` goes straight to the
+/// per-feature loop), so against a mock handle an empty request yields an empty
+/// result rather than an error, exactly as in Java.
+///
+/// # Parameters
+///
+/// - `features`: feature names; a NULL entry is rejected, and so is a repeated
+///   name (Java takes a `Map`, where the second would silently replace the
+///   first).
+/// - `max_version_levels`: the new maximum version level per feature. Zero
+///   deletes the finalized feature and must be paired with a downgrade type.
+/// - `upgrade_types`: `FeatureUpdate.UpgradeType.code()` — UNKNOWN=0,
+///   UPGRADE=1, SAFE_DOWNGRADE=2, UNSAFE_DOWNGRADE=3. An unrecognised value
+///   becomes UNKNOWN, as Java's `fromCode` does, and the broker rejects it.
+/// - `validate_only`: validate the updates without applying them.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with name entries NULL or valid C strings; `out_result` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
+    admin: *const kafka_admin_AdminClient_t,
+    features: *const *const c_char,
+    max_version_levels: *const i16,
+    upgrade_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    out_result: *mut *mut kafka_admin_UpdateFeaturesResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
+    let options = update_features_options(timeout_ms, validate_only);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_update_features(a, &updates?, options)) };
+    unsafe { finish_sync(outcome, out_result, box_update_features_result) }
+}
+
+/// Applies feature updates asynchronously. See
+/// [`kafka_admin_AdminClient_update_features`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, a NULL or repeated feature name, a
+/// `FeatureUpdate` the constructor rejects, or — against a real client, not a
+/// mock — an empty update map, for which `KafkaAdminClient.updateFeatures`
+/// throws `IllegalArgumentException`). And it runs on a
+/// **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when the result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
+/// guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in the callback, and publish everything the callback
+/// needs (including `user_data`) before calling rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every non-null array must have `count`
+/// entries, with name entries NULL or valid C strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
+    admin: *const kafka_admin_AdminClient_t,
+    features: *const *const c_char,
+    max_version_levels: *const i16,
+    upgrade_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    callback: kafka_admin_AdminClient_update_features_callback_t,
+    user_data: *mut c_void,
+) {
+    let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
+    let options = update_features_options(timeout_ms, validate_only);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_update_features(a, &updates?, options),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_update_features_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// B5b — SCRAM, delegation-token and feature result handles
+//
+// Accessors follow each Java `*Result`'s future shape (`PLAN-bindings.md` D2),
+// not a fixed template:
+//
+//   - `Map<K, KafkaFuture<Void>>`             -> `_count` / key / `_get_error(i)`,
+//     no value (`alterUserScramCredentials`, `updateFeatures`)
+//   - a per-key value **and** error, composed from Java's three views
+//     (`describeUserScramCredentials`; see
+//     `submit_describe_user_scram_credentials`)
+//   - one `KafkaFuture<V>` for the whole call -> value accessors and **no**
+//     `_get_error`, because a failure is the call's error
+//     (`createDelegationToken`, `renewDelegationToken`,
+//     `expireDelegationToken`, `describeDelegationToken`, `describeFeatures`)
+//
+// The two `KafkaFuture<Long>` results still get a handle each, rather than
+// delivering the timestamp through the callback directly: D2 is one opaque
+// result handle per RPC, and keeping the callback signature uniform across all
+// 46 RPCs is worth more than saving an allocation on two of them.
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a flattened `DescribeUserScramCredentialsResult`.
+#[repr(C)]
+pub struct kafka_admin_DescribeUserScramCredentialsResult_t {
+    _private: [u8; 0],
+}
+
+/// One user's row in [`kafka_admin_DescribeUserScramCredentialsResult_t`].
+///
+/// `ScramCredentialInfo` is two scalars, so it is flattened into a second index
+/// rather than minted as a handle (`PLAN-bindings.md` §7 D2, fifth rule).
+struct ScramUserRow {
+    user_c: CString,
+    mechanisms: Vec<i32>,
+    iterations: Vec<i32>,
+    error: Option<KafkaErrorInner>,
+}
+
+/// Backing state for [`kafka_admin_DescribeUserScramCredentialsResult_t`].
+struct DescribeUserScramCredentialsResultInner {
+    users: Vec<ScramUserRow>,
+}
+
+/// Flattens the per-user `describeUserScramCredentials` outcomes into the C
+/// handle.
+fn box_describe_user_scram_credentials_result(
+    outcomes: ScramDescriptionOutcomes,
+) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
+    let mut users: Vec<ScramUserRow> = outcomes
+        .into_iter()
+        .map(|(user, outcome)| {
+            let (mechanisms, iterations, error) = match outcome {
+                Ok(description) => {
+                    let mechanisms = description
+                        .credential_infos()
+                        .iter()
+                        .map(|i| i32::from(i.mechanism().r#type()))
+                        .collect();
+                    let iterations = description.credential_infos().iter().map(|i| i.iterations()).collect();
+                    (mechanisms, iterations, None)
+                },
+                Err(e) => (Vec::new(), Vec::new(), Some(error_inner(e))),
+            };
+            ScramUserRow { user_c: to_cstring(&user), mechanisms, iterations, error }
+        })
+        .collect();
+    users.sort_by(|a, b| a.user_c.cmp(&b.user_c));
+    Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { users }))
+        as *mut kafka_admin_DescribeUserScramCredentialsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeUserScramCredentialsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_user_scram_credentials`
+/// call.
+unsafe fn describe_user_scram_credentials_result_ref(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> &'static DescribeUserScramCredentialsResultInner {
+    unsafe { &*(result as *const DescribeUserScramCredentialsResultInner) }
+}
+
+/// Returns the row at `index`, or `None` when it is out of range.
+fn scram_user_row_at(inner: &DescribeUserScramCredentialsResultInner, index: i32) -> Option<&ScramUserRow> {
+    if index < 0 {
+        return None;
+    }
+    inner.users.get(index as usize)
+}
+
+/// Returns the number of described users. Users are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> i32 {
+    unsafe { describe_user_scram_credentials_result_ref(result) }.users.len() as i32
+}
+
+/// Returns the user name at `index` (borrowed), or null if out of range. Do not
+/// free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    index: i32,
+) -> *const c_char {
+    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
+        Some(row) => row.user_c.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the user at `index` (borrowed), or null if the user was
+/// described successfully or `index` is out of range. Do not destroy it.
+///
+/// A user the broker reports as `RESOURCE_NOT_FOUND` is *not* an error here: it
+/// is a successfully described user with zero credentials, which is what Java's
+/// `all()` also does.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_error(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
+        Some(row) => error_ptr(row.error.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of `ScramCredentialInfo`s for the user at `index`, or 0
+/// if out of range or the user failed.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    index: i32,
+) -> i32 {
+    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
+        Some(row) => row.mechanisms.len() as i32,
+        None => 0,
+    }
+}
+
+/// Returns `ScramMechanism.type()` for credential `credential_index` of the
+/// user at `index`: UNKNOWN=0, SCRAM_SHA_256=1, SCRAM_SHA_512=2. Returns -1 when
+/// either index is out of range, which is not a legal type indicator.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    index: i32,
+    credential_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
+            .map(|row| row.mechanisms.as_slice()),
+        credential_index,
+    )
+}
+
+/// Returns the iteration count for credential `credential_index` of the user at
+/// `index`, or -1 when either index is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    index: i32,
+    credential_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
+            .map(|row| row.iterations.as_slice()),
+        credential_index,
+    )
+}
+
+/// Destroys a `describe_user_scram_credentials` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_user_scram_credentials` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
+    result: *mut kafka_admin_DescribeUserScramCredentialsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeUserScramCredentialsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `AlterUserScramCredentialsResult`.
+#[repr(C)]
+pub struct kafka_admin_AlterUserScramCredentialsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_AlterUserScramCredentialsResult_t`].
+///
+/// `AlterUserScramCredentialsResult.values()` is
+/// `Map<String, KafkaFuture<Void>>`: a per-user future carrying no value, so
+/// the handle exposes the user and its error and nothing else.
+struct AlterUserScramCredentialsResultInner {
+    users: Vec<CString>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-user `alterUserScramCredentials` outcomes into the C
+/// handle.
+fn box_alter_user_scram_credentials_result(
+    outcomes: AlterScramOutcomes,
+) -> *mut kafka_admin_AlterUserScramCredentialsResult_t {
+    let (users, errors) = flatten_keyed_void_outcomes(outcomes);
+    Box::into_raw(Box::new(AlterUserScramCredentialsResultInner { users, errors }))
+        as *mut kafka_admin_AlterUserScramCredentialsResult_t
+}
+
+/// Casts a `*const kafka_admin_AlterUserScramCredentialsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `alter_user_scram_credentials`
+/// call.
+unsafe fn alter_user_scram_credentials_result_ref(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+) -> &'static AlterUserScramCredentialsResultInner {
+    unsafe { &*(result as *const AlterUserScramCredentialsResultInner) }
+}
+
+/// Returns the number of altered users. Users are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_count(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+) -> i32 {
+    unsafe { alter_user_scram_credentials_result_ref(result) }.users.len() as i32
+}
+
+/// Returns the user name at `index` (borrowed), or null if out of range. Do not
+/// free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.users, index)
+}
+
+/// Returns the error for the user at `index` (borrowed), or null if the
+/// alteration succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.errors, index)
+}
+
+/// Destroys an `alter_user_scram_credentials` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `alter_user_scram_credentials` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
+    result: *mut kafka_admin_AlterUserScramCredentialsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut AlterUserScramCredentialsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `CreateDelegationTokenResult`.
+#[repr(C)]
+pub struct kafka_admin_CreateDelegationTokenResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_CreateDelegationTokenResult_t`].
+///
+/// `CreateDelegationTokenResult` holds one `KafkaFuture<DelegationToken>` for
+/// the whole call, so there is no per-key error: a failure is the call's error.
+struct CreateDelegationTokenResultInner {
+    token: DelegationTokenInner,
+}
+
+/// Boxes the created token into the C handle.
+fn box_create_delegation_token_result(token: DelegationToken) -> *mut kafka_admin_CreateDelegationTokenResult_t {
+    Box::into_raw(Box::new(CreateDelegationTokenResultInner {
+        token: DelegationTokenInner::new(&token),
+    })) as *mut kafka_admin_CreateDelegationTokenResult_t
+}
+
+/// Casts a `*const kafka_admin_CreateDelegationTokenResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `create_delegation_token` call.
+unsafe fn create_delegation_token_result_ref(
+    result: *const kafka_admin_CreateDelegationTokenResult_t,
+) -> &'static CreateDelegationTokenResultInner {
+    unsafe { &*(result as *const CreateDelegationTokenResultInner) }
+}
+
+/// Returns the created token (borrowed). Do not free it; it dies with the
+/// result handle.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
+    result: *const kafka_admin_CreateDelegationTokenResult_t,
+) -> *const kafka_common_DelegationToken_t {
+    unsafe { create_delegation_token_result_ref(result) }.token.as_ptr()
+}
+
+/// Destroys a `create_delegation_token` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `create_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_destroy(
+    result: *mut kafka_admin_CreateDelegationTokenResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut CreateDelegationTokenResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `RenewDelegationTokenResult`.
+#[repr(C)]
+pub struct kafka_admin_RenewDelegationTokenResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_RenewDelegationTokenResult_t`].
+struct RenewDelegationTokenResultInner {
+    expiry_timestamp: i64,
+}
+
+/// Boxes the new expiry timestamp into the C handle.
+fn box_renew_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_RenewDelegationTokenResult_t {
+    Box::into_raw(Box::new(RenewDelegationTokenResultInner { expiry_timestamp }))
+        as *mut kafka_admin_RenewDelegationTokenResult_t
+}
+
+/// Returns `expiryTimestamp()`: the token's new expiry, in milliseconds since
+/// the epoch.
+///
+/// # Safety
+///
+/// `result` must be a valid `renew_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
+    result: *const kafka_admin_RenewDelegationTokenResult_t,
+) -> i64 {
+    unsafe { &*(result as *const RenewDelegationTokenResultInner) }.expiry_timestamp
+}
+
+/// Destroys a `renew_delegation_token` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `renew_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
+    result: *mut kafka_admin_RenewDelegationTokenResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut RenewDelegationTokenResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `ExpireDelegationTokenResult`.
+#[repr(C)]
+pub struct kafka_admin_ExpireDelegationTokenResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ExpireDelegationTokenResult_t`].
+struct ExpireDelegationTokenResultInner {
+    expiry_timestamp: i64,
+}
+
+/// Boxes the new expiry timestamp into the C handle.
+fn box_expire_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_ExpireDelegationTokenResult_t {
+    Box::into_raw(Box::new(ExpireDelegationTokenResultInner { expiry_timestamp }))
+        as *mut kafka_admin_ExpireDelegationTokenResult_t
+}
+
+/// Returns `expiryTimestamp()`: when the token now expires, in milliseconds
+/// since the epoch. A token expired immediately reports the timestamp at which
+/// the broker expired it.
+///
+/// # Safety
+///
+/// `result` must be a valid `expire_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(
+    result: *const kafka_admin_ExpireDelegationTokenResult_t,
+) -> i64 {
+    unsafe { &*(result as *const ExpireDelegationTokenResultInner) }.expiry_timestamp
+}
+
+/// Destroys an `expire_delegation_token` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `expire_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_destroy(
+    result: *mut kafka_admin_ExpireDelegationTokenResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ExpireDelegationTokenResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeDelegationTokenResult`.
+#[repr(C)]
+pub struct kafka_admin_DescribeDelegationTokenResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeDelegationTokenResult_t`].
+///
+/// One `KafkaFuture<List<DelegationToken>>` for the whole call, so there is no
+/// per-token error: a failure is the call's error.
+struct DescribeDelegationTokenResultInner {
+    tokens: Vec<DelegationTokenInner>,
+}
+
+/// Boxes the described tokens into the C handle.
+fn box_describe_delegation_token_result(
+    tokens: Vec<DelegationToken>,
+) -> *mut kafka_admin_DescribeDelegationTokenResult_t {
+    let tokens = tokens.iter().map(DelegationTokenInner::new).collect();
+    Box::into_raw(Box::new(DescribeDelegationTokenResultInner { tokens }))
+        as *mut kafka_admin_DescribeDelegationTokenResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeDelegationTokenResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_delegation_token` call.
+unsafe fn describe_delegation_token_result_ref(
+    result: *const kafka_admin_DescribeDelegationTokenResult_t,
+) -> &'static DescribeDelegationTokenResultInner {
+    unsafe { &*(result as *const DescribeDelegationTokenResultInner) }
+}
+
+/// Returns the number of described tokens.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
+    result: *const kafka_admin_DescribeDelegationTokenResult_t,
+) -> i32 {
+    unsafe { describe_delegation_token_result_ref(result) }.tokens.len() as i32
+}
+
+/// Returns the token at `index` (borrowed), or null if out of range. Tokens
+/// keep the order the broker reported, as Java's `List` does. Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
+    result: *const kafka_admin_DescribeDelegationTokenResult_t,
+    index: i32,
+) -> *const kafka_common_DelegationToken_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_delegation_token_result_ref(result) }
+        .tokens
+        .get(index as usize)
+    {
+        Some(token) => token.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_delegation_token` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_delegation_token` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
+    result: *mut kafka_admin_DescribeDelegationTokenResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeDelegationTokenResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `DescribeFeaturesResult`.
+#[repr(C)]
+pub struct kafka_admin_DescribeFeaturesResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeFeaturesResult_t`].
+///
+/// `FeatureMetadata` is a single record keyed directly by the result, so its
+/// two maps sit at one index each on the handle and its epoch is a scalar on
+/// it; nothing is minted (`PLAN-bindings.md` §7 D2, fifth rule). The two maps
+/// are **independently indexed**: `finalizedFeatures()` and
+/// `supportedFeatures()` need not have the same size or the same feature names,
+/// so `_get_finalized_feature(i)` and `_get_supported_feature(i)` are not
+/// co-indexed. This is the `ListGroupsResult.valid()`/`errors()` shape.
+struct DescribeFeaturesResultInner {
+    finalized_features: Vec<CString>,
+    finalized_min_version_levels: Vec<i16>,
+    finalized_max_version_levels: Vec<i16>,
+    finalized_features_epoch: Option<i64>,
+    supported_features: Vec<CString>,
+    supported_min_versions: Vec<i16>,
+    supported_max_versions: Vec<i16>,
+}
+
+/// Flattens the feature metadata into the C handle.
+fn box_describe_features_result(metadata: FeatureMetadata) -> *mut kafka_admin_DescribeFeaturesResult_t {
+    let finalized = sorted_entries(metadata.finalized_features().clone());
+    let supported = sorted_entries(metadata.supported_features().clone());
+    let inner = DescribeFeaturesResultInner {
+        finalized_features: finalized.iter().map(|(name, _)| to_cstring(name)).collect(),
+        finalized_min_version_levels: finalized.iter().map(|(_, r)| r.min_version_level()).collect(),
+        finalized_max_version_levels: finalized.iter().map(|(_, r)| r.max_version_level()).collect(),
+        finalized_features_epoch: metadata.finalized_features_epoch(),
+        supported_features: supported.iter().map(|(name, _)| to_cstring(name)).collect(),
+        supported_min_versions: supported.iter().map(|(_, r)| r.min_version()).collect(),
+        supported_max_versions: supported.iter().map(|(_, r)| r.max_version()).collect(),
+    };
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DescribeFeaturesResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeFeaturesResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_features` call.
+unsafe fn describe_features_result_ref(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+) -> &'static DescribeFeaturesResultInner {
+    unsafe { &*(result as *const DescribeFeaturesResultInner) }
+}
+
+/// Returns the number of finalized features. Features are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_count(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+) -> i32 {
+    unsafe { describe_features_result_ref(result) }.finalized_features.len() as i32
+}
+
+/// Returns the finalized feature name at `index` (borrowed), or null if out of
+/// range. Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_feature(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_features_result_ref(result) }.finalized_features, index)
+}
+
+/// Returns `FinalizedVersionRange.minVersionLevel()` for the finalized feature
+/// at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    index: i32,
+) -> i16 {
+    indexed_i16_at(
+        &unsafe { describe_features_result_ref(result) }.finalized_min_version_levels,
+        index,
+    )
+}
+
+/// Returns `FinalizedVersionRange.maxVersionLevel()` for the finalized feature
+/// at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    index: i32,
+) -> i16 {
+    indexed_i16_at(
+        &unsafe { describe_features_result_ref(result) }.finalized_max_version_levels,
+        index,
+    )
+}
+
+/// Writes `finalizedFeaturesEpoch()` to `out_epoch` and returns true, or
+/// returns false when the broker did not report one (Java's empty
+/// `Optional<Long>`).
+///
+/// A nullable *number* needs an explicit discriminant: every `int64_t`,
+/// including 0 and -1, is a legal epoch, so no sentinel would work.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle; `out_epoch` must
+/// be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_epoch(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    out_epoch: *mut i64,
+) -> bool {
+    unsafe { write_optional(describe_features_result_ref(result).finalized_features_epoch, out_epoch) }
+}
+
+/// Returns the number of supported features. Features are sorted by name, and
+/// are **not** co-indexed with the finalized ones: the two maps can differ in
+/// both size and contents.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_supported_count(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+) -> i32 {
+    unsafe { describe_features_result_ref(result) }.supported_features.len() as i32
+}
+
+/// Returns the supported feature name at `index` (borrowed), or null if out of
+/// range. Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_feature(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_features_result_ref(result) }.supported_features, index)
+}
+
+/// Returns `SupportedVersionRange.minVersion()` for the supported feature at
+/// `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_min_version(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    index: i32,
+) -> i16 {
+    indexed_i16_at(&unsafe { describe_features_result_ref(result) }.supported_min_versions, index)
+}
+
+/// Returns `SupportedVersionRange.maxVersion()` for the supported feature at
+/// `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_version(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+    index: i32,
+) -> i16 {
+    indexed_i16_at(&unsafe { describe_features_result_ref(result) }.supported_max_versions, index)
+}
+
+/// Destroys a `describe_features` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(result: *mut kafka_admin_DescribeFeaturesResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeFeaturesResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `UpdateFeaturesResult`.
+#[repr(C)]
+pub struct kafka_admin_UpdateFeaturesResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_UpdateFeaturesResult_t`].
+///
+/// `UpdateFeaturesResult.values()` is `Map<String, KafkaFuture<Void>>`: a
+/// per-feature future carrying no value, so the handle exposes the feature and
+/// its error and nothing else.
+struct UpdateFeaturesResultInner {
+    features: Vec<CString>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-feature `updateFeatures` outcomes into the C handle.
+fn box_update_features_result(outcomes: UpdateFeaturesOutcomes) -> *mut kafka_admin_UpdateFeaturesResult_t {
+    let (features, errors) = flatten_keyed_void_outcomes(outcomes);
+    Box::into_raw(Box::new(UpdateFeaturesResultInner { features, errors })) as *mut kafka_admin_UpdateFeaturesResult_t
+}
+
+/// Casts a `*const kafka_admin_UpdateFeaturesResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `update_features` call.
+unsafe fn update_features_result_ref(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+) -> &'static UpdateFeaturesResultInner {
+    unsafe { &*(result as *const UpdateFeaturesResultInner) }
+}
+
+/// Returns the number of updated features. Features are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `update_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_count(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+) -> i32 {
+    unsafe { update_features_result_ref(result) }.features.len() as i32
+}
+
+/// Returns the feature name at `index` (borrowed), or null if out of range. Do
+/// not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `update_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { update_features_result_ref(result) }.features, index)
+}
+
+/// Returns the error for the feature at `index` (borrowed), or null if the
+/// update succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `update_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    optional_error_at(&unsafe { update_features_result_ref(result) }.errors, index)
+}
+
+/// Destroys an `update_features` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `update_features` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut kafka_admin_UpdateFeaturesResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut UpdateFeaturesResultInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 //
 // These exercise the pure marshaling helpers directly rather than end-to-end
@@ -14828,7 +17511,7 @@ unsafe fn read_partition_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::{ConfigSynonym, FilterResult, ReplicaInfo};
+    use crate::admin::{ConfigSynonym, FilterResult, FinalizedVersionRange, ReplicaInfo, SupportedVersionRange};
     use crate::common::{ClassicGroupState, Errors, KafkaGenericError};
 
     fn text(value: &CString) -> &str {
@@ -17230,6 +19913,677 @@ mod tests {
             assert!(kafka_admin_AlterClientQuotasResult_get_entity(result, -1).is_null());
             assert!(kafka_admin_AlterClientQuotasResult_get_error(result, -1).is_null());
             kafka_admin_AlterClientQuotasResult_destroy(result);
+        }
+    }
+
+    // -- B5b: SCRAM, delegation tokens and features -------------------------
+    //
+    // Java's own `MockAdminClient` throws for `describeUserScramCredentials`
+    // and `alterUserScramCredentials` (`MockAdminClient.java:1251-1259`), so
+    // *neither* direction of their marshaling has an end-to-end observable:
+    // the drain's success path is dead code and so is every request
+    // discriminant. These tests are the only coverage those paths get, and
+    // they exercise the pure helpers directly.
+    //
+    // The delegation-token and feature RPCs *are* implemented by Java's mock,
+    // so those are additionally covered end to end in the C and Python suites.
+
+    #[test]
+    fn describe_user_scram_credentials_options_maps_its_timeout() {
+        assert_eq!(describe_user_scram_credentials_options(4_100).timeout(), Some(4_100));
+        assert_eq!(describe_user_scram_credentials_options(-1).timeout(), None);
+        assert_eq!(alter_user_scram_credentials_options(4_200).timeout(), Some(4_200));
+        assert_eq!(alter_user_scram_credentials_options(-1).timeout(), None);
+    }
+
+    #[test]
+    fn create_delegation_token_options_maps_each_field_to_its_own_setter() {
+        // Every value distinct, so swapping any two parameters is caught.
+        let options = create_delegation_token_options(
+            vec![
+                KafkaPrincipal::new("User", "renewer-1"),
+                KafkaPrincipal::new("User", "renewer-2"),
+            ],
+            Some(KafkaPrincipal::new("User", "owner")),
+            86_400_000,
+            4_300,
+        );
+        assert_eq!(options.get_renewers().len(), 2);
+        assert_eq!(options.get_renewers()[0].name(), "renewer-1");
+        assert_eq!(options.get_renewers()[1].name(), "renewer-2");
+        assert_eq!(options.get_owner().map(|o| o.name().to_string()), Some("owner".to_string()));
+        assert_eq!(options.get_max_lifetime_ms(), 86_400_000);
+        assert_eq!(options.timeout(), Some(4_300));
+
+        // No owner leaves Java's field empty, which makes the requesting
+        // principal the owner; a negative lifetime keeps Java's -1 sentinel.
+        let defaulted = create_delegation_token_options(Vec::new(), None, -1, -1);
+        assert!(defaulted.get_owner().is_none());
+        assert_eq!(defaulted.get_max_lifetime_ms(), -1);
+        assert_eq!(defaulted.timeout(), None);
+    }
+
+    #[test]
+    fn renew_and_expire_options_do_not_share_a_period_field() {
+        // The two periods mean opposite things -- renew extends, expire with a
+        // negative value expires immediately -- so they are given different
+        // values here to catch a wire-up crossing them.
+        let renew = renew_delegation_token_options(60_000, 4_400);
+        assert_eq!(renew.get_renew_time_period_ms(), 60_000);
+        assert_eq!(renew.timeout(), Some(4_400));
+
+        let expire = expire_delegation_token_options(-1, 4_500);
+        assert_eq!(expire.get_expiry_time_period_ms(), -1);
+        assert_eq!(expire.timeout(), Some(4_500));
+    }
+
+    #[test]
+    fn describe_delegation_token_options_keeps_an_empty_filter_apart_from_no_filter() {
+        // Java's `owners()` is nullable: null describes every token. An empty
+        // list is a different request, and a count of zero cannot tell the two
+        // apart, so the flag is load-bearing.
+        let unfiltered = describe_delegation_token_options(Vec::new(), false, 4_600);
+        assert_eq!(unfiltered.get_owners(), None);
+        assert_eq!(unfiltered.timeout(), Some(4_600));
+
+        let empty_filter = describe_delegation_token_options(Vec::new(), true, -1);
+        assert_eq!(empty_filter.get_owners().map(<[KafkaPrincipal]>::len), Some(0));
+
+        let filtered = describe_delegation_token_options(vec![KafkaPrincipal::new("User", "alice")], true, -1);
+        assert_eq!(filtered.get_owners().map(<[KafkaPrincipal]>::len), Some(1));
+        assert_eq!(filtered.get_owners().unwrap()[0].name(), "alice");
+    }
+
+    #[test]
+    fn describe_and_update_features_options_map_each_flag_to_its_own_field() {
+        // Node id 0 is a legal broker, so the flag is what carries absence.
+        let unpinned = describe_features_options(0, false, 4_700);
+        assert_eq!(unpinned.get_node_id(), None);
+        assert_eq!(unpinned.timeout(), Some(4_700));
+
+        let pinned = describe_features_options(0, true, -1);
+        assert_eq!(pinned.get_node_id(), Some(0));
+        assert_eq!(pinned.timeout(), None);
+
+        // Asymmetric: a set timeout with validate_only false, and the reverse.
+        let applying = update_features_options(4_800, false);
+        assert_eq!(applying.timeout(), Some(4_800));
+        assert!(!applying.get_validate_only());
+
+        let validating = update_features_options(-1, true);
+        assert_eq!(validating.timeout(), None);
+        assert!(validating.get_validate_only());
+    }
+
+    #[test]
+    fn read_bytes_copies_the_exact_length_and_tolerates_nul() {
+        let raw: [u8; 4] = [0x01, 0x00, 0x02, 0xff];
+        assert_eq!(unsafe { read_bytes(raw.as_ptr(), 4) }, vec![0x01, 0x00, 0x02, 0xff]);
+        // A short length truncates rather than reading past the caller's array.
+        assert_eq!(unsafe { read_bytes(raw.as_ptr(), 2) }, vec![0x01, 0x00]);
+        assert!(unsafe { read_bytes(raw.as_ptr(), 0) }.is_empty());
+        assert!(unsafe { read_bytes(raw.as_ptr(), -1) }.is_empty());
+        assert!(unsafe { read_bytes(std::ptr::null(), 4) }.is_empty());
+    }
+
+    #[test]
+    fn read_kafka_principals_rejects_a_null_type_or_name_by_index() {
+        let (_t, types) = c_array_opt(&[Some("User"), Some("User")]);
+        let (_n, names) = c_array_opt(&[Some("alice"), Some("bob")]);
+        let principals = unsafe { read_kafka_principals(types.as_ptr(), names.as_ptr(), 2, "renewer") }
+            .expect("both rows are complete");
+        assert_eq!(principals.len(), 2);
+        assert_eq!(principals[0].principal_type(), "User");
+        assert_eq!(principals[0].name(), "alice");
+        assert_eq!(principals[1].name(), "bob");
+
+        let (_bt, bad_types) = c_array_opt(&[Some("User"), None]);
+        let error = unsafe { read_kafka_principals(bad_types.as_ptr(), names.as_ptr(), 2, "renewer") }
+            .expect_err("a null principal type is rejected");
+        assert_eq!(error.message(), "renewer principal type at index 1 must not be null");
+
+        let (_bn, bad_names) = c_array_opt(&[None, Some("bob")]);
+        let error = unsafe { read_kafka_principals(types.as_ptr(), bad_names.as_ptr(), 2, "owner") }
+            .expect_err("a null principal name is rejected");
+        assert_eq!(error.message(), "owner principal name at index 0 must not be null");
+
+        // A NULL array is read as "no entries", per CLAUDE.md §3.
+        assert!(
+            unsafe { read_kafka_principals(std::ptr::null(), names.as_ptr(), 2, "renewer") }
+                .expect("null array")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn read_optional_principal_needs_both_halves() {
+        let ty = to_cstring("User");
+        let name = to_cstring("alice");
+        let owner = unsafe { read_optional_principal(ty.as_ptr(), name.as_ptr()) }.expect("both present");
+        assert_eq!(owner.principal_type(), "User");
+        assert_eq!(owner.name(), "alice");
+        assert!(unsafe { read_optional_principal(std::ptr::null(), name.as_ptr()) }.is_none());
+        assert!(unsafe { read_optional_principal(ty.as_ptr(), std::ptr::null()) }.is_none());
+        assert!(unsafe { read_optional_principal(std::ptr::null(), std::ptr::null()) }.is_none());
+    }
+
+    #[test]
+    fn read_scram_alterations_splits_deletions_from_upsertions() {
+        // Three rows with deliberately *different* shapes: an upsertion with an
+        // explicit salt, a deletion, and an upsertion with no salt. The two
+        // password lengths and the salt length all differ, so substituting one
+        // length array for another fails here.
+        let (_u, users) = c_array_opt(&[Some("alice"), Some("bob"), Some("carol")]);
+        let is_deletions = [false, true, false];
+        let mechanisms = [
+            i32::from(ScramMechanism::ScramSha256.r#type()),
+            i32::from(ScramMechanism::ScramSha512.r#type()),
+            i32::from(ScramMechanism::ScramSha512.r#type()),
+        ];
+        let iterations = [4_096, 0, 8_192];
+        let alice_password: [u8; 3] = [b'p', b'w', b'1'];
+        let carol_password: [u8; 5] = [b'p', b'w', b'2', b'3', b'4'];
+        let passwords: [*const u8; 3] = [alice_password.as_ptr(), std::ptr::null(), carol_password.as_ptr()];
+        let password_lens = [3i32, 0, 5];
+        let alice_salt: [u8; 2] = [0xaa, 0xbb];
+        let salts: [*const u8; 3] = [alice_salt.as_ptr(), std::ptr::null(), std::ptr::null()];
+        let salt_lens = [2i32, 0, 0];
+
+        let alterations = unsafe {
+            read_scram_alterations(
+                users.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                salts.as_ptr(),
+                salt_lens.as_ptr(),
+                3,
+            )
+        }
+        .expect("all three rows are well formed");
+        assert_eq!(alterations.len(), 3);
+
+        match &alterations[0] {
+            UserScramCredentialAlteration::Upsertion(u) => {
+                assert_eq!(u.user(), "alice");
+                assert_eq!(u.credential_info().mechanism(), ScramMechanism::ScramSha256);
+                assert_eq!(u.credential_info().iterations(), 4_096);
+                assert_eq!(u.password(), b"pw1");
+                // The supplied salt is used verbatim, not regenerated.
+                assert_eq!(u.salt(), &[0xaa, 0xbb]);
+            },
+            other => panic!("row 0 should be an upsertion, got {other:?}"),
+        }
+        match &alterations[1] {
+            UserScramCredentialAlteration::Deletion(d) => {
+                assert_eq!(d.user(), "bob");
+                assert_eq!(d.mechanism(), ScramMechanism::ScramSha512);
+            },
+            other => panic!("row 1 should be a deletion, got {other:?}"),
+        }
+        match &alterations[2] {
+            UserScramCredentialAlteration::Upsertion(u) => {
+                assert_eq!(u.user(), "carol");
+                assert_eq!(u.credential_info().iterations(), 8_192);
+                assert_eq!(u.password(), b"pw234");
+                // No salt supplied: Java's three-argument constructor generates
+                // one, so it must be non-empty rather than absent.
+                assert!(!u.salt().is_empty());
+            },
+            other => panic!("row 2 should be an upsertion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_scram_alterations_rejects_a_null_user_and_a_passwordless_upsertion() {
+        let (_u, users) = c_array_opt(&[Some("alice"), None]);
+        let is_deletions = [false, true];
+        let mechanisms = [1i32, 1];
+        let iterations = [4_096i32, 0];
+        let password: [u8; 3] = [b'p', b'w', b'1'];
+        let passwords: [*const u8; 2] = [password.as_ptr(), std::ptr::null()];
+        let password_lens = [3i32, 0];
+
+        let error = unsafe {
+            read_scram_alterations(
+                users.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+            )
+        }
+        .expect_err("a null user is rejected");
+        assert_eq!(error.message(), "scram alteration user at index 1 must not be null");
+
+        let (_u2, users) = c_array_opt(&[Some("alice")]);
+        let is_deletions = [false];
+        let error = unsafe {
+            read_scram_alterations(
+                users.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        }
+        .expect_err("an upsertion with no password is rejected");
+        assert_eq!(error.message(), "scram alteration at index 0 is an upsertion with no password");
+    }
+
+    #[test]
+    fn read_scram_alterations_maps_an_unknown_mechanism_to_unknown() {
+        // Java's `ScramMechanism.fromType` falls through to UNKNOWN, which the
+        // broker rejects; the marshaling layer does not.
+        let (_u, users) = c_array_opt(&[Some("alice")]);
+        let is_deletions = [true];
+        // 259 truncates to 3 under a bare `as i8`, which is not a mechanism
+        // either, but 257 would truncate to 1 = SCRAM_SHA_256.
+        let mechanisms = [257i32];
+        let alterations = unsafe {
+            read_scram_alterations(
+                users.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        }
+        .expect("a deletion needs nothing but a user and a mechanism");
+        match &alterations[0] {
+            UserScramCredentialAlteration::Deletion(d) => {
+                assert_eq!(d.mechanism(), ScramMechanism::Unknown);
+            },
+            other => panic!("expected a deletion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_feature_updates_maps_each_column_and_rejects_a_duplicate() {
+        let (_f, features) = c_array_opt(&[Some("metadata.version"), Some("transaction.version")]);
+        let max_version_levels = [17i16, 2];
+        let upgrade_types = [
+            i32::from(UpgradeType::Upgrade.code()),
+            i32::from(UpgradeType::SafeDowngrade.code()),
+        ];
+        let updates =
+            unsafe { read_feature_updates(features.as_ptr(), max_version_levels.as_ptr(), upgrade_types.as_ptr(), 2) }
+                .expect("both rows are well formed");
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates["metadata.version"].max_version_level(), 17);
+        assert_eq!(updates["metadata.version"].upgrade_type(), UpgradeType::Upgrade);
+        assert_eq!(updates["transaction.version"].max_version_level(), 2);
+        assert_eq!(updates["transaction.version"].upgrade_type(), UpgradeType::SafeDowngrade);
+
+        let (_d, duplicated) = c_array_opt(&[Some("metadata.version"), Some("metadata.version")]);
+        let error = unsafe {
+            read_feature_updates(duplicated.as_ptr(), max_version_levels.as_ptr(), upgrade_types.as_ptr(), 2)
+        }
+        .expect_err("Java takes a Map, so a duplicate key would silently replace the earlier update");
+        assert_eq!(error.message(), "feature update at index 1 repeats feature `metadata.version`");
+
+        let (_n, with_null) = c_array_opt(&[None, Some("transaction.version")]);
+        let error =
+            unsafe { read_feature_updates(with_null.as_ptr(), max_version_levels.as_ptr(), upgrade_types.as_ptr(), 2) }
+                .expect_err("a null feature name is rejected");
+        assert_eq!(error.message(), "feature at index 0 must not be null");
+    }
+
+    #[test]
+    fn read_feature_updates_propagates_the_constructor_error_with_its_index() {
+        // Java's `FeatureUpdate` constructor throws for level 0 with UPGRADE and
+        // for a negative level; both must reach the caller, prefixed by row.
+        let (_f, features) = c_array_opt(&[Some("metadata.version"), Some("transaction.version")]);
+        let upgrade_types = [i32::from(UpgradeType::Upgrade.code()); 2];
+
+        let levels = [17i16, 0];
+        let error = unsafe { read_feature_updates(features.as_ptr(), levels.as_ptr(), upgrade_types.as_ptr(), 2) }
+            .expect_err("level 0 with UPGRADE is rejected");
+        assert_eq!(
+            error.message(),
+            "feature update at index 1: The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE \
+             when the provided maxVersionLevel:0 is < 1."
+        );
+
+        let levels = [-1i16, 2];
+        let error = unsafe { read_feature_updates(features.as_ptr(), levels.as_ptr(), upgrade_types.as_ptr(), 2) }
+            .expect_err("a negative level is rejected");
+        assert_eq!(
+            error.message(),
+            "feature update at index 0: Cannot specify a negative version level."
+        );
+    }
+
+    #[test]
+    fn describe_features_result_indexes_its_two_maps_independently() {
+        // Deliberately ragged: three supported features and two finalized ones,
+        // so reading one count for the other overruns and is caught. The four
+        // version numbers are all distinct for the same reason.
+        let mut finalized = HashMap::new();
+        finalized.insert(
+            "metadata.version".to_string(),
+            FinalizedVersionRange::new(14, 17).expect("valid"),
+        );
+        finalized.insert(
+            "transaction.version".to_string(),
+            FinalizedVersionRange::new(1, 2).expect("valid"),
+        );
+        let mut supported = HashMap::new();
+        supported.insert(
+            "metadata.version".to_string(),
+            SupportedVersionRange::new(3, 21).expect("valid"),
+        );
+        supported.insert(
+            "transaction.version".to_string(),
+            SupportedVersionRange::new(0, 2).expect("valid"),
+        );
+        supported.insert("group.version".to_string(), SupportedVersionRange::new(0, 1).expect("valid"));
+
+        let result = box_describe_features_result(FeatureMetadata::new(finalized, Some(123), supported));
+        unsafe {
+            assert_eq!(kafka_admin_DescribeFeaturesResult_finalized_count(result), 2);
+            assert_eq!(kafka_admin_DescribeFeaturesResult_supported_count(result), 3);
+
+            // Sorted by name, so index 0 is `metadata.version` among the
+            // finalized and `group.version` among the supported -- the two
+            // sequences are not co-indexed.
+            let finalized_0 = CStr::from_ptr(kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, 0));
+            assert_eq!(finalized_0.to_str().expect("utf8"), "metadata.version");
+            assert_eq!(
+                kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, 0),
+                14
+            );
+            assert_eq!(
+                kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(result, 0),
+                17
+            );
+
+            let supported_0 = CStr::from_ptr(kafka_admin_DescribeFeaturesResult_get_supported_feature(result, 0));
+            assert_eq!(supported_0.to_str().expect("utf8"), "group.version");
+            assert_eq!(kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, 0), 0);
+            assert_eq!(kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, 0), 1);
+            assert_eq!(kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, 2), 2);
+
+            // Out of range is -1, which is not a legal version level.
+            assert_eq!(
+                kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, 2),
+                -1
+            );
+            assert_eq!(
+                kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, -1),
+                -1
+            );
+            assert!(kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, 2).is_null());
+
+            let mut epoch = 0i64;
+            assert!(kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &mut epoch));
+            assert_eq!(epoch, 123);
+
+            kafka_admin_DescribeFeaturesResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn describe_features_result_reports_an_absent_epoch_through_the_flag() {
+        // Every int64 is a legal epoch, so absence needs the boolean return
+        // rather than a sentinel -- and the out-param must be left untouched.
+        let result = box_describe_features_result(FeatureMetadata::new(HashMap::new(), None, HashMap::new()));
+        unsafe {
+            let mut epoch = -7i64;
+            assert!(!kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &mut epoch));
+            assert_eq!(epoch, -7);
+            assert!(kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, std::ptr::null_mut()) == false);
+            kafka_admin_DescribeFeaturesResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn describe_user_scram_credentials_result_flattens_credentials_at_a_second_index() {
+        // Ragged on purpose: two credentials for one user, one for the next and
+        // a failure for the third. The mechanisms and iteration counts are all
+        // distinct, so transposing the two arrays is caught.
+        let rows: ScramDescriptionOutcomes = vec![
+            (
+                "alice".to_string(),
+                Ok(UserScramCredentialsDescription::new(
+                    "alice",
+                    vec![
+                        ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4_096),
+                        ScramCredentialInfo::new(ScramMechanism::ScramSha512, 8_192),
+                    ],
+                )),
+            ),
+            (
+                "bob".to_string(),
+                Ok(UserScramCredentialsDescription::new(
+                    "bob",
+                    vec![ScramCredentialInfo::new(ScramMechanism::ScramSha512, 16_384)],
+                )),
+            ),
+            (
+                "carol".to_string(),
+                Err(KafkaError::with_message(Errors::ResourceNotFound, "No such user: carol")),
+            ),
+        ];
+        let result = box_describe_user_scram_credentials_result(rows);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_count(result), 3);
+            let user0 = CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 0));
+            assert_eq!(user0.to_str().expect("utf8"), "alice");
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 0).is_null());
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 0),
+                2
+            );
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, 0, 0),
+                i32::from(ScramMechanism::ScramSha256.r#type())
+            );
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 0, 0),
+                4_096
+            );
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, 0, 1),
+                i32::from(ScramMechanism::ScramSha512.r#type())
+            );
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 0, 1),
+                8_192
+            );
+
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 1),
+                1
+            );
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 1, 0),
+                16_384
+            );
+            // Row 1 has no second credential, even though row 0 does.
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 1, 1),
+                -1
+            );
+
+            let error = kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 2);
+            assert!(!error.is_null());
+            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            assert_eq!(message.to_str().expect("utf8"), "No such user: carol");
+            assert_eq!(
+                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 2),
+                0
+            );
+
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 3).is_null());
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 3).is_null());
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn delegation_token_handles_expose_the_whole_java_chain() {
+        // The three principals are distinct, and the renewer list has two
+        // entries, so a transposition of owner / requester / renewer is caught.
+        let info = TokenInformation::with_requester(
+            "token-id-1".to_string(),
+            KafkaPrincipal::new("User", "owner"),
+            KafkaPrincipal::new("User", "requester"),
+            vec![
+                KafkaPrincipal::new("User", "renewer-1"),
+                KafkaPrincipal::new("Group", "renewer-2"),
+            ],
+            1_000,
+            9_000,
+            5_000,
+        );
+        let token = DelegationToken::new(info, vec![0x01, 0x00, 0x02]);
+        let base64 = token.hmac_as_base64_string();
+        let result = box_describe_delegation_token_result(vec![token]);
+        unsafe {
+            assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(result), 1);
+            let handle = kafka_admin_DescribeDelegationTokenResult_get_token(result, 0);
+            assert!(!handle.is_null());
+            assert!(kafka_admin_DescribeDelegationTokenResult_get_token(result, 1).is_null());
+            assert!(kafka_admin_DescribeDelegationTokenResult_get_token(result, -1).is_null());
+
+            // The HMAC contains an interior NUL, so only the length says how
+            // long it is -- a CString would have truncated it to one byte.
+            let mut len = 0i32;
+            let hmac = kafka_common_DelegationToken_hmac(handle, &mut len);
+            assert_eq!(len, 3);
+            assert_eq!(std::slice::from_raw_parts(hmac, len as usize), &[0x01, 0x00, 0x02]);
+            let encoded = CStr::from_ptr(kafka_common_DelegationToken_hmac_as_base64_string(handle));
+            assert_eq!(encoded.to_str().expect("utf8"), base64);
+
+            let info = kafka_common_DelegationToken_token_info(handle);
+            let id = CStr::from_ptr(kafka_common_TokenInformation_token_id(info));
+            assert_eq!(id.to_str().expect("utf8"), "token-id-1");
+            assert_eq!(kafka_common_TokenInformation_issue_timestamp(info), 1_000);
+            assert_eq!(kafka_common_TokenInformation_max_timestamp(info), 9_000);
+            assert_eq!(kafka_common_TokenInformation_expiry_timestamp(info), 5_000);
+
+            let owner = kafka_common_TokenInformation_owner(info);
+            let owner_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(owner));
+            assert_eq!(owner_name.to_str().expect("utf8"), "owner");
+            let requester = kafka_common_TokenInformation_token_requester(info);
+            let requester_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(requester));
+            assert_eq!(requester_name.to_str().expect("utf8"), "requester");
+
+            assert_eq!(kafka_common_TokenInformation_renewer_count(info), 2);
+            let renewer0 = kafka_common_TokenInformation_get_renewer(info, 0);
+            let renewer0_type = CStr::from_ptr(kafka_common_KafkaPrincipal_principal_type(renewer0));
+            let renewer0_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(renewer0));
+            assert_eq!(renewer0_type.to_str().expect("utf8"), "User");
+            assert_eq!(renewer0_name.to_str().expect("utf8"), "renewer-1");
+            let renewer1 = kafka_common_TokenInformation_get_renewer(info, 1);
+            let renewer1_type = CStr::from_ptr(kafka_common_KafkaPrincipal_principal_type(renewer1));
+            assert_eq!(renewer1_type.to_str().expect("utf8"), "Group");
+            assert!(kafka_common_TokenInformation_get_renewer(info, 2).is_null());
+            assert!(kafka_common_TokenInformation_get_renewer(info, -1).is_null());
+            assert!(!kafka_common_KafkaPrincipal_token_authenticated(owner));
+
+            kafka_admin_DescribeDelegationTokenResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn keyed_void_results_expose_their_key_and_error_and_nothing_else() {
+        // `alterUserScramCredentials` and `updateFeatures` are both
+        // `Map<K, KafkaFuture<Void>>`, so both are key + error only.
+        let mut scram: AlterScramOutcomes = HashMap::new();
+        scram.insert("alice".to_string(), Ok(()));
+        scram.insert("bob".to_string(), Err(KafkaError::unsupported_version("Not implemented yet")));
+        let result = box_alter_user_scram_credentials_result(scram);
+        unsafe {
+            assert_eq!(kafka_admin_AlterUserScramCredentialsResult_count(result), 2);
+            let user0 = CStr::from_ptr(kafka_admin_AlterUserScramCredentialsResult_get_user(result, 0));
+            assert_eq!(user0.to_str().expect("utf8"), "alice");
+            assert!(kafka_admin_AlterUserScramCredentialsResult_get_error(result, 0).is_null());
+            let error = kafka_admin_AlterUserScramCredentialsResult_get_error(result, 1);
+            assert!(!error.is_null());
+            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
+            assert!(kafka_admin_AlterUserScramCredentialsResult_get_user(result, 2).is_null());
+            kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+        }
+
+        let mut features: UpdateFeaturesOutcomes = HashMap::new();
+        features.insert("metadata.version".to_string(), Err(KafkaError::illegal_argument("nope")));
+        features.insert("transaction.version".to_string(), Ok(()));
+        let result = box_update_features_result(features);
+        unsafe {
+            assert_eq!(kafka_admin_UpdateFeaturesResult_count(result), 2);
+            let feature0 = CStr::from_ptr(kafka_admin_UpdateFeaturesResult_get_feature(result, 0));
+            assert_eq!(feature0.to_str().expect("utf8"), "metadata.version");
+            assert!(!kafka_admin_UpdateFeaturesResult_get_error(result, 0).is_null());
+            assert!(kafka_admin_UpdateFeaturesResult_get_error(result, 1).is_null());
+            kafka_admin_UpdateFeaturesResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn single_value_token_results_expose_only_their_value() {
+        let result = box_renew_delegation_token_result(1_234);
+        unsafe {
+            assert_eq!(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result), 1_234);
+            kafka_admin_RenewDelegationTokenResult_destroy(result);
+        }
+        let result = box_expire_delegation_token_result(5_678);
+        unsafe {
+            assert_eq!(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result), 5_678);
+            kafka_admin_ExpireDelegationTokenResult_destroy(result);
+        }
+
+        let info = TokenInformation::new(
+            "token-id-2".to_string(),
+            KafkaPrincipal::new("User", "owner"),
+            Vec::new(),
+            10,
+            30,
+            20,
+        );
+        let result = box_create_delegation_token_result(DelegationToken::new(info, vec![0xff]));
+        unsafe {
+            let handle = kafka_admin_CreateDelegationTokenResult_get_token(result);
+            let id = CStr::from_ptr(kafka_common_TokenInformation_token_id(kafka_common_DelegationToken_token_info(
+                handle,
+            )));
+            assert_eq!(id.to_str().expect("utf8"), "token-id-2");
+            // No renewers is a legal token: only the owner may renew it.
+            assert_eq!(
+                kafka_common_TokenInformation_renewer_count(kafka_common_DelegationToken_token_info(handle)),
+                0
+            );
+            kafka_admin_CreateDelegationTokenResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn destroying_a_null_b5b_result_is_a_no_op() {
+        unsafe {
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(std::ptr::null_mut());
+            kafka_admin_AlterUserScramCredentialsResult_destroy(std::ptr::null_mut());
+            kafka_admin_CreateDelegationTokenResult_destroy(std::ptr::null_mut());
+            kafka_admin_RenewDelegationTokenResult_destroy(std::ptr::null_mut());
+            kafka_admin_ExpireDelegationTokenResult_destroy(std::ptr::null_mut());
+            kafka_admin_DescribeDelegationTokenResult_destroy(std::ptr::null_mut());
+            kafka_admin_DescribeFeaturesResult_destroy(std::ptr::null_mut());
+            kafka_admin_UpdateFeaturesResult_destroy(std::ptr::null_mut());
         }
     }
 }
