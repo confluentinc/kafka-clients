@@ -91,17 +91,29 @@
 // convention.
 #![allow(non_snake_case, non_camel_case_types)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::{
-    Admin, AdminClientConfig, Config, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions,
-    DeleteTopicsOptions, DeletedRecords, DescribeTopicsOptions, ListTopicsOptions, MockAdminClient, NewPartitions,
-    NewTopic, RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry,
+    ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions,
+    LogDirDescription, MockAdminClient, NewPartitions, NewTopic, OpType, RecordsToDelete, ReplicaLogDirInfo,
+    TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
-use crate::common::{KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid};
+// `listClientMetricsResources` is deprecated in Java 4.1 (superseded by
+// `listConfigResources` filtered to CLIENT_METRICS) but is still part of the
+// `Admin` surface, so the FFI exposes it for parity.
+#[allow(deprecated)]
+use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
+use crate::common::acl::AclOperation;
+use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::{
+    KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
+};
 
 use super::common::{
     self, CompletionJob, KafkaErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
@@ -629,14 +641,13 @@ impl SendUserData {
     }
 }
 
-/// Async dispatch for a **value-returning** admin RPC.
+/// Async dispatch for a **value-returning** admin RPC whose outcome is produced
+/// by an arbitrary future.
 ///
 /// `submit` runs on the **calling** thread (inside the runtime context, so the
-/// RPC may `tokio::spawn` or notify the background task) and returns the
-/// [`KafkaFuture`] to await — normally `KafkaFuture::join_map_results(...)` over
-/// the `*Result`'s per-key futures. This mirrors Java, where
-/// `Admin.createTopics(...)` enqueues the request on the caller's thread and
-/// returns immediately.
+/// RPC may `tokio::spawn` or notify the background task) and returns the future
+/// to await. This mirrors Java, where `Admin.createTopics(...)` enqueues the
+/// request on the caller's thread and returns immediately.
 ///
 /// The spawned task only awaits that future. `complete` then runs on the
 /// dispatcher thread, builds the C result handle from the `Ok` value (or an
@@ -649,17 +660,23 @@ impl SendUserData {
 /// (argument marshaling failed, so no RPC was issued and no task is spawned).
 /// See the module docs, *Callback thread*.
 ///
+/// Most RPCs award a single [`KafkaFuture`] and use the thin
+/// [`admin_async_value_op`] wrapper below; this general form exists for
+/// `describeCluster`, whose Java result holds four independent futures that must
+/// all be awaited before one C handle can be built.
+///
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
-unsafe fn admin_async_value_op<T, S, C>(
+unsafe fn admin_async_future_op<T, S, Fut, C>(
     admin: *const kafka_admin_AdminClient_t,
     user_data: *mut c_void,
     submit: S,
     complete: C,
 ) where
-    T: Clone + Send + Sync + 'static,
-    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, KafkaError>,
+    T: Send + 'static,
+    S: FnOnce(&dyn Admin) -> Result<Fut, KafkaError>,
+    Fut: std::future::Future<Output = Result<T, KafkaError>> + Send + 'static,
     C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
 {
     if admin.is_null() {
@@ -686,10 +703,37 @@ unsafe fn admin_async_value_op<T, S, C>(
     let ud = SendUserData(user_data);
     h.runtime_handle.spawn(async move {
         let ud = ud;
-        let result = future.get().await;
+        let result = future.await;
         let job: CompletionJob = Box::new(move || complete(result, ud.into_ptr()));
         enqueue_or_run_inline(&tx, job);
     });
+}
+
+/// Async dispatch for a value-returning admin RPC that resolves through one
+/// [`KafkaFuture`] — normally `KafkaFuture::join_map_results(...)` over the
+/// `*Result`'s per-key futures. Thin wrapper over [`admin_async_future_op`].
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+unsafe fn admin_async_value_op<T, S, C>(
+    admin: *const kafka_admin_AdminClient_t,
+    user_data: *mut c_void,
+    submit: S,
+    complete: C,
+) where
+    T: Clone + Send + Sync + 'static,
+    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, KafkaError>,
+    C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
+{
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| submit(a).map(|future| async move { future.get().await }),
+            complete,
+        )
+    };
 }
 
 /// Synchronous dispatch for a value-returning admin RPC: runs `submit` on the
@@ -703,10 +747,10 @@ unsafe fn admin_async_value_op<T, S, C>(
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
-unsafe fn admin_sync_value_op<T, S>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, KafkaError>
+unsafe fn admin_sync_future_op<T, S, Fut>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, KafkaError>
 where
-    T: Clone + Send + Sync + 'static,
-    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, KafkaError>,
+    S: FnOnce(&dyn Admin) -> Result<Fut, KafkaError>,
+    Fut: std::future::Future<Output = Result<T, KafkaError>>,
 {
     if admin.is_null() {
         return Err(KafkaError::illegal_argument("admin handle must not be null"));
@@ -717,7 +761,21 @@ where
         let _guard = h.runtime.enter();
         submit(h.admin())?
     };
-    h.runtime.block_on(future.get())
+    h.runtime.block_on(future)
+}
+
+/// Synchronous dispatch for a value-returning admin RPC that resolves through
+/// one [`KafkaFuture`]. Thin wrapper over [`admin_sync_future_op`].
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+unsafe fn admin_sync_value_op<T, S>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, KafkaError>
+where
+    T: Clone + Send + Sync + 'static,
+    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, KafkaError>,
+{
+    unsafe { admin_sync_future_op(admin, move |a| submit(a).map(|future| async move { future.get().await })) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,12 +1253,64 @@ unsafe fn read_records_to_delete(
 // pointers valid until the owning result handle is destroyed.
 // ---------------------------------------------------------------------------
 
+/// One `ConfigEntry.ConfigSynonym` flattened for C.
+///
+/// Java models this as a nested class, but it carries three scalar fields and no
+/// identity, so it is exposed through indexed accessors on
+/// [`kafka_admin_ConfigEntry_t`] (`_synonym_name` / `_synonym_value` /
+/// `_synonym_source`) rather than as an opaque handle of its own.
+struct ConfigSynonymC {
+    name_c: CString,
+    /// `None` for a null value (Java's `ConfigSynonym.value()` is nullable).
+    value_c: Option<CString>,
+    source_c: CString,
+}
+
+/// Returns Java's implicit `Enum.name()` for a [`ConfigSource`].
+///
+/// `ConfigEntry.ConfigSource` is a plain Java enum with no numeric id (unlike
+/// `ConfigResource.Type`, which has `id()`), so C receives the constant name
+/// rather than an invented code.
+fn config_source_name(source: ConfigSource) -> &'static str {
+    match source {
+        ConfigSource::DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
+        ConfigSource::DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
+        ConfigSource::DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
+        ConfigSource::DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+        ConfigSource::DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
+        ConfigSource::DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
+        ConfigSource::StaticBrokerConfig => "STATIC_BROKER_CONFIG",
+        ConfigSource::DefaultConfig => "DEFAULT_CONFIG",
+        ConfigSource::Unknown => "UNKNOWN",
+    }
+}
+
+/// Returns Java's implicit `Enum.name()` for a [`ConfigType`].
+///
+/// `ConfigEntry.ConfigType` is likewise a plain Java enum with no numeric id.
+fn config_type_name(config_type: ConfigType) -> &'static str {
+    match config_type {
+        ConfigType::Unknown => "UNKNOWN",
+        ConfigType::Boolean => "BOOLEAN",
+        ConfigType::String => "STRING",
+        ConfigType::Int => "INT",
+        ConfigType::Short => "SHORT",
+        ConfigType::Long => "LONG",
+        ConfigType::Double => "DOUBLE",
+        ConfigType::List => "LIST",
+        ConfigType::Class => "CLASS",
+        ConfigType::Password => "PASSWORD",
+    }
+}
+
 /// A `ConfigEntry` flattened for C.
 ///
-/// `createTopics` is the only B1 RPC that carries configs, and the broker's
-/// `CreateTopicsResponse` populates only these fields. The full `Config` /
-/// `ConfigEntry` C surface (synonyms, config type, documentation, config source)
-/// arrives with the `describeConfigs` slice, where it is the primary payload.
+/// Every field Java's `ConfigEntry` exposes is carried. `createTopics` only
+/// populates the first five (the broker's `CreateTopicsResponse` carries no
+/// source, type, documentation or synonyms), which is why
+/// [`kafka_admin_TopicMetadataAndConfig_t`] keeps its own flat `_config_*`
+/// accessors for them; `describeConfigs` populates all of them and hands out a
+/// [`kafka_admin_ConfigEntry_t`] instead.
 struct ConfigEntryC {
     name_c: CString,
     /// `None` for a null config value (Java's `ConfigEntry.value()` is nullable).
@@ -1208,24 +1318,313 @@ struct ConfigEntryC {
     is_default: bool,
     is_sensitive: bool,
     is_read_only: bool,
+    source_c: CString,
+    config_type_c: CString,
+    /// `None` for null documentation (Java's `ConfigEntry.documentation()`).
+    documentation_c: Option<CString>,
+    synonyms: Vec<ConfigSynonymC>,
 }
 
 impl ConfigEntryC {
+    /// Flattens one [`ConfigEntry`], preserving synonym order (Java's synonym
+    /// list is ordered by precedence, so it must not be sorted).
+    fn new(entry: &ConfigEntry) -> Self {
+        Self {
+            name_c: to_cstring(entry.name()),
+            value_c: entry.value().map(to_cstring),
+            is_default: entry.is_default(),
+            is_sensitive: entry.is_sensitive(),
+            is_read_only: entry.is_read_only(),
+            source_c: to_cstring(config_source_name(entry.source())),
+            config_type_c: to_cstring(config_type_name(entry.config_type())),
+            documentation_c: entry.documentation().map(to_cstring),
+            synonyms: entry
+                .synonyms()
+                .iter()
+                .map(|s| ConfigSynonymC {
+                    name_c: to_cstring(s.name()),
+                    value_c: s.value().map(to_cstring),
+                    source_c: to_cstring(config_source_name(s.source())),
+                })
+                .collect(),
+        }
+    }
+
     /// Flattens every entry of a [`Config`], sorted by name for stable indexing.
     fn from_config(config: &Config) -> Vec<ConfigEntryC> {
-        let mut entries: Vec<ConfigEntryC> = config
-            .entries()
-            .map(|entry| ConfigEntryC {
-                name_c: to_cstring(entry.name()),
-                value_c: entry.value().map(to_cstring),
-                is_default: entry.is_default(),
-                is_sensitive: entry.is_sensitive(),
-                is_read_only: entry.is_read_only(),
-            })
-            .collect();
+        let mut entries: Vec<ConfigEntryC> = config.entries().map(ConfigEntryC::new).collect();
         entries.sort_by(|a, b| a.name_c.cmp(&b.name_c));
         entries
     }
+}
+
+/// Opaque handle to a `Config` (the set of configuration entries of one
+/// resource).
+#[repr(C)]
+pub struct kafka_admin_Config_t {
+    _private: [u8; 0],
+}
+
+/// Opaque handle to a `ConfigEntry`.
+#[repr(C)]
+pub struct kafka_admin_ConfigEntry_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_Config_t`].
+struct ConfigInner {
+    entries: Vec<ConfigEntryC>,
+}
+
+impl ConfigInner {
+    fn new(config: &Config) -> Self {
+        Self { entries: ConfigEntryC::from_config(config) }
+    }
+}
+
+/// Casts a `*const kafka_admin_Config_t` to a reference.
+///
+/// # Safety
+///
+/// `config` must be a non-null borrowed pointer from a result-handle getter.
+unsafe fn config_ref(config: *const kafka_admin_Config_t) -> &'static ConfigInner {
+    unsafe { &*(config as *const ConfigInner) }
+}
+
+/// Casts a `*const kafka_admin_ConfigEntry_t` to a reference.
+///
+/// # Safety
+///
+/// `entry` must be a non-null borrowed pointer from a [`kafka_admin_Config_t`]
+/// getter.
+unsafe fn config_entry_ref(entry: *const kafka_admin_ConfigEntry_t) -> &'static ConfigEntryC {
+    unsafe { &*(entry as *const ConfigEntryC) }
+}
+
+/// Returns the number of configuration entries.
+///
+/// # Safety
+///
+/// `config` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Config_entry_count(config: *const kafka_admin_Config_t) -> i32 {
+    unsafe { config_ref(config) }.entries.len() as i32
+}
+
+/// Returns the entry at `index` (borrowed), or null if out of range. Entries are
+/// sorted by name.
+///
+/// # Safety
+///
+/// `config` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Config_get_entry(
+    config: *const kafka_admin_Config_t,
+    index: i32,
+) -> *const kafka_admin_ConfigEntry_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { config_ref(config) }.entries.get(index as usize) {
+        Some(entry) => entry as *const ConfigEntryC as *const kafka_admin_ConfigEntry_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the entry named `name` (borrowed), or null if there is none.
+/// Mirrors Java's `Config.get(String)`.
+///
+/// # Safety
+///
+/// `config` must be a valid borrowed pointer from a result-handle getter; `name`
+/// must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Config_find_entry(
+    config: *const kafka_admin_Config_t,
+    name: *const c_char,
+) -> *const kafka_admin_ConfigEntry_t {
+    if name.is_null() {
+        return std::ptr::null();
+    }
+    let wanted = unsafe { CStr::from_ptr(name) };
+    match unsafe { config_ref(config) }
+        .entries
+        .iter()
+        .find(|entry| entry.name_c.as_c_str() == wanted)
+    {
+        Some(entry) => entry as *const ConfigEntryC as *const kafka_admin_ConfigEntry_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the entry name (borrowed).
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    unsafe { config_entry_ref(entry) }.name_c.as_ptr()
+}
+
+/// Returns the entry value (borrowed), or null when the value is null (Java's
+/// `ConfigEntry.value()` is nullable — sensitive configs come back null).
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    match &unsafe { config_entry_ref(entry) }.value_c {
+        Some(value) => value.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the config source as Java's enum constant name (borrowed), e.g.
+/// `"DYNAMIC_TOPIC_CONFIG"` or `"DEFAULT_CONFIG"`.
+///
+/// `ConfigEntry.ConfigSource` has no numeric id in Java, so the name is the
+/// contract.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    unsafe { config_entry_ref(entry) }.source_c.as_ptr()
+}
+
+/// Returns whether the entry is a broker default (Java's `isDefault()`).
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_admin_ConfigEntry_t) -> bool {
+    unsafe { config_entry_ref(entry) }.is_default
+}
+
+/// Returns whether the entry is sensitive (its value is then null).
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafka_admin_ConfigEntry_t) -> bool {
+    unsafe { config_entry_ref(entry) }.is_sensitive
+}
+
+/// Returns whether the entry is read-only.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafka_admin_ConfigEntry_t) -> bool {
+    unsafe { config_entry_ref(entry) }.is_read_only
+}
+
+/// Returns the config type as Java's enum constant name (borrowed), e.g.
+/// `"STRING"` or `"UNKNOWN"`.
+///
+/// `ConfigEntry.ConfigType` has no numeric id in Java, so the name is the
+/// contract.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
+}
+
+/// Returns the entry documentation (borrowed), or null when the broker did not
+/// report it (Java's `ConfigEntry.documentation()` is nullable).
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
+    entry: *const kafka_admin_ConfigEntry_t,
+) -> *const c_char {
+    match &unsafe { config_entry_ref(entry) }.documentation_c {
+        Some(doc) => doc.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of synonyms of this entry.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_count(entry: *const kafka_admin_ConfigEntry_t) -> i32 {
+    unsafe { config_entry_ref(entry) }.synonyms.len() as i32
+}
+
+/// Returns the name of the synonym at `index` (borrowed), or null if out of
+/// range. Synonyms keep Java's precedence order and are not sorted.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_name(
+    entry: *const kafka_admin_ConfigEntry_t,
+    index: i32,
+) -> *const c_char {
+    match synonym_at(unsafe { config_entry_ref(entry) }, index) {
+        Some(synonym) => synonym.name_c.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the value of the synonym at `index` (borrowed), or null if the value
+/// is null or `index` is out of range.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_value(
+    entry: *const kafka_admin_ConfigEntry_t,
+    index: i32,
+) -> *const c_char {
+    match synonym_at(unsafe { config_entry_ref(entry) }, index) {
+        Some(synonym) => match &synonym.value_c {
+            Some(value) => value.as_ptr(),
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the source of the synonym at `index` as Java's enum constant name
+/// (borrowed), or null if out of range.
+///
+/// # Safety
+///
+/// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_source(
+    entry: *const kafka_admin_ConfigEntry_t,
+    index: i32,
+) -> *const c_char {
+    match synonym_at(unsafe { config_entry_ref(entry) }, index) {
+        Some(synonym) => synonym.source_c.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the `index`th synonym of `entry`, or `None` if out of range.
+fn synonym_at(entry: &ConfigEntryC, index: i32) -> Option<&ConfigSynonymC> {
+    if index < 0 {
+        return None;
+    }
+    entry.synonyms.get(index as usize)
 }
 
 /// Opaque handle to a `CreateTopicsResult.TopicMetadataAndConfig`.
@@ -3516,6 +3915,2659 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
             move |outcome, ud| {
                 let (result, error) = match outcome {
                     Ok(outcomes) => (box_delete_records_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Cluster / configs / log-dir marshaling helpers
+// ---------------------------------------------------------------------------
+
+/// Reads `count` 32-bit integers into an owned vector.
+///
+/// # Safety
+///
+/// `values` must be null or have `count` readable entries.
+unsafe fn read_i32s(values: *const i32, count: i32) -> Vec<i32> {
+    let n = count.max(0) as usize;
+    if values.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(unsafe { *values.add(i) });
+    }
+    out
+}
+
+/// Reads `count` `(type_code, name)` pairs into [`ConfigResource`]s, skipping
+/// entries whose name is NULL so the two arrays cannot drift out of step.
+///
+/// `type_codes` hold Java's `ConfigResource.Type.id()` values; an unrecognized
+/// code becomes `ConfigResource.Type.UNKNOWN`, exactly as Java's
+/// `ConfigResource.Type.forId` does.
+///
+/// # Safety
+///
+/// `type_codes` and `names` must be null or have `count` readable entries each,
+/// every name NULL or a valid C string.
+unsafe fn read_config_resources(
+    type_codes: *const i32,
+    names: *const *const c_char,
+    count: i32,
+) -> Vec<ConfigResource> {
+    let n = count.max(0) as usize;
+    if type_codes.is_null() || names.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let name_ptr = unsafe { *names.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let resource_type = ConfigResourceType::for_id(unsafe { *type_codes.add(i) } as i8);
+        out.push(ConfigResource::new(resource_type, name));
+    }
+    out
+}
+
+/// Reads `count` `(topic, partition, broker_id)` triples into
+/// [`TopicPartitionReplica`]s, skipping entries whose topic is NULL.
+///
+/// # Safety
+///
+/// `topics`, `partitions` and `broker_ids` must be null or have `count` readable
+/// entries each, every topic NULL or a valid C string.
+unsafe fn read_replicas(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    broker_ids: *const i32,
+    count: i32,
+) -> Vec<TopicPartitionReplica> {
+    let n = count.max(0) as usize;
+    if topics.is_null() || partitions.is_null() || broker_ids.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let topic_ptr = unsafe { *topics.add(i) };
+        if topic_ptr.is_null() {
+            continue;
+        }
+        let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        out.push(TopicPartitionReplica::new(topic, unsafe { *partitions.add(i) }, unsafe {
+            *broker_ids.add(i)
+        }));
+    }
+    out
+}
+
+/// Reads the flat `incrementalAlterConfigs` rows into Java's
+/// `Map<ConfigResource, Collection<AlterConfigOp>>`.
+///
+/// Java's nested map becomes five parallel arrays, one row per *operation*:
+/// row `i` applies `(config_names[i] -> config_values[i], op_types[i])` to the
+/// resource `(resource_type_codes[i], resource_names[i])`. Rows for the same
+/// resource are grouped, keeping their relative order (Java applies a
+/// resource's ops in iteration order). A row with a NULL resource name or a NULL
+/// config name is skipped; a NULL *value* is meaningful and becomes Java's null
+/// value (which is what `DELETE` sends).
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if an op-type code is not one of
+/// `AlterConfigOp.OpType.id()`.
+///
+/// # Safety
+///
+/// Every array must be null or have `count` readable entries.
+unsafe fn read_alter_config_ops(
+    resource_type_codes: *const i32,
+    resource_names: *const *const c_char,
+    config_names: *const *const c_char,
+    config_values: *const *const c_char,
+    op_type_codes: *const i32,
+    count: i32,
+) -> Result<HashMap<ConfigResource, Vec<AlterConfigOp>>, KafkaError> {
+    let n = count.max(0) as usize;
+    let mut out: HashMap<ConfigResource, Vec<AlterConfigOp>> = HashMap::new();
+    if resource_type_codes.is_null() || resource_names.is_null() || config_names.is_null() || op_type_codes.is_null() {
+        return Ok(out);
+    }
+    for i in 0..n {
+        let resource_name_ptr = unsafe { *resource_names.add(i) };
+        let config_name_ptr = unsafe { *config_names.add(i) };
+        if resource_name_ptr.is_null() || config_name_ptr.is_null() {
+            continue;
+        }
+        let op_code = unsafe { *op_type_codes.add(i) };
+        let op_type = OpType::for_id(op_code as i8).ok_or_else(|| {
+            KafkaError::illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
+        })?;
+        let resource_type = ConfigResourceType::for_id(unsafe { *resource_type_codes.add(i) } as i8);
+        let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
+        let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
+        let value = if config_values.is_null() {
+            None
+        } else {
+            let value_ptr = unsafe { *config_values.add(i) };
+            if value_ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { CStr::from_ptr(value_ptr) }.to_string_lossy().to_string())
+            }
+        };
+        out.entry(ConfigResource::new(resource_type, resource_name))
+            .or_default()
+            .push(AlterConfigOp::new(ConfigEntry::new(config_name, value), op_type));
+    }
+    Ok(out)
+}
+
+/// Sorts a per-`ConfigResource` outcome map by `(type id, name)`.
+///
+/// [`ConfigResource`] is not `Ord` (Java's map is unordered too), but C
+/// addresses entries by index, so the order must be reproducible.
+fn sorted_config_resource_entries<V>(map: HashMap<ConfigResource, V>) -> Vec<(ConfigResource, V)> {
+    let mut entries: Vec<(ConfigResource, V)> = map.into_iter().collect();
+    entries.sort_by(|a, b| {
+        a.0.resource_type()
+            .id()
+            .cmp(&b.0.resource_type().id())
+            .then_with(|| a.0.name().cmp(b.0.name()))
+    });
+    entries
+}
+
+/// Sorts a per-[`TopicPartitionReplica`] outcome map by
+/// `(topic, partition, broker id)`, for the same reason.
+fn sorted_replica_entries<V>(map: HashMap<TopicPartitionReplica, V>) -> Vec<(TopicPartitionReplica, V)> {
+    let mut entries: Vec<(TopicPartitionReplica, V)> = map.into_iter().collect();
+    entries.sort_by(|a, b| {
+        a.0.topic()
+            .cmp(b.0.topic())
+            .then_with(|| a.0.partition().cmp(&b.0.partition()))
+            .then_with(|| a.0.broker_id().cmp(&b.0.broker_id()))
+    });
+    entries
+}
+
+// ---------------------------------------------------------------------------
+// Log-dir value types
+// ---------------------------------------------------------------------------
+
+/// Reported for a log dir whose total/usable size the broker did not send.
+/// Mirrors `DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`, which is what Java's
+/// `LogDirDescription.totalBytes()` reports as an empty `OptionalLong`.
+const UNKNOWN_VOLUME_BYTES: i64 = -1;
+
+/// One `(TopicPartition, ReplicaInfo)` pair of a log dir, flattened for C.
+///
+/// Java's `LogDirDescription.replicaInfos()` is a map; C reads it as indexed
+/// accessors on the owning [`kafka_admin_LogDirDescription_t`], the same shape
+/// [`kafka_admin_DeleteRecordsResult_t`] uses for its `TopicPartition` keys.
+struct ReplicaInfoC {
+    topic_c: CString,
+    partition: i32,
+    size: i64,
+    offset_lag: i64,
+    is_future: bool,
+}
+
+/// Opaque handle to a `LogDirDescription`.
+#[repr(C)]
+pub struct kafka_admin_LogDirDescription_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_LogDirDescription_t`].
+struct LogDirDescriptionInner {
+    /// Java's `LogDirDescription.error()`: a per-log-dir error, distinct from
+    /// the per-broker error of the enclosing future.
+    error: Option<KafkaErrorInner>,
+    total_bytes: i64,
+    usable_bytes: i64,
+    replicas: Vec<ReplicaInfoC>,
+}
+
+impl LogDirDescriptionInner {
+    fn new(description: &LogDirDescription) -> Self {
+        let mut replicas: Vec<ReplicaInfoC> = description
+            .replica_infos()
+            .iter()
+            .map(|(tp, info)| ReplicaInfoC {
+                topic_c: to_cstring(tp.topic()),
+                partition: tp.partition(),
+                size: info.size(),
+                offset_lag: info.offset_lag(),
+                is_future: info.is_future(),
+            })
+            .collect();
+        // `replicaInfos()` is an unordered map in Java; C indexes it.
+        replicas.sort_by(|a, b| a.topic_c.cmp(&b.topic_c).then_with(|| a.partition.cmp(&b.partition)));
+        Self {
+            error: description.error().cloned().map(error_inner),
+            total_bytes: description.total_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+            usable_bytes: description.usable_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+            replicas,
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_LogDirDescription_t` to a reference.
+///
+/// # Safety
+///
+/// `description` must be a non-null borrowed pointer from a
+/// [`kafka_admin_LogDirDescriptionMap_t`] getter.
+unsafe fn log_dir_ref(description: *const kafka_admin_LogDirDescription_t) -> &'static LogDirDescriptionInner {
+    unsafe { &*(description as *const LogDirDescriptionInner) }
+}
+
+/// Returns the log dir's own error (borrowed), or null if it reported none.
+///
+/// This is Java's `LogDirDescription.error()`. It is *not* the per-broker error
+/// from [`kafka_admin_DescribeLogDirsResult_get_error`]: the broker answered, but
+/// this particular directory is offline or unreadable. Do not destroy it.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
+    description: *const kafka_admin_LogDirDescription_t,
+) -> *const kafka_common_KafkaError_t {
+    error_ptr(unsafe { log_dir_ref(description) }.error.as_ref())
+}
+
+/// Returns the total size in bytes of the volume the log dir is on, or -1 if the
+/// broker did not report it (Java's empty `OptionalLong`).
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
+    description: *const kafka_admin_LogDirDescription_t,
+) -> i64 {
+    unsafe { log_dir_ref(description) }.total_bytes
+}
+
+/// Returns the usable size in bytes of the volume the log dir is on, or -1 if
+/// the broker did not report it.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
+    description: *const kafka_admin_LogDirDescription_t,
+) -> i64 {
+    unsafe { log_dir_ref(description) }.usable_bytes
+}
+
+/// Returns the number of replicas hosted in this log dir.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_count(
+    description: *const kafka_admin_LogDirDescription_t,
+) -> i32 {
+    unsafe { log_dir_ref(description) }.replicas.len() as i32
+}
+
+/// Returns the topic of the replica at `index` (borrowed), or null if out of
+/// range. Replicas are sorted by `(topic, partition)`.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_topic(
+    description: *const kafka_admin_LogDirDescription_t,
+    index: i32,
+) -> *const c_char {
+    match replica_info_at(unsafe { log_dir_ref(description) }, index) {
+        Some(replica) => replica.topic_c.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the partition of the replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_partition(
+    description: *const kafka_admin_LogDirDescription_t,
+    index: i32,
+) -> i32 {
+    match replica_info_at(unsafe { log_dir_ref(description) }, index) {
+        Some(replica) => replica.partition,
+        None => -1,
+    }
+}
+
+/// Returns the on-disk size in bytes of the replica at `index`, or -1 if out of
+/// range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_size(
+    description: *const kafka_admin_LogDirDescription_t,
+    index: i32,
+) -> i64 {
+    match replica_info_at(unsafe { log_dir_ref(description) }, index) {
+        Some(replica) => replica.size,
+        None => -1,
+    }
+}
+
+/// Returns the offset lag of the replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_offset_lag(
+    description: *const kafka_admin_LogDirDescription_t,
+    index: i32,
+) -> i64 {
+    match replica_info_at(unsafe { log_dir_ref(description) }, index) {
+        Some(replica) => replica.offset_lag,
+        None => -1,
+    }
+}
+
+/// Returns whether the replica at `index` is a *future* replica (one being moved
+/// into this log dir). False if out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_is_future(
+    description: *const kafka_admin_LogDirDescription_t,
+    index: i32,
+) -> bool {
+    match replica_info_at(unsafe { log_dir_ref(description) }, index) {
+        Some(replica) => replica.is_future,
+        None => false,
+    }
+}
+
+/// Returns the `index`th replica of `description`, or `None` if out of range.
+fn replica_info_at(description: &LogDirDescriptionInner, index: i32) -> Option<&ReplicaInfoC> {
+    if index < 0 {
+        return None;
+    }
+    description.replicas.get(index as usize)
+}
+
+/// Opaque handle to one broker's `Map<String, LogDirDescription>`.
+#[repr(C)]
+pub struct kafka_admin_LogDirDescriptionMap_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_LogDirDescriptionMap_t`].
+struct LogDirDescriptionMapInner {
+    log_dirs: Vec<CString>,
+    descriptions: Vec<LogDirDescriptionInner>,
+}
+
+impl LogDirDescriptionMapInner {
+    fn new(map: &HashMap<String, LogDirDescription>) -> Self {
+        let mut entries: Vec<(&String, &LogDirDescription)> = map.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let mut log_dirs = Vec::with_capacity(entries.len());
+        let mut descriptions = Vec::with_capacity(entries.len());
+        for (name, description) in entries {
+            log_dirs.push(to_cstring(name));
+            descriptions.push(LogDirDescriptionInner::new(description));
+        }
+        Self { log_dirs, descriptions }
+    }
+}
+
+/// Casts a `*const kafka_admin_LogDirDescriptionMap_t` to a reference.
+///
+/// # Safety
+///
+/// `map` must be a non-null borrowed pointer from a `describe_log_dirs` result
+/// getter.
+unsafe fn log_dir_map_ref(map: *const kafka_admin_LogDirDescriptionMap_t) -> &'static LogDirDescriptionMapInner {
+    unsafe { &*(map as *const LogDirDescriptionMapInner) }
+}
+
+/// Returns the number of log dirs reported by this broker.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
+/// getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_count(map: *const kafka_admin_LogDirDescriptionMap_t) -> i32 {
+    unsafe { log_dir_map_ref(map) }.log_dirs.len() as i32
+}
+
+/// Returns the log-dir path at `index` (borrowed), or null if out of range.
+/// Entries are sorted by path.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
+/// getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_key(
+    map: *const kafka_admin_LogDirDescriptionMap_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { log_dir_map_ref(map) }.log_dirs, index)
+}
+
+/// Returns the description of the log dir at `index` (borrowed), or null if out
+/// of range.
+///
+/// # Safety
+///
+/// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
+/// getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
+    map: *const kafka_admin_LogDirDescriptionMap_t,
+    index: i32,
+) -> *const kafka_admin_LogDirDescription_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { log_dir_map_ref(map) }.descriptions.get(index as usize) {
+        Some(description) => description as *const LogDirDescriptionInner as *const kafka_admin_LogDirDescription_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Opaque handle to a `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
+#[repr(C)]
+pub struct kafka_admin_ReplicaLogDirInfo_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ReplicaLogDirInfo_t`].
+struct ReplicaLogDirInfoInner {
+    /// `None` when no replica of this partition is found on the broker (Java
+    /// returns null).
+    current_log_dir_c: Option<CString>,
+    current_offset_lag: i64,
+    /// `None` when the replica is not being moved (Java returns null).
+    future_log_dir_c: Option<CString>,
+    future_offset_lag: i64,
+}
+
+impl ReplicaLogDirInfoInner {
+    fn new(info: &ReplicaLogDirInfo) -> Self {
+        Self {
+            current_log_dir_c: info.current_replica_log_dir().map(to_cstring),
+            current_offset_lag: info.current_replica_offset_lag(),
+            future_log_dir_c: info.future_replica_log_dir().map(to_cstring),
+            future_offset_lag: info.future_replica_offset_lag(),
+        }
+    }
+}
+
+/// Casts a `*const kafka_admin_ReplicaLogDirInfo_t` to a reference.
+///
+/// # Safety
+///
+/// `info` must be a non-null borrowed pointer from a result-handle getter.
+unsafe fn replica_log_dir_info_ref(info: *const kafka_admin_ReplicaLogDirInfo_t) -> &'static ReplicaLogDirInfoInner {
+    unsafe { &*(info as *const ReplicaLogDirInfoInner) }
+}
+
+/// Returns the replica's current log dir (borrowed), or null if the broker hosts
+/// no replica of that partition.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
+    info: *const kafka_admin_ReplicaLogDirInfo_t,
+) -> *const c_char {
+    match &unsafe { replica_log_dir_info_ref(info) }.current_log_dir_c {
+        Some(dir) => dir.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns `max(partition high watermark - replica log end offset, 0)` for the
+/// current replica.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(
+    info: *const kafka_admin_ReplicaLogDirInfo_t,
+) -> i64 {
+    unsafe { replica_log_dir_info_ref(info) }.current_offset_lag
+}
+
+/// Returns the log dir the replica is being moved to (borrowed), or null if it
+/// is not being moved.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
+    info: *const kafka_admin_ReplicaLogDirInfo_t,
+) -> *const c_char {
+    match &unsafe { replica_log_dir_info_ref(info) }.future_log_dir_c {
+        Some(dir) => dir.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns `max(partition high watermark - future replica log end offset, 0)`.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(
+    info: *const kafka_admin_ReplicaLogDirInfo_t,
+) -> i64 {
+    unsafe { replica_log_dir_info_ref(info) }.future_offset_lag
+}
+
+// ---------------------------------------------------------------------------
+// describeCluster
+// ---------------------------------------------------------------------------
+
+/// The four independently-completable attributes of Java's
+/// `DescribeClusterResult`, resolved into one value for the C handle.
+struct DescribeClusterOutcome {
+    nodes: Vec<Node>,
+    controller: Option<Node>,
+    cluster_id: String,
+    /// `None` when the operations were not requested or the broker omitted them
+    /// (Java returns null).
+    authorized_operations: Option<BTreeSet<AclOperation>>,
+}
+
+/// Opaque handle to a `DescribeClusterResult`.
+#[repr(C)]
+pub struct kafka_admin_DescribeClusterResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeClusterResult_t`].
+///
+/// Unlike the per-key RPCs there is no key/value/error triple: Java's result is
+/// four attributes of one cluster, not a map, so the handle exposes them
+/// directly and any failure is a whole-call failure.
+struct DescribeClusterResultInner {
+    cluster_id_c: CString,
+    nodes: Vec<Node>,
+    controller: Option<Node>,
+    /// `None` maps to a count of -1 (absent), matching how
+    /// [`kafka_admin_TopicPartitionInfo_elr_count`] reports an absent set.
+    authorized_operations: Option<Vec<i32>>,
+}
+
+/// Flattens the cluster description into the C handle.
+fn box_describe_cluster_result(outcome: DescribeClusterOutcome) -> *mut kafka_admin_DescribeClusterResult_t {
+    let inner = DescribeClusterResultInner {
+        cluster_id_c: to_cstring(&outcome.cluster_id),
+        nodes: outcome.nodes,
+        controller: outcome.controller,
+        authorized_operations: outcome
+            .authorized_operations
+            .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
+    };
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DescribeClusterResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeClusterResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_cluster` call.
+unsafe fn describe_cluster_result_ref(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> &'static DescribeClusterResultInner {
+    unsafe { &*(result as *const DescribeClusterResultInner) }
+}
+
+/// Returns the cluster id (borrowed).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> *const c_char {
+    unsafe { describe_cluster_result_ref(result) }.cluster_id_c.as_ptr()
+}
+
+/// Returns the number of nodes in the cluster.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_node_count(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> i32 {
+    unsafe { describe_cluster_result_ref(result) }.nodes.len() as i32
+}
+
+/// Returns the node at `index` (borrowed), or null if out of range. Read it with
+/// the `kafka_common_Node_*` accessors; do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
+    result: *const kafka_admin_DescribeClusterResult_t,
+    index: i32,
+) -> *const kafka_common_Node_t {
+    node_at(&unsafe { describe_cluster_result_ref(result) }.nodes, index)
+}
+
+/// Returns the current controller node (borrowed), or null if there is none
+/// (Java's `controller()` yields null).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> *const kafka_common_Node_t {
+    match &unsafe { describe_cluster_result_ref(result) }.controller {
+        Some(node) => node as *const Node as *const kafka_common_Node_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the number of authorized operations reported for the cluster, or
+/// **-1** if the broker did not report them (Java yields null, which is distinct
+/// from an empty set).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_count(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> i32 {
+    match &unsafe { describe_cluster_result_ref(result) }.authorized_operations {
+        Some(ops) => ops.len() as i32,
+        None => -1,
+    }
+}
+
+/// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
+/// authorized operation at `index`, or -1 if out of range or absent.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
+    result: *const kafka_admin_DescribeClusterResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    match &unsafe { describe_cluster_result_ref(result) }.authorized_operations {
+        Some(ops) => ops.get(index as usize).copied().unwrap_or(-1),
+        None => -1,
+    }
+}
+
+/// Destroys a `describe_cluster` result handle, invalidating every borrowed
+/// sub-handle obtained from it. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(result: *mut kafka_admin_DescribeClusterResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeClusterResultInner)) };
+    }
+}
+
+/// Submits `describeCluster` and returns a future over its four attributes.
+///
+/// All four are awaited before any error is reported, so none is abandoned; if
+/// more than one failed, the first in Java's declaration order (nodes,
+/// controller, cluster id, authorized operations) is returned. C has one handle
+/// per call, so a failure of any attribute is a whole-call failure.
+fn submit_describe_cluster(
+    admin: &dyn Admin,
+    options: DescribeClusterOptions,
+) -> impl std::future::Future<Output = Result<DescribeClusterOutcome, KafkaError>> + Send + use<> {
+    let result = admin.describe_cluster(options);
+    let nodes = result.nodes();
+    let controller = result.controller();
+    let cluster_id = result.cluster_id();
+    let authorized_operations = result.authorized_operations();
+    async move {
+        let nodes = nodes.get().await;
+        let controller = controller.get().await;
+        let cluster_id = cluster_id.get().await;
+        let authorized_operations = authorized_operations.get().await;
+        Ok(DescribeClusterOutcome {
+            nodes: nodes?,
+            controller: controller?,
+            cluster_id: cluster_id?,
+            authorized_operations: authorized_operations?,
+        })
+    }
+}
+
+/// Builds `DescribeClusterOptions` from the flat C option parameters.
+fn describe_cluster_options(
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    include_fenced_brokers: bool,
+) -> DescribeClusterOptions {
+    DescribeClusterOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .include_authorized_operations(include_authorized_operations)
+        .include_fenced_brokers(include_fenced_brokers)
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_describe_cluster_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeClusterResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`.
+pub type kafka_admin_AdminClient_describe_cluster_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeClusterResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the cluster, blocking until every attribute future has resolved
+/// (synchronous).
+///
+/// On success writes a [`kafka_admin_DescribeClusterResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_DescribeClusterResult_destroy`]) and returns null.
+/// Java's result holds four independent futures rather than a per-key map, so
+/// unlike the batch RPCs there are no per-key errors: any failure is returned
+/// here.
+///
+/// # Parameters
+///
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `include_authorized_operations`:
+///   `DescribeClusterOptions.includeAuthorizedOperations`.
+/// - `include_fenced_brokers`: `DescribeClusterOptions.includeFencedBrokers`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
+    admin: *const kafka_admin_AdminClient_t,
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    include_fenced_brokers: bool,
+    out_result: *mut *mut kafka_admin_DescribeClusterResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let options = describe_cluster_options(timeout_ms, include_authorized_operations, include_fenced_brokers);
+    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_cluster(a, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_cluster_result) }
+}
+
+/// Describes the cluster asynchronously. See
+/// [`kafka_admin_AdminClient_describe_cluster`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
+    admin: *const kafka_admin_AdminClient_t,
+    timeout_ms: i32,
+    include_authorized_operations: bool,
+    include_fenced_brokers: bool,
+    callback: kafka_admin_AdminClient_describe_cluster_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = describe_cluster_options(timeout_ms, include_authorized_operations, include_fenced_brokers);
+    unsafe {
+        admin_async_future_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_cluster(a, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcome) => (box_describe_cluster_result(outcome), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeConfigs
+// ---------------------------------------------------------------------------
+
+/// Per-resource outcomes of `describeConfigs`.
+type DescribeConfigsOutcomes = HashMap<ConfigResource, Result<Config, KafkaError>>;
+
+/// Opaque handle to a flattened `DescribeConfigsResult`, keyed by config
+/// resource.
+#[repr(C)]
+pub struct kafka_admin_DescribeConfigsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeConfigsResult_t`].
+///
+/// The key is a `ConfigResource`, which C reads as a type code plus a name
+/// (`_get_key_type(i)` / `_get_key_name(i)`) rather than through a dedicated
+/// handle type — the shape [`kafka_admin_DeleteRecordsResult_t`] already uses for
+/// its `TopicPartition` keys.
+struct DescribeConfigsResultInner {
+    key_types: Vec<i32>,
+    key_names: Vec<CString>,
+    values: Vec<Option<ConfigInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-resource `describeConfigs` outcomes into the C handle.
+fn box_describe_configs_result(outcomes: DescribeConfigsOutcomes) -> *mut kafka_admin_DescribeConfigsResult_t {
+    let entries = sorted_config_resource_entries(outcomes);
+    let mut key_types = Vec::with_capacity(entries.len());
+    let mut key_names = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (resource, outcome) in entries {
+        key_types.push(i32::from(resource.resource_type().id()));
+        key_names.push(to_cstring(resource.name()));
+        match outcome {
+            Ok(config) => {
+                values.push(Some(ConfigInner::new(&config)));
+                errors.push(None);
+            },
+            Err(e) => {
+                values.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DescribeConfigsResultInner { key_types, key_names, values, errors }))
+        as *mut kafka_admin_DescribeConfigsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeConfigsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_configs` call.
+unsafe fn describe_configs_result_ref(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+) -> &'static DescribeConfigsResultInner {
+    unsafe { &*(result as *const DescribeConfigsResultInner) }
+}
+
+/// Returns the number of requested resources.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_count(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+) -> i32 {
+    unsafe { describe_configs_result_ref(result) }.key_names.len() as i32
+}
+
+/// Returns the `ConfigResource.Type.id()` of the resource at `index`, or -1 if
+/// out of range. Entries are sorted by `(type id, name)`.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { describe_configs_result_ref(result) }
+        .key_types
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the name of the resource at `index` (borrowed), or null if out of
+/// range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_name(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_configs_result_ref(result) }.key_names, index)
+}
+
+/// Returns the config of the resource at `index` (borrowed), or null if that
+/// resource failed (see [`kafka_admin_DescribeConfigsResult_get_error`]) or
+/// `index` is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+    index: i32,
+) -> *const kafka_admin_Config_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_configs_result_ref(result) }.values.get(index as usize) {
+        Some(Some(config)) => config as *const ConfigInner as *const kafka_admin_Config_t,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the resource at `index` (borrowed), or null if it was
+/// described successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_configs_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_configs` result handle, invalidating every borrowed
+/// sub-handle obtained from it. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(result: *mut kafka_admin_DescribeConfigsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeConfigsResultInner)) };
+    }
+}
+
+/// Submits `describeConfigs` and returns the collect-all future over its
+/// per-resource futures.
+fn submit_describe_configs(
+    admin: &dyn Admin,
+    resources: &[ConfigResource],
+    options: DescribeConfigsOptions,
+) -> KafkaFuture<DescribeConfigsOutcomes> {
+    let result = admin.describe_configs(resources, options);
+    let entries: Vec<(ConfigResource, KafkaFuture<Config>)> =
+        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Builds `DescribeConfigsOptions` from the flat C option parameters.
+fn describe_configs_options(
+    timeout_ms: i32,
+    include_synonyms: bool,
+    include_documentation: bool,
+) -> DescribeConfigsOptions {
+    DescribeConfigsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .include_synonyms(include_synonyms)
+        .include_documentation(include_documentation)
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_describe_configs_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeConfigsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-resource failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_configs_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeConfigsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Describes the configuration of the given resources, blocking until every
+/// per-resource future has resolved (synchronous).
+///
+/// Java's `Collection<ConfigResource>` becomes two parallel arrays: entry `i` is
+/// the resource `(resource_types[i], resource_names[i])`, where the type is a
+/// `ConfigResource.Type.id()` code (2 = TOPIC, 4 = BROKER, 8 = BROKER_LOGGER,
+/// 16 = CLIENT_METRICS, 32 = GROUP). An entry with a NULL name is skipped.
+///
+/// On success writes a [`kafka_admin_DescribeConfigsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_DescribeConfigsResult_destroy`]) and returns null.
+/// **A per-resource failure is not a call failure**: it is reported by
+/// [`kafka_admin_DescribeConfigsResult_get_error`] for that key. A non-null return
+/// means the request could not be submitted at all.
+///
+/// # Parameters
+///
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `include_synonyms`: `DescribeConfigsOptions.includeSynonyms`.
+/// - `include_documentation`: `DescribeConfigsOptions.includeDocumentation`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `resource_types` and `resource_names` must
+/// have `count` valid entries each; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    include_synonyms: bool,
+    include_documentation: bool,
+    out_result: *mut *mut kafka_admin_DescribeConfigsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
+    let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_configs(a, &resources, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_configs_result) }
+}
+
+/// Describes resource configurations asynchronously. See
+/// [`kafka_admin_AdminClient_describe_configs`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `resource_types` and `resource_names` must
+/// have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    include_synonyms: bool,
+    include_documentation: bool,
+    callback: kafka_admin_AdminClient_describe_configs_callback_t,
+    user_data: *mut c_void,
+) {
+    let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
+    let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_configs(a, &resources, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_configs_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// incrementalAlterConfigs
+// ---------------------------------------------------------------------------
+
+/// Per-resource outcomes of `incrementalAlterConfigs`.
+type AlterConfigsOutcomes = HashMap<ConfigResource, Result<(), KafkaError>>;
+
+/// Opaque handle to a flattened `AlterConfigsResult`, keyed by config resource.
+#[repr(C)]
+pub struct kafka_admin_AlterConfigsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_AlterConfigsResult_t`].
+///
+/// There is no per-key value: Java's per-resource future is `KafkaFuture<Void>`,
+/// so a null error *is* the success value.
+struct AlterConfigsResultInner {
+    key_types: Vec<i32>,
+    key_names: Vec<CString>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-resource `incrementalAlterConfigs` outcomes into the C
+/// handle.
+fn box_alter_configs_result(outcomes: AlterConfigsOutcomes) -> *mut kafka_admin_AlterConfigsResult_t {
+    let entries = sorted_config_resource_entries(outcomes);
+    let mut key_types = Vec::with_capacity(entries.len());
+    let mut key_names = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (resource, outcome) in entries {
+        key_types.push(i32::from(resource.resource_type().id()));
+        key_names.push(to_cstring(resource.name()));
+        errors.push(outcome.err().map(error_inner));
+    }
+    Box::into_raw(Box::new(AlterConfigsResultInner { key_types, key_names, errors }))
+        as *mut kafka_admin_AlterConfigsResult_t
+}
+
+/// Casts a `*const kafka_admin_AlterConfigsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `incremental_alter_configs` call.
+unsafe fn alter_configs_result_ref(
+    result: *const kafka_admin_AlterConfigsResult_t,
+) -> &'static AlterConfigsResultInner {
+    unsafe { &*(result as *const AlterConfigsResultInner) }
+}
+
+/// Returns the number of altered resources.
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_count(result: *const kafka_admin_AlterConfigsResult_t) -> i32 {
+    unsafe { alter_configs_result_ref(result) }.key_names.len() as i32
+}
+
+/// Returns the `ConfigResource.Type.id()` of the resource at `index`, or -1 if
+/// out of range. Entries are sorted by `(type id, name)`.
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
+    result: *const kafka_admin_AlterConfigsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { alter_configs_result_ref(result) }
+        .key_types
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the name of the resource at `index` (borrowed), or null if out of
+/// range.
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
+    result: *const kafka_admin_AlterConfigsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { alter_configs_result_ref(result) }.key_names, index)
+}
+
+/// Returns the error for the resource at `index` (borrowed), or null if it was
+/// altered successfully or `index` is out of range. Do not destroy it.
+///
+/// There is no `_get_value`: Java's per-resource future is `KafkaFuture<Void>`,
+/// so a null error *is* the success value.
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
+    result: *const kafka_admin_AlterConfigsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { alter_configs_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys an `incremental_alter_configs` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `incremental_alter_configs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_destroy(result: *mut kafka_admin_AlterConfigsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut AlterConfigsResultInner)) };
+    }
+}
+
+/// Submits `incrementalAlterConfigs` and returns the collect-all future over its
+/// per-resource futures.
+fn submit_incremental_alter_configs(
+    admin: &dyn Admin,
+    configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+    options: AlterConfigsOptions,
+) -> KafkaFuture<AlterConfigsOutcomes> {
+    let result = admin.incremental_alter_configs(configs, options);
+    let entries: Vec<(ConfigResource, KafkaFuture<()>)> =
+        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_incremental_alter_configs_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_AlterConfigsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-resource failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_AlterConfigsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Incrementally alters resource configurations, blocking until every
+/// per-resource future has resolved (synchronous).
+///
+/// Java's `Map<ConfigResource, Collection<AlterConfigOp>>` becomes five parallel
+/// arrays, **one row per operation**: row `i` applies
+/// `(config_names[i] -> config_values[i], op_types[i])` to the resource
+/// `(resource_types[i], resource_names[i])`. Rows naming the same resource are
+/// grouped in order. `resource_types` hold `ConfigResource.Type.id()` codes and
+/// `op_types` hold `AlterConfigOp.OpType.id()` codes (0 = SET, 1 = DELETE,
+/// 2 = APPEND, 3 = SUBTRACT). A row with a NULL resource name or config name is
+/// skipped; a NULL `config_values` entry is the null value DELETE uses. An
+/// unknown op-type code fails the whole call with an illegal-argument error.
+///
+/// On success writes a [`kafka_admin_AlterConfigsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_AlterConfigsResult_destroy`]) and returns null.
+/// Per-resource failures are reported by
+/// [`kafka_admin_AlterConfigsResult_get_error`], not by the return value.
+///
+/// # Parameters
+///
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `validate_only`: `AlterConfigsOptions.validateOnly` — validate without
+///   applying.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every input array must have `count` valid
+/// entries; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    config_names: *const *const c_char,
+    config_values: *const *const c_char,
+    op_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    out_result: *mut *mut kafka_admin_AlterConfigsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let configs = match unsafe {
+        read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count)
+    } {
+        Ok(configs) => configs,
+        Err(e) => return box_error(e),
+    };
+    let options = AlterConfigsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .validate_only(validate_only);
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_incremental_alter_configs(a, &configs, options))) };
+    unsafe { finish_sync(outcome, out_result, box_alter_configs_result) }
+}
+
+/// Incrementally alters resource configurations asynchronously. See
+/// [`kafka_admin_AdminClient_incremental_alter_configs`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or an unknown `AlterConfigOp.OpType`
+/// code). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every input array must have `count` valid
+/// entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    config_names: *const *const c_char,
+    config_values: *const *const c_char,
+    op_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    validate_only: bool,
+    callback: kafka_admin_AdminClient_incremental_alter_configs_callback_t,
+    user_data: *mut c_void,
+) {
+    let parsed =
+        unsafe { read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count) };
+    let options = AlterConfigsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .validate_only(validate_only);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_incremental_alter_configs(a, &parsed?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_alter_configs_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// listConfigResources
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `ListConfigResourcesResult`.
+#[repr(C)]
+pub struct kafka_admin_ListConfigResourcesResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListConfigResourcesResult_t`].
+///
+/// Java's `listConfigResources` has a single `KafkaFuture<Collection<
+/// ConfigResource>>`, so there are no per-key errors: the whole call either
+/// succeeds or fails.
+struct ListConfigResourcesResultInner {
+    types: Vec<i32>,
+    names: Vec<CString>,
+}
+
+/// Flattens the listed resources into the C handle, sorted by
+/// `(type id, name)` — Java returns an unordered collection, but C indexes it.
+fn box_list_config_resources_result(resources: Vec<ConfigResource>) -> *mut kafka_admin_ListConfigResourcesResult_t {
+    let mut sorted = resources;
+    sorted.sort_by(|a, b| {
+        a.resource_type()
+            .id()
+            .cmp(&b.resource_type().id())
+            .then_with(|| a.name().cmp(b.name()))
+    });
+    let mut types = Vec::with_capacity(sorted.len());
+    let mut names = Vec::with_capacity(sorted.len());
+    for resource in &sorted {
+        types.push(i32::from(resource.resource_type().id()));
+        names.push(to_cstring(resource.name()));
+    }
+    Box::into_raw(Box::new(ListConfigResourcesResultInner { types, names }))
+        as *mut kafka_admin_ListConfigResourcesResult_t
+}
+
+/// Casts a `*const kafka_admin_ListConfigResourcesResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_config_resources` call.
+unsafe fn list_config_resources_result_ref(
+    result: *const kafka_admin_ListConfigResourcesResult_t,
+) -> &'static ListConfigResourcesResultInner {
+    unsafe { &*(result as *const ListConfigResourcesResultInner) }
+}
+
+/// Returns the number of listed config resources.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_config_resources` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_count(
+    result: *const kafka_admin_ListConfigResourcesResult_t,
+) -> i32 {
+    unsafe { list_config_resources_result_ref(result) }.names.len() as i32
+}
+
+/// Returns the `ConfigResource.Type.id()` of the resource at `index`, or -1 if
+/// out of range. Entries are sorted by `(type id, name)`.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_config_resources` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
+    result: *const kafka_admin_ListConfigResourcesResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { list_config_resources_result_ref(result) }
+        .types
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the name of the resource at `index` (borrowed), or null if out of
+/// range.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_config_resources` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_name(
+    result: *const kafka_admin_ListConfigResourcesResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { list_config_resources_result_ref(result) }.names, index)
+}
+
+/// Destroys a `list_config_resources` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_config_resources` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
+    result: *mut kafka_admin_ListConfigResourcesResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListConfigResourcesResultInner)) };
+    }
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_list_config_resources_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it.
+pub type kafka_admin_AdminClient_list_config_resources_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListConfigResourcesResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Lists the cluster's config resources whose type is in `resource_types`
+/// (synchronous).
+///
+/// `resource_types` hold `ConfigResource.Type.id()` codes; pass NULL or
+/// `count == 0` for Java's empty set, which means "every supported type".
+///
+/// On success writes a [`kafka_admin_ListConfigResourcesResult_t`] to
+/// `*out_result` (free with
+/// [`kafka_admin_ListConfigResourcesResult_destroy`]) and returns null. Java has
+/// a single future here, so any failure is a call failure and is returned.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `resource_types` must be null or have `count`
+/// readable entries; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ListConfigResourcesResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let types = unsafe { read_config_resource_types(resource_types, count) };
+    let options = ListConfigResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources(&types, options).all())) };
+    unsafe { finish_sync(outcome, out_result, box_list_config_resources_result) }
+}
+
+/// Lists the cluster's config resources asynchronously. See
+/// [`kafka_admin_AdminClient_list_config_resources`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `resource_types` must be null or have `count`
+/// readable entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
+    admin: *const kafka_admin_AdminClient_t,
+    resource_types: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_list_config_resources_callback_t,
+    user_data: *mut c_void,
+) {
+    let types = unsafe { read_config_resource_types(resource_types, count) };
+    let options = ListConfigResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(a.list_config_resources(&types, options).all()),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(resources) => (box_list_config_resources_result(resources), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+/// Reads `count` `ConfigResource.Type.id()` codes into the `HashSet` Java's
+/// `listConfigResources` takes. An empty set means "every supported type".
+///
+/// # Safety
+///
+/// `type_codes` must be null or have `count` readable entries.
+unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<ConfigResourceType> {
+    unsafe { read_i32s(type_codes, count) }
+        .into_iter()
+        .map(|code| ConfigResourceType::for_id(code as i8))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// listClientMetricsResources
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `ListClientMetricsResourcesResult`.
+#[repr(C)]
+pub struct kafka_admin_ListClientMetricsResourcesResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListClientMetricsResourcesResult_t`].
+///
+/// Java's `ClientMetricsResourceListing` carries only a name, so the handle
+/// exposes names directly instead of a sub-handle per listing. There is a single
+/// future, hence no per-key errors.
+struct ListClientMetricsResourcesResultInner {
+    names: Vec<CString>,
+}
+
+/// Flattens the client-metrics resource listings into the C handle, sorted by
+/// name (Java returns an unordered collection, but C indexes it).
+#[allow(deprecated)]
+fn box_list_client_metrics_resources_result(
+    listings: Vec<ClientMetricsResourceListing>,
+) -> *mut kafka_admin_ListClientMetricsResourcesResult_t {
+    let mut names: Vec<CString> = listings.iter().map(|l| to_cstring(l.name())).collect();
+    names.sort();
+    Box::into_raw(Box::new(ListClientMetricsResourcesResultInner { names }))
+        as *mut kafka_admin_ListClientMetricsResourcesResult_t
+}
+
+/// Casts a `*const kafka_admin_ListClientMetricsResourcesResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_client_metrics_resources`
+/// call.
+unsafe fn list_client_metrics_resources_result_ref(
+    result: *const kafka_admin_ListClientMetricsResourcesResult_t,
+) -> &'static ListClientMetricsResourcesResultInner {
+    unsafe { &*(result as *const ListClientMetricsResourcesResultInner) }
+}
+
+/// Returns the number of client-metrics resources.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_client_metrics_resources` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_count(
+    result: *const kafka_admin_ListClientMetricsResourcesResult_t,
+) -> i32 {
+    unsafe { list_client_metrics_resources_result_ref(result) }.names.len() as i32
+}
+
+/// Returns the name of the resource at `index` (borrowed), or null if out of
+/// range. Entries are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_client_metrics_resources` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_get_name(
+    result: *const kafka_admin_ListClientMetricsResourcesResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { list_client_metrics_resources_result_ref(result) }.names, index)
+}
+
+/// Destroys a `list_client_metrics_resources` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_client_metrics_resources` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_destroy(
+    result: *mut kafka_admin_ListClientMetricsResourcesResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListClientMetricsResourcesResultInner)) };
+    }
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_list_client_metrics_resources_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it.
+pub type kafka_admin_AdminClient_list_client_metrics_resources_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_ListClientMetricsResourcesResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Lists the cluster's client-metrics resources (synchronous).
+///
+/// Mirrors Java's `Admin.listClientMetricsResources`, which is **deprecated
+/// since 4.1** in favour of `listConfigResources` filtered to
+/// `CLIENT_METRICS`; it is exposed for parity. On success writes a
+/// [`kafka_admin_ListClientMetricsResourcesResult_t`] to `*out_result` (free with
+/// [`kafka_admin_ListClientMetricsResourcesResult_destroy`]) and returns null.
+/// Java has a single future here, so any failure is a call failure and is
+/// returned.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+#[allow(deprecated)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
+    admin: *const kafka_admin_AdminClient_t,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ListClientMetricsResourcesResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let options = ListClientMetricsResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_client_metrics_resources(options).all())) };
+    unsafe { finish_sync(outcome, out_result, box_list_client_metrics_resources_result) }
+}
+
+/// Lists the cluster's client-metrics resources asynchronously. See
+/// [`kafka_admin_AdminClient_list_client_metrics_resources`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+#[unsafe(no_mangle)]
+#[allow(deprecated)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources_async(
+    admin: *const kafka_admin_AdminClient_t,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_list_client_metrics_resources_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = ListClientMetricsResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(a.list_client_metrics_resources(options).all()),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(listings) => (box_list_client_metrics_resources_result(listings), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeLogDirs
+// ---------------------------------------------------------------------------
+
+/// Per-broker outcomes of `describeLogDirs`.
+type DescribeLogDirsOutcomes = HashMap<i32, Result<HashMap<String, LogDirDescription>, KafkaError>>;
+
+/// Opaque handle to a flattened `DescribeLogDirsResult`, keyed by broker id.
+#[repr(C)]
+pub struct kafka_admin_DescribeLogDirsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeLogDirsResult_t`].
+struct DescribeLogDirsResultInner {
+    brokers: Vec<i32>,
+    values: Vec<Option<LogDirDescriptionMapInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-broker `describeLogDirs` outcomes into the C handle.
+fn box_describe_log_dirs_result(outcomes: DescribeLogDirsOutcomes) -> *mut kafka_admin_DescribeLogDirsResult_t {
+    let entries = sorted_entries(outcomes);
+    let mut brokers = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (broker, outcome) in entries {
+        brokers.push(broker);
+        match outcome {
+            Ok(map) => {
+                values.push(Some(LogDirDescriptionMapInner::new(&map)));
+                errors.push(None);
+            },
+            Err(e) => {
+                values.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DescribeLogDirsResultInner { brokers, values, errors }))
+        as *mut kafka_admin_DescribeLogDirsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeLogDirsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_log_dirs` call.
+unsafe fn describe_log_dirs_result_ref(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+) -> &'static DescribeLogDirsResultInner {
+    unsafe { &*(result as *const DescribeLogDirsResultInner) }
+}
+
+/// Returns the number of queried brokers.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_count(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+) -> i32 {
+    unsafe { describe_log_dirs_result_ref(result) }.brokers.len() as i32
+}
+
+/// Returns the broker id at `index`, or -1 if out of range. Entries are sorted
+/// by broker id.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { describe_log_dirs_result_ref(result) }
+        .brokers
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the broker's log-dir map at `index` (borrowed), or null if that
+/// broker failed (see [`kafka_admin_DescribeLogDirsResult_get_error`]) or `index`
+/// is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+    index: i32,
+) -> *const kafka_admin_LogDirDescriptionMap_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_log_dirs_result_ref(result) }.values.get(index as usize) {
+        Some(Some(map)) => map as *const LogDirDescriptionMapInner as *const kafka_admin_LogDirDescriptionMap_t,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the broker at `index` (borrowed), or null if it
+/// answered or `index` is out of range. Do not destroy it.
+///
+/// A *per-log-dir* error is separate — see
+/// [`kafka_admin_LogDirDescription_error`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_log_dirs_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_log_dirs` result handle, invalidating every borrowed
+/// sub-handle obtained from it. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_destroy(result: *mut kafka_admin_DescribeLogDirsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeLogDirsResultInner)) };
+    }
+}
+
+/// Submits `describeLogDirs` and returns the collect-all future over its
+/// per-broker futures.
+fn submit_describe_log_dirs(
+    admin: &dyn Admin,
+    brokers: &[i32],
+    options: DescribeLogDirsOptions,
+) -> KafkaFuture<DescribeLogDirsOutcomes> {
+    let result = admin.describe_log_dirs(brokers, options);
+    let entries: Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> =
+        result.descriptions().iter().map(|(b, f)| (*b, f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Completion callback for [`kafka_admin_AdminClient_describe_log_dirs_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeLogDirsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-broker failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_log_dirs_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeLogDirsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Queries the log directories of the given brokers, blocking until every
+/// per-broker future has resolved (synchronous).
+///
+/// On success writes a [`kafka_admin_DescribeLogDirsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_DescribeLogDirsResult_destroy`]) and returns null.
+/// **A per-broker failure is not a call failure**: it is reported by
+/// [`kafka_admin_DescribeLogDirsResult_get_error`] for that broker. A non-null
+/// return means the request could not be submitted at all.
+///
+/// # Parameters
+///
+/// - `brokers`: array of `count` broker ids.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///   `DescribeLogDirsOptions` has no other field in Java.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `brokers` must have `count` readable entries;
+/// `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
+    admin: *const kafka_admin_AdminClient_t,
+    brokers: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeLogDirsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let broker_ids = unsafe { read_i32s(brokers, count) };
+    let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_log_dirs_result) }
+}
+
+/// Queries broker log directories asynchronously. See
+/// [`kafka_admin_AdminClient_describe_log_dirs`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `brokers` must have `count` readable entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
+    admin: *const kafka_admin_AdminClient_t,
+    brokers: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_log_dirs_callback_t,
+    user_data: *mut c_void,
+) {
+    let broker_ids = unsafe { read_i32s(brokers, count) };
+    let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_log_dirs_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// alterReplicaLogDirs
+// ---------------------------------------------------------------------------
+
+/// Per-replica outcomes of `alterReplicaLogDirs`.
+type AlterReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<(), KafkaError>>;
+
+/// Opaque handle to a flattened `AlterReplicaLogDirsResult`, keyed by replica.
+#[repr(C)]
+pub struct kafka_admin_AlterReplicaLogDirsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_AlterReplicaLogDirsResult_t`].
+///
+/// The key is a `TopicPartitionReplica`, which C reads as a topic, a partition
+/// and a broker id rather than through a dedicated handle type. There is no
+/// per-key value: Java's per-replica future is `KafkaFuture<Void>`.
+struct AlterReplicaLogDirsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    broker_ids: Vec<i32>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-replica `alterReplicaLogDirs` outcomes into the C handle.
+fn box_alter_replica_log_dirs_result(
+    outcomes: AlterReplicaLogDirsOutcomes,
+) -> *mut kafka_admin_AlterReplicaLogDirsResult_t {
+    let entries = sorted_replica_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut broker_ids = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (replica, outcome) in entries {
+        topics.push(to_cstring(replica.topic()));
+        partitions.push(replica.partition());
+        broker_ids.push(replica.broker_id());
+        errors.push(outcome.err().map(error_inner));
+    }
+    Box::into_raw(Box::new(AlterReplicaLogDirsResultInner {
+        topics,
+        partitions,
+        broker_ids,
+        errors,
+    })) as *mut kafka_admin_AlterReplicaLogDirsResult_t
+}
+
+/// Casts a `*const kafka_admin_AlterReplicaLogDirsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `alter_replica_log_dirs` call.
+unsafe fn alter_replica_log_dirs_result_ref(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+) -> &'static AlterReplicaLogDirsResultInner {
+    unsafe { &*(result as *const AlterReplicaLogDirsResultInner) }
+}
+
+/// Returns the number of requested replica moves.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_count(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+) -> i32 {
+    unsafe { alter_replica_log_dirs_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic of the replica at `index` (borrowed), or null if out of
+/// range. Entries are sorted by `(topic, partition, broker id)`.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_topic(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { alter_replica_log_dirs_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition of the replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { alter_replica_log_dirs_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the broker id of the replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { alter_replica_log_dirs_result_ref(result) }
+        .broker_ids
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the error for the replica at `index` (borrowed), or null if the move
+/// was accepted or `index` is out of range. Do not destroy it.
+///
+/// There is no `_get_value`: Java's per-replica future is `KafkaFuture<Void>`,
+/// so a null error *is* the success value.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { alter_replica_log_dirs_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys an `alter_replica_log_dirs` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `alter_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_destroy(
+    result: *mut kafka_admin_AlterReplicaLogDirsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut AlterReplicaLogDirsResultInner)) };
+    }
+}
+
+/// Reads the flat `alterReplicaLogDirs` rows into Java's
+/// `Map<TopicPartitionReplica, String>`. A row with a NULL topic or NULL log dir
+/// is skipped, so the arrays cannot drift out of step.
+///
+/// # Safety
+///
+/// Every array must be null or have `count` readable entries.
+unsafe fn read_replica_assignment(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    broker_ids: *const i32,
+    log_dirs: *const *const c_char,
+    count: i32,
+) -> HashMap<TopicPartitionReplica, String> {
+    let n = count.max(0) as usize;
+    let mut out = HashMap::new();
+    if topics.is_null() || partitions.is_null() || broker_ids.is_null() || log_dirs.is_null() {
+        return out;
+    }
+    for i in 0..n {
+        let topic_ptr = unsafe { *topics.add(i) };
+        let log_dir_ptr = unsafe { *log_dirs.add(i) };
+        if topic_ptr.is_null() || log_dir_ptr.is_null() {
+            continue;
+        }
+        let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        let log_dir = unsafe { CStr::from_ptr(log_dir_ptr) }.to_string_lossy().to_string();
+        out.insert(
+            TopicPartitionReplica::new(topic, unsafe { *partitions.add(i) }, unsafe { *broker_ids.add(i) }),
+            log_dir,
+        );
+    }
+    out
+}
+
+/// Submits `alterReplicaLogDirs` and returns the collect-all future over its
+/// per-replica futures.
+fn submit_alter_replica_log_dirs(
+    admin: &dyn Admin,
+    replica_assignment: &HashMap<TopicPartitionReplica, String>,
+    options: AlterReplicaLogDirsOptions,
+) -> KafkaFuture<AlterReplicaLogDirsOutcomes> {
+    let result = admin.alter_replica_log_dirs(replica_assignment, options);
+    let entries: Vec<(TopicPartitionReplica, KafkaFuture<()>)> =
+        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_alter_replica_log_dirs_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_AlterReplicaLogDirsResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. A per-replica failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_AlterReplicaLogDirsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Moves the given replicas to new log directories, blocking until every
+/// per-replica future has resolved (synchronous).
+///
+/// This is `alterReplicaLogDirs(Map<TopicPartitionReplica, String>,
+/// AlterReplicaLogDirsOptions)`. Java's map becomes four parallel arrays: entry
+/// `i` moves the replica `(topics[i], partitions[i], broker_ids[i])` to
+/// `log_dirs[i]`. An entry with a NULL topic or NULL log dir is skipped.
+///
+/// On success writes a [`kafka_admin_AlterReplicaLogDirsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_AlterReplicaLogDirsResult_destroy`]) and returns null.
+/// Per-replica failures are reported by
+/// [`kafka_admin_AlterReplicaLogDirsResult_get_error`], not by the return value.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every input array must have `count` valid
+/// entries; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    broker_ids: *const i32,
+    log_dirs: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_AlterReplicaLogDirsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
+    let options = AlterReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options))) };
+    unsafe { finish_sync(outcome, out_result, box_alter_replica_log_dirs_result) }
+}
+
+/// Moves replicas to new log directories asynchronously. See
+/// [`kafka_admin_AdminClient_alter_replica_log_dirs`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every input array must have `count` valid
+/// entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    broker_ids: *const i32,
+    log_dirs: *const *const c_char,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_alter_replica_log_dirs_callback_t,
+    user_data: *mut c_void,
+) {
+    let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
+    let options = AlterReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_alter_replica_log_dirs_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// describeReplicaLogDirs
+// ---------------------------------------------------------------------------
+
+/// Per-replica outcomes of `describeReplicaLogDirs`.
+type DescribeReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<ReplicaLogDirInfo, KafkaError>>;
+
+/// Opaque handle to a flattened `DescribeReplicaLogDirsResult`, keyed by
+/// replica.
+#[repr(C)]
+pub struct kafka_admin_DescribeReplicaLogDirsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DescribeReplicaLogDirsResult_t`].
+struct DescribeReplicaLogDirsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    broker_ids: Vec<i32>,
+    values: Vec<Option<ReplicaLogDirInfoInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-replica `describeReplicaLogDirs` outcomes into the C handle.
+fn box_describe_replica_log_dirs_result(
+    outcomes: DescribeReplicaLogDirsOutcomes,
+) -> *mut kafka_admin_DescribeReplicaLogDirsResult_t {
+    let entries = sorted_replica_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut broker_ids = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (replica, outcome) in entries {
+        topics.push(to_cstring(replica.topic()));
+        partitions.push(replica.partition());
+        broker_ids.push(replica.broker_id());
+        match outcome {
+            Ok(info) => {
+                values.push(Some(ReplicaLogDirInfoInner::new(&info)));
+                errors.push(None);
+            },
+            Err(e) => {
+                values.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(DescribeReplicaLogDirsResultInner {
+        topics,
+        partitions,
+        broker_ids,
+        values,
+        errors,
+    })) as *mut kafka_admin_DescribeReplicaLogDirsResult_t
+}
+
+/// Casts a `*const kafka_admin_DescribeReplicaLogDirsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_replica_log_dirs` call.
+unsafe fn describe_replica_log_dirs_result_ref(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+) -> &'static DescribeReplicaLogDirsResultInner {
+    unsafe { &*(result as *const DescribeReplicaLogDirsResultInner) }
+}
+
+/// Returns the number of described replicas.
+///
+/// Replicas of a topic the broker does not know are silently omitted, mirroring
+/// Java's `describeReplicaLogDirs`, so this can be smaller than the number
+/// requested.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_count(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+) -> i32 {
+    unsafe { describe_replica_log_dirs_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic of the replica at `index` (borrowed), or null if out of
+/// range. Entries are sorted by `(topic, partition, broker id)`.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_replica_log_dirs_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition of the replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { describe_replica_log_dirs_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the broker id of the replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { describe_replica_log_dirs_result_ref(result) }
+        .broker_ids
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the log-dir info of the replica at `index` (borrowed), or null if
+/// that replica failed (see
+/// [`kafka_admin_DescribeReplicaLogDirsResult_get_error`]) or `index` is out of
+/// range.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    index: i32,
+) -> *const kafka_admin_ReplicaLogDirInfo_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_replica_log_dirs_result_ref(result) }
+        .values
+        .get(index as usize)
+    {
+        Some(Some(info)) => info as *const ReplicaLogDirInfoInner as *const kafka_admin_ReplicaLogDirInfo_t,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the replica at `index` (borrowed), or null if it was
+/// described successfully or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { describe_replica_log_dirs_result_ref(result) }
+        .errors
+        .get(index as usize)
+    {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `describe_replica_log_dirs` result handle, invalidating every
+/// borrowed sub-handle obtained from it. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `describe_replica_log_dirs` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_destroy(
+    result: *mut kafka_admin_DescribeReplicaLogDirsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut DescribeReplicaLogDirsResultInner)) };
+    }
+}
+
+/// Submits `describeReplicaLogDirs` and returns the collect-all future over its
+/// per-replica futures.
+fn submit_describe_replica_log_dirs(
+    admin: &dyn Admin,
+    replicas: &[TopicPartitionReplica],
+    options: DescribeReplicaLogDirsOptions,
+) -> KafkaFuture<DescribeReplicaLogDirsOutcomes> {
+    let result = admin.describe_replica_log_dirs(replicas, options);
+    let entries: Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> =
+        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_DescribeReplicaLogDirsResult_destroy`] or `error`
+/// with `kafka_common_KafkaError_destroy`. A per-replica failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeReplicaLogDirsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Queries the log directories of the given replicas, blocking until every
+/// per-replica future has resolved (synchronous).
+///
+/// This is `describeReplicaLogDirs(Collection<TopicPartitionReplica>,
+/// DescribeReplicaLogDirsOptions)`. Java's collection becomes three parallel
+/// arrays: entry `i` is the replica `(topics[i], partitions[i],
+/// broker_ids[i])`. An entry with a NULL topic is skipped.
+///
+/// On success writes a [`kafka_admin_DescribeReplicaLogDirsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`]) and returns null.
+/// Per-replica failures are reported by
+/// [`kafka_admin_DescribeReplicaLogDirsResult_get_error`], not by the return
+/// value.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every input array must have `count` valid
+/// entries; `out_result` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    broker_ids: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_DescribeReplicaLogDirsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
+    let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options))) };
+    unsafe { finish_sync(outcome, out_result, box_describe_replica_log_dirs_result) }
+}
+
+/// Queries replica log directories asynchronously. See
+/// [`kafka_admin_AdminClient_describe_replica_log_dirs`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; every input array must have `count` valid
+/// entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    broker_ids: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_describe_replica_log_dirs_callback_t,
+    user_data: *mut c_void,
+) {
+    let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
+    let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_describe_replica_log_dirs_result(outcomes), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
