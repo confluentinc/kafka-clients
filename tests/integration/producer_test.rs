@@ -796,6 +796,12 @@ async fn test_wrong_serializer_errors_send() {
 /// multilanguage_consumer_test.rs. See
 /// [`crate::common::callback_log`] for why the assertion goes through a
 /// server-side log rather than a closure handed across the wire.
+///
+/// The `exactly once` half of the claim is what
+/// `wait_for_kind_settled`'s grace window buys: a plain `wait_for_kind`
+/// returns the instant the first `delivery` entry is visible, so a
+/// double-firing backend would usually be sampled between the two appends and
+/// the `len() == 1` assertion would pass vacuously.
 async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("delivery_callback");
     let (producer, log) = factory
@@ -815,7 +821,11 @@ async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &
     // Flush so a backend that batches has certainly run its completion path.
     producer.flush().await.expect("flush should succeed");
 
-    let entries = log.wait_for_kind(KIND_DELIVERY, Duration::from_secs(20)).await;
+    // Settle before counting: `assert_eq!(len, 1)` on the earliest snapshot
+    // that contains one entry cannot detect a second invocation.
+    let entries = log
+        .wait_for_kind_settled(KIND_DELIVERY, Duration::from_secs(20), Duration::from_millis(750))
+        .await;
     let deliveries: Vec<_> = entries.iter().filter(|e| e.kind == KIND_DELIVERY).collect();
     assert_eq!(
         deliveries.len(),

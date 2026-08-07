@@ -342,6 +342,36 @@ impl ProducerCallbackLog {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+
+    /// [`Self::wait_for_kind`] followed by a bounded **settle window**: keep
+    /// re-reading the log for `grace` after the first matching entry appears,
+    /// and return the last snapshot.
+    ///
+    /// Required by any assertion on the *number* of invocations.
+    /// `wait_for_kind` deliberately returns at the earliest moment one matching
+    /// entry exists, so a backend that fires the callback twice is, in the
+    /// common case, sampled between the two appends and an `== 1` assertion
+    /// passes vacuously — pinning only the "at least once" half of the
+    /// contract. "At most once" is the interesting half: double-firing is the
+    /// classic FFI/binding callback bug and CLAUDE.md §9.5 makes exactly-once
+    /// invocation an explicit obligation. A stray second append lands within
+    /// milliseconds of the first (same completion path, same dispatcher), so a
+    /// sub-second grace window is enough to catch it, and the window is a flat
+    /// cost — it does not retry or extend.
+    pub async fn wait_for_kind_settled(
+        &self,
+        kind: &str,
+        deadline: std::time::Duration,
+        grace: std::time::Duration,
+    ) -> Vec<CallbackLogEntry> {
+        let mut latest = self.wait_for_kind(kind, deadline).await;
+        let settle_start = std::time::Instant::now();
+        while settle_start.elapsed() < grace {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            latest = self.entries().await.expect("read producer callback log");
+        }
+        latest
+    }
 }
 
 // ---------------------------------------------------------------------------
