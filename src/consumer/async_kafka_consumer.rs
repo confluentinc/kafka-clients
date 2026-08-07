@@ -959,17 +959,76 @@ impl AsyncConsumerHandleState {
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
 /// instance; dropped (with `signal_close`) on close.
 pub(crate) struct NetworkThreadCloseHandle {
-    /// Cancels the bg-task `run_once` loop and wakes the trigger so the
-    /// next iteration observes the shutdown.
+    /// Clears the bg-task `running` flag and pokes the bg loop so the
+    /// next iteration observes the shutdown. Built by
+    /// [`build_network_thread_close_fns`].
     signal_close_fn: Box<dyn Fn() + Send + Sync>,
-    /// Wakes the bg-task's `select!` on the wakeup token. Held as an
-    /// `Arc` (not `Box`) so a clone can be handed to a shareable
-    /// [`ConsumerHandle`] (so cross-task `wakeup()` — a first-class Java
-    /// pattern — is expressible without `unsafe`); the bg-wakeup
-    /// closure is `Send + Sync` and side-effect-idempotent.
+    /// Pokes the bg-task's `select!` so its in-flight network poll returns
+    /// at a safe boundary. Held as an `Arc` (not `Box`) so a clone can be
+    /// handed to a shareable [`ConsumerHandle`] (so cross-task `wakeup()`
+    /// — a first-class Java pattern — is expressible without `unsafe`);
+    /// the bg-wakeup closure is `Send + Sync` and side-effect-idempotent.
+    /// Built by [`build_network_thread_close_fns`].
     wakeup_fn: Arc<dyn Fn() + Send + Sync>,
     /// How the bg loop is joined on close (tokio task vs dedicated thread).
     join: BgJoin,
+}
+
+/// `(signal_close_fn, wakeup_fn)` as returned by
+/// [`build_network_thread_close_fns`] and consumed by
+/// [`NetworkThreadCloseHandle::new`] / [`NetworkThreadCloseHandle::new_dedicated`].
+/// Aliased to satisfy clippy's `type_complexity` lint.
+pub(crate) type NetworkThreadCloseFns = (Box<dyn Fn() + Send + Sync>, Box<dyn Fn() + Send + Sync>);
+
+/// Builds the two erased closures held by a [`NetworkThreadCloseHandle`]:
+/// `signal_close_fn` (clear the bg-task `running` flag, then wake) and
+/// `wakeup_fn` (wake only).
+///
+/// **Both wakes go through the application-event `Notify`** — the same
+/// `Arc<Notify>` [`ApplicationEventHandler::wake_background_task`] fires and
+/// that `ConsumerNetworkThread::run_once`'s network-poll `select!` has an arm
+/// for. That arm pokes the selector's wakeup primitive, so the in-flight poll
+/// returns at a safe boundary instead of waiting out `poll_wait_time_ms`
+/// (bounded by `MAX_POLL_TIMEOUT_MS` = 5 s). Java analog:
+/// `ConsumerNetworkThread.close()` → `wakeup()` → `networkClientDelegate
+/// .wakeup()` → `Selector.wakeup()`.
+///
+/// It MUST NOT be [`WakeupTrigger::wakeup`], for two independent reasons:
+///
+///  1. `close_internal` step 1 calls `wakeup_trigger.disable()`, after which
+///     `WakeupTrigger::wakeup()` returns early without cancelling the token.
+///     A trigger-based shutdown wake is therefore *silently inert* on the
+///     close path, and `close()` blocks until the in-flight poll times out.
+///  2. The trigger is the *user-facing* `Consumer::wakeup()` cancellation
+///     token; firing it internally makes the caller's own `poll()` return
+///     `KafkaError::Wakeup` although the user never called `wakeup()` (the
+///     Phase-41b listener-ack bug). Java's `ConsumerNetworkThread.wakeup()`
+///     likewise never touches `wakeupTrigger`.
+///
+/// Callers that *do* want the user-visible cancellation
+/// ([`AsyncKafkaConsumer::wakeup`], [`ConsumerHandle::wakeup`]) fire the
+/// trigger themselves before calling [`NetworkThreadCloseHandle::wakeup`].
+///
+/// Shared by the production constructor and the unit-test fixture
+/// (`spawn_dedicated_bg`) so the two can never diverge: a fixture that
+/// substitutes a working primitive for a broken one turns its test into a
+/// proof about the fixture.
+pub(crate) fn build_network_thread_close_fns(
+    running: Arc<AtomicBool>,
+    event_notify: Arc<tokio::sync::Notify>,
+) -> NetworkThreadCloseFns {
+    let close_notify = Arc::clone(&event_notify);
+    let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        running.store(false, Ordering::Release);
+        // `notify_one()` stores a permit when the bg loop is not currently
+        // parked on `notified()`, so the shutdown poke is never lost in the
+        // gap between two `run_once` phases.
+        close_notify.notify_one();
+    });
+    let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        event_notify.notify_one();
+    });
+    (signal_close_fn, wakeup_fn)
 }
 
 impl NetworkThreadCloseHandle {
@@ -1015,13 +1074,19 @@ impl NetworkThreadCloseHandle {
     }
 
     /// Signals the bg task to exit and wakes it from its current
-    /// `select!`. Idempotent.
+    /// `select!` via the application-event `Notify` (NOT the user-facing
+    /// `WakeupTrigger` — see [`build_network_thread_close_fns`]).
+    /// Idempotent.
     pub(crate) fn signal_close(&self) {
         (self.signal_close_fn)();
     }
 
-    /// Wakes the bg task's `select!` without signalling shutdown. Used
-    /// from `AsyncKafkaConsumer::wakeup`.
+    /// Pokes the bg task's `select!` via the application-event `Notify`
+    /// (NOT the user-facing `WakeupTrigger` — see
+    /// [`build_network_thread_close_fns`]) so an in-flight network poll
+    /// returns at a safe boundary, without signalling shutdown. Used from
+    /// `AsyncKafkaConsumer::wakeup`, `ConsumerHandle::wakeup` and
+    /// `close_internal` step 7.
     pub(crate) fn wakeup(&self) {
         (self.wakeup_fn)();
     }
@@ -2260,20 +2325,14 @@ where
         network_thread
             .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
 
-        // Capture the running-flag + wakeup handles before moving
-        // `network_thread` into `tokio::spawn`. The erased closures
-        // call these to signal close / wake the bg task without
-        // holding a reference to the concrete `K` type.
-        let signal_close_running = network_thread.running_handle();
-        let signal_close_wakeup = wakeup_trigger.clone();
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            signal_close_running.store(false, Ordering::Release);
-            signal_close_wakeup.wakeup();
-        });
-        let wakeup_for_fn = wakeup_trigger.clone();
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_for_fn.wakeup();
-        });
+        // Capture the running-flag + the application-event `Notify` before
+        // moving `network_thread` into the bg thread. The erased closures
+        // call these to signal close / wake the bg task without holding a
+        // reference to the concrete `K` type. Both wakes go through the
+        // `Notify`, never the user-facing `WakeupTrigger` — see
+        // [`build_network_thread_close_fns`] for why.
+        let (signal_close_fn, wakeup_fn) =
+            build_network_thread_close_fns(network_thread.running_handle(), Arc::clone(&event_notify));
 
         // The `max_time_to_wait_ms` slot is seeded with
         // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
@@ -2654,9 +2713,20 @@ where
     /// signal handlers.
     pub fn wakeup(&self) {
         self.wakeup_trigger.wakeup();
-        // Also wake the bg task's `select!` directly so the underlying
-        // `KafkaClient::poll` is unblocked even if the wakeup token was
-        // already cancelled.
+        // Java's `wakeup()` is the single `wakeupTrigger.wakeup()` statement
+        // above, because Java's `WakeupTrigger` completes the pending
+        // `CompletableFuture` a blocked API call is waiting on — it does not
+        // have to interrupt a socket poll. Rust's `poll()` can instead be
+        // parked inside `NetworkClientDelegate::poll_default` on the bg task,
+        // so we additionally poke the application-event `Notify` (Java's
+        // `Selector.wakeup()` analog): `run_once`'s `select!` arm fires the
+        // selector's wakeup handle and the in-flight poll returns at a safe
+        // boundary. Without it a `wakeup()` arriving while the bg loop is in
+        // its network poll is only acted on up to `MAX_POLL_TIMEOUT_MS` later.
+        //
+        // This must NOT be the token again: `CancellationToken::cancel()` is
+        // idempotent, so re-firing the (possibly already cancelled) trigger
+        // unblocks nothing. See [`build_network_thread_close_fns`].
         self.network_thread_close.wakeup();
     }
 
@@ -3163,14 +3233,18 @@ where
                     // membership manager queued is simply never run and is
                     // discarded when the consumer closes.
                     //
-                    // We still must send the §31 ack so the bg task's
-                    // `invoke_rebalance_callback` (parked on `ack_rx.await`)
-                    // unblocks and reconciliation completes cleanly — without
-                    // it the bg task never makes progress and
-                    // `network_thread_close.await_join()` (Step 8) hangs. Java
-                    // has no equivalent dependency because its KIP-848
-                    // reconcile chains via `CompletableFuture` and never parks
-                    // the bg thread on the ack.
+                    // We still must send the §31 ack. Since Phase 41 the bg
+                    // loop does NOT park on `ack_rx.await` — it stores the
+                    // receiver as cross-iteration state and `try_recv`s it on
+                    // every `reconcile` / `drive_pending_release` entry — so a
+                    // missing ack cannot hang `await_join()`. What it *does*
+                    // gate is the membership state transition: without the ack
+                    // the member stays stuck in its transitional state
+                    // (`RECONCILING` / `FENCED` / `STALE`) for the rest of the
+                    // close path. Java's equivalent
+                    // `revokeAndAssign(...).whenComplete(...)` chain has the
+                    // same shape: the network thread keeps spinning, only the
+                    // reconcile future is outstanding.
                     //
                     // Ack with `Ok(())`: a benign success completes the
                     // reconcile, so the membership stops re-enqueuing the
@@ -3180,6 +3254,12 @@ where
                     let _ = method_name;
                     let _ = partitions;
                     let _ = ack.send(Ok(()));
+                    // Same poke as the sibling arm below: wake the bg loop so
+                    // it `try_recv`s this ack on its next iteration instead of
+                    // waiting out the in-flight selector poll. Matters more on
+                    // the close path than off it — every close step runs under
+                    // the close deadline.
+                    self.application_event_handler.wake_background_task();
                 },
                 BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
                     // Read the currently-registered listener and drop the
@@ -5633,10 +5713,12 @@ mod tests {
         /// Handle on the shared `SubscriptionState` so tests can inspect /
         /// pre-populate it.
         subscriptions: Arc<Mutex<SubscriptionState>>,
-        /// Set to `true` whenever the consumer's bg-task wakeup fn is invoked
-        /// (Phase 41 Issue 3 observability). That fn fires the *user-facing*
-        /// `WakeupTrigger`, so tests assert it is NOT called on paths that only
-        /// need to nudge the bg loop.
+        /// Set to `true` whenever the consumer's erased bg-task wakeup fn
+        /// (`NetworkThreadCloseHandle::wakeup`) is invoked — Phase 41 Issue 3
+        /// observability. Tests assert it is NOT called on paths that only need
+        /// to nudge the bg loop, so a poke re-routed through the close handle
+        /// (whose caller `AsyncKafkaConsumer::wakeup` also fires the
+        /// user-facing `WakeupTrigger`) is caught here.
         bg_wakeup_called: Arc<AtomicBool>,
         /// The same `Notify` the consumer's [`ApplicationEventHandler`] fires —
         /// Java's `wakeupNetworkThread()`. Lets a component test assert the §31
@@ -5678,17 +5760,22 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
-        // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
-        // mirror that here as well as setting the flag, so a test asserting
-        // "no wakeup is pending" really exercises what the app would observe.
-        let wakeup_trigger_for_fn = wakeup.clone();
+        // Wrap the SAME closures production builds — from
+        // [`build_network_thread_close_fns`], i.e. the application-event
+        // `Notify`, never the user-facing `WakeupTrigger` — with an
+        // observability flag. Hand-rolling fixture bodies here is what hid
+        // Critic-3 Issue 1; the only fixture-only addition is the flag.
+        let bg_running = Arc::new(AtomicBool::new(true));
+        let (prod_signal_close_fn, prod_wakeup_fn) =
+            build_network_thread_close_fns(Arc::clone(&bg_running), Arc::clone(&app_event_notify));
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
+                prod_signal_close_fn();
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
-                wakeup_trigger_for_fn.wakeup();
+                prod_wakeup_fn();
             }),
             join_handle,
         );
@@ -9928,14 +10015,31 @@ mod tests {
     /// Builds a dedicated bg thread that mirrors the production loop:
     /// a `current_thread` runtime spinning a `run_once`-style loop until
     /// the running flag flips, firing `done` on exit. Returns the close
-    /// handle plus the running flag and a wakeup `Notify` the loop waits
-    /// on (so the test can prove `signal_close` + `wakeup` terminate it).
-    fn spawn_dedicated_bg() -> (NetworkThreadCloseHandle, Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+    /// handle plus the running flag and the application-event `Notify` the
+    /// loop waits on (so the test can prove `signal_close` + `wakeup`
+    /// terminate it).
+    ///
+    /// The close/wakeup closures come from the SAME
+    /// [`build_network_thread_close_fns`] the production ctor uses, so this
+    /// fixture cannot diverge from production. Building them by hand here is
+    /// what previously hid Critic-3 Issue 1: the fixture poked the loop's
+    /// `Notify` while production fired the (close-time disabled)
+    /// `WakeupTrigger`, and the test proved a wake path production did not
+    /// have.
+    ///
+    /// The fixture also reports when the loop has actually **parked** on the
+    /// wake primitive. Without that, `signal_close()` could be observed by the
+    /// loop's `while` check before it ever parks, and the test would pass even
+    /// with a completely inert wake — the second half of Critic-3 Issue 1's
+    /// "why no test caught it".
+    fn spawn_dedicated_bg() -> DedicatedBgFixture {
         let running = Arc::new(AtomicBool::new(true));
         let wake = Arc::new(tokio::sync::Notify::new());
+        let parked = Arc::new(AtomicBool::new(false));
 
         let loop_running = Arc::clone(&running);
         let loop_wake = Arc::clone(&wake);
+        let loop_parked = Arc::clone(&parked);
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let thread_handle = std::thread::Builder::new()
             .name("kafka-consumer-io-test".into())
@@ -9950,6 +10054,10 @@ mod tests {
                     // the loop only proceeds when woken (as the real
                     // selector poll returns on `Selector::wakeup`).
                     while loop_running.load(Ordering::Acquire) {
+                        // Set BEFORE awaiting. `Notify::notify_one()` stores a
+                        // permit when nobody is parked yet, so a poke landing in
+                        // the gap is not lost either way.
+                        loop_parked.store(true, Ordering::Release);
                         loop_wake.notified().await;
                     }
                     // Stand-in for `cleanup().await`.
@@ -9958,27 +10066,42 @@ mod tests {
             })
             .expect("spawn test io thread");
 
-        let close_running = Arc::clone(&running);
-        let close_wake = Arc::clone(&wake);
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            close_running.store(false, Ordering::Release);
-            close_wake.notify_one();
-        });
-        let wakeup_wake = Arc::clone(&wake);
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_wake.notify_one();
-        });
+        let (signal_close_fn, wakeup_fn) = build_network_thread_close_fns(Arc::clone(&running), Arc::clone(&wake));
 
         let handle = NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
-        (handle, running, wake)
+        (handle, running, wake, parked)
+    }
+
+    /// Return value of [`spawn_dedicated_bg`]: the close handle, the bg
+    /// `running` flag, the wake `Notify` the loop parks on, and a flag set once
+    /// the loop has reached that park. Aliased to satisfy clippy's
+    /// `type_complexity` lint.
+    type DedicatedBgFixture = (
+        NetworkThreadCloseHandle,
+        Arc<AtomicBool>,
+        Arc<tokio::sync::Notify>,
+        Arc<AtomicBool>,
+    );
+
+    /// Spins (bounded) until the dedicated bg loop has parked on its wake
+    /// primitive, so a subsequent `signal_close()` genuinely has to wake it.
+    async fn await_bg_parked(parked: &Arc<AtomicBool>) {
+        for _ in 0..500 {
+            if parked.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("dedicated bg loop never parked on its wake primitive");
     }
 
     /// `signal_close()` + `wakeup()` terminate the dedicated bg loop and
     /// `await_join()` cleanly reaps the OS thread within a bounded
-    /// timeout (no hang).
+    /// timeout (no hang) — even though the loop is parked when close starts.
     #[tokio::test]
     async fn dedicated_close_handle_joins_cleanly() {
-        let (mut handle, running, _wake) = spawn_dedicated_bg();
+        let (mut handle, running, _wake, parked) = spawn_dedicated_bg();
+        await_bg_parked(&parked).await;
 
         handle.signal_close();
         handle.wakeup();
@@ -9994,7 +10117,8 @@ mod tests {
     /// call after a successful join is a no-op `Ok(())`, not a hang.
     #[tokio::test]
     async fn dedicated_await_join_is_idempotent() {
-        let (mut handle, _running, _wake) = spawn_dedicated_bg();
+        let (mut handle, _running, _wake, parked) = spawn_dedicated_bg();
+        await_bg_parked(&parked).await;
 
         handle.signal_close();
         handle.wakeup();

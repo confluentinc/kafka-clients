@@ -205,12 +205,12 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// `run_once`) lock briefly with `std::sync::Mutex`. The lock is
     /// never held across an `.await` per `consumer-threading.md` §16.
     request_managers: Arc<std::sync::Mutex<RequestManagers>>,
-    /// Wakeup primitive. The app side calls `wakeup.wakeup()`; the bg
-    /// task `select!`s on `wakeup_rx.borrow().clone().cancelled()` at
-    /// the top of each loop.
-    wakeup: WakeupTrigger,
     /// Watch-channel subscription used to re-read the current wakeup
-    /// token at the top of every iteration.
+    /// token at the top of every iteration. Derived from the app side's
+    /// [`WakeupTrigger`] (passed into [`Self::new`]); the bg task only ever
+    /// *observes* the token — it never fires the trigger itself, matching
+    /// Java, where `wakeupTrigger` is an `AsyncKafkaConsumer` field that
+    /// `ConsumerNetworkThread` has no access to.
     wakeup_rx: watch::Receiver<CancellationToken>,
     /// Wake signal fired by the app side whenever an application event is
     /// enqueued (the same `Arc<Notify>` held by
@@ -304,7 +304,6 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             application_event_processor,
             network_client_delegate,
             request_managers,
-            wakeup,
             wakeup_rx,
             event_notify,
             running: Arc::new(AtomicBool::new(true)),
@@ -356,31 +355,40 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.cached_max_time_to_wait_ms.load(Ordering::Acquire)
     }
 
-    /// Mirror of Java's `wakeup()`. Cancels the current token via the
-    /// shared [`WakeupTrigger`] and also calls
-    /// `network_client_delegate.wakeup()` to unblock the underlying
-    /// `KafkaClient::poll`. The trigger is shared with the app side
-    /// (`AsyncKafkaConsumer::wakeup()` in Phase 11).
+    /// Mirror of Java's `wakeup()`
+    /// (`ConsumerNetworkThread.java:322-326`), which is *only*
+    /// `if (networkClientDelegate != null) networkClientDelegate.wakeup();`
+    /// → `Selector.wakeup()`.
+    ///
+    /// It deliberately does NOT touch the [`WakeupTrigger`]: that primitive
+    /// is the *user-facing* `Consumer::wakeup()` cancellation token, and
+    /// firing it from an internal "nudge the loop" path makes the caller's
+    /// own `poll()` return `KafkaError::Wakeup` although the user never
+    /// called `wakeup()`. Java's `wakeupTrigger` lives on
+    /// `AsyncKafkaConsumer` and is untouched by this method.
     pub(crate) async fn wakeup(&self) {
-        self.wakeup.wakeup();
-        // Java additionally calls `networkClientDelegate.wakeup()` to
-        // break out of the underlying selector — we do the same so the
-        // `KafkaClient` is unblocked even if the await is not inside
-        // our `select!`.
         let delegate = self.network_client_delegate.lock().await;
         delegate.wakeup();
     }
 
     /// Signals the bg task to exit at the next iteration. Mirrors the
     /// state change inside Java's `closeInternal(...)` (without the
-    /// `join()` — the spawn handle is owned by the caller in Rust).
+    /// `join()` — the spawn handle is owned by the caller in Rust), which
+    /// sets `running = false` and then calls the selector-only
+    /// [`Self::wakeup`].
     ///
-    /// Setting `running = false` AND firing the wakeup token in
-    /// combination ensure the bg task observes the shutdown without
-    /// needing to wait for `MAX_POLL_TIMEOUT_MS` to elapse.
+    /// Setting `running = false` AND poking the application-event `Notify`
+    /// in combination ensure the bg task observes the shutdown without
+    /// needing to wait for `MAX_POLL_TIMEOUT_MS` to elapse: `run_once`'s
+    /// network-poll `select!` has a `notified()` arm that fires the
+    /// selector's wakeup handle. The `Notify` is used rather than the
+    /// [`WakeupTrigger`] for the same two reasons documented on
+    /// `crate::consumer::async_kafka_consumer::build_network_thread_close_fns`
+    /// — the trigger is user-facing, and it is inert after `close()` has
+    /// called `disable()` on it.
     pub(crate) fn signal_close(&self) {
         self.running.store(false, Ordering::Release);
-        self.wakeup.wakeup();
+        self.event_notify.notify_one();
     }
 
     /// Sets the close timeout used by [`Self::cleanup`].
@@ -1526,6 +1534,120 @@ mod tests {
             .expect("run_once must be preempted by the application-event notify, not block on the poll");
     }
 
+    /// Critic-3 Issue 1: `close()`'s background-task shutdown wake must still
+    /// reach the bg task after `close_internal` step 1 has called
+    /// `wakeup_trigger.disable()`.
+    ///
+    /// This models production's shutdown path exactly:
+    ///   * a real `ConsumerNetworkThread` looping on its own `std::thread`
+    ///     hosting a `current_thread` runtime (the Phase-21 shape),
+    ///   * a `NetworkThreadCloseHandle` whose closures come from
+    ///     [`build_network_thread_close_fns`] — the same builder the
+    ///     production ctor uses,
+    ///   * a client whose `poll()` parks until its selector wakeup handle is
+    ///     fired, like the real `Selector`,
+    ///   * `WakeupTrigger::disable()` called first, as `close_internal` does
+    ///     before reaching steps 7/8.
+    ///
+    /// Pre-fix, both closures' only wake action was `WakeupTrigger::wakeup()`,
+    /// which returns early once disabled — so nothing woke the parked poll and
+    /// `await_join()` blocked until the poll timed out (`poll_wait_time_ms`,
+    /// bounded by `MAX_POLL_TIMEOUT_MS` = 5 s in production; here the mock poll
+    /// never times out at all, so the pre-fix behavior is a hang).
+    ///
+    /// Mutation check: restoring `signal_close_wakeup.wakeup()` /
+    /// `wakeup_for_fn.wakeup()` as the closure bodies fails this test on the
+    /// `timeout` expect.
+    #[tokio::test]
+    async fn close_handle_wakes_bg_task_after_wakeup_trigger_disabled() {
+        use crate::consumer::async_kafka_consumer::{NetworkThreadCloseHandle, build_network_thread_close_fns};
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::with_dyn_managers(Vec::new())));
+        let counting_delegate = make_counting_delegate(&config, metadata.clone());
+        // The real `Selector::poll` parks until its wakeup `Notify` fires;
+        // `poll_block` reproduces that, and `CountingClient::wakeup_handle()`
+        // hands out the very `Notify` the parked poll awaits — so the only way
+        // out of the poll phase is a poke from `run_once`'s `select!`.
+        counting_delegate
+            .client_for_test_ref()
+            .poll_block()
+            .store(true, Ordering::SeqCst);
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let event_notify = Arc::new(Notify::new());
+        let thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn ThreadTime>,
+            rx,
+            reaper.clone(),
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            wakeup.clone(),
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::clone(&event_notify),
+        );
+
+        // `close_internal` step 1 — Java's `wakeupTrigger.disableWakeups()`.
+        // Every subsequent `WakeupTrigger::wakeup()` is a silent no-op.
+        wakeup.disable();
+
+        let (signal_close_fn, wakeup_fn) =
+            build_network_thread_close_fns(thread.running_handle(), Arc::clone(&event_notify));
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io-close-test".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build test io runtime");
+                rt.block_on(async move {
+                    let mut thread = thread;
+                    while thread.is_running() {
+                        thread.run_once().await;
+                    }
+                    thread.cleanup().await;
+                });
+                let _ = done_tx.send(());
+            })
+            .expect("spawn test io thread");
+
+        let mut close_handle =
+            NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
+
+        // Let the bg loop reach its (never-self-completing) network poll, so the
+        // shutdown really has to wake it rather than racing it to the top of the
+        // loop.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // `close_internal` steps 7 & 8.
+        let started = std::time::Instant::now();
+        close_handle.signal_close();
+        close_handle.wakeup();
+        tokio::time::timeout(Duration::from_secs(5), close_handle.await_join())
+            .await
+            .expect(
+                "close must not wait out the in-flight network poll: the shutdown wake has to reach \
+                 the bg task even though the WakeupTrigger is disabled",
+            )
+            .expect("clean dedicated-thread join");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "close must be prompt (well under MAX_POLL_TIMEOUT_MS = {MAX_POLL_TIMEOUT_MS} ms), took {elapsed:?}"
+        );
+    }
+
     fn make_offsets_manager(
         config: &ConsumerConfig,
         subs: Arc<Mutex<SubscriptionState>>,
@@ -2006,8 +2128,12 @@ mod tests {
     async fn run_once_returns_when_wakeup_fires_during_poll() {
         let (mut thread, _tx, _reaper, _time, _rm) = make_thread_no_membership();
         // Cancel the wakeup token before run_once starts; the select!
-        // arm should win immediately.
-        thread.wakeup.wakeup();
+        // arm should win immediately. Cancelling the token the bg task
+        // observes is exactly what the app-side `WakeupTrigger::wakeup()`
+        // does — the bg task itself no longer holds the trigger (it only
+        // holds the watch receiver, matching Java, where `wakeupTrigger` is
+        // an `AsyncKafkaConsumer` field).
+        thread.wakeup_rx.borrow().clone().cancel();
         let res = tokio::time::timeout(Duration::from_millis(500), thread.run_once()).await;
         assert!(res.is_ok(), "run_once must return promptly after wakeup");
     }
