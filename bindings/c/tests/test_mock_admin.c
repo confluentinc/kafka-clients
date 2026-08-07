@@ -2712,6 +2712,46 @@ static void test_mock_admin_list_partition_reassignments_round_trip(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Regression at the FFI boundary for the core fix in this slice.
+ *
+ * `deleteTopics` drops the topic from the mock's `allTopics` without pruning
+ * its `reassignments` map — exactly as Java's does (MockAdminClient.java:584
+ * and :614 versus the only two writers, at :1158 and :1161) — so
+ * create/alter/delete/list reaches `findPartitionReassignment`'s
+ * "no TopicMetadata" branch, where Java throws a bare RuntimeException. Before
+ * the fix the Rust mock panicked there, and that unwind would have aborted this
+ * process at the `extern "C"` frame. The point of this test is that the suite
+ * survives the sequence and observes an ordinary error return: were the
+ * regression to come back, the test binary would die rather than fail. */
+static void test_mock_admin_list_partition_reassignments_after_delete_returns_error(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
+    create_one(admin, "lr-gone", 1, 3);
+    reassign_one(admin, "lr-gone", 0);
+
+    const char *names[1] = {"lr-gone"};
+    kafka_admin_DeleteTopicsResult_t *deleted = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_topics(admin, names, 1, -1, false, &deleted));
+    TEST_ASSERT_NOT_NULL(deleted);
+    TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_get_error(deleted, 0));
+    kafka_admin_DeleteTopicsResult_destroy(deleted);
+
+    /* `listPartitionReassignments` holds a single future for the whole map
+     * (ListPartitionReassignmentsResult.java:31), so the failure surfaces as
+     * the call's error and no result handle is produced. */
+    kafka_admin_ListPartitionReassignmentsResult_t *listed = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_partition_reassignments(
+        admin, true, NULL, NULL, 0, -1, &listed);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(listed);
+    TEST_ASSERT_EQUAL_STRING(
+        "Internal MockAdminClient logic error: found reassignment for lr-gone-0, but no "
+        "TopicMetadata",
+        kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 typedef struct {
     atomic_int fired;
     int had_result;
@@ -3212,6 +3252,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_partition_reassignments_partial_failure);
     RUN_TEST(test_mock_admin_alter_partition_reassignments_rejects_empty_replicas);
     RUN_TEST(test_mock_admin_list_partition_reassignments_round_trip);
+    RUN_TEST(test_mock_admin_list_partition_reassignments_after_delete_returns_error);
     RUN_TEST(test_mock_admin_alter_partition_reassignments_async);
     RUN_TEST(test_mock_admin_alter_partition_reassignments_async_empty_replicas);
     RUN_TEST(test_mock_admin_alter_partition_reassignments_async_null_handle);

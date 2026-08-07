@@ -1362,12 +1362,20 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._describe_replica_log_dirs_spec(replicas, timeout))
 
-    def elect_leaders(self, election_type, partitions=None, timeout=None):
+    def elect_leaders(self, election_type, partitions, timeout=None):
         """Elect leaders for ``partitions`` (an iterable of ``(topic,
         partition)``), or for **every** partition when ``partitions`` is
         ``None`` — Java's null ``Set``. Returns
         ``{(topic, partition): None | KafkaError}``, where ``None`` means the
         election succeeded for that partition.
+
+        ``partitions`` is required, unlike the neighbouring
+        :meth:`list_partition_reassignments`. Both of Java's ``electLeaders``
+        overloads (``Admin.java:1092`` and the three-argument form) take the
+        ``Set`` explicitly; there is no no-argument form. Pass ``None``
+        explicitly for a cluster-wide election, as a Java caller must — an
+        omitted argument must not silently mean an unclean election over every
+        partition in the cluster.
         """
         self._check_closed()
         return self._run_sync(*self._elect_leaders_spec(election_type, partitions, timeout))
@@ -1536,7 +1544,9 @@ class AsyncAdmin(_AdminBase):
         return await self._run_async(*self._describe_replica_log_dirs_spec(
             replicas, timeout))
 
-    async def elect_leaders(self, election_type, partitions=None, timeout=None):
+    async def elect_leaders(self, election_type, partitions, timeout=None):
+        """See :meth:`Admin.elect_leaders`. ``partitions`` is required; pass
+        ``None`` explicitly for a cluster-wide election, as in Java."""
         self._check_closed()
         return await self._run_async(*self._elect_leaders_spec(
             election_type, partitions, timeout))

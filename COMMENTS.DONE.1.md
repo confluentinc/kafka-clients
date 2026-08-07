@@ -1175,3 +1175,90 @@ the mock ignores.
 
 DoD #10 (hot-path allocation audit) is N/A for Admin per `admin-client.md` §10;
 #11 does not apply.
+
+---
+
+# Critic 1 round 7 (slice B3) — the four LOW carryovers
+
+Round 7's verdict was "no defects"; these are its four LOW observations, all
+resolved. Nothing here changes shipped behaviour except LOW 3, which removes a
+Python default argument.
+
+## LOW 1 — the second `find_partition_reassignment` branch was untested
+
+`list_partition_reassignments_after_topic_shrink_fails_the_future`
+(`src/admin/mock_admin_client.rs`) walks the Critic's sequence: create `rt2`
+with **2** partitions, reassign `rt2-1`, delete the topic, recreate it with
+**1** partition, list. The stale reassignment now names a partition index the
+recreated topic no longer has, so the second guard
+(`MockAdminClient.java:1190-1192`) fires and the test asserts its exact
+message, `"... found reassignment for rt2-1, but no TopicPartitionInfo"`.
+
+Kept as its own test rather than an extension of `admin_with_reassignment`,
+because the helper creates a single-partition topic and the branch needs a
+reassignment on an index that survives the delete but not the recreate.
+
+The rustdoc already records why this branch is live in Rust and dead in Java
+(`ArrayList.get` throws where `Vec::get` returns `None`); the test comment
+repeats it, since a reader arriving at the test will ask.
+
+## LOW 2 — no C-level regression test for the abort
+
+`test_mock_admin_list_partition_reassignments_after_delete_returns_error`
+(`bindings/c/tests/test_mock_admin.c`) drives create -> alter -> delete -> list
+through the C API and asserts a non-NULL `err`, a NULL result handle, and the
+exact message. Its comment states the property under test explicitly: the
+evidence is that the *binary survives* the sequence, since the pre-fix panic
+would have aborted the process at the `extern "C"` frame rather than failing an
+assertion. That is the artifact the escalation commit message was missing.
+
+88 C mock tests now (87 -> 88).
+
+## LOW 3 — `elect_leaders`' invented cluster-wide default
+
+Fixed by matching Java rather than documenting the deviation. `partitions` is
+now a required positional parameter on both `Admin.elect_leaders` and
+`AsyncAdmin.elect_leaders`; callers pass `None` explicitly for a cluster-wide
+election, exactly as a Java caller must. Java has no no-argument overload —
+`Admin.java:1092` and the three-argument form both take the `Set` — so the
+default was ours, and an omitted argument combined with `ElectionType.UNCLEAN`
+meant a cluster-wide unclean election.
+
+The `None` -> "all partitions" *mapping* is unchanged and still correct; only
+the default is gone. The neighbouring `list_partition_reassignments` keeps its
+`partitions=None` default, which **is** Java (`Admin.java:1245-1247` has the
+no-argument overload) — the two methods are no longer symmetric, and that
+asymmetry is now the faithful one.
+
+Two existing call sites updated to pass `None`, plus a new
+`test_elect_leaders_requires_partitions_explicitly` asserting the `TypeError`,
+so the requirement cannot silently regress to a default.
+
+## LOW 4 — the second private `read_topic_partitions`
+
+Twelve lines of rustdoc on the admin copy (`src/ffi/admin.rs`) stating that the
+divergence from the consumer's same-named helper is deliberate, what the
+difference is (empty for a NULL array, skip a NULL topic entry), and why it is
+load-bearing: four admin entry points document "an entry with a NULL topic is
+skipped", cbindgen ships that sentence into the public header, and delegating
+to the consumer helper would make all four false. Also says what a future
+unification must preserve, rather than only forbidding it.
+
+## Adjudications accepted without code change
+
+- **Priority 2.1** — the allocation argument is withdrawn, as the Critic asks;
+  `admin-client.md` §10 rules the hot-path audit N/A for Admin, so it cannot be
+  load-bearing. The decisive reason is the Critic's: `TopicPartition` is
+  `org.apache.kafka.common`, so under CLAUDE.md §3 the correct spelling is
+  `kafka_common_TopicPartition_t`, and reusing the mis-namespaced consumer type
+  would propagate the error into a second public C API. Recorded in memory so
+  B4-B6 do not re-litigate it.
+- **Priority 2.2 / 2.3** — no change requested; the amended D2 (committed as
+  `da4cfd44`) now makes B3's accessor shape the rule.
+
+## Verification
+
+`cargo build` (both feature settings), `cargo test` (3045 lib tests, +1),
+`cargo xtask format-check`, `cargo clippy --all-targets --features ffi -D
+warnings`, `test_mock_admin` (88 tests), and the Python admin suite in Docker
+(88 tests, +1). DoD #10 N/A per `admin-client.md` §10; #11 does not apply.
