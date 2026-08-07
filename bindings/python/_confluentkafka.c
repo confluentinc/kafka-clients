@@ -2771,6 +2771,549 @@ static PyObject* py_DeleteRecordsResult_drain(PyObject* self, PyObject* args) {
 }
 
 // Method definitions
+// ===========================================================================
+// Admin — B2: cluster, configs, log dirs
+//
+// Same marshaling-only contract as the B1 section above: async submits hand the
+// GIL back immediately, the callback returns opaque handle ints, and the
+// matching *_drain converts and destroys the handle.
+// ===========================================================================
+
+// ---- trampolines -----------------------------------------------------------
+
+static void admin_describe_cluster_trampoline(kafka_admin_DescribeClusterResult_t* r,
+                                              kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_configs_trampoline(kafka_admin_DescribeConfigsResult_t* r,
+                                              kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_alter_configs_trampoline(kafka_admin_AlterConfigsResult_t* r,
+                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_list_config_resources_trampoline(kafka_admin_ListConfigResourcesResult_t* r,
+                                                   kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_list_client_metrics_trampoline(kafka_admin_ListClientMetricsResourcesResult_t* r,
+                                                 kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_log_dirs_trampoline(kafka_admin_DescribeLogDirsResult_t* r,
+                                               kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_alter_replica_log_dirs_trampoline(kafka_admin_AlterReplicaLogDirsResult_t* r,
+                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_describe_replica_log_dirs_trampoline(kafka_admin_DescribeReplicaLogDirsResult_t* r,
+                                                       kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// ---- input marshaling helpers ----------------------------------------------
+
+// Reads a sequence of ints into a freshly malloc'd int32_t array. Returns 0 on
+// success (with *out_values possibly NULL when the sequence is empty), -1 with
+// a Python exception set otherwise.
+static int build_int_array(PyObject* seq, int32_t** out_values, Py_ssize_t* out_count) {
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) return -1;
+    *out_count = n;
+    *out_values = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    if (*out_values == NULL) { PyErr_NoMemory(); return -1; }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(seq, i);  // new ref
+        long v = item ? PyLong_AsLong(item) : -1;
+        Py_XDECREF(item);
+        if (v == -1 && PyErr_Occurred()) { PyMem_Free(*out_values); *out_values = NULL; return -1; }
+        (*out_values)[i] = (int32_t)v;
+    }
+    return 0;
+}
+
+// ---- submits ---------------------------------------------------------------
+
+static PyObject* py_Admin_describe_cluster_async(PyObject* self, PyObject* args) {
+    unsigned long long h; int timeout_ms; int include_auth; int include_fenced; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KiiiO", &h, &timeout_ms, &include_auth, &include_fenced, &cb))
+        return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_cluster_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
+        timeout_ms, include_auth ? true : false, include_fenced ? true : false,
+        admin_describe_cluster_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms; int synonyms; int documentation; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiiiO", &h, &spec, &timeout_ms, &synonyms, &documentation, &cb))
+        return NULL;
+
+    // spec is a sequence of (resource_type:int, resource_name:str).
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    const char** names = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    if (types == NULL || names == NULL) {
+        PyMem_Free(types); PyMem_Free(names); PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        int t = 0; const char* name = NULL;
+        int ok = item && PyArg_ParseTuple(item, "is", &t, &name);
+        Py_XDECREF(item);
+        if (!ok) { PyMem_Free(types); PyMem_Free(names); return NULL; }
+        types[i] = (int32_t)t; names[i] = name;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_configs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
+        types, names, (int32_t)n, timeout_ms, synonyms ? true : false,
+        documentation ? true : false, admin_describe_configs_trampoline, cb);
+    PyMem_Free(types); PyMem_Free(names);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms; int validate_only; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiiO", &h, &spec, &timeout_ms, &validate_only, &cb)) return NULL;
+
+    // spec is a sequence of one row per operation:
+    // (resource_type:int, resource_name:str, config_name:str, value:str|None, op_type:int).
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    const char** resources = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    const char** keys = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    const char** values = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    int32_t* ops = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    if (types == NULL || resources == NULL || keys == NULL || values == NULL || ops == NULL) {
+        PyMem_Free(types); PyMem_Free(resources); PyMem_Free(keys);
+        PyMem_Free(values); PyMem_Free(ops);
+        PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        int t = 0; int op = 0;
+        const char* resource = NULL; const char* key = NULL; const char* value = NULL;
+        // "z" accepts None for the value, which is what DELETE sends.
+        int ok = item && PyArg_ParseTuple(item, "isszi", &t, &resource, &key, &value, &op);
+        Py_XDECREF(item);
+        if (!ok) {
+            PyMem_Free(types); PyMem_Free(resources); PyMem_Free(keys);
+            PyMem_Free(values); PyMem_Free(ops);
+            return NULL;
+        }
+        types[i] = (int32_t)t; resources[i] = resource; keys[i] = key;
+        values[i] = value; ops[i] = (int32_t)op;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_incremental_alter_configs_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, types, resources, keys, values, ops,
+        (int32_t)n, timeout_ms, validate_only ? true : false,
+        admin_alter_configs_trampoline, cb);
+    PyMem_Free(types); PyMem_Free(resources); PyMem_Free(keys);
+    PyMem_Free(values); PyMem_Free(ops);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_list_config_resources_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* types_seq; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &types_seq, &timeout_ms, &cb)) return NULL;
+
+    int32_t* types = NULL; Py_ssize_t n = 0;
+    if (build_int_array(types_seq, &types, &n) < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_list_config_resources_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, types, (int32_t)n, timeout_ms,
+        admin_list_config_resources_trampoline, cb);
+    PyMem_Free(types);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_list_client_metrics_resources_async(PyObject* self, PyObject* args) {
+    unsigned long long h; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KiO", &h, &timeout_ms, &cb)) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_list_client_metrics_resources_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, timeout_ms,
+        admin_list_client_metrics_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_log_dirs_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* brokers_seq; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &brokers_seq, &timeout_ms, &cb)) return NULL;
+
+    int32_t* brokers = NULL; Py_ssize_t n = 0;
+    if (build_int_array(brokers_seq, &brokers, &n) < 0) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_log_dirs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
+        brokers, (int32_t)n, timeout_ms, admin_describe_log_dirs_trampoline, cb);
+    PyMem_Free(brokers);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_alter_replica_log_dirs_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &spec, &timeout_ms, &cb)) return NULL;
+
+    // spec is a sequence of (topic:str, partition:int, broker_id:int, log_dir:str).
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    const char** topics = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    int32_t* partitions = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    int32_t* brokers = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    const char** log_dirs = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    if (topics == NULL || partitions == NULL || brokers == NULL || log_dirs == NULL) {
+        PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(brokers); PyMem_Free(log_dirs);
+        PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        const char* topic = NULL; const char* dir = NULL; int p = 0; int b = 0;
+        int ok = item && PyArg_ParseTuple(item, "siis", &topic, &p, &b, &dir);
+        Py_XDECREF(item);
+        if (!ok) {
+            PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(brokers); PyMem_Free(log_dirs);
+            return NULL;
+        }
+        topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b; log_dirs[i] = dir;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_alter_replica_log_dirs_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, log_dirs,
+        (int32_t)n, timeout_ms, admin_alter_replica_log_dirs_trampoline, cb);
+    PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(brokers); PyMem_Free(log_dirs);
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Admin_describe_replica_log_dirs_async(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* spec; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &spec, &timeout_ms, &cb)) return NULL;
+
+    // spec is a sequence of (topic:str, partition:int, broker_id:int).
+    Py_ssize_t n = PySequence_Size(spec);
+    if (n < 0) return NULL;
+    const char** topics = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(char*));
+    int32_t* partitions = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    int32_t* brokers = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
+    if (topics == NULL || partitions == NULL || brokers == NULL) {
+        PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(brokers);
+        PyErr_NoMemory(); return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(spec, i);  // new ref
+        const char* topic = NULL; int p = 0; int b = 0;
+        int ok = item && PyArg_ParseTuple(item, "sii", &topic, &p, &b);
+        Py_XDECREF(item);
+        if (!ok) {
+            PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(brokers);
+            return NULL;
+        }
+        topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b;
+    }
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_describe_replica_log_dirs_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, (int32_t)n,
+        timeout_ms, admin_describe_replica_log_dirs_trampoline, cb);
+    PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(brokers);
+    Py_RETURN_NONE;
+}
+
+// ---- result drains ---------------------------------------------------------
+
+// (cluster_id, [node], controller_or_None, [acl_operation_codes] or None)
+static PyObject* py_DescribeClusterResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeClusterResult_t* r = (kafka_admin_DescribeClusterResult_t*)(uintptr_t)ptr;
+
+    int32_t n = kafka_admin_DescribeClusterResult_node_count(r);
+    PyObject* nodes = PyList_New(n < 0 ? 0 : n);
+    if (nodes == NULL) { kafka_admin_DescribeClusterResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* node = node_to_py(kafka_admin_DescribeClusterResult_get_node(r, i));
+        if (node == NULL) { Py_DECREF(nodes); kafka_admin_DescribeClusterResult_destroy(r); return NULL; }
+        PyList_SET_ITEM(nodes, i, node);
+    }
+
+    PyObject* controller = node_to_py(kafka_admin_DescribeClusterResult_controller(r));
+    if (controller == NULL) { Py_DECREF(nodes); kafka_admin_DescribeClusterResult_destroy(r); return NULL; }
+
+    // -1 means the broker did not report the operations at all (Java's null),
+    // which stays distinct from an empty list.
+    int32_t on = kafka_admin_DescribeClusterResult_authorized_operation_count(r);
+    PyObject* operations;
+    if (on < 0) {
+        operations = (Py_INCREF(Py_None), Py_None);
+    } else {
+        operations = PyList_New(on);
+        if (operations != NULL) {
+            for (int32_t i = 0; i < on; i++) {
+                PyObject* op = PyLong_FromLong(
+                    kafka_admin_DescribeClusterResult_authorized_operation(r, i));
+                if (op == NULL) { Py_DECREF(operations); operations = NULL; break; }
+                PyList_SET_ITEM(operations, i, op);
+            }
+        }
+    }
+    if (operations == NULL) {
+        Py_DECREF(nodes); Py_DECREF(controller);
+        kafka_admin_DescribeClusterResult_destroy(r); return NULL;
+    }
+
+    PyObject* out = Py_BuildValue("(sNNN)", kafka_admin_DescribeClusterResult_cluster_id(r),
+                                  nodes, controller, operations);
+    kafka_admin_DescribeClusterResult_destroy(r);
+    return out;
+}
+
+// (name, value, is_default, is_sensitive, is_read_only, source, type,
+//  documentation, [(synonym_name, synonym_value, synonym_source)])
+static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* entry) {
+    int32_t n = kafka_admin_ConfigEntry_synonym_count(entry);
+    PyObject* synonyms = PyList_New(n < 0 ? 0 : n);
+    if (synonyms == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* s = Py_BuildValue("(szs)",
+                                    kafka_admin_ConfigEntry_synonym_name(entry, i),
+                                    kafka_admin_ConfigEntry_synonym_value(entry, i),
+                                    kafka_admin_ConfigEntry_synonym_source(entry, i));
+        if (s == NULL) { Py_DECREF(synonyms); return NULL; }
+        PyList_SET_ITEM(synonyms, i, s);
+    }
+    // "z" yields None for a NULL value / documentation.
+    return Py_BuildValue("(sziiisszN)",
+                         kafka_admin_ConfigEntry_name(entry),
+                         kafka_admin_ConfigEntry_value(entry),
+                         kafka_admin_ConfigEntry_is_default(entry) ? 1 : 0,
+                         kafka_admin_ConfigEntry_is_sensitive(entry) ? 1 : 0,
+                         kafka_admin_ConfigEntry_is_read_only(entry) ? 1 : 0,
+                         kafka_admin_ConfigEntry_source(entry),
+                         kafka_admin_ConfigEntry_type(entry),
+                         kafka_admin_ConfigEntry_documentation(entry),
+                         synonyms);
+}
+
+// [config_entry]
+static PyObject* config_to_py(const kafka_admin_Config_t* config) {
+    int32_t n = kafka_admin_Config_entry_count(config);
+    PyObject* entries = PyList_New(n < 0 ? 0 : n);
+    if (entries == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* e = config_entry_to_py(kafka_admin_Config_get_entry(config, i));
+        if (e == NULL) { Py_DECREF(entries); return NULL; }
+        PyList_SET_ITEM(entries, i, e);
+    }
+    return entries;
+}
+
+// {(resource_type, resource_name): (error, [config_entry])}
+static PyObject* py_DescribeConfigsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeConfigsResult_t* r = (kafka_admin_DescribeConfigsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeConfigsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeConfigsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = Py_BuildValue("(is)",
+                                      kafka_admin_DescribeConfigsResult_get_key_type(r, i),
+                                      kafka_admin_DescribeConfigsResult_get_key_name(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_DescribeConfigsResult_get_error(r, i));
+        const kafka_admin_Config_t* config = kafka_admin_DescribeConfigsResult_get_value(r, i);
+        PyObject* value = config ? config_to_py(config) : (Py_INCREF(Py_None), Py_None);
+        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
+        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_DescribeConfigsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_DescribeConfigsResult_destroy(r);
+    return d;
+}
+
+// {(resource_type, resource_name): error_or_None}
+static PyObject* py_AlterConfigsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_AlterConfigsResult_t* r = (kafka_admin_AlterConfigsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_AlterConfigsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_AlterConfigsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = Py_BuildValue("(is)",
+                                      kafka_admin_AlterConfigsResult_get_key_type(r, i),
+                                      kafka_admin_AlterConfigsResult_get_key_name(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_AlterConfigsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_AlterConfigsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_AlterConfigsResult_destroy(r);
+    return d;
+}
+
+// [(resource_type, resource_name)]
+static PyObject* py_ListConfigResourcesResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListConfigResourcesResult_t* r =
+        (kafka_admin_ListConfigResourcesResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_ListConfigResourcesResult_count(r);
+    PyObject* out = PyList_New(n < 0 ? 0 : n);
+    if (out == NULL) { kafka_admin_ListConfigResourcesResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* item = Py_BuildValue("(is)",
+                                       kafka_admin_ListConfigResourcesResult_get_type(r, i),
+                                       kafka_admin_ListConfigResourcesResult_get_name(r, i));
+        if (item == NULL) { Py_DECREF(out); kafka_admin_ListConfigResourcesResult_destroy(r); return NULL; }
+        PyList_SET_ITEM(out, i, item);
+    }
+    kafka_admin_ListConfigResourcesResult_destroy(r);
+    return out;
+}
+
+// [name]
+static PyObject* py_ListClientMetricsResourcesResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListClientMetricsResourcesResult_t* r =
+        (kafka_admin_ListClientMetricsResourcesResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_ListClientMetricsResourcesResult_count(r);
+    PyObject* out = PyList_New(n < 0 ? 0 : n);
+    if (out == NULL) { kafka_admin_ListClientMetricsResourcesResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* name = PyUnicode_FromString(
+            kafka_admin_ListClientMetricsResourcesResult_get_name(r, i));
+        if (name == NULL) { Py_DECREF(out); kafka_admin_ListClientMetricsResourcesResult_destroy(r); return NULL; }
+        PyList_SET_ITEM(out, i, name);
+    }
+    kafka_admin_ListClientMetricsResourcesResult_destroy(r);
+    return out;
+}
+
+// (error, total_bytes, usable_bytes, [(topic, partition, size, offset_lag, is_future)])
+static PyObject* log_dir_description_to_py(const kafka_admin_LogDirDescription_t* dir) {
+    int32_t n = kafka_admin_LogDirDescription_replica_count(dir);
+    PyObject* replicas = PyList_New(n < 0 ? 0 : n);
+    if (replicas == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* replica = Py_BuildValue(
+            "(siLLi)",
+            kafka_admin_LogDirDescription_replica_topic(dir, i),
+            kafka_admin_LogDirDescription_replica_partition(dir, i),
+            (long long)kafka_admin_LogDirDescription_replica_size(dir, i),
+            (long long)kafka_admin_LogDirDescription_replica_offset_lag(dir, i),
+            kafka_admin_LogDirDescription_replica_is_future(dir, i) ? 1 : 0);
+        if (replica == NULL) { Py_DECREF(replicas); return NULL; }
+        PyList_SET_ITEM(replicas, i, replica);
+    }
+    PyObject* err = borrowed_error_to_py(kafka_admin_LogDirDescription_error(dir));
+    if (err == NULL) { Py_DECREF(replicas); return NULL; }
+    return Py_BuildValue("(NLLN)", err,
+                         (long long)kafka_admin_LogDirDescription_total_bytes(dir),
+                         (long long)kafka_admin_LogDirDescription_usable_bytes(dir),
+                         replicas);
+}
+
+// {log_dir: log_dir_description}
+static PyObject* log_dir_map_to_py(const kafka_admin_LogDirDescriptionMap_t* map) {
+    int32_t n = kafka_admin_LogDirDescriptionMap_count(map);
+    PyObject* d = PyDict_New();
+    if (d == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = PyUnicode_FromString(kafka_admin_LogDirDescriptionMap_get_key(map, i));
+        PyObject* val = log_dir_description_to_py(kafka_admin_LogDirDescriptionMap_get_value(map, i));
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    return d;
+}
+
+// {broker_id: (error, {log_dir: log_dir_description})}
+static PyObject* py_DescribeLogDirsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeLogDirsResult_t* r = (kafka_admin_DescribeLogDirsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeLogDirsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeLogDirsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = PyLong_FromLong(kafka_admin_DescribeLogDirsResult_get_broker(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_DescribeLogDirsResult_get_error(r, i));
+        const kafka_admin_LogDirDescriptionMap_t* map =
+            kafka_admin_DescribeLogDirsResult_get_value(r, i);
+        PyObject* value = map ? log_dir_map_to_py(map) : (Py_INCREF(Py_None), Py_None);
+        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
+        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_DescribeLogDirsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_DescribeLogDirsResult_destroy(r);
+    return d;
+}
+
+// {(topic, partition, broker_id): error_or_None}
+static PyObject* py_AlterReplicaLogDirsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_AlterReplicaLogDirsResult_t* r =
+        (kafka_admin_AlterReplicaLogDirsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_AlterReplicaLogDirsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_AlterReplicaLogDirsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = Py_BuildValue("(sii)",
+                                      kafka_admin_AlterReplicaLogDirsResult_get_topic(r, i),
+                                      kafka_admin_AlterReplicaLogDirsResult_get_partition(r, i),
+                                      kafka_admin_AlterReplicaLogDirsResult_get_broker_id(r, i));
+        PyObject* err = borrowed_error_to_py(kafka_admin_AlterReplicaLogDirsResult_get_error(r, i));
+        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
+            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
+            kafka_admin_AlterReplicaLogDirsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(err);
+    }
+    kafka_admin_AlterReplicaLogDirsResult_destroy(r);
+    return d;
+}
+
+// {(topic, partition, broker_id):
+//   (error, (current_log_dir, current_offset_lag, future_log_dir, future_offset_lag))}
+static PyObject* py_DescribeReplicaLogDirsResult_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeReplicaLogDirsResult_t* r =
+        (kafka_admin_DescribeReplicaLogDirsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeReplicaLogDirsResult_count(r);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_admin_DescribeReplicaLogDirsResult_destroy(r); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* key = Py_BuildValue(
+            "(sii)", kafka_admin_DescribeReplicaLogDirsResult_get_topic(r, i),
+            kafka_admin_DescribeReplicaLogDirsResult_get_partition(r, i),
+            kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(r, i));
+        PyObject* err = borrowed_error_to_py(
+            kafka_admin_DescribeReplicaLogDirsResult_get_error(r, i));
+        const kafka_admin_ReplicaLogDirInfo_t* info =
+            kafka_admin_DescribeReplicaLogDirsResult_get_value(r, i);
+        PyObject* value = info
+            ? Py_BuildValue("(zLzL)",
+                            kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(info),
+                            (long long)kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(info),
+                            kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(info),
+                            (long long)kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(info))
+            : (Py_INCREF(Py_None), Py_None);
+        PyObject* val = (err && value) ? Py_BuildValue("(NN)", err, value) : NULL;
+        if (val == NULL) { Py_XDECREF(err); Py_XDECREF(value); }
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_admin_DescribeReplicaLogDirsResult_destroy(r); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_admin_DescribeReplicaLogDirsResult_destroy(r);
+    return d;
+}
+
 static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
@@ -2879,6 +3422,38 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"DescribeTopicsResult_drain", py_DescribeTopicsResult_drain, METH_VARARGS, "Drain+destroy a DescribeTopicsResult handle into a dict"},
     {"CreatePartitionsResult_drain", py_CreatePartitionsResult_drain, METH_VARARGS, "Drain+destroy a CreatePartitionsResult handle into a dict"},
     {"DeleteRecordsResult_drain", py_DeleteRecordsResult_drain, METH_VARARGS, "Drain+destroy a DeleteRecordsResult handle into a dict"},
+    {"Admin_describe_cluster_async", py_Admin_describe_cluster_async, METH_VARARGS,
+     "Async describeCluster; cb(result_int, error_int)"},
+    {"Admin_describe_configs_async", py_Admin_describe_configs_async, METH_VARARGS,
+     "Async describeConfigs; cb(result_int, error_int)"},
+    {"Admin_incremental_alter_configs_async", py_Admin_incremental_alter_configs_async, METH_VARARGS,
+     "Async incrementalAlterConfigs; cb(result_int, error_int)"},
+    {"Admin_list_config_resources_async", py_Admin_list_config_resources_async, METH_VARARGS,
+     "Async listConfigResources; cb(result_int, error_int)"},
+    {"Admin_list_client_metrics_resources_async", py_Admin_list_client_metrics_resources_async, METH_VARARGS,
+     "Async listClientMetricsResources; cb(result_int, error_int)"},
+    {"Admin_describe_log_dirs_async", py_Admin_describe_log_dirs_async, METH_VARARGS,
+     "Async describeLogDirs; cb(result_int, error_int)"},
+    {"Admin_alter_replica_log_dirs_async", py_Admin_alter_replica_log_dirs_async, METH_VARARGS,
+     "Async alterReplicaLogDirs; cb(result_int, error_int)"},
+    {"Admin_describe_replica_log_dirs_async", py_Admin_describe_replica_log_dirs_async, METH_VARARGS,
+     "Async describeReplicaLogDirs; cb(result_int, error_int)"},
+    {"DescribeClusterResult_drain", py_DescribeClusterResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeClusterResult handle into a tuple"},
+    {"DescribeConfigsResult_drain", py_DescribeConfigsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeConfigsResult handle into a dict"},
+    {"AlterConfigsResult_drain", py_AlterConfigsResult_drain, METH_VARARGS,
+     "Drain+destroy an AlterConfigsResult handle into a dict"},
+    {"ListConfigResourcesResult_drain", py_ListConfigResourcesResult_drain, METH_VARARGS,
+     "Drain+destroy a ListConfigResourcesResult handle into a list"},
+    {"ListClientMetricsResourcesResult_drain", py_ListClientMetricsResourcesResult_drain, METH_VARARGS,
+     "Drain+destroy a ListClientMetricsResourcesResult handle into a list"},
+    {"DescribeLogDirsResult_drain", py_DescribeLogDirsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeLogDirsResult handle into a dict"},
+    {"AlterReplicaLogDirsResult_drain", py_AlterReplicaLogDirsResult_drain, METH_VARARGS,
+     "Drain+destroy an AlterReplicaLogDirsResult handle into a dict"},
+    {"DescribeReplicaLogDirsResult_drain", py_DescribeReplicaLogDirsResult_drain, METH_VARARGS,
+     "Drain+destroy a DescribeReplicaLogDirsResult handle into a dict"},
     {NULL, NULL, 0, NULL}
 };
 

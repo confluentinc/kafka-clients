@@ -38,6 +38,20 @@ dict whose values are either the result object or a :class:`KafkaError`:
 * ``create_partitions`` -> ``{topic_name: None | KafkaError}`` (per-topic future
   is ``KafkaFuture<Void>``, so ``None`` means success)
 * ``delete_records`` -> ``{(topic, partition): DeletedRecords | KafkaError}``
+* ``describe_configs`` -> ``{ConfigResource: Config | KafkaError}``
+* ``incremental_alter_configs`` -> ``{ConfigResource: None | KafkaError}``
+  (per-resource future is ``KafkaFuture<Void>``, so ``None`` means success)
+* ``describe_log_dirs`` ->
+  ``{broker_id: {log_dir: LogDirDescription} | KafkaError}``
+* ``alter_replica_log_dirs`` ->
+  ``{TopicPartitionReplica: None | KafkaError}``
+* ``describe_replica_log_dirs`` ->
+  ``{TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}``
+* ``describe_cluster`` -> a single :class:`ClusterDescription` (Java's result is
+  four independent futures, not a map, so a failure raises)
+* ``list_config_resources`` -> ``[ConfigResource]``, and
+  ``list_client_metrics_resources`` -> ``[ClientMetricsResourceListing]``
+  (single futures in Java, so a failure raises)
 
 A per-key failure therefore does **not** raise; iterate the dict and check for
 ``KafkaError`` values. Only a whole-call failure raises.
@@ -154,25 +168,274 @@ class DeletedRecords:
         return f"DeletedRecords(low_watermark={self.low_watermark})"
 
 
-class ConfigEntry:
-    """A topic configuration entry (Java ``ConfigEntry``).
+class ConfigSynonym:
+    """A configuration synonym of a :class:`ConfigEntry` (Java
+    ``ConfigEntry.ConfigSynonym``).
 
-    ``create_topics`` is the only B1 RPC that carries configs and the broker's
-    ``CreateTopicsResponse`` populates only these fields; ``synonyms`` /
-    ``config_type`` / ``documentation`` arrive with ``describe_configs``.
+    ``source`` is Java's ``ConfigEntry.ConfigSource`` enum constant name, e.g.
+    ``"STATIC_BROKER_CONFIG"``; that enum has no numeric id in Java, so the name
+    is the contract. ``value`` may be ``None``.
     """
 
-    __slots__ = ("name", "value", "is_default", "is_sensitive", "is_read_only")
+    __slots__ = ("name", "value", "source")
 
-    def __init__(self, name, value, is_default, is_sensitive, is_read_only):
+    def __init__(self, name, value, source):
+        self.name = name
+        self.value = value
+        self.source = source
+
+    def __repr__(self):
+        return f"ConfigSynonym(name={self.name!r}, source={self.source!r})"
+
+
+class ConfigEntry:
+    """A configuration entry (Java ``ConfigEntry``).
+
+    ``source`` and ``config_type`` are Java's ``ConfigSource`` / ``ConfigType``
+    enum constant names (neither enum has a numeric id in Java). Synonyms keep
+    Java's precedence order.
+
+    ``create_topics`` populates only the first five fields — the broker's
+    ``CreateTopicsResponse`` carries no source, type, documentation or synonyms —
+    so on entries obtained from it the rest are ``None`` / empty.
+    ``describe_configs`` populates all of them.
+    """
+
+    __slots__ = ("name", "value", "is_default", "is_sensitive", "is_read_only",
+                 "source", "config_type", "documentation", "synonyms")
+
+    def __init__(self, name, value, is_default, is_sensitive, is_read_only,
+                 source=None, config_type=None, documentation=None, synonyms=()):
         self.name = name
         self.value = value
         self.is_default = is_default
         self.is_sensitive = is_sensitive
         self.is_read_only = is_read_only
+        self.source = source
+        self.config_type = config_type
+        self.documentation = documentation
+        self.synonyms = list(synonyms)
 
     def __repr__(self):
         return f"ConfigEntry(name={self.name!r}, value={self.value!r})"
+
+
+class Config:
+    """The configuration entries of one resource (Java ``Config``)."""
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries):
+        self.entries = list(entries)
+
+    def get(self, name):
+        """The entry named ``name``, or ``None`` (Java's ``Config.get``)."""
+        for entry in self.entries:
+            if entry.name == name:
+                return entry
+        return None
+
+    def __repr__(self):
+        return f"Config(entries={len(self.entries)})"
+
+
+class ConfigResourceType:
+    """Config-resource types (Java ``ConfigResource.Type``).
+
+    The values are Java's ``ConfigResource.Type.id()`` wire codes, which is what
+    crosses the C boundary.
+    """
+
+    UNKNOWN = 0
+    TOPIC = 2
+    BROKER = 4
+    BROKER_LOGGER = 8
+    CLIENT_METRICS = 16
+    GROUP = 32
+
+
+class ConfigResource:
+    """A resource that has configs (Java ``ConfigResource``).
+
+    Hashable, so it can key the ``describe_configs`` /
+    ``incremental_alter_configs`` result dicts exactly as in Java.
+    """
+
+    __slots__ = ("resource_type", "name")
+
+    def __init__(self, resource_type, name):
+        self.resource_type = int(resource_type)
+        self.name = str(name)
+
+    def is_default(self):
+        """Whether this is the cluster-wide default resource (empty name)."""
+        return self.name == ""
+
+    def __eq__(self, other):
+        return (isinstance(other, ConfigResource)
+                and self.resource_type == other.resource_type
+                and self.name == other.name)
+
+    def __hash__(self):
+        return hash((self.resource_type, self.name))
+
+    def __repr__(self):
+        return f"ConfigResource(resource_type={self.resource_type}, name={self.name!r})"
+
+
+class OpType:
+    """Incremental config-alteration operations (Java ``AlterConfigOp.OpType``).
+
+    The values are Java's ``OpType.id()`` wire codes.
+    """
+
+    SET = 0
+    DELETE = 1
+    APPEND = 2
+    SUBTRACT = 3
+
+
+class AlterConfigOp:
+    """One incremental configuration change (Java ``AlterConfigOp``).
+
+    ``config_entry`` supplies the name and the value; a ``DELETE`` carries a
+    ``None`` value.
+    """
+
+    __slots__ = ("config_entry", "op_type")
+
+    def __init__(self, config_entry, op_type):
+        self.config_entry = config_entry
+        self.op_type = op_type
+
+    def __repr__(self):
+        return (f"AlterConfigOp(name={self.config_entry.name!r}, "
+                f"op_type={self.op_type})")
+
+
+class TopicPartitionReplica:
+    """One replica of one partition on one broker (Java
+    ``TopicPartitionReplica``). Hashable, so it can key the log-dir result
+    dicts as in Java."""
+
+    __slots__ = ("topic", "partition", "broker_id")
+
+    def __init__(self, topic, partition, broker_id):
+        self.topic = str(topic)
+        self.partition = int(partition)
+        self.broker_id = int(broker_id)
+
+    def __eq__(self, other):
+        return (isinstance(other, TopicPartitionReplica)
+                and self.topic == other.topic
+                and self.partition == other.partition
+                and self.broker_id == other.broker_id)
+
+    def __hash__(self):
+        return hash((self.topic, self.partition, self.broker_id))
+
+    def __repr__(self):
+        return (f"TopicPartitionReplica(topic={self.topic!r}, "
+                f"partition={self.partition}, broker_id={self.broker_id})")
+
+
+class ReplicaInfo:
+    """One replica hosted in a log directory (Java ``ReplicaInfo``)."""
+
+    __slots__ = ("size", "offset_lag", "is_future")
+
+    def __init__(self, size, offset_lag, is_future):
+        self.size = size
+        self.offset_lag = offset_lag
+        self.is_future = is_future
+
+    def __repr__(self):
+        return f"ReplicaInfo(size={self.size}, offset_lag={self.offset_lag})"
+
+
+class LogDirDescription:
+    """One log directory of one broker (Java ``LogDirDescription``).
+
+    ``error`` is this directory's own error (offline, unreadable, ...) and is
+    distinct from a per-broker failure, which appears as a :class:`KafkaError`
+    *instead of* this object. ``total_bytes`` / ``usable_bytes`` are ``None``
+    when the broker did not report them (Java's empty ``OptionalLong``).
+    ``replica_infos`` is keyed by ``(topic, partition)``.
+    """
+
+    __slots__ = ("error", "total_bytes", "usable_bytes", "replica_infos")
+
+    def __init__(self, error, total_bytes, usable_bytes, replica_infos):
+        self.error = error
+        self.total_bytes = total_bytes
+        self.usable_bytes = usable_bytes
+        self.replica_infos = replica_infos
+
+    def __repr__(self):
+        return f"LogDirDescription(replicas={len(self.replica_infos)})"
+
+
+class ReplicaLogDirInfo:
+    """Where one replica lives, and where it is moving to (Java
+    ``DescribeReplicaLogDirsResult.ReplicaLogDirInfo``).
+
+    ``current_replica_log_dir`` is ``None`` when the broker hosts no replica of
+    that partition; ``future_replica_log_dir`` is ``None`` when no move is
+    pending.
+    """
+
+    __slots__ = ("current_replica_log_dir", "current_replica_offset_lag",
+                 "future_replica_log_dir", "future_replica_offset_lag")
+
+    def __init__(self, current_replica_log_dir, current_replica_offset_lag,
+                 future_replica_log_dir, future_replica_offset_lag):
+        self.current_replica_log_dir = current_replica_log_dir
+        self.current_replica_offset_lag = current_replica_offset_lag
+        self.future_replica_log_dir = future_replica_log_dir
+        self.future_replica_offset_lag = future_replica_offset_lag
+
+    def __repr__(self):
+        return (f"ReplicaLogDirInfo(current={self.current_replica_log_dir!r}, "
+                f"future={self.future_replica_log_dir!r})")
+
+
+class ClientMetricsResourceListing:
+    """A client-metrics resource (Java ``ClientMetricsResourceListing``)."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return f"ClientMetricsResourceListing(name={self.name!r})"
+
+
+class ClusterDescription:
+    """The cluster, as ``describe_cluster`` reports it.
+
+    Java has no such class: ``DescribeClusterResult`` exposes four independent
+    ``KafkaFuture``s (nodes, controller, cluster id, authorized operations).
+    Neither C nor this module has a ``KafkaFuture``, so one call yields one
+    object holding all four values; a failure of any of them fails the call.
+
+    ``controller`` is ``None`` when there is no current controller.
+    ``authorized_operations`` holds ``AclOperation`` wire codes (Java's
+    ``AclOperation.code()``) and is ``None`` — not empty — when the broker did
+    not report them at all.
+    """
+
+    __slots__ = ("cluster_id", "nodes", "controller", "authorized_operations")
+
+    def __init__(self, cluster_id, nodes, controller, authorized_operations):
+        self.cluster_id = cluster_id
+        self.nodes = nodes
+        self.controller = controller
+        self.authorized_operations = authorized_operations
+
+    def __repr__(self):
+        return (f"ClusterDescription(cluster_id={self.cluster_id!r}, "
+                f"nodes={len(self.nodes)})")
 
 
 class TopicMetadataAndConfig:
@@ -349,6 +612,93 @@ def _to_delete_records(raw):
     return out
 
 
+def _to_cluster_description(raw):
+    """(cluster_id, [node], controller, operations) -> ClusterDescription"""
+    cluster_id, nodes, controller, operations = raw
+    return ClusterDescription(cluster_id, [_to_node(n) for n in nodes],
+                              _to_node(controller),
+                              None if operations is None else list(operations))
+
+
+def _to_full_config_entry(raw):
+    """The 9-tuple describe_configs reports -> ConfigEntry."""
+    (name, value, is_default, is_sensitive, is_read_only, source, config_type,
+     documentation, synonyms) = raw
+    return ConfigEntry(name, value, bool(is_default), bool(is_sensitive),
+                       bool(is_read_only), source, config_type, documentation,
+                       [ConfigSynonym(*s) for s in synonyms])
+
+
+def _to_describe_configs(raw):
+    """{(type, name): (error, [entry])} -> {ConfigResource: Config | KafkaError}"""
+    out = {}
+    for (resource_type, name), (error, entries) in raw.items():
+        resource = ConfigResource(resource_type, name)
+        out[resource] = (_to_error(error) if error is not None
+                         else Config([_to_full_config_entry(e) for e in entries]))
+    return out
+
+
+def _to_alter_configs(raw):
+    """{(type, name): error} -> {ConfigResource: None | KafkaError}
+
+    Java's per-resource future is ``KafkaFuture<Void>``, so ``None`` means
+    success.
+    """
+    return {ConfigResource(resource_type, name): _to_error(error)
+            for (resource_type, name), error in raw.items()}
+
+
+def _to_config_resources(raw):
+    """[(type, name)] -> [ConfigResource]"""
+    return [ConfigResource(resource_type, name) for resource_type, name in raw]
+
+
+def _to_client_metrics_resources(raw):
+    """[name] -> [ClientMetricsResourceListing]"""
+    return [ClientMetricsResourceListing(name) for name in raw]
+
+
+def _to_log_dir_description(raw):
+    """(error, total_bytes, usable_bytes, [replica]) -> LogDirDescription"""
+    error, total_bytes, usable_bytes, replicas = raw
+    # -1 is the wire's UNKNOWN_VOLUME_BYTES, i.e. Java's empty OptionalLong.
+    return LogDirDescription(
+        _to_error(error),
+        None if total_bytes < 0 else total_bytes,
+        None if usable_bytes < 0 else usable_bytes,
+        {(topic, partition): ReplicaInfo(size, offset_lag, bool(is_future))
+         for topic, partition, size, offset_lag, is_future in replicas},
+    )
+
+
+def _to_describe_log_dirs(raw):
+    """{broker: (error, {log_dir: description})}
+    -> {broker: {log_dir: LogDirDescription} | KafkaError}"""
+    out = {}
+    for broker, (error, log_dirs) in raw.items():
+        out[broker] = (_to_error(error) if error is not None
+                       else {name: _to_log_dir_description(d)
+                             for name, d in log_dirs.items()})
+    return out
+
+
+def _to_alter_replica_log_dirs(raw):
+    """{(topic, partition, broker): error}
+    -> {TopicPartitionReplica: None | KafkaError}"""
+    return {TopicPartitionReplica(*key): _to_error(error) for key, error in raw.items()}
+
+
+def _to_describe_replica_log_dirs(raw):
+    """{(topic, partition, broker): (error, info)}
+    -> {TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}"""
+    out = {}
+    for key, (error, info) in raw.items():
+        out[TopicPartitionReplica(*key)] = (_to_error(error) if error is not None
+                                            else ReplicaLogDirInfo(*info))
+    return out
+
+
 def _ms(timeout):
     """Convert a timeout (seconds float, ``timedelta``, or None) to int32 ms.
 
@@ -483,6 +833,82 @@ class _AdminBase:
                 self._resolve_value(drain, _to_delete_records),
                 self._free_value(drain))
 
+    def _describe_cluster_spec(self, timeout, include_authorized_operations,
+                               include_fenced_brokers):
+        ms = _ms(timeout)
+        drain = _lib.DescribeClusterResult_drain
+        return (lambda cb: _lib.Admin_describe_cluster_async(
+                    self._h, ms, bool(include_authorized_operations),
+                    bool(include_fenced_brokers), cb),
+                self._resolve_value(drain, _to_cluster_description),
+                self._free_value(drain))
+
+    def _describe_configs_spec(self, resources, timeout, include_synonyms,
+                               include_documentation):
+        spec = [(int(r.resource_type), str(r.name)) for r in resources]
+        ms = _ms(timeout)
+        drain = _lib.DescribeConfigsResult_drain
+        return (lambda cb: _lib.Admin_describe_configs_async(
+                    self._h, spec, ms, bool(include_synonyms),
+                    bool(include_documentation), cb),
+                self._resolve_value(drain, _to_describe_configs),
+                self._free_value(drain))
+
+    def _incremental_alter_configs_spec(self, configs, timeout, validate_only):
+        # Java's Map<ConfigResource, Collection<AlterConfigOp>> flattens to one
+        # row per operation; the Rust side regroups them by resource.
+        spec = [(int(resource.resource_type), str(resource.name),
+                 str(op.config_entry.name),
+                 None if op.config_entry.value is None else str(op.config_entry.value),
+                 int(op.op_type))
+                for resource, ops in configs.items() for op in ops]
+        ms = _ms(timeout)
+        drain = _lib.AlterConfigsResult_drain
+        return (lambda cb: _lib.Admin_incremental_alter_configs_async(
+                    self._h, spec, ms, bool(validate_only), cb),
+                self._resolve_value(drain, _to_alter_configs),
+                self._free_value(drain))
+
+    def _list_config_resources_spec(self, resource_types, timeout):
+        types = [] if resource_types is None else [int(t) for t in resource_types]
+        ms = _ms(timeout)
+        drain = _lib.ListConfigResourcesResult_drain
+        return (lambda cb: _lib.Admin_list_config_resources_async(self._h, types, ms, cb),
+                self._resolve_value(drain, _to_config_resources),
+                self._free_value(drain))
+
+    def _list_client_metrics_resources_spec(self, timeout):
+        ms = _ms(timeout)
+        drain = _lib.ListClientMetricsResourcesResult_drain
+        return (lambda cb: _lib.Admin_list_client_metrics_resources_async(self._h, ms, cb),
+                self._resolve_value(drain, _to_client_metrics_resources),
+                self._free_value(drain))
+
+    def _describe_log_dirs_spec(self, brokers, timeout):
+        ids = [int(b) for b in brokers]
+        ms = _ms(timeout)
+        drain = _lib.DescribeLogDirsResult_drain
+        return (lambda cb: _lib.Admin_describe_log_dirs_async(self._h, ids, ms, cb),
+                self._resolve_value(drain, _to_describe_log_dirs),
+                self._free_value(drain))
+
+    def _alter_replica_log_dirs_spec(self, replica_assignment, timeout):
+        spec = [(str(r.topic), int(r.partition), int(r.broker_id), str(log_dir))
+                for r, log_dir in replica_assignment.items()]
+        ms = _ms(timeout)
+        drain = _lib.AlterReplicaLogDirsResult_drain
+        return (lambda cb: _lib.Admin_alter_replica_log_dirs_async(self._h, spec, ms, cb),
+                self._resolve_value(drain, _to_alter_replica_log_dirs),
+                self._free_value(drain))
+
+    def _describe_replica_log_dirs_spec(self, replicas, timeout):
+        spec = [(str(r.topic), int(r.partition), int(r.broker_id)) for r in replicas]
+        ms = _ms(timeout)
+        drain = _lib.DescribeReplicaLogDirsResult_drain
+        return (lambda cb: _lib.Admin_describe_replica_log_dirs_async(self._h, spec, ms, cb),
+                self._resolve_value(drain, _to_describe_replica_log_dirs),
+                self._free_value(drain))
+
     def _describe_topics_spec(self, topics, timeout, include_authorized_operations,
                               partition_size_limit, by_ids):
         names = [str(t) for t in topics]
@@ -613,6 +1039,75 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._delete_records_spec(records_to_delete, timeout))
 
+    def describe_cluster(self, timeout=None, include_authorized_operations=False,
+                         include_fenced_brokers=False):
+        """Describe the cluster. Returns a :class:`ClusterDescription`.
+
+        Java's result holds four independent futures rather than a per-key map,
+        so any failure raises instead of appearing per key.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_cluster_spec(
+            timeout, include_authorized_operations, include_fenced_brokers))
+
+    def describe_configs(self, resources, timeout=None, include_synonyms=False,
+                         include_documentation=False):
+        """Describe the configuration of ``resources`` (:class:`ConfigResource`).
+        Returns ``{ConfigResource: Config | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._describe_configs_spec(
+            resources, timeout, include_synonyms, include_documentation))
+
+    def incremental_alter_configs(self, configs, timeout=None, validate_only=False):
+        """Incrementally alter ``{ConfigResource: [AlterConfigOp]}``. Returns
+        ``{ConfigResource: None | KafkaError}`` (``None`` means success)."""
+        self._check_closed()
+        return self._run_sync(*self._incremental_alter_configs_spec(
+            configs, timeout, validate_only))
+
+    def list_config_resources(self, resource_types=None, timeout=None):
+        """List the cluster's config resources whose type is in
+        ``resource_types`` (:class:`ConfigResourceType` values); ``None`` or an
+        empty sequence means every supported type. Returns
+        ``[ConfigResource]``."""
+        self._check_closed()
+        return self._run_sync(*self._list_config_resources_spec(resource_types, timeout))
+
+    def list_client_metrics_resources(self, timeout=None):
+        """List the cluster's client-metrics resources. Returns
+        ``[ClientMetricsResourceListing]``.
+
+        Deprecated in Java since 4.1 in favour of
+        ``list_config_resources([ConfigResourceType.CLIENT_METRICS])``; exposed
+        for parity.
+        """
+        self._check_closed()
+        return self._run_sync(*self._list_client_metrics_resources_spec(timeout))
+
+    def describe_log_dirs(self, brokers, timeout=None):
+        """Query the log directories of ``brokers``. Returns
+        ``{broker_id: {log_dir: LogDirDescription} | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._describe_log_dirs_spec(brokers, timeout))
+
+    def alter_replica_log_dirs(self, replica_assignment, timeout=None):
+        """Move ``{TopicPartitionReplica: log_dir}`` to new log directories.
+        Returns ``{TopicPartitionReplica: None | KafkaError}``."""
+        self._check_closed()
+        return self._run_sync(*self._alter_replica_log_dirs_spec(
+            replica_assignment, timeout))
+
+    def describe_replica_log_dirs(self, replicas, timeout=None):
+        """Query the log directories of ``replicas``
+        (:class:`TopicPartitionReplica`). Returns
+        ``{TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}``.
+
+        Replicas of a topic the cluster does not know are omitted, so the result
+        can be smaller than the request.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_replica_log_dirs_spec(replicas, timeout))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -709,6 +1204,46 @@ class AsyncAdmin(_AdminBase):
     async def delete_records(self, records_to_delete, timeout=None):
         self._check_closed()
         return await self._run_async(*self._delete_records_spec(records_to_delete, timeout))
+
+    async def describe_cluster(self, timeout=None, include_authorized_operations=False,
+                               include_fenced_brokers=False):
+        self._check_closed()
+        return await self._run_async(*self._describe_cluster_spec(
+            timeout, include_authorized_operations, include_fenced_brokers))
+
+    async def describe_configs(self, resources, timeout=None, include_synonyms=False,
+                               include_documentation=False):
+        self._check_closed()
+        return await self._run_async(*self._describe_configs_spec(
+            resources, timeout, include_synonyms, include_documentation))
+
+    async def incremental_alter_configs(self, configs, timeout=None, validate_only=False):
+        self._check_closed()
+        return await self._run_async(*self._incremental_alter_configs_spec(
+            configs, timeout, validate_only))
+
+    async def list_config_resources(self, resource_types=None, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._list_config_resources_spec(
+            resource_types, timeout))
+
+    async def list_client_metrics_resources(self, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._list_client_metrics_resources_spec(timeout))
+
+    async def describe_log_dirs(self, brokers, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_log_dirs_spec(brokers, timeout))
+
+    async def alter_replica_log_dirs(self, replica_assignment, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._alter_replica_log_dirs_spec(
+            replica_assignment, timeout))
+
+    async def describe_replica_log_dirs(self, replicas, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_replica_log_dirs_spec(
+            replicas, timeout))
 
     async def close(self, timeout=None):
         if self.closed:
