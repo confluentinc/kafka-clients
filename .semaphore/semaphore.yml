@@ -93,12 +93,15 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "make verify"
+        - name: "verify-rust-and-multilanguage-integration-tests"
           commands:
-            # Runs in the Semaphore env against the checked-out tree, as
-            # opposed to the `make verify` the agent runs inside its own
-            # sandboxed worktree during the implementation step.
-            - make verify
+            - make verify-rust-and-multilanguage-integration-tests
+        - name: "verify-c"
+          commands:
+            - make verify-c
+        - name: "verify-python"
+          commands:
+            - make verify-python
 
 promotions:
   - name: Start translation plan
