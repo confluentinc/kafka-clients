@@ -294,3 +294,4 @@
 - [Multilanguage suite on macOS](multilanguage_suite_on_macos.md) — Linux-artifact cross-build recipe, .dockerignore, and the WakeupTrigger-vs-event-notify prod bug it caught
 - [Critic-3 wakeup + LogState round](critic3_wakeup_and_logstate_round.md) — disabled WakeupTrigger makes close() wakes inert; never hand-roll a prod closure in a fixture; FFI user_data is session-lifetime
 - [Critic-1 FFI contract round](critic1_ffi_contract_round.md) — check Java before doc-vs-code; Rust moves what Java shares (callback hand-back); clear duplicated state, not just set it
+- [Critic-2 Python bindings round](critic2_python_bindings_round.md) — route a blocking wrapper through the async FFI twin (not just ALLOW_THREADS); cache the asyncio loop; mock can't reproduce block_on deadlocks
