@@ -917,6 +917,368 @@ class MemberToRemove:
         return f"MemberToRemove(group_instance_id={self.group_instance_id!r})"
 
 
+class AclOperation:
+    """ACL operations (Java ``AclOperation``).
+
+    The values are Java's ``AclOperation.code()`` wire codes. ``ANY`` is a
+    filter-only value: :meth:`Admin.create_acls` rejects it, exactly as Java's
+    ``AccessControlEntry`` constructor does.
+    """
+
+    UNKNOWN = 0
+    ANY = 1
+    ALL = 2
+    READ = 3
+    WRITE = 4
+    CREATE = 5
+    DELETE = 6
+    ALTER = 7
+    DESCRIBE = 8
+    CLUSTER_ACTION = 9
+    DESCRIBE_CONFIGS = 10
+    ALTER_CONFIGS = 11
+    IDEMPOTENT_WRITE = 12
+    CREATE_TOKENS = 13
+    DESCRIBE_TOKENS = 14
+    TWO_PHASE_COMMIT = 15
+
+
+class AclPermissionType:
+    """ACL permission types (Java ``AclPermissionType``).
+
+    The values are Java's ``AclPermissionType.code()`` wire codes. ``ANY`` is
+    filter-only, as for :class:`AclOperation`.
+    """
+
+    UNKNOWN = 0
+    ANY = 1
+    DENY = 2
+    ALLOW = 3
+
+
+class ResourceType:
+    """Kinds of resource an ACL can apply to (Java ``ResourceType``).
+
+    The values are Java's ``ResourceType.code()`` wire codes. ``ANY`` is
+    filter-only: Java's ``ResourcePattern`` constructor rejects it.
+    """
+
+    UNKNOWN = 0
+    ANY = 1
+    TOPIC = 2
+    GROUP = 3
+    CLUSTER = 4
+    TRANSACTIONAL_ID = 5
+    DELEGATION_TOKEN = 6
+    USER = 7
+
+
+class PatternType:
+    """How an ACL's resource name is matched (Java ``PatternType``).
+
+    The values are Java's ``PatternType.code()`` wire codes. ``ANY`` and
+    ``MATCH`` are filter-only — Java's ``ResourcePattern`` constructor rejects
+    both — where ``ANY`` means "any pattern type" and ``MATCH`` selects the
+    literal, prefixed and wildcard patterns that would match the name.
+    """
+
+    UNKNOWN = 0
+    ANY = 1
+    MATCH = 2
+    LITERAL = 3
+    PREFIXED = 4
+
+
+class AclBinding:
+    """An ACL binding: a resource pattern plus an access-control entry (Java
+    ``AclBinding``).
+
+    Java nests these as ``pattern()`` and ``entry()``; the seven fields are
+    flattened here, keeping Java's field names. Hashable, so it can key the
+    :meth:`Admin.create_acls` result dict as in Java.
+
+    All three strings are required. The nullable, "match any" form is
+    :class:`AclBindingFilter`.
+    """
+
+    __slots__ = ("resource_type", "resource_name", "pattern_type", "principal", "host",
+                 "operation", "permission_type")
+
+    def __init__(self, resource_type, resource_name, pattern_type, principal, host, operation,
+                 permission_type):
+        self.resource_type = int(resource_type)
+        self.resource_name = str(resource_name)
+        self.pattern_type = int(pattern_type)
+        self.principal = str(principal)
+        self.host = str(host)
+        self.operation = int(operation)
+        self.permission_type = int(permission_type)
+
+    def _as_tuple(self):
+        return (self.resource_type, self.resource_name, self.pattern_type, self.principal,
+                self.host, self.operation, self.permission_type)
+
+    def to_filter(self):
+        """The filter that matches exactly this binding (Java ``toFilter()``)."""
+        return AclBindingFilter(*self._as_tuple())
+
+    def __eq__(self, other):
+        return isinstance(other, AclBinding) and self._as_tuple() == other._as_tuple()
+
+    def __hash__(self):
+        return hash(self._as_tuple())
+
+    def __repr__(self):
+        return (f"AclBinding(resource_type={self.resource_type}, "
+                f"resource_name={self.resource_name!r}, pattern_type={self.pattern_type}, "
+                f"principal={self.principal!r}, host={self.host!r}, "
+                f"operation={self.operation}, permission_type={self.permission_type})")
+
+
+class AclBindingFilter:
+    """A filter over ACL bindings (Java ``AclBindingFilter``).
+
+    Differs from :class:`AclBinding` in exactly the two ways Java's filter types
+    do: ``resource_name``, ``principal`` and ``host`` may be ``None``, meaning
+    "match any", and the four enums may take their ``ANY`` value (and
+    ``pattern_type`` may be ``MATCH``).
+
+    ``None`` is not the same as ``""``: the empty string filters on the empty
+    name. Hashable, so it can key the :meth:`Admin.delete_acls` result dict.
+    """
+
+    __slots__ = ("resource_type", "resource_name", "pattern_type", "principal", "host",
+                 "operation", "permission_type")
+
+    def __init__(self, resource_type=ResourceType.ANY, resource_name=None,
+                 pattern_type=PatternType.ANY, principal=None, host=None,
+                 operation=AclOperation.ANY, permission_type=AclPermissionType.ANY):
+        self.resource_type = int(resource_type)
+        self.resource_name = None if resource_name is None else str(resource_name)
+        self.pattern_type = int(pattern_type)
+        self.principal = None if principal is None else str(principal)
+        self.host = None if host is None else str(host)
+        self.operation = int(operation)
+        self.permission_type = int(permission_type)
+
+    def _as_tuple(self):
+        return (self.resource_type, self.resource_name, self.pattern_type, self.principal,
+                self.host, self.operation, self.permission_type)
+
+    def __eq__(self, other):
+        return isinstance(other, AclBindingFilter) and self._as_tuple() == other._as_tuple()
+
+    def __hash__(self):
+        return hash(self._as_tuple())
+
+    def __repr__(self):
+        return (f"AclBindingFilter(resource_type={self.resource_type}, "
+                f"resource_name={self.resource_name!r}, pattern_type={self.pattern_type}, "
+                f"principal={self.principal!r}, host={self.host!r}, "
+                f"operation={self.operation}, permission_type={self.permission_type})")
+
+
+class DeletedAcl:
+    """One ACL a :meth:`Admin.delete_acls` filter matched (Java
+    ``DeleteAclsResult.FilterResult``).
+
+    Exactly one of the two is set: ``binding`` when the ACL was deleted,
+    ``error`` when the filter matched it but deleting it failed.
+    """
+
+    __slots__ = ("binding", "error")
+
+    def __init__(self, binding, error):
+        self.binding = binding
+        self.error = error
+
+    def __eq__(self, other):
+        return (isinstance(other, DeletedAcl)
+                and self.binding == other.binding and self.error == other.error)
+
+    def __repr__(self):
+        return f"DeletedAcl(binding={self.binding!r}, error={self.error!r})"
+
+
+class ClientQuotaEntity:
+    """A quota entity: entity type -> entity name (Java ``ClientQuotaEntity``).
+
+    ``entries`` maps ``"user"`` / ``"client-id"`` / ``"ip"`` to a name, where a
+    ``None`` name is Java's null map value: the **built-in default entity** for
+    that type (the ``--entity-default`` of the command-line tools). That is not
+    the same as the type being absent from the map, and not the same as the name
+    ``""``.
+
+    Hashable, so it can key the client-quota result dicts as in Java.
+    """
+
+    USER = "user"
+    CLIENT_ID = "client-id"
+    IP = "ip"
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries):
+        self.entries = {str(k): (None if v is None else str(v)) for k, v in dict(entries).items()}
+
+    def _as_key(self):
+        return tuple(sorted(self.entries.items(), key=lambda kv: kv[0]))
+
+    def __eq__(self, other):
+        return isinstance(other, ClientQuotaEntity) and self.entries == other.entries
+
+    def __hash__(self):
+        return hash(self._as_key())
+
+    def __repr__(self):
+        return f"ClientQuotaEntity(entries={self.entries!r})"
+
+
+class ClientQuotaFilterComponent:
+    """One component of a client-quota filter (Java
+    ``ClientQuotaFilterComponent``).
+
+    The match is a genuine tri-state and is built through the three factories
+    below rather than by hand, because two of the three carry no name and so
+    could not be told apart by the name alone:
+
+    * :meth:`of_entity` — match this entity type with exactly this name.
+    * :meth:`of_default_entity` — match the built-in default entity of the type.
+    * :meth:`of_entity_type` — match any *named* entity of the type.
+
+    ``match_type`` holds Kafka's own wire constant: 0 EXACT, 1 DEFAULT,
+    2 SPECIFIED.
+    """
+
+    EXACT = 0
+    DEFAULT = 1
+    SPECIFIED = 2
+
+    __slots__ = ("entity_type", "match_type", "match_name")
+
+    def __init__(self, entity_type, match_type, match_name):
+        self.entity_type = str(entity_type)
+        self.match_type = int(match_type)
+        self.match_name = None if match_name is None else str(match_name)
+
+    @staticmethod
+    def of_entity(entity_type, entity_name):
+        """Match ``entity_type`` with exactly ``entity_name`` (Java
+        ``ofEntity``)."""
+        return ClientQuotaFilterComponent(entity_type, ClientQuotaFilterComponent.EXACT,
+                                          entity_name)
+
+    @staticmethod
+    def of_default_entity(entity_type):
+        """Match the built-in default entity of ``entity_type`` (Java
+        ``ofDefaultEntity``)."""
+        return ClientQuotaFilterComponent(entity_type, ClientQuotaFilterComponent.DEFAULT, None)
+
+    @staticmethod
+    def of_entity_type(entity_type):
+        """Match any *named* entity of ``entity_type`` (Java ``ofEntityType``).
+
+        Distinct from :meth:`of_default_entity`, which matches only the
+        default; the two differ in both equality and the wire encoding.
+        """
+        return ClientQuotaFilterComponent(entity_type, ClientQuotaFilterComponent.SPECIFIED, None)
+
+    def _as_tuple(self):
+        return (self.entity_type, self.match_type, self.match_name)
+
+    def __eq__(self, other):
+        return (isinstance(other, ClientQuotaFilterComponent)
+                and self._as_tuple() == other._as_tuple())
+
+    def __hash__(self):
+        return hash(self._as_tuple())
+
+    def __repr__(self):
+        return (f"ClientQuotaFilterComponent(entity_type={self.entity_type!r}, "
+                f"match_type={self.match_type}, match_name={self.match_name!r})")
+
+
+class ClientQuotaFilter:
+    """A filter over client quotas (Java ``ClientQuotaFilter``).
+
+    Built through the three factories, mirroring Java's private constructor.
+    """
+
+    __slots__ = ("components", "strict")
+
+    def __init__(self, components, strict):
+        self.components = list(components)
+        self.strict = bool(strict)
+
+    @staticmethod
+    def contains(components):
+        """Match entities that have at least these components (Java
+        ``contains``)."""
+        return ClientQuotaFilter(components, False)
+
+    @staticmethod
+    def contains_only(components):
+        """Match entities that have exactly these components and no others
+        (Java ``containsOnly``)."""
+        return ClientQuotaFilter(components, True)
+
+    @staticmethod
+    def all():
+        """Match every entity (Java ``all()``).
+
+        Note this is *not* ``contains_only([])``, which matches only the entity
+        with no components at all.
+        """
+        return ClientQuotaFilter([], False)
+
+    def __eq__(self, other):
+        return (isinstance(other, ClientQuotaFilter)
+                and self.components == other.components and self.strict == other.strict)
+
+    def __repr__(self):
+        return f"ClientQuotaFilter(components={self.components!r}, strict={self.strict})"
+
+
+class ClientQuotaOp:
+    """One quota change (Java ``ClientQuotaAlteration.Op``).
+
+    ``value`` is ``None`` to **remove** the quota, mirroring Java's nullable
+    ``Double``. Every number, 0 included, is a legal quota value, so ``None`` is
+    the only way to say "remove".
+    """
+
+    __slots__ = ("key", "value")
+
+    def __init__(self, key, value):
+        self.key = str(key)
+        self.value = None if value is None else float(value)
+
+    def __eq__(self, other):
+        return (isinstance(other, ClientQuotaOp)
+                and self.key == other.key and self.value == other.value)
+
+    def __repr__(self):
+        return f"ClientQuotaOp(key={self.key!r}, value={self.value!r})"
+
+
+class ClientQuotaAlteration:
+    """The quota changes to apply to one entity (Java
+    ``ClientQuotaAlteration``)."""
+
+    __slots__ = ("entity", "ops")
+
+    def __init__(self, entity, ops):
+        self.entity = entity
+        self.ops = list(ops)
+
+    def __eq__(self, other):
+        return (isinstance(other, ClientQuotaAlteration)
+                and self.entity == other.entity and self.ops == other.ops)
+
+    def __repr__(self):
+        return f"ClientQuotaAlteration(entity={self.entity!r}, ops={self.ops!r})"
+
+
 def _to_error(raw):
     """``(code, message, is_retriable, is_fatal)`` -> KafkaError, or None."""
     return None if raw is None else KafkaError._from_parts(*raw)
@@ -1215,6 +1577,67 @@ def _to_list_consumer_group_offsets(raw):
     for key, (error, offsets) in raw.items():
         out[key] = _to_error(error) if error is not None else _to_group_offsets(offsets)
     return out
+
+
+def _to_acl_binding(raw):
+    """``(resource_type, resource_name, pattern_type, principal, host,
+    operation, permission_type)`` -> AclBinding, or None."""
+    return None if raw is None else AclBinding(*raw)
+
+
+def _to_acl_binding_filter(raw):
+    """The same seven fields, with nullable strings -> AclBindingFilter."""
+    return None if raw is None else AclBindingFilter(*raw)
+
+
+def _to_create_acls(raw):
+    """{binding_tuple: error} -> {AclBinding: None | KafkaError}"""
+    return {_to_acl_binding(key): _to_error(error) for key, error in raw.items()}
+
+
+def _to_describe_acls(raw):
+    """[binding_tuple] -> [AclBinding]
+
+    A list, not a dict: ``DescribeAclsResult`` has one future for the whole
+    call, so there is no key an error could hang on and a failure raises
+    instead.
+    """
+    return [_to_acl_binding(row) for row in raw]
+
+
+def _to_delete_acls(raw):
+    """{filter_tuple: (error, [(error, binding_tuple)])}
+    -> {AclBindingFilter: KafkaError | [DeletedAcl]}
+
+    A filter whose own future failed maps to that error; otherwise it maps to
+    the ACLs it matched, each of which either was deleted or carries its own
+    exception. The two levels are Java's, not an invention: ``FilterResults``
+    holds one ``FilterResult`` per matched ACL.
+    """
+    out = {}
+    for key, (error, results) in raw.items():
+        filter_key = _to_acl_binding_filter(key)
+        if error is not None:
+            out[filter_key] = _to_error(error)
+        else:
+            out[filter_key] = [DeletedAcl(_to_acl_binding(b), _to_error(e)) for e, b in results]
+    return out
+
+
+def _to_client_quota_entity(raw):
+    """``((entity_type, entity_name_or_None), ...)`` -> ClientQuotaEntity."""
+    return ClientQuotaEntity({entity_type: name for entity_type, name in raw})
+
+
+def _to_describe_client_quotas(raw):
+    """{entity_pairs: [(quota_key, value)]}
+    -> {ClientQuotaEntity: {quota_key: float}}"""
+    return {_to_client_quota_entity(key): dict(quotas) for key, quotas in raw.items()}
+
+
+def _to_alter_client_quotas(raw):
+    """{entity_pairs: error} -> {ClientQuotaEntity: None | KafkaError}"""
+    return {_to_client_quota_entity(key): _to_error(error) for key, error in raw.items()}
 
 
 def _to_keyed_errors(raw):
@@ -1608,6 +2031,97 @@ class _AdminBase:
                 self._free_value(drain))
 
 
+    # ---- B5a: ACLs and client quotas ---------------------------------------
+    #
+    # The four ACL enums cross as Java's `code()` values, and quota filter
+    # components as Kafka's wire match-type constants; both are real protocol
+    # numbers, not names or invented codes.
+
+    @staticmethod
+    def _acl_binding_rows(acls):
+        """AclBinding objects -> the 7-tuples the C extension unpacks."""
+        return [(int(a.resource_type), str(a.resource_name), int(a.pattern_type),
+                 str(a.principal), str(a.host), int(a.operation), int(a.permission_type))
+                for a in acls]
+
+    @staticmethod
+    def _acl_filter_rows(filters):
+        """AclBindingFilter objects -> the 7-tuples the C extension unpacks.
+
+        The three strings stay ``None`` where absent: ``None`` is Java's
+        match-any, distinct from ``""``.
+        """
+        return [(int(f.resource_type),
+                 None if f.resource_name is None else str(f.resource_name),
+                 int(f.pattern_type),
+                 None if f.principal is None else str(f.principal),
+                 None if f.host is None else str(f.host),
+                 int(f.operation), int(f.permission_type))
+                for f in filters]
+
+    def _create_acls_spec(self, acls, timeout):
+        rows = self._acl_binding_rows(acls)
+        ms = _ms(timeout)
+        drain = _lib.CreateAclsResult_drain
+        return (lambda cb: _lib.Admin_create_acls_async(self._h, rows, ms, cb),
+                self._resolve_value(drain, _to_create_acls),
+                self._free_value(drain))
+
+    def _describe_acls_spec(self, acl_filter, timeout):
+        row = self._acl_filter_rows([acl_filter])[0]
+        ms = _ms(timeout)
+        drain = _lib.DescribeAclsResult_drain
+        return (lambda cb: _lib.Admin_describe_acls_async(
+                    self._h, row[0], row[1], row[2], row[3], row[4], row[5], row[6], ms, cb),
+                self._resolve_value(drain, _to_describe_acls),
+                self._free_value(drain))
+
+    def _delete_acls_spec(self, filters, timeout):
+        rows = self._acl_filter_rows(filters)
+        ms = _ms(timeout)
+        drain = _lib.DeleteAclsResult_drain
+        return (lambda cb: _lib.Admin_delete_acls_async(self._h, rows, ms, cb),
+                self._resolve_value(drain, _to_delete_acls),
+                self._free_value(drain))
+
+    def _describe_client_quotas_spec(self, quota_filter, timeout):
+        components = [(str(c.entity_type), int(c.match_type),
+                       None if c.match_name is None else str(c.match_name))
+                      for c in quota_filter.components]
+        strict = bool(quota_filter.strict)
+        ms = _ms(timeout)
+        drain = _lib.DescribeClientQuotasResult_drain
+        return (lambda cb: _lib.Admin_describe_client_quotas_async(
+                    self._h, components, strict, ms, cb),
+                self._resolve_value(drain, _to_describe_client_quotas),
+                self._free_value(drain))
+
+    @staticmethod
+    def _quota_alteration_rows(entries):
+        """ClientQuotaAlteration objects -> the ``(entity_pairs, ops)`` rows the
+        C extension unpacks.
+
+        Both nulls are load-bearing and must survive as ``None``: a ``None``
+        entity name is the built-in default entity, and a ``None`` op value is
+        a removal. Neither is observable end to end — Java's mock
+        throws before echoing anything back — so this is extracted as a pure
+        function precisely so a test can pin it.
+        """
+        return [([(str(t), None if n is None else str(n))
+                  for t, n in a.entity.entries.items()],
+                 [(str(o.key), None if o.value is None else float(o.value)) for o in a.ops])
+                for a in entries]
+
+    def _alter_client_quotas_spec(self, entries, timeout, validate_only):
+        rows = self._quota_alteration_rows(entries)
+        ms = _ms(timeout)
+        drain = _lib.AlterClientQuotasResult_drain
+        return (lambda cb: _lib.Admin_alter_client_quotas_async(
+                    self._h, rows, ms, validate_only, cb),
+                self._resolve_value(drain, _to_alter_client_quotas),
+                self._free_value(drain))
+
+
 class _MockAdminClientMixin:
     """Mock-only operations (test helper)."""
 
@@ -1987,6 +2501,65 @@ class Admin(_AdminBase):
         return self._run_sync(*self._remove_members_from_consumer_group_spec(
             group_id, members, reason, timeout))
 
+    def create_acls(self, acls, timeout=None):
+        """Create ``acls`` (an iterable of :class:`AclBinding`). Returns
+        ``{AclBinding: None | KafkaError}``.
+
+        A binding with an ``ANY`` resource type, operation or permission type,
+        or an ``ANY`` or ``MATCH`` pattern type, raises before the request is
+        sent — Java's ``ResourcePattern`` and ``AccessControlEntry``
+        constructors reject those, and they are what
+        :class:`AclBindingFilter` is for.
+        """
+        self._check_closed()
+        return self._run_sync(*self._create_acls_spec(acls, timeout))
+
+    def describe_acls(self, acl_filter, timeout=None):
+        """Describe the ACLs matching ``acl_filter`` (an
+        :class:`AclBindingFilter`). Returns ``[AclBinding]``.
+
+        Java takes a single filter here, not a collection, and has no
+        no-argument overload, so ``acl_filter`` is required. Unlike the other
+        four RPCs in this group the result is one future for the whole call, so
+        a failure raises rather than landing in a per-key slot.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_acls_spec(acl_filter, timeout))
+
+    def delete_acls(self, filters, timeout=None):
+        """Delete the ACLs matching each of ``filters`` (an iterable of
+        :class:`AclBindingFilter`). Returns
+        ``{AclBindingFilter: KafkaError | [DeletedAcl]}``.
+
+        A filter maps to a ``KafkaError`` when its own request failed and
+        nothing was deleted for it, or to the ACLs it matched — each of which
+        either was deleted or carries its own exception, as Java's
+        ``FilterResult`` does.
+        """
+        self._check_closed()
+        return self._run_sync(*self._delete_acls_spec(filters, timeout))
+
+    def describe_client_quotas(self, quota_filter, timeout=None):
+        """Describe the client quotas matching ``quota_filter`` (a
+        :class:`ClientQuotaFilter`). Returns
+        ``{ClientQuotaEntity: {quota_key: float}}``.
+
+        One future for the whole call, so a failure raises.
+        """
+        self._check_closed()
+        return self._run_sync(*self._describe_client_quotas_spec(quota_filter, timeout))
+
+    def alter_client_quotas(self, entries, timeout=None, validate_only=False):
+        """Apply ``entries`` (an iterable of :class:`ClientQuotaAlteration`).
+        Returns ``{ClientQuotaEntity: None | KafkaError}``.
+
+        An op whose ``value`` is ``None`` removes that quota. Two alterations
+        of the same entity raise, because Java keys the result by entity and
+        the second could only silently replace the first.
+        """
+        self._check_closed()
+        return self._run_sync(*self._alter_client_quotas_spec(entries, timeout, validate_only))
+
     def close(self, timeout=None):
         if self.closed:
             return
@@ -2206,6 +2779,27 @@ class AsyncAdmin(_AdminBase):
         self._check_closed()
         return await self._run_async(*self._remove_members_from_consumer_group_spec(
             group_id, members, reason, timeout))
+
+    async def create_acls(self, acls, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._create_acls_spec(acls, timeout))
+
+    async def describe_acls(self, acl_filter, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_acls_spec(acl_filter, timeout))
+
+    async def delete_acls(self, filters, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._delete_acls_spec(filters, timeout))
+
+    async def describe_client_quotas(self, quota_filter, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._describe_client_quotas_spec(quota_filter, timeout))
+
+    async def alter_client_quotas(self, entries, timeout=None, validate_only=False):
+        self._check_closed()
+        return await self._run_async(
+            *self._alter_client_quotas_spec(entries, timeout, validate_only))
 
     async def close(self, timeout=None):
         if self.closed:
