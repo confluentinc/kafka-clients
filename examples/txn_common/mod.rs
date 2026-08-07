@@ -115,7 +115,19 @@ pub fn plain_producer(bootstrap: &str, client_id: &str) -> Result<StringProducer
 /// A consumer for `group_id` at the given isolation level, reading from the
 /// earliest offset when the group has no committed position.
 pub fn build_consumer(bootstrap: &str, group_id: &str, isolation: &str) -> Result<BytesConsumer, String> {
-    let props = HashMap::from([
+    build_consumer_with(bootstrap, group_id, isolation, &[])
+}
+
+/// [`build_consumer`] with extra / overriding config entries, for cases that
+/// probe a specific consumer setting (`fetch.min.bytes`,
+/// `default.api.timeout.ms`, ...).
+pub fn build_consumer_with(
+    bootstrap: &str,
+    group_id: &str,
+    isolation: &str,
+    overrides: &[(&str, &str)],
+) -> Result<BytesConsumer, String> {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("group.id".to_string(), group_id.to_string()),
@@ -124,6 +136,9 @@ pub fn build_consumer(bootstrap: &str, group_id: &str, isolation: &str) -> Resul
         ("isolation.level".to_string(), isolation.to_string()),
         ("client.id".to_string(), format!("{group_id}-client")),
     ]);
+    for (key, value) in overrides {
+        props.insert((*key).to_string(), (*value).to_string());
+    }
     let config = ConsumerConfig::from_properties(&props).map_err(|e| format!("invalid consumer config: {e}"))?;
     new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
         .map_err(|e| format!("building the consumer: {e}"))
@@ -331,6 +346,18 @@ pub async fn read_partition(
     isolation: &str,
     verbose: bool,
 ) -> Result<Vec<String>, String> {
+    read_partition_idle(bootstrap, topic, isolation, verbose, IDLE_WINDOW).await
+}
+
+/// [`read_partition`] with a caller-chosen idle window — fan-out style cases
+/// read many topics, where a full 5 s idle wait per topic adds up.
+pub async fn read_partition_idle(
+    bootstrap: &str,
+    topic: &str,
+    isolation: &str,
+    verbose: bool,
+    idle_window: Duration,
+) -> Result<Vec<String>, String> {
     let group_id = format!("txn-manual-verify-{isolation}-{}", unique_suffix());
     println!();
     println!("--- isolation.level={isolation}: reading {topic}-0 from the beginning ---");
@@ -339,11 +366,20 @@ pub async fn read_partition(
         .assign(vec![TopicPartition::new(topic.to_string(), 0)])
         .await
         .map_err(|e| format!("assign {topic}: {e}"))?;
-    let collected = drain_until_idle(&mut consumer, verbose)
-        .await
-        .map_err(|e| format!("{topic}: {e}"))?;
+    let started = Instant::now();
+    let mut last_record_at = Instant::now();
+    let mut collected: Vec<String> = Vec::new();
+    while started.elapsed() < PHASE_DEADLINE && last_record_at.elapsed() < idle_window {
+        let records = consumer
+            .poll(Duration::from_millis(500))
+            .await
+            .map_err(|e| format!("poll {topic}: {e}"))?;
+        if collect(records, &mut collected, verbose) > 0 {
+            last_record_at = Instant::now();
+        }
+    }
     if collected.is_empty() {
-        println!("  (no records within {IDLE_WINDOW:?})");
+        println!("  (no records within {idle_window:?})");
     } else if !verbose {
         println!("  received {} records", collected.len());
     }
