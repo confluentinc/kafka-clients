@@ -55,11 +55,12 @@
 //!   have resolved.
 //! - **Synchronously, on the calling thread, before the entry point returns**,
 //!   when the operation fails before it can be submitted: `admin` is NULL, or
-//!   argument marshaling fails (for example an unparseable base64 topic id
-//!   passed to `kafka_admin_AdminClient_delete_topics_by_ids_async` /
-//!   `_describe_topics_by_ids_async`). This is plain bad input, not only a
-//!   programming error, so a caller must not assume the entry point has returned
-//!   by the time the callback runs.
+//!   argument marshaling fails (an unparseable base64 topic id passed to
+//!   `kafka_admin_AdminClient_delete_topics_by_ids_async` /
+//!   `_describe_topics_by_ids_async`, or an unknown `AlterConfigOp.OpType` code
+//!   passed to `kafka_admin_AdminClient_incremental_alter_configs_async`). This
+//!   is plain bad input, not only a programming error, so a caller must not
+//!   assume the entry point has returned by the time the callback runs.
 //! - On a **tokio worker thread**, if the dispatcher's completion queue can no
 //!   longer be reached when the result arrives. Handle destruction does not
 //!   cause this: each async operation clones the sender before spawning and
