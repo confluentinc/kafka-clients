@@ -2125,22 +2125,41 @@ impl<C: KafkaClient> Sender<C> {
         let error_for_manager = top_level_exception.clone();
         if batch.complete_exceptionally(top_level_exception, record_exceptions) {
             if let Some(transaction_manager) = self.transaction_manager.clone() {
+                // `handleFailedBatch` needs the partition's *remaining* tracked
+                // batches for the transactional sequence adjustment
+                // (`TransactionManager.java:818` → `TxnPartitionMap.
+                // adjustSequencesDueToFailedBatch`): every batch behind the failed
+                // one is rewritten `recordCount` sequences down so the retried ones
+                // fill the gap instead of dying on OUT_OF_ORDER_SEQUENCE_NUMBER
+                // forever — which also kept `has_incomplete_batches` true, parked a
+                // pending `EndTxn(commit)` past `max.block.ms`, and wedged the
+                // application between an untimely commit timeout and a refused
+                // abort. Per rules §7 the pool must draw from **both** owners
+                // (`Sender::in_flight_batches` and the accumulator's deques for
+                // reenqueued batches); `with_in_flight_batch_pool` takes the deque
+                // locks first, so the closure's manager lock observes the
+                // deque → manager order of rules §3. The failed batch itself is in
+                // neither owner here (see above) and `handle_failed_batch` untracks
+                // it before adjusting, so the pool aliases nothing.
+                let partitions = [batch.topic_partition.clone()];
+                let accumulator = Arc::clone(&self.accumulator);
+                let handled = accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
+                    let pool_batches = pool
+                        .get_mut(&batch.topic_partition)
+                        .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+                    transaction_manager.lock().unwrap().handle_failed_batch(
+                        batch,
+                        &error_for_manager,
+                        adjust_sequence_numbers,
+                        pool_batches,
+                        Caller::Sender,
+                    )
+                });
                 // This call can return an error in the rare case that there's an
                 // invalid state transition attempted. Log it so as not to interfere
                 // with the rest of the logic — Java catches and logs at debug for the
                 // same reason (`Sender.java:845-851`).
-                //
-                // `batches` is empty: it supplies the partition's *remaining*
-                // in-flight batches for the transactional sequence adjustment
-                // (`TransactionManager.java:818`), and the idempotent arm never reads
-                // it (rules §7).
-                if let Err(error) = transaction_manager.lock().unwrap().handle_failed_batch(
-                    batch,
-                    &error_for_manager,
-                    adjust_sequence_numbers,
-                    &mut [],
-                    Caller::Sender,
-                ) {
+                if let Err(error) = handled {
                     kafka_debug!(
                         self.log_context,
                         "Encountered error when transaction manager was handling a failed batch: {}",
@@ -8663,6 +8682,57 @@ mod tests {
             .prepare_response_with_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
     }
 
+    /// [`prepare_produce_response`] that additionally pins the batch's base
+    /// sequence on the wire — the observable that
+    /// `TxnPartitionMap::adjustSequencesDueToFailedBatch` exists to change.
+    /// No direct Java twin: Java's matchers assert pid/epoch and rely on the
+    /// broker for sequencing; here the mock IS the broker, so the retried
+    /// sequence must be asserted explicitly or a stale one passes unnoticed.
+    fn prepare_produce_response_expecting_sequence(
+        ctx: &mut SenderTestContext,
+        error: Errors,
+        producer_id: i64,
+        producer_epoch: i16,
+        tp: &TopicPartition,
+        expected_base_sequence: i32,
+    ) {
+        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::requests::ConcreteRequest;
+
+        let response = txn_produce_response(ctx, tp, 0, error);
+        let tp = tp.clone();
+        let matcher: crate::mock_client::RequestMatcher = Box::new(move |request| {
+            let ConcreteRequest::Produce(produce_request) = request else {
+                panic!("expected a produce request, got {request}");
+            };
+            let records = produce_request
+                .data()
+                .topic_data
+                .iter()
+                .find(|topic| topic.name == *tp.topic())
+                .expect("the request must carry this topic")
+                .partition_data
+                .iter()
+                .find(|partition| partition.index == tp.partition())
+                .expect("the request must carry this partition")
+                .records
+                .clone()
+                .expect("a produce request carries records");
+            let records = MemoryRecords::new(records);
+            let mut batches = records.batches();
+            let batch = batches.next().expect("one batch");
+            assert_eq!(batch.producer_id(), producer_id);
+            assert_eq!(batch.producer_epoch(), producer_epoch);
+            assert_eq!(
+                batch.base_sequence(),
+                expected_base_sequence,
+                "the batch was re-sent with a stale sequence — adjustSequencesDueToFailedBatch did not rewrite it"
+            );
+            true
+        });
+        ctx.sender.client_mut().prepare_response_with_matcher(matcher, response);
+    }
+
     /// `sendProduceResponse(error, producerId, producerEpoch, tp)` (Java 4097-4099):
     /// answers a produce request that is already in flight.
     fn send_produce_response(
@@ -11958,6 +12028,126 @@ mod tests {
         assert!(commit_result.is_acked());
 
         assert_abortable_error(&ctx, Errors::TransactionAbortable);
+    }
+
+    /// Regression for the commit-timeout wedge the manual suite found
+    /// (`examples/txn_api_contracts.rs` case 4): a batch failing while an
+    /// `EndTxn(commit)` is pending must not park the commit behind
+    /// `has_incomplete_batches` until `max.block.ms`.
+    ///
+    /// The Java chain under test: `Sender.failBatch` →
+    /// `TransactionManager.handleFailedBatch` (`TransactionManager.java:788`)
+    /// → `TxnPartitionMap.adjustSequencesDueToFailedBatch` (`:818`) rewrites
+    /// every later batch's sequence down by the failed batch's record count,
+    /// so the pipelined follow-up that was rejected with
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER` retries into the gap and succeeds
+    /// (asserted on the wire via the sequence-pinning matcher); with all
+    /// batches resolved, `nextRequest` dequeues the EndTxn and
+    /// `maybeTerminateRequestWithError` (`:1174`) fails the pending commit
+    /// with `lastError` promptly. Regression shape: the Rust call site passed
+    /// an empty batch pool to `handle_failed_batch`, so the follow-up kept
+    /// its stale sequence and retried `OUT_OF_ORDER_SEQUENCE_NUMBER` forever.
+    ///
+    /// Also pins the librdkafka-style flag (CLAUDE.md §10.3): the commit
+    /// error surfaced from the `ABORTABLE_ERROR` state carries
+    /// `txn_requires_abort()`, and the documented recovery branch —
+    /// `abort_transaction` — is accepted afterwards.
+    #[tokio::test]
+    async fn test_failed_batch_adjusts_following_sequences_and_fails_pending_commit() {
+        use crate::producer::internals::producer_test_utils::run_until;
+        use crate::producer::internals::producer_test_utils::run_until_with_tries;
+
+        // Not `txn_mgr_test_context`: that passes `guarantee_message_order =
+        // true`, which mutes a partition while a batch is in flight — but the
+        // wedge needs the follow-up batch pipelined on the wire when the
+        // failure lands, exactly like a real producer with the default
+        // max.in.flight of 5.
+        let mut ctx = SenderTestContext::with_transaction_state(
+            false,
+            i32::MAX,
+            Some(txn_mgr_test_manager(false)),
+            Some(SenderTestTimeouts {
+                request_timeout_ms: TXN_MGR_REQUEST_TIMEOUT,
+                delivery_timeout_ms: TXN_MGR_DELIVERY_TIMEOUT_MS,
+                accumulator_retry_backoff_ms: 0,
+                sender_retry_backoff_ms: RETRY_BACKOFF_MS,
+                linger_ms: 0,
+            }),
+        );
+        do_init_transactions(&mut ctx).await;
+
+        begin_transaction(&ctx);
+        let tp0 = ctx.tp0.clone();
+        maybe_add_partition(&ctx, &tp0);
+        prepare_add_partitions_to_txn_response(&mut ctx, Errors::None, &tp0, TXN_EPOCH, TXN_PRODUCER_ID);
+        {
+            let manager = ctx.transaction_manager();
+            let tp = tp0.clone();
+            run_until(&mut ctx.sender, move |_| {
+                manager.lock().unwrap().transaction_contains_partition(&tp)
+            })
+            .await;
+        }
+
+        // Two pipelined single-record batches: sequences 0 and 1. Each stage
+        // spans several request/response round trips, so the waits get a
+        // larger (still bounded) iteration budget than run_until's default.
+        let first = ctx.append_to_accumulator(&tp0).await;
+        {
+            let tp = tp0.clone();
+            run_until_with_tries(&mut ctx.sender, move |sender| sender.in_flight_batches(&tp).len() == 1, 40).await;
+        }
+        let second = ctx.append_to_accumulator(&tp0).await;
+        {
+            let tp = tp0.clone();
+            run_until_with_tries(&mut ctx.sender, move |sender| sender.in_flight_batches(&tp).len() == 2, 40).await;
+        }
+
+        // The wedge shape: commit while both batches are unresolved, so the
+        // EndTxn is parked behind has_incomplete_batches.
+        let commit_result = begin_commit(&ctx);
+        assert!(!commit_result.is_completed());
+
+        // The first batch dies; the second was sent with the now-impossible
+        // sequence 1 and is rejected; its retry must carry sequence 0.
+        send_produce_response(&mut ctx, Errors::MessageTooLarge, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        send_produce_response(&mut ctx, Errors::OutOfOrderSequenceNumber, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
+        prepare_produce_response_expecting_sequence(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0, 0);
+
+        {
+            let commit_result = Arc::clone(&commit_result);
+            run_until_with_tries(&mut ctx.sender, move |_| commit_result.is_completed(), 40).await;
+        }
+        assert!(first.is_done());
+        assert!(second.is_done());
+
+        let commit_error = commit_result
+            .await_result()
+            .await
+            .expect_err("the pending commit fails with the batch's error instead of timing out");
+        assert_eq!(commit_error.error(), Errors::MessageTooLarge);
+        assert!(
+            commit_error.txn_requires_abort(),
+            "the commit error from ABORTABLE_ERROR carries txn_requires_abort() (CLAUDE.md §10.3)"
+        );
+        {
+            let manager = ctx.transaction_manager();
+            let manager = manager.lock().unwrap();
+            assert!(manager.has_abortable_error());
+            assert!(!manager.has_fatal_error());
+        }
+
+        // The documented recovery branch stays available.
+        let abort_result = begin_abort(&ctx);
+        prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
+        {
+            let abort_result = Arc::clone(&abort_result);
+            run_until(&mut ctx.sender, move |_| abort_result.is_completed()).await;
+        }
+        assert!(
+            abort_result.is_successful(),
+            "abort_transaction is accepted after the failed commit"
+        );
     }
 
     // =====================================================================
