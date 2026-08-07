@@ -4932,6 +4932,778 @@ static void test_mock_admin_b5a_null_out_result(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* ==== B5b: SCRAM, delegation tokens and features ===========================
+ *
+ * Two of these eight RPCs are declined by Java's own `MockAdminClient`
+ * (`describeUserScramCredentials` / `alterUserScramCredentials`,
+ * MockAdminClient.java:1251-1259), so their success drains are unreachable
+ * here and are covered by the Rust FFI unit tests against hand-built fixtures.
+ * The other six *are* implemented by the mock, so they are exercised end to
+ * end: a token is created, described, renewed and expired using the HMAC the
+ * broker handed back, and the feature levels are seeded and then read and
+ * updated.
+ */
+
+#define SCRAM_MECHANISM_UNKNOWN 0
+#define SCRAM_MECHANISM_SHA_256 1
+#define SCRAM_MECHANISM_SHA_512 2
+
+#define UPGRADE_TYPE_UNKNOWN 0
+#define UPGRADE_TYPE_UPGRADE 1
+#define UPGRADE_TYPE_SAFE_DOWNGRADE 2
+#define UPGRADE_TYPE_UNSAFE_DOWNGRADE 3
+
+static void test_mock_admin_describe_user_scram_credentials_fails_the_whole_call(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *users[2] = {"alice", "bob"};
+
+    /* One future for the whole response, so the mock's refusal is the call's
+     * error rather than a per-user one. */
+    kafka_admin_DescribeUserScramCredentialsResult_t *result = NULL;
+    kafka_common_KafkaError_t *error =
+        kafka_admin_AdminClient_describe_user_scram_credentials(admin, users, 2, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* An empty user list means "every user" and reaches the same refusal. */
+    error = kafka_admin_AdminClient_describe_user_scram_credentials(admin, NULL, 0, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_alter_user_scram_credentials_reports_unsupported_per_user(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* Deliberately mixed and ragged: an upsertion with an explicit salt, a
+     * deletion, and an upsertion with no salt. The two password lengths and the
+     * salt length all differ, so substituting one length array for another is
+     * visible rather than a no-op. */
+    const char *users[3] = {"alice", "bob", "carol"};
+    const bool is_deletions[3] = {false, true, false};
+    const int32_t mechanisms[3] = {SCRAM_MECHANISM_SHA_256, SCRAM_MECHANISM_SHA_512,
+                                   SCRAM_MECHANISM_SHA_512};
+    const int32_t iterations[3] = {4096, 0, 8192};
+    const uint8_t alice_password[3] = {'p', 'w', '1'};
+    const uint8_t carol_password[5] = {'p', 'w', '2', '3', '4'};
+    const uint8_t *const passwords[3] = {alice_password, NULL, carol_password};
+    const int32_t password_lens[3] = {3, 0, 5};
+    const uint8_t alice_salt[2] = {0xaa, 0xbb};
+    const uint8_t *const salts[3] = {alice_salt, NULL, NULL};
+    const int32_t salt_lens[3] = {2, 0, 0};
+
+    kafka_admin_AlterUserScramCredentialsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, is_deletions, mechanisms, iterations, passwords, password_lens, salts,
+        salt_lens, 3, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_AlterUserScramCredentialsResult_count(result));
+
+    /* Sorted by user name. */
+    TEST_ASSERT_EQUAL_STRING("alice", kafka_admin_AlterUserScramCredentialsResult_get_user(result, 0));
+    TEST_ASSERT_EQUAL_STRING("bob", kafka_admin_AlterUserScramCredentialsResult_get_user(result, 1));
+    TEST_ASSERT_EQUAL_STRING("carol", kafka_admin_AlterUserScramCredentialsResult_get_user(result, 2));
+    for (int32_t i = 0; i < 3; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_AlterUserScramCredentialsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    TEST_ASSERT_NULL(kafka_admin_AlterUserScramCredentialsResult_get_user(result, 3));
+    TEST_ASSERT_NULL(kafka_admin_AlterUserScramCredentialsResult_get_error(result, 3));
+    kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_alter_user_scram_credentials_rejects_bad_rows(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *with_null[2] = {"alice", NULL};
+    const bool is_deletions[2] = {true, true};
+    const int32_t mechanisms[2] = {SCRAM_MECHANISM_SHA_256, SCRAM_MECHANISM_SHA_256};
+
+    kafka_admin_AlterUserScramCredentialsResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 2, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("scram alteration user at index 1 must not be null",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* An upsertion with no password is not a legal credential. A deletion in
+     * the same position is fine, which is what the flag buys. */
+    const char *users[1] = {"alice"};
+    const bool upsertion[1] = {false};
+    error = kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("scram alteration at index 0 is an upsertion with no password",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    const bool deletion[1] = {true};
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, deletion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterUserScramCredentialsResult_count(result));
+    kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_describe_user_scram_credentials(kafka_admin_DescribeUserScramCredentialsResult_t *result,
+                                               kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeUserScramCredentialsResult_count(result);
+        kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_alter_user_scram_credentials(kafka_admin_AlterUserScramCredentialsResult_t *result,
+                                            kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_AlterUserScramCredentialsResult_count(result);
+        kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_scram_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *users[1] = {"alice"};
+
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_user_scram_credentials_async(
+        admin, users, 1, -1, on_describe_user_scram_credentials, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
+
+    const bool is_deletions[1] = {true};
+    const int32_t mechanisms[1] = {SCRAM_MECHANISM_SHA_512};
+    acl_async_result_t a = {0};
+    atomic_init(&a.fired, 0);
+    kafka_admin_AdminClient_alter_user_scram_credentials_async(
+        admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1,
+        on_alter_user_scram_credentials, &a);
+    TEST_ASSERT_TRUE(wait_for(&a.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, a.had_result);
+    TEST_ASSERT_EQUAL_INT(0, a.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, a.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_scram_async_null_handle_and_marshaling_failure(void) {
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_user_scram_credentials_async(NULL, NULL, 0, -1,
+                                                                  on_describe_user_scram_credentials, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+
+    acl_async_result_t a = {0};
+    atomic_init(&a.fired, 0);
+    kafka_admin_AdminClient_alter_user_scram_credentials_async(NULL, NULL, NULL, NULL, NULL, NULL,
+                                                               NULL, NULL, NULL, 0, -1,
+                                                               on_alter_user_scram_credentials, &a);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&a.fired));
+    TEST_ASSERT_EQUAL_INT(1, a.had_error);
+
+    /* Marshaling failure fires the callback inline too, before the call
+     * returns, so the flag is read without waiting. */
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *with_null[1] = {NULL};
+    const bool is_deletions[1] = {true};
+    const int32_t mechanisms[1] = {SCRAM_MECHANISM_SHA_256};
+    acl_async_result_t m = {0};
+    atomic_init(&m.fired, 0);
+    kafka_admin_AdminClient_alter_user_scram_credentials_async(
+        admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1,
+        on_alter_user_scram_credentials, &m);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&m.fired));
+    TEST_ASSERT_EQUAL_INT(0, m.had_result);
+    TEST_ASSERT_EQUAL_STRING("scram alteration user at index 0 must not be null", m.message);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_delegation_token_lifecycle(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* Two renewers with different names, so a transposition of the two arrays
+     * or of the two rows is visible. The mock makes the *first* renewer the
+     * owner, mirroring MockAdminClient.createDelegationToken. */
+    const char *renewer_types[2] = {"User", "User"};
+    const char *renewer_names[2] = {"owner-principal", "second-renewer"};
+
+    kafka_admin_CreateDelegationTokenResult_t *created = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_delegation_token(
+        admin, renewer_types, renewer_names, 2, NULL, NULL, 86400000, -1, &created));
+    TEST_ASSERT_NOT_NULL(created);
+
+    const kafka_common_DelegationToken_t *token =
+        kafka_admin_CreateDelegationTokenResult_get_token(created);
+    TEST_ASSERT_NOT_NULL(token);
+    const kafka_common_TokenInformation_t *info = kafka_common_DelegationToken_token_info(token);
+    TEST_ASSERT_NOT_NULL(info);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_TokenInformation_renewer_count(info));
+    const kafka_common_KafkaPrincipal_t *owner = kafka_common_TokenInformation_owner(info);
+    TEST_ASSERT_EQUAL_STRING("User", kafka_common_KafkaPrincipal_principal_type(owner));
+    TEST_ASSERT_EQUAL_STRING("owner-principal", kafka_common_KafkaPrincipal_name(owner));
+    TEST_ASSERT_EQUAL_STRING("second-renewer",
+                             kafka_common_KafkaPrincipal_name(
+                                 kafka_common_TokenInformation_get_renewer(info, 1)));
+    TEST_ASSERT_EQUAL_INT64(86400000, kafka_common_TokenInformation_max_timestamp(info));
+    /* Copy the token id out, not just the pointer: every getter on these
+     * handles returns a borrow that dies with the result handle destroyed
+     * below. Keeping the pointer reads freed memory -- and does so
+     * intermittently, which is how this was caught. */
+    const char *token_id_borrowed = kafka_common_TokenInformation_token_id(info);
+    TEST_ASSERT_NOT_NULL(token_id_borrowed);
+    char token_id[128];
+    TEST_ASSERT_TRUE(strlen(token_id_borrowed) < sizeof(token_id));
+    snprintf(token_id, sizeof(token_id), "%s", token_id_borrowed);
+
+    /* The HMAC is borrowed from the same handle and needs the same treatment;
+     * the mock uses the token id's bytes as the HMAC. */
+    int32_t hmac_len = 0;
+    const uint8_t *hmac_borrowed = kafka_common_DelegationToken_hmac(token, &hmac_len);
+    TEST_ASSERT_TRUE(hmac_len > 0);
+    uint8_t hmac[128];
+    TEST_ASSERT_TRUE((size_t)hmac_len <= sizeof(hmac));
+    memcpy(hmac, hmac_borrowed, (size_t)hmac_len);
+    /* The base64 form is the same bytes, so it must be non-empty too. */
+    TEST_ASSERT_TRUE(strlen(kafka_common_DelegationToken_hmac_as_base64_string(token)) > 0);
+    kafka_admin_CreateDelegationTokenResult_destroy(created);
+
+    /* describeDelegationToken with no filter sees it. */
+    kafka_admin_DescribeDelegationTokenResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_delegation_token(admin, false, NULL, NULL, 0,
+                                                                       -1, &described));
+    TEST_ASSERT_NOT_NULL(described);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DescribeDelegationTokenResult_count(described));
+    const kafka_common_DelegationToken_t *listed =
+        kafka_admin_DescribeDelegationTokenResult_get_token(described, 0);
+    TEST_ASSERT_EQUAL_STRING(
+        token_id, kafka_common_TokenInformation_token_id(kafka_common_DelegationToken_token_info(listed)));
+    TEST_ASSERT_NULL(kafka_admin_DescribeDelegationTokenResult_get_token(described, 1));
+    kafka_admin_DescribeDelegationTokenResult_destroy(described);
+
+    /* Renewing moves the expiry to the requested period. */
+    kafka_admin_RenewDelegationTokenResult_t *renewed = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_renew_delegation_token(admin, hmac, hmac_len, 4242, -1,
+                                                                    &renewed));
+    TEST_ASSERT_NOT_NULL(renewed);
+    TEST_ASSERT_EQUAL_INT64(4242, kafka_admin_RenewDelegationTokenResult_expiry_timestamp(renewed));
+    kafka_admin_RenewDelegationTokenResult_destroy(renewed);
+
+    /* A wrong HMAC is DELEGATION_TOKEN_NOT_FOUND, not a silent no-op. */
+    const uint8_t bogus[3] = {0x01, 0x02, 0x03};
+    kafka_common_KafkaError_t *error =
+        kafka_admin_AdminClient_renew_delegation_token(admin, bogus, 3, 1, -1, &renewed);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    /* Expiring with the -1 sentinel removes it immediately. */
+    kafka_admin_ExpireDelegationTokenResult_t *expired = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_expire_delegation_token(admin, hmac, hmac_len, -1, -1, &expired));
+    TEST_ASSERT_NOT_NULL(expired);
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(expired));
+    kafka_admin_ExpireDelegationTokenResult_destroy(expired);
+
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_delegation_token(admin, false, NULL, NULL, 0,
+                                                                       -1, &described));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeDelegationTokenResult_count(described));
+    kafka_admin_DescribeDelegationTokenResult_destroy(described);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_delegation_token_owner_filter(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *alice_types[1] = {"User"};
+    const char *alice_names[1] = {"alice"};
+    const char *bob_types[1] = {"User"};
+    const char *bob_names[1] = {"bob"};
+
+    kafka_admin_CreateDelegationTokenResult_t *created = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_delegation_token(admin, alice_types, alice_names,
+                                                                     1, NULL, NULL, -1, -1, &created));
+    kafka_admin_CreateDelegationTokenResult_destroy(created);
+    created = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_delegation_token(admin, bob_types, bob_names, 1,
+                                                                     NULL, NULL, -1, -1, &created));
+    kafka_admin_CreateDelegationTokenResult_destroy(created);
+
+    /* No filter describes both. */
+    kafka_admin_DescribeDelegationTokenResult_t *result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_delegation_token(admin, false, NULL, NULL, 0, -1, &result));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DescribeDelegationTokenResult_count(result));
+    kafka_admin_DescribeDelegationTokenResult_destroy(result);
+
+    /* A filter naming only alice describes one -- so the flag and the filter
+     * are not the same knob, and passing the owner arrays without setting the
+     * flag would be a different request. */
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_delegation_token(admin, true, alice_types,
+                                                                       alice_names, 1, -1, &result));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_DescribeDelegationTokenResult_count(result));
+    const kafka_common_TokenInformation_t *info = kafka_common_DelegationToken_token_info(
+        kafka_admin_DescribeDelegationTokenResult_get_token(result, 0));
+    TEST_ASSERT_EQUAL_STRING("alice",
+                             kafka_common_KafkaPrincipal_name(kafka_common_TokenInformation_owner(info)));
+    kafka_admin_DescribeDelegationTokenResult_destroy(result);
+
+    /* The same owner arrays with the flag off describe everything again. */
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_delegation_token(admin, false, alice_types,
+                                                                       alice_names, 1, -1, &result));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DescribeDelegationTokenResult_count(result));
+    kafka_admin_DescribeDelegationTokenResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_create_delegation_token_rejects_bad_input(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* A NULL renewer name is rejected during marshaling, as Java's
+     * KafkaPrincipal constructor rejects a null name. */
+    const char *types[2] = {"User", "User"};
+    const char *names[2] = {"alice", NULL};
+    kafka_admin_CreateDelegationTokenResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_create_delegation_token(
+        admin, types, names, 2, NULL, NULL, -1, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("renewer principal name at index 1 must not be null",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* A non-User renewer reaches the mock, which refuses it. */
+    const char *group_types[1] = {"Group"};
+    const char *group_names[1] = {"admins"};
+    error = kafka_admin_AdminClient_create_delegation_token(admin, group_types, group_names, 1, NULL,
+                                                            NULL, -1, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_features_reports_seeded_levels(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    /* All twelve numbers distinct, so transposing any two of the three level
+     * arrays is visible. */
+    const char *features[3] = {"metadata.version", "transaction.version", "group.version"};
+    const int16_t levels[3] = {17, 2, 1};
+    const int16_t min_levels[3] = {14, 1, 0};
+    const int16_t max_levels[3] = {21, 3, 4};
+    TEST_ASSERT_NULL(
+        kafka_admin_MockAdminClient_set_feature_levels(admin, features, levels, min_levels, max_levels, 3));
+
+    kafka_admin_DescribeFeaturesResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_features(admin, false, 0, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DescribeFeaturesResult_finalized_count(result));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DescribeFeaturesResult_supported_count(result));
+
+    /* Sorted by name: group.version, metadata.version, transaction.version. A
+     * finalized range is [level, level]; a supported one is [min, max]. */
+    TEST_ASSERT_EQUAL_STRING("group.version",
+                             kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, 0));
+    TEST_ASSERT_EQUAL_INT16(1, kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, 0));
+    TEST_ASSERT_EQUAL_INT16(1, kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(result, 0));
+    TEST_ASSERT_EQUAL_STRING("metadata.version",
+                             kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, 1));
+    TEST_ASSERT_EQUAL_INT16(17, kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(result, 1));
+
+    TEST_ASSERT_EQUAL_STRING("group.version",
+                             kafka_admin_DescribeFeaturesResult_get_supported_feature(result, 0));
+    TEST_ASSERT_EQUAL_INT16(0, kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, 0));
+    TEST_ASSERT_EQUAL_INT16(4, kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, 0));
+    TEST_ASSERT_EQUAL_STRING("metadata.version",
+                             kafka_admin_DescribeFeaturesResult_get_supported_feature(result, 1));
+    TEST_ASSERT_EQUAL_INT16(14, kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, 1));
+    TEST_ASSERT_EQUAL_INT16(21, kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, 1));
+
+    /* Out of range is -1, not 0: 0 is a legal version level. */
+    TEST_ASSERT_EQUAL_INT16(-1, kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, 3));
+    TEST_ASSERT_NULL(kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, 3));
+
+    int64_t epoch = 0;
+    TEST_ASSERT_TRUE(kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &epoch));
+    TEST_ASSERT_EQUAL_INT64(123, epoch);
+    kafka_admin_DescribeFeaturesResult_destroy(result);
+
+    /* Pinning a node id is a different request but the same answer from the
+     * mock, which ignores its options. */
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_features(admin, true, 0, -1, &result));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DescribeFeaturesResult_finalized_count(result));
+    kafka_admin_DescribeFeaturesResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_update_features_applies_and_validates(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *seed[1] = {"metadata.version"};
+    const int16_t levels[1] = {17};
+    const int16_t min_levels[1] = {14};
+    const int16_t max_levels[1] = {21};
+    TEST_ASSERT_NULL(
+        kafka_admin_MockAdminClient_set_feature_levels(admin, seed, levels, min_levels, max_levels, 1));
+
+    /* validate_only leaves the level alone. */
+    const char *features[1] = {"metadata.version"};
+    const int16_t targets[1] = {19};
+    const int32_t upgrade[1] = {UPGRADE_TYPE_UPGRADE};
+    kafka_admin_UpdateFeaturesResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features(admin, features, targets, upgrade, 1, -1,
+                                                             true, &result));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_UpdateFeaturesResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("metadata.version", kafka_admin_UpdateFeaturesResult_get_feature(result, 0));
+    TEST_ASSERT_NULL(kafka_admin_UpdateFeaturesResult_get_error(result, 0));
+    kafka_admin_UpdateFeaturesResult_destroy(result);
+
+    kafka_admin_DescribeFeaturesResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_features(admin, false, 0, -1, &described));
+    TEST_ASSERT_EQUAL_INT16(
+        17, kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(described, 0));
+    kafka_admin_DescribeFeaturesResult_destroy(described);
+
+    /* Applying for real moves it. */
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features(admin, features, targets, upgrade, 1, -1,
+                                                             false, &result));
+    TEST_ASSERT_NULL(kafka_admin_UpdateFeaturesResult_get_error(result, 0));
+    kafka_admin_UpdateFeaturesResult_destroy(result);
+
+    described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_features(admin, false, 0, -1, &described));
+    TEST_ASSERT_EQUAL_INT16(
+        19, kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(described, 0));
+    kafka_admin_DescribeFeaturesResult_destroy(described);
+
+    /* Above the seeded maximum is a per-feature error, not a call error. */
+    const int16_t too_high[1] = {99};
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features(admin, features, too_high, upgrade, 1, -1,
+                                                             false, &result));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_UpdateFeaturesResult_count(result));
+    const kafka_common_KafkaError_t *e = kafka_admin_UpdateFeaturesResult_get_error(result, 0);
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_STRING("Invalid update version 99 for feature metadata.version. Can't upgrade above 21",
+                             kafka_common_KafkaError_message(e));
+    kafka_admin_UpdateFeaturesResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_update_features_rejects_bad_input(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *duplicated[2] = {"metadata.version", "metadata.version"};
+    const int16_t targets[2] = {17, 18};
+    const int32_t upgrade[2] = {UPGRADE_TYPE_UPGRADE, UPGRADE_TYPE_UPGRADE};
+
+    kafka_admin_UpdateFeaturesResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_update_features(
+        admin, duplicated, targets, upgrade, 2, -1, false, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("feature update at index 1 repeats feature `metadata.version`",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* FeatureUpdate's own constructor rejects level 0 with UPGRADE. */
+    const char *features[1] = {"metadata.version"};
+    const int16_t zero[1] = {0};
+    error = kafka_admin_AdminClient_update_features(admin, features, zero, upgrade, 1, -1, false,
+                                                    &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("feature update at index 0: The upgradeType flag should be set to "
+                             "SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* An UNKNOWN upgrade type marshals fine and is refused by the broker side;
+     * on the mock that is a per-feature error. */
+    const int32_t unknown[1] = {UPGRADE_TYPE_UNKNOWN};
+    const int16_t one[1] = {1};
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_update_features(admin, features, one, unknown, 1, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(kafka_admin_UpdateFeaturesResult_get_error(result, 0));
+    kafka_admin_UpdateFeaturesResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_create_delegation_token(kafka_admin_CreateDelegationTokenResult_t *result,
+                                       kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        const kafka_common_TokenInformation_t *info =
+            kafka_common_DelegationToken_token_info(kafka_admin_CreateDelegationTokenResult_get_token(result));
+        r->count = kafka_common_TokenInformation_renewer_count(info);
+        kafka_admin_CreateDelegationTokenResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_describe_delegation_token(kafka_admin_DescribeDelegationTokenResult_t *result,
+                                         kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeDelegationTokenResult_count(result);
+        kafka_admin_DescribeDelegationTokenResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_renew_delegation_token(kafka_admin_RenewDelegationTokenResult_t *result,
+                                      kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = (int32_t)kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result);
+        kafka_admin_RenewDelegationTokenResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_expire_delegation_token(kafka_admin_ExpireDelegationTokenResult_t *result,
+                                       kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = (int32_t)kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result);
+        kafka_admin_ExpireDelegationTokenResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_describe_features(kafka_admin_DescribeFeaturesResult_t *result,
+                                 kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeFeaturesResult_finalized_count(result);
+        kafka_admin_DescribeFeaturesResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_update_features(kafka_admin_UpdateFeaturesResult_t *result,
+                               kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_UpdateFeaturesResult_count(result);
+        kafka_admin_UpdateFeaturesResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_b5b_token_and_feature_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *types[2] = {"User", "User"};
+    const char *names[2] = {"alice", "bob"};
+
+    acl_async_result_t c = {0};
+    atomic_init(&c.fired, 0);
+    kafka_admin_AdminClient_create_delegation_token_async(admin, types, names, 2, NULL, NULL, -1, -1,
+                                                          on_create_delegation_token, &c);
+    TEST_ASSERT_TRUE(wait_for(&c.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, c.had_result);
+    TEST_ASSERT_EQUAL_INT(0, c.had_error);
+    TEST_ASSERT_EQUAL_INT32(2, c.count);
+
+    acl_async_result_t d = {0};
+    atomic_init(&d.fired, 0);
+    kafka_admin_AdminClient_describe_delegation_token_async(admin, false, NULL, NULL, 0, -1,
+                                                            on_describe_delegation_token, &d);
+    TEST_ASSERT_TRUE(wait_for(&d.fired, 1));
+    TEST_ASSERT_EQUAL_INT32(1, d.count);
+
+    /* Renewing an unknown HMAC is the call's error, so the async error path is
+     * exercised as well as the success one. */
+    const uint8_t bogus[2] = {0x01, 0x02};
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_renew_delegation_token_async(admin, bogus, 2, 1, -1,
+                                                         on_renew_delegation_token, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+
+    acl_async_result_t x = {0};
+    atomic_init(&x.fired, 0);
+    kafka_admin_AdminClient_expire_delegation_token_async(admin, bogus, 2, -1, -1,
+                                                          on_expire_delegation_token, &x);
+    TEST_ASSERT_TRUE(wait_for(&x.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, x.had_error);
+
+    const char *seed[1] = {"metadata.version"};
+    const int16_t levels[1] = {17};
+    const int16_t min_levels[1] = {14};
+    const int16_t max_levels[1] = {21};
+    TEST_ASSERT_NULL(
+        kafka_admin_MockAdminClient_set_feature_levels(admin, seed, levels, min_levels, max_levels, 1));
+
+    acl_async_result_t f = {0};
+    atomic_init(&f.fired, 0);
+    kafka_admin_AdminClient_describe_features_async(admin, false, 0, -1, on_describe_features, &f);
+    TEST_ASSERT_TRUE(wait_for(&f.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, f.had_result);
+    TEST_ASSERT_EQUAL_INT32(1, f.count);
+
+    const int16_t targets[1] = {19};
+    const int32_t upgrade[1] = {UPGRADE_TYPE_UPGRADE};
+    acl_async_result_t u = {0};
+    atomic_init(&u.fired, 0);
+    kafka_admin_AdminClient_update_features_async(admin, seed, targets, upgrade, 1, -1, false,
+                                                  on_update_features, &u);
+    TEST_ASSERT_TRUE(wait_for(&u.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, u.had_result);
+    TEST_ASSERT_EQUAL_INT32(1, u.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_b5b_async_null_handle(void) {
+    acl_async_result_t c = {0};
+    atomic_init(&c.fired, 0);
+    kafka_admin_AdminClient_create_delegation_token_async(NULL, NULL, NULL, 0, NULL, NULL, -1, -1,
+                                                          on_create_delegation_token, &c);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&c.fired));
+    TEST_ASSERT_EQUAL_INT(1, c.had_error);
+
+    acl_async_result_t d = {0};
+    atomic_init(&d.fired, 0);
+    kafka_admin_AdminClient_describe_delegation_token_async(NULL, false, NULL, NULL, 0, -1,
+                                                            on_describe_delegation_token, &d);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&d.fired));
+    TEST_ASSERT_EQUAL_INT(1, d.had_error);
+
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_renew_delegation_token_async(NULL, NULL, 0, -1, -1,
+                                                         on_renew_delegation_token, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+
+    acl_async_result_t x = {0};
+    atomic_init(&x.fired, 0);
+    kafka_admin_AdminClient_expire_delegation_token_async(NULL, NULL, 0, -1, -1,
+                                                          on_expire_delegation_token, &x);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&x.fired));
+    TEST_ASSERT_EQUAL_INT(1, x.had_error);
+
+    acl_async_result_t f = {0};
+    atomic_init(&f.fired, 0);
+    kafka_admin_AdminClient_describe_features_async(NULL, false, 0, -1, on_describe_features, &f);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&f.fired));
+    TEST_ASSERT_EQUAL_INT(1, f.had_error);
+
+    acl_async_result_t u = {0};
+    atomic_init(&u.fired, 0);
+    kafka_admin_AdminClient_update_features_async(NULL, NULL, NULL, NULL, 0, -1, false,
+                                                  on_update_features, &u);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.fired));
+    TEST_ASSERT_EQUAL_INT(1, u.had_error);
+}
+
+static void test_mock_admin_b5b_null_out_result(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *users[1] = {"alice"};
+    const bool is_deletions[1] = {true};
+    const int32_t mechanisms[1] = {SCRAM_MECHANISM_SHA_256};
+    const char *types[1] = {"User"};
+    const char *names[1] = {"alice"};
+    const char *features[1] = {"metadata.version"};
+    const int16_t targets[1] = {1};
+    const int32_t upgrade[1] = {UPGRADE_TYPE_UPGRADE};
+
+    /* Per-key RPCs succeed with a NULL out_result and must not build a handle. */
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features(admin, features, targets, upgrade, 1, -1,
+                                                             true, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_delegation_token(admin, types, names, 1, NULL,
+                                                                     NULL, -1, -1, NULL));
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_delegation_token(admin, false, NULL, NULL, 0, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_features(admin, false, 0, -1, NULL));
+
+    /* The refused single-future RPC still returns its error. */
+    kafka_common_KafkaError_t *error =
+        kafka_admin_AdminClient_describe_user_scram_credentials(admin, users, 1, -1, NULL);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    /* Renew/expire against a token that does not exist likewise. */
+    const uint8_t bogus[1] = {0x01};
+    error = kafka_admin_AdminClient_renew_delegation_token(admin, bogus, 1, -1, -1, NULL);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+    error = kafka_admin_AdminClient_expire_delegation_token(admin, bogus, 1, -1, -1, NULL);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_set_feature_levels_rejects_non_mock(void) {
+    /* Mock-only configuration must refuse a real client handle, as the other
+     * `MockAdminClient_*` setters do. */
+    kafka_admin_AdminClientProperties_t *props = kafka_admin_AdminClientProperties_new();
+    kafka_admin_AdminClientProperties_put(props, "bootstrap.servers", "localhost:9092");
+    kafka_common_KafkaError_t *error = NULL;
+    kafka_admin_AdminClient_t *admin = kafka_admin_AdminClient_new(props, &error);
+    kafka_admin_AdminClientProperties_destroy(props);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(admin);
+
+    const char *features[1] = {"metadata.version"};
+    const int16_t levels[1] = {1};
+    error = kafka_admin_MockAdminClient_set_feature_levels(admin, features, levels, levels, levels, 1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("this operation is only supported on a MockAdminClient",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_close(admin, 1000);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
@@ -5072,5 +5844,20 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_client_quotas_async);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle);
     RUN_TEST(test_mock_admin_b5a_null_out_result);
+    RUN_TEST(test_mock_admin_describe_user_scram_credentials_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_alter_user_scram_credentials_reports_unsupported_per_user);
+    RUN_TEST(test_mock_admin_alter_user_scram_credentials_rejects_bad_rows);
+    RUN_TEST(test_mock_admin_scram_async);
+    RUN_TEST(test_mock_admin_scram_async_null_handle_and_marshaling_failure);
+    RUN_TEST(test_mock_admin_delegation_token_lifecycle);
+    RUN_TEST(test_mock_admin_describe_delegation_token_owner_filter);
+    RUN_TEST(test_mock_admin_create_delegation_token_rejects_bad_input);
+    RUN_TEST(test_mock_admin_describe_features_reports_seeded_levels);
+    RUN_TEST(test_mock_admin_update_features_applies_and_validates);
+    RUN_TEST(test_mock_admin_update_features_rejects_bad_input);
+    RUN_TEST(test_mock_admin_b5b_token_and_feature_async);
+    RUN_TEST(test_mock_admin_b5b_async_null_handle);
+    RUN_TEST(test_mock_admin_b5b_null_out_result);
+    RUN_TEST(test_mock_admin_set_feature_levels_rejects_non_mock);
     return UNITY_END();
 }
