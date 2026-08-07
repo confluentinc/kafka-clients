@@ -3923,10 +3923,18 @@ fn make_commit_callback(
 ///   dispatcher thread, when the commit completes.
 /// - `offsets` and a non-null `error` are owned by the callee (see
 ///   [`kafka_consumer_Consumer_commit_async_callback_t`]).
-/// - The callback must **not** call back into this consumer: the access guard is
-///   held for the duration of the commit, so any consumer op would fail with a
-///   `ConcurrentModification` error, and a callback that block-waits on consumer
-///   progress deadlocks the dispatcher queue.
+/// - The callback must **not** call the plain `kafka_consumer_Consumer_*` API of
+///   this consumer: the access guard is held for the duration of the commit, so
+///   those calls fail with a `ConcurrentModification` error. Use
+///   [`kafka_consumer_ConsumerHandle_t`] (obtained with
+///   [`kafka_consumer_Consumer_handle`]) instead — it bypasses the guard on
+///   purpose and is the sanctioned reentrancy path, matching Java, where
+///   `acquire()` is reentrant for the polling thread and `onComplete` therefore
+///   may call `seek(...)` / `commitSync()` on the consumer.
+/// - Independently of that: a callback that block-waits on *consumer progress*
+///   (e.g. spins until another thread's `poll` returns) deadlocks the dispatcher
+///   queue, because the callback runs on the single dispatcher thread that must
+///   also deliver every other callback of this consumer.
 /// - On a `MockConsumer` the core invokes the callback inline during the commit
 ///   (with `error` always null), so the callback has already run by the time this
 ///   function returns. Against a real broker the commit completes later, on a
