@@ -4193,6 +4193,742 @@ static void test_mock_admin_b4_null_out_result(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+// ---------------------------------------------------------------------------
+// B5a — ACLs and client quotas
+//
+// Java's own MockAdminClient throws UnsupportedOperationException for all five
+// of these RPCs — createAcls (MockAdminClient.java:806), describeAcls (:811),
+// deleteAcls (:816), describeClientQuotas (:1243) and alterClientQuotas
+// (:1248) — so nothing here can reach a populated success path. What these
+// tests do cover, and the Rust unit tests cannot, is the C-visible surface:
+// that each entry point links, that its marshaling accepts and rejects the
+// right shapes with Java's exact messages, that the "unsupported" outcome
+// lands in the right slot for each of the three result shapes, and that the
+// two-level array parameter types decay correctly from C.
+//
+// Note the two different Java strings: the ACL RPCs throw "Not implemented
+// yet", the quota RPCs "Not implement yet" (Java's own typo, preserved).
+// ---------------------------------------------------------------------------
+
+/* Java AclOperation / AclPermissionType / ResourceType / PatternType codes. */
+#define ACL_RESOURCE_TYPE_UNKNOWN 0
+#define ACL_RESOURCE_TYPE_ANY 1
+#define ACL_RESOURCE_TYPE_TOPIC 2
+#define ACL_RESOURCE_TYPE_GROUP 3
+#define ACL_PATTERN_TYPE_ANY 1
+#define ACL_PATTERN_TYPE_MATCH 2
+#define ACL_PATTERN_TYPE_LITERAL 3
+#define ACL_PATTERN_TYPE_PREFIXED 4
+#define ACL_OPERATION_ANY 1
+#define ACL_OPERATION_READ 3
+#define ACL_OPERATION_WRITE 4
+#define ACL_OPERATION_DESCRIBE 8
+#define ACL_PERMISSION_ANY 1
+#define ACL_PERMISSION_DENY 2
+#define ACL_PERMISSION_ALLOW 3
+
+/* Wire match types for a client-quota filter component. */
+#define QUOTA_MATCH_EXACT 0
+#define QUOTA_MATCH_DEFAULT 1
+#define QUOTA_MATCH_SPECIFIED 2
+
+// ---- createAcls -------------------------------------------------------------
+
+static void test_mock_admin_create_acls_reports_unsupported_per_binding(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* Two bindings whose every field differs, so a column read from the wrong
+     * array shows up. Request order is z-then-a; the result is sorted. */
+    const int32_t resource_types[2] = {ACL_RESOURCE_TYPE_TOPIC, ACL_RESOURCE_TYPE_GROUP};
+    const char *resource_names[2] = {"z-topic", "a-group"};
+    const int32_t pattern_types[2] = {ACL_PATTERN_TYPE_LITERAL, ACL_PATTERN_TYPE_PREFIXED};
+    const char *principals[2] = {"User:zoe", "User:alice"};
+    const char *hosts[2] = {"10.0.0.9", "10.0.0.1"};
+    const int32_t operations[2] = {ACL_OPERATION_WRITE, ACL_OPERATION_READ};
+    const int32_t permissions[2] = {ACL_PERMISSION_DENY, ACL_PERMISSION_ALLOW};
+
+    kafka_admin_CreateAclsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_acls(admin, resource_types, resource_names,
+                                                         pattern_types, principals, hosts,
+                                                         operations, permissions, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_CreateAclsResult_count(result));
+
+    /* Sorted by resource type first, so GROUP (3) sorts after TOPIC (2): the
+     * z-topic row is index 0 even though its name sorts last. Checking the
+     * whole row together is what catches a column swap. */
+    const kafka_common_AclBinding_t *b0 = kafka_admin_CreateAclsResult_get_binding(result, 0);
+    TEST_ASSERT_NOT_NULL(b0);
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_TOPIC, kafka_common_AclBinding_resource_type(b0));
+    TEST_ASSERT_EQUAL_STRING("z-topic", kafka_common_AclBinding_resource_name(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL, kafka_common_AclBinding_pattern_type(b0));
+    TEST_ASSERT_EQUAL_STRING("User:zoe", kafka_common_AclBinding_principal(b0));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.9", kafka_common_AclBinding_host(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_WRITE, kafka_common_AclBinding_operation(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY, kafka_common_AclBinding_permission_type(b0));
+
+    const kafka_common_AclBinding_t *b1 = kafka_admin_CreateAclsResult_get_binding(result, 1);
+    TEST_ASSERT_NOT_NULL(b1);
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_GROUP, kafka_common_AclBinding_resource_type(b1));
+    TEST_ASSERT_EQUAL_STRING("a-group", kafka_common_AclBinding_resource_name(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_PREFIXED, kafka_common_AclBinding_pattern_type(b1));
+    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_AclBinding_principal(b1));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_AclBinding_host(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_READ, kafka_common_AclBinding_operation(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ALLOW, kafka_common_AclBinding_permission_type(b1));
+
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e = kafka_admin_CreateAclsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+    }
+    TEST_ASSERT_NULL(kafka_admin_CreateAclsResult_get_binding(result, 2));
+    TEST_ASSERT_NULL(kafka_admin_CreateAclsResult_get_error(result, 2));
+    kafka_admin_CreateAclsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_create_acls_rejects_what_javas_constructors_reject(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *names[1] = {"t"};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+
+    struct {
+        int32_t resource_type;
+        int32_t pattern_type;
+        int32_t operation;
+        int32_t permission;
+        const char *message;
+    } cases[] = {
+        {ACL_RESOURCE_TYPE_ANY, ACL_PATTERN_TYPE_LITERAL, ACL_OPERATION_READ, ACL_PERMISSION_ALLOW,
+         "acl at index 0: resourceType must not be ANY"},
+        {ACL_RESOURCE_TYPE_TOPIC, ACL_PATTERN_TYPE_MATCH, ACL_OPERATION_READ, ACL_PERMISSION_ALLOW,
+         "acl at index 0: patternType must not be MATCH"},
+        {ACL_RESOURCE_TYPE_TOPIC, ACL_PATTERN_TYPE_ANY, ACL_OPERATION_READ, ACL_PERMISSION_ALLOW,
+         "acl at index 0: patternType must not be ANY"},
+        {ACL_RESOURCE_TYPE_TOPIC, ACL_PATTERN_TYPE_LITERAL, ACL_OPERATION_ANY, ACL_PERMISSION_ALLOW,
+         "acl at index 0: operation must not be ANY"},
+        {ACL_RESOURCE_TYPE_TOPIC, ACL_PATTERN_TYPE_LITERAL, ACL_OPERATION_READ, ACL_PERMISSION_ANY,
+         "acl at index 0: permissionType must not be ANY"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const int32_t rt[1] = {cases[i].resource_type};
+        const int32_t pt[1] = {cases[i].pattern_type};
+        const int32_t op[1] = {cases[i].operation};
+        const int32_t pm[1] = {cases[i].permission};
+        kafka_admin_CreateAclsResult_t *result = NULL;
+        kafka_common_KafkaError_t *error = kafka_admin_AdminClient_create_acls(
+            admin, rt, names, pt, principals, hosts, op, pm, 1, -1, &result);
+        TEST_ASSERT_NOT_NULL(error);
+        TEST_ASSERT_NULL(result);
+        TEST_ASSERT_EQUAL_STRING(cases[i].message, kafka_common_KafkaError_message(error));
+        kafka_common_KafkaError_destroy(error);
+    }
+
+    /* A NULL entry in a non-nullable string array names the row. */
+    const int32_t rt[2] = {ACL_RESOURCE_TYPE_TOPIC, ACL_RESOURCE_TYPE_TOPIC};
+    const int32_t pt[2] = {ACL_PATTERN_TYPE_LITERAL, ACL_PATTERN_TYPE_LITERAL};
+    const int32_t op[2] = {ACL_OPERATION_READ, ACL_OPERATION_READ};
+    const int32_t pm[2] = {ACL_PERMISSION_ALLOW, ACL_PERMISSION_ALLOW};
+    const char *two_names[2] = {"t0", "t1"};
+    const char *null_principal[2] = {"User:a", NULL};
+    const char *two_hosts[2] = {"*", "*"};
+    kafka_admin_CreateAclsResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_create_acls(
+        admin, rt, two_names, pt, null_principal, two_hosts, op, pm, 2, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("principal at index 1 must not be null",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+    int32_t count;
+    char message[128];
+} acl_async_result_t;
+
+static void record_async_error(acl_async_result_t *r, kafka_common_KafkaError_t *error) {
+    r->had_error = error != NULL;
+    if (error != NULL) {
+        const char *m = kafka_common_KafkaError_message(error);
+        if (m != NULL) {
+            snprintf(r->message, sizeof(r->message), "%s", m);
+        }
+        kafka_common_KafkaError_destroy(error);
+    }
+}
+
+static void on_create_acls(kafka_admin_CreateAclsResult_t *result,
+                           kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_CreateAclsResult_count(result);
+        kafka_admin_CreateAclsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_create_acls_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_TOPIC};
+    const char *names[1] = {"async-topic"};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+    const int32_t op[1] = {ACL_OPERATION_READ};
+    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
+
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
+                                              -1, on_create_acls, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_create_acls_async_reports_marshaling_failure(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_ANY};
+    const char *names[1] = {"t"};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+    const int32_t op[1] = {ACL_OPERATION_READ};
+    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
+
+    /* The RPC is never submitted, so the callback fires inline on this thread
+     * before the call returns — the "cannot be submitted at all" arm of the
+     * documented callback-thread contract. */
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
+                                              -1, on_create_acls, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_STRING("acl at index 0: resourceType must not be ANY", r.message);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_create_acls_async_null_handle(void) {
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_create_acls_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, -1,
+                                              on_create_acls, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- describeAcls -----------------------------------------------------------
+
+static void test_mock_admin_describe_acls_fails_the_whole_call(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* DescribeAclsResult holds one future for the whole call, so there is no
+     * per-key slot: the failure comes back from the function itself and
+     * `out_result` is left untouched. This is the shape difference from
+     * createAcls above, and it follows from the Java result type. */
+    kafka_admin_DescribeAclsResult_t *result = NULL;
+    kafka_common_KafkaError_t *error =
+        kafka_admin_AdminClient_describe_acls(admin, ACL_RESOURCE_TYPE_TOPIC, "t",
+                                              ACL_PATTERN_TYPE_LITERAL, "User:a", "*",
+                                              ACL_OPERATION_READ, ACL_PERMISSION_ALLOW, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_acls_accepts_any_match_and_nulls(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* A *filter* accepts exactly the combinations a *binding* rejects: ANY on
+     * all four enums, MATCH pattern types, and NULL strings meaning "match
+     * any". Reaching the mock's "Not implemented yet" rather than an
+     * IllegalArgument is what proves marshaling accepted them — createAcls
+     * with the same enum values fails before it ever reaches the mock. */
+    kafka_admin_DescribeAclsResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_describe_acls(
+        admin, ACL_RESOURCE_TYPE_ANY, NULL, ACL_PATTERN_TYPE_ANY, NULL, NULL, ACL_OPERATION_ANY,
+        ACL_PERMISSION_ANY, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    error = kafka_admin_AdminClient_describe_acls(admin, ACL_RESOURCE_TYPE_TOPIC, "prefix",
+                                                  ACL_PATTERN_TYPE_MATCH, NULL, NULL,
+                                                  ACL_OPERATION_DESCRIBE, ACL_PERMISSION_DENY, -1,
+                                                  &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_describe_acls(kafka_admin_DescribeAclsResult_t *result,
+                             kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeAclsResult_count(result);
+        kafka_admin_DescribeAclsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_describe_acls_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_acls_async(admin, ACL_RESOURCE_TYPE_ANY, NULL,
+                                                ACL_PATTERN_TYPE_ANY, NULL, NULL, ACL_OPERATION_ANY,
+                                                ACL_PERMISSION_ANY, -1, on_describe_acls, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    /* Single-future RPC: the mock's failure arrives as `error`, not inside a
+     * result handle. */
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_acls_async_null_handle(void) {
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_acls_async(NULL, ACL_RESOURCE_TYPE_ANY, NULL,
+                                                ACL_PATTERN_TYPE_ANY, NULL, NULL, ACL_OPERATION_ANY,
+                                                ACL_PERMISSION_ANY, -1, on_describe_acls, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- deleteAcls -------------------------------------------------------------
+
+static void test_mock_admin_delete_acls_reports_unsupported_per_filter(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* Row 0 has a null name and principal (match any), row 1 an empty name.
+     * The empty name must survive as "" and not collapse into the null. */
+    const int32_t resource_types[2] = {ACL_RESOURCE_TYPE_ANY, ACL_RESOURCE_TYPE_TOPIC};
+    const char *resource_names[2] = {NULL, ""};
+    const int32_t pattern_types[2] = {ACL_PATTERN_TYPE_ANY, ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[2] = {NULL, "User:alice"};
+    const char *hosts[2] = {NULL, "10.0.0.1"};
+    const int32_t operations[2] = {ACL_OPERATION_ANY, ACL_OPERATION_DESCRIBE};
+    const int32_t permissions[2] = {ACL_PERMISSION_ANY, ACL_PERMISSION_DENY};
+
+    kafka_admin_DeleteAclsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_acls(admin, resource_types, resource_names,
+                                                         pattern_types, principals, hosts,
+                                                         operations, permissions, 2, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_DeleteAclsResult_count(result));
+
+    /* Sorted by resource type: ANY (1) before TOPIC (2). */
+    const kafka_common_AclBindingFilter_t *f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
+    TEST_ASSERT_NOT_NULL(f0);
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_ANY, kafka_common_AclBindingFilter_resource_type(f0));
+    TEST_ASSERT_NULL(kafka_common_AclBindingFilter_resource_name(f0));
+    TEST_ASSERT_NULL(kafka_common_AclBindingFilter_principal(f0));
+    TEST_ASSERT_NULL(kafka_common_AclBindingFilter_host(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_ANY, kafka_common_AclBindingFilter_pattern_type(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_ANY, kafka_common_AclBindingFilter_operation(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ANY,
+                            kafka_common_AclBindingFilter_permission_type(f0));
+
+    const kafka_common_AclBindingFilter_t *f1 = kafka_admin_DeleteAclsResult_get_filter(result, 1);
+    TEST_ASSERT_NOT_NULL(f1);
+    /* Present but empty: a pointer to "", never the null that means match-any. */
+    TEST_ASSERT_NOT_NULL(kafka_common_AclBindingFilter_resource_name(f1));
+    TEST_ASSERT_EQUAL_STRING("", kafka_common_AclBindingFilter_resource_name(f1));
+    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_AclBindingFilter_principal(f1));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_AclBindingFilter_host(f1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL,
+                            kafka_common_AclBindingFilter_pattern_type(f1));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_DESCRIBE, kafka_common_AclBindingFilter_operation(f1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY,
+                            kafka_common_AclBindingFilter_permission_type(f1));
+
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e = kafka_admin_DeleteAclsResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_KafkaError_message(e));
+        /* A filter whose own future failed deleted nothing, so it has no
+         * per-ACL entries — which is a different thing from a filter that
+         * succeeded and matched nothing. */
+        TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DeleteAclsResult_get_result_count(result, i));
+        TEST_ASSERT_NULL(kafka_admin_DeleteAclsResult_get_binding(result, i, 0));
+        TEST_ASSERT_NULL(kafka_admin_DeleteAclsResult_get_result_error(result, i, 0));
+    }
+    TEST_ASSERT_NULL(kafka_admin_DeleteAclsResult_get_filter(result, 2));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DeleteAclsResult_get_result_count(result, 2));
+    kafka_admin_DeleteAclsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_delete_acls(kafka_admin_DeleteAclsResult_t *result,
+                           kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DeleteAclsResult_count(result);
+        kafka_admin_DeleteAclsResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_delete_acls_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_ANY};
+    const char *names[1] = {NULL};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_ANY};
+    const char *principals[1] = {NULL};
+    const char *hosts[1] = {NULL};
+    const int32_t op[1] = {ACL_OPERATION_ANY};
+    const int32_t pm[1] = {ACL_PERMISSION_ANY};
+
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_delete_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
+                                              -1, on_delete_acls, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_delete_acls_async_null_handle(void) {
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_delete_acls_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, -1,
+                                              on_delete_acls, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- describeClientQuotas ---------------------------------------------------
+
+static void test_mock_admin_describe_client_quotas_fails_the_whole_call(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *entity_types[3] = {"user", "client-id", "ip"};
+    const int32_t match_types[3] = {QUOTA_MATCH_EXACT, QUOTA_MATCH_DEFAULT, QUOTA_MATCH_SPECIFIED};
+    const char *match_names[3] = {"alice", NULL, NULL};
+
+    /* Like describeAcls, one future for the whole call: no per-key slot, so the
+     * mock's failure is the call's error. Note Java's own typo in the message,
+     * "Not implement yet", which the ACL RPCs do not share. */
+    kafka_admin_DescribeClientQuotasResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_describe_client_quotas(
+        admin, entity_types, match_types, match_names, 3, false, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* No components at all is Java's ClientQuotaFilter.all(); still reaches the
+     * mock rather than being rejected. */
+    error = kafka_admin_AdminClient_describe_client_quotas(admin, NULL, NULL, NULL, 0, false, -1,
+                                                           &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_client_quotas_rejects_bad_components(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *entity_types[1] = {"user"};
+    const char *no_name[1] = {NULL};
+
+    /* EXACT with no name: the discriminant says "match this name" and there is
+     * none, which Java's `ClientQuotaFilterComponent.ofEntity` could not
+     * express either. */
+    const int32_t exact[1] = {QUOTA_MATCH_EXACT};
+    kafka_admin_DescribeClientQuotasResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_describe_client_quotas(
+        admin, entity_types, exact, no_name, 1, false, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("quota filter component at index 0 has match type EXACT but no match name",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    const int32_t bogus[1] = {7};
+    error = kafka_admin_AdminClient_describe_client_quotas(admin, entity_types, bogus, no_name, 1,
+                                                           false, -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("quota filter component at index 0 has unknown match type 7",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    const char *null_type[1] = {NULL};
+    const int32_t def[1] = {QUOTA_MATCH_DEFAULT};
+    error = kafka_admin_AdminClient_describe_client_quotas(admin, null_type, def, no_name, 1, false,
+                                                           -1, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("entity type at index 0 must not be null",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_describe_client_quotas(kafka_admin_DescribeClientQuotasResult_t *result,
+                                      kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_DescribeClientQuotasResult_count(result);
+        kafka_admin_DescribeClientQuotasResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_describe_client_quotas_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_client_quotas_async(admin, NULL, NULL, NULL, 0, false, -1,
+                                                         on_describe_client_quotas, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", r.message);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_describe_client_quotas_async_null_handle(void) {
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_client_quotas_async(NULL, NULL, NULL, NULL, 0, false, -1,
+                                                         on_describe_client_quotas, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- alterClientQuotas ------------------------------------------------------
+
+static void test_mock_admin_alter_client_quotas_reports_unsupported_per_entity(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* Two alterations. The first names two entity types, one of them the
+     * built-in default entity (a NULL name); the second is a single ip entity.
+     * The two-level parameter types need the inner arrays declared separately
+     * so the outer array decays to `const char *const *const *`. */
+    const char *e0_types[2] = {"user", "client-id"};
+    const char *e0_names[2] = {"alice", NULL};
+    const char *e1_types[1] = {"ip"};
+    const char *e1_names[1] = {"10.0.0.1"};
+    const char *const *const entity_types[2] = {e0_types, e1_types};
+    const char *const *const entity_names[2] = {e0_names, e1_names};
+    const int32_t entity_counts[2] = {2, 1};
+
+    const char *k0[1] = {"producer_byte_rate"};
+    const char *k1[2] = {"consumer_byte_rate", "request_percentage"};
+    const char *const *const op_keys[2] = {k0, k1};
+    const double v0[1] = {1024.0};
+    const double v1[2] = {0.0, 50.0};
+    const double *const op_values[2] = {v0, v1};
+    /* The first op of row 1 has no value: Java's `Op(key, null)`, i.e.
+     * remove. Its slot in `v1` holds 0.0, a legal quota value, which is why the
+     * flag and not a sentinel carries the meaning.
+     *
+     * The entity counts (2, 1) and op counts (1, 2) differ per row on purpose,
+     * so swapping the two count arrays is visible rather than a no-op. */
+    const bool h0[1] = {true};
+    const bool h1[2] = {false, true};
+    const bool *const op_has_values[2] = {h0, h1};
+    const int32_t op_counts[2] = {1, 2};
+
+    kafka_admin_AlterClientQuotasResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_client_quotas(
+        admin, entity_types, entity_names, entity_counts, op_keys, op_values, op_has_values,
+        op_counts, 2, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_AlterClientQuotasResult_count(result));
+
+    /* Sorted by (entity type, name) pairs: the ["client-id"=default,
+     * "user"=alice] entity sorts before ["ip"=10.0.0.1]. */
+    const kafka_common_ClientQuotaEntity_t *e0 =
+        kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
+    TEST_ASSERT_NOT_NULL(e0);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_ClientQuotaEntity_entry_count(e0));
+    TEST_ASSERT_EQUAL_STRING("client-id", kafka_common_ClientQuotaEntity_get_entry_type(e0, 0));
+    /* A null name at an in-range index is the built-in default entity, not an
+     * absent entry and not the empty name. */
+    TEST_ASSERT_NULL(kafka_common_ClientQuotaEntity_get_entry_name(e0, 0));
+    TEST_ASSERT_EQUAL_STRING("user", kafka_common_ClientQuotaEntity_get_entry_type(e0, 1));
+    TEST_ASSERT_EQUAL_STRING("alice", kafka_common_ClientQuotaEntity_get_entry_name(e0, 1));
+    TEST_ASSERT_NULL(kafka_common_ClientQuotaEntity_get_entry_type(e0, 2));
+
+    const kafka_common_ClientQuotaEntity_t *e1 =
+        kafka_admin_AlterClientQuotasResult_get_entity(result, 1);
+    TEST_ASSERT_NOT_NULL(e1);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_ClientQuotaEntity_entry_count(e1));
+    TEST_ASSERT_EQUAL_STRING("ip", kafka_common_ClientQuotaEntity_get_entry_type(e1, 0));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_ClientQuotaEntity_get_entry_name(e1, 0));
+
+    for (int32_t i = 0; i < 2; i++) {
+        const kafka_common_KafkaError_t *e =
+            kafka_admin_AlterClientQuotasResult_get_error(result, i);
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_KafkaError_message(e));
+    }
+    TEST_ASSERT_NULL(kafka_admin_AlterClientQuotasResult_get_entity(result, 2));
+    TEST_ASSERT_NULL(kafka_admin_AlterClientQuotasResult_get_error(result, 2));
+    kafka_admin_AlterClientQuotasResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *dup_types[2] = {"user", "user"};
+    const char *dup_names[2] = {"alice", "bob"};
+    const char *const *const entity_types[1] = {dup_types};
+    const char *const *const entity_names[1] = {dup_names};
+    const int32_t entity_counts[1] = {2};
+
+    kafka_admin_AlterClientQuotasResult_t *result = NULL;
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_alter_client_quotas(
+        admin, entity_types, entity_names, entity_counts, NULL, NULL, NULL, NULL, 1, -1, false,
+        &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("quota alteration at index 0 repeats entity type `user`",
+                             kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    /* The same entity in two alterations: Java keys the result by entity, so
+     * the second would silently replace the first. */
+    const char *types[1] = {"user"};
+    const char *names[1] = {"alice"};
+    const char *const *const two_types[2] = {types, types};
+    const char *const *const two_names[2] = {names, names};
+    const int32_t ones[2] = {1, 1};
+    error = kafka_admin_AdminClient_alter_client_quotas(admin, two_types, two_names, ones, NULL,
+                                                        NULL, NULL, NULL, 2, -1, false, &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING(
+        "quota alteration at index 1 repeats an entity already altered by an earlier entry",
+        kafka_common_KafkaError_message(error));
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void on_alter_client_quotas(kafka_admin_AlterClientQuotasResult_t *result,
+                                   kafka_common_KafkaError_t *error, void *user_data) {
+    acl_async_result_t *r = (acl_async_result_t *)user_data;
+    r->had_result = result != NULL;
+    if (result != NULL) {
+        r->count = kafka_admin_AlterClientQuotasResult_count(result);
+        kafka_admin_AlterClientQuotasResult_destroy(result);
+    }
+    record_async_error(r, error);
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_alter_client_quotas_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *types[1] = {"user"};
+    const char *names[1] = {"async-user"};
+    const char *const *const entity_types[1] = {types};
+    const char *const *const entity_names[1] = {names};
+    const int32_t entity_counts[1] = {1};
+
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_alter_client_quotas_async(admin, entity_types, entity_names,
+                                                      entity_counts, NULL, NULL, NULL, NULL, 1, -1,
+                                                      true, on_alter_client_quotas, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, r.count);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_alter_client_quotas_async_null_handle(void) {
+    acl_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_alter_client_quotas_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                                      NULL, 0, -1, false, on_alter_client_quotas,
+                                                      &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+}
+
+// ---- ownership: a NULL out_result must not build (or leak) a handle ---------
+
+static void test_mock_admin_b5a_null_out_result(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_TOPIC};
+    const char *names[1] = {"t"};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+    const int32_t op[1] = {ACL_OPERATION_READ};
+    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
+    const char *types[1] = {"user"};
+    const char *entity_names_inner[1] = {"alice"};
+    const char *const *const entity_types[1] = {types};
+    const char *const *const entity_names[1] = {entity_names_inner};
+    const int32_t entity_counts[1] = {1};
+
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_acls(admin, rt, names, pt, principals, hosts,
+                                                         op, pm, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_delete_acls(admin, rt, names, pt, principals, hosts,
+                                                         op, pm, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_client_quotas(
+        admin, entity_types, entity_names, entity_counts, NULL, NULL, NULL, NULL, 1, -1, false,
+        NULL));
+
+    /* The two single-future RPCs return the mock's error whether or not the
+     * caller wants the result, so they are checked for a non-null error
+     * instead. Passing NULL must still not build a handle. */
+    kafka_common_KafkaError_t *error = kafka_admin_AdminClient_describe_acls(
+        admin, ACL_RESOURCE_TYPE_ANY, NULL, ACL_PATTERN_TYPE_ANY, NULL, NULL, ACL_OPERATION_ANY,
+        ACL_PERMISSION_ANY, -1, NULL);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+    error = kafka_admin_AdminClient_describe_client_quotas(admin, NULL, NULL, NULL, 0, false, -1,
+                                                           NULL);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
@@ -4312,5 +5048,26 @@ int main(void) {
     RUN_TEST(test_mock_admin_remove_members_async);
     RUN_TEST(test_mock_admin_group_offsets_driver_rejects_non_mock);
     RUN_TEST(test_mock_admin_b4_null_out_result);
+    RUN_TEST(test_mock_admin_create_acls_reports_unsupported_per_binding);
+    RUN_TEST(test_mock_admin_create_acls_rejects_what_javas_constructors_reject);
+    RUN_TEST(test_mock_admin_create_acls_async);
+    RUN_TEST(test_mock_admin_create_acls_async_reports_marshaling_failure);
+    RUN_TEST(test_mock_admin_create_acls_async_null_handle);
+    RUN_TEST(test_mock_admin_describe_acls_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_describe_acls_accepts_any_match_and_nulls);
+    RUN_TEST(test_mock_admin_describe_acls_async);
+    RUN_TEST(test_mock_admin_describe_acls_async_null_handle);
+    RUN_TEST(test_mock_admin_delete_acls_reports_unsupported_per_filter);
+    RUN_TEST(test_mock_admin_delete_acls_async);
+    RUN_TEST(test_mock_admin_delete_acls_async_null_handle);
+    RUN_TEST(test_mock_admin_describe_client_quotas_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_describe_client_quotas_rejects_bad_components);
+    RUN_TEST(test_mock_admin_describe_client_quotas_async);
+    RUN_TEST(test_mock_admin_describe_client_quotas_async_null_handle);
+    RUN_TEST(test_mock_admin_alter_client_quotas_reports_unsupported_per_entity);
+    RUN_TEST(test_mock_admin_alter_client_quotas_rejects_duplicate_entities);
+    RUN_TEST(test_mock_admin_alter_client_quotas_async);
+    RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle);
+    RUN_TEST(test_mock_admin_b5a_null_out_result);
     return UNITY_END();
 }
