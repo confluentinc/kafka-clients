@@ -531,6 +531,103 @@ static void test_kafka_admin_b3_rejects_bad_arguments(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Argument validation happens on the calling thread before anything is
+ * enqueued, so these return immediately even with no broker: the error names
+ * the offending value rather than being a timeout. */
+static void test_kafka_admin_b4_rejects_bad_arguments(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    /* A NULL group id. */
+    const char *topics[1] = {"t"};
+    const int32_t partitions[1] = {0};
+    const int64_t offsets[1] = {0};
+    kafka_admin_AlterConsumerGroupOffsetsResult_t *altered = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, NULL, topics, partitions, offsets, NULL, NULL, NULL, 1, RPC_TIMEOUT_MS, &altered);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(altered);
+    TEST_ASSERT_EQUAL_STRING("group_id must not be null", kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* A negative offset: Java's OffsetAndMetadata constructor throws. */
+    const int64_t bad_offsets[1] = {-2};
+    altered = NULL;
+    err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, "g", topics, partitions, bad_offsets, NULL, NULL, NULL, 1, RPC_TIMEOUT_MS,
+        &altered);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(altered);
+    TEST_ASSERT_EQUAL_STRING("offset at index 0: Invalid negative offset",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* A duplicate group id in the two-level listConsumerGroupOffsets request. */
+    const char *groups[2] = {"g", "g"};
+    const bool all_partitions[2] = {true, true};
+    const int32_t counts[2] = {0, 0};
+    kafka_admin_ListConsumerGroupOffsetsResult_t *listed = NULL;
+    err = kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, all_partitions, NULL, NULL, counts, 2, RPC_TIMEOUT_MS, false, &listed);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(listed);
+    TEST_ASSERT_EQUAL_STRING("group id `g` appears more than once at index 1",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* An empty member list without `remove_all`: Java's Collection constructor
+     * throws rather than treating it as "remove everything". */
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t *removed = NULL;
+    err = kafka_admin_AdminClient_remove_members_from_consumer_group(
+        admin, "g", false, NULL, 0, NULL, RPC_TIMEOUT_MS, &removed);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(removed);
+    TEST_ASSERT_EQUAL_STRING("Invalid empty members has been provided",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* With no keys requested there is nothing to send, so these return promptly
+ * against an unreachable broker. `deleteConsumerGroups` with no group ids and
+ * `describeConsumerGroups` with none both resolve to an empty result rather
+ * than waiting for a coordinator. */
+static void test_kafka_admin_b4_empty_batches_need_no_broker(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_DescribeConsumerGroupsResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_consumer_groups(admin, NULL, 0,
+                                                                      RPC_TIMEOUT_MS, false,
+                                                                      &described));
+    TEST_ASSERT_NOT_NULL(described);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeConsumerGroupsResult_count(described));
+    kafka_admin_DescribeConsumerGroupsResult_destroy(described);
+
+    kafka_admin_DescribeClassicGroupsResult_t *classic = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_classic_groups(admin, NULL, 0,
+                                                                     RPC_TIMEOUT_MS, false,
+                                                                     &classic));
+    TEST_ASSERT_NOT_NULL(classic);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeClassicGroupsResult_count(classic));
+    kafka_admin_DescribeClassicGroupsResult_destroy(classic);
+
+    kafka_admin_DeleteConsumerGroupsResult_t *deleted = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_delete_consumer_groups(admin, NULL, 0, RPC_TIMEOUT_MS, &deleted));
+    TEST_ASSERT_NOT_NULL(deleted);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DeleteConsumerGroupsResult_count(deleted));
+    kafka_admin_DeleteConsumerGroupsResult_destroy(deleted);
+
+    kafka_admin_ListConsumerGroupOffsetsResult_t *listed = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, NULL, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, false, &listed));
+    TEST_ASSERT_NOT_NULL(listed);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListConsumerGroupOffsetsResult_count(listed));
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(listed);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_admin_new_succeeds);
@@ -551,5 +648,7 @@ int main(void) {
     RUN_TEST(test_kafka_admin_b2_empty_batches_need_no_broker);
     RUN_TEST(test_kafka_admin_b3_empty_batches_need_no_broker);
     RUN_TEST(test_kafka_admin_b3_rejects_bad_arguments);
+    RUN_TEST(test_kafka_admin_b4_rejects_bad_arguments);
+    RUN_TEST(test_kafka_admin_b4_empty_batches_need_no_broker);
     return UNITY_END();
 }
