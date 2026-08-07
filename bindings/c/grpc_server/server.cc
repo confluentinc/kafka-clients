@@ -226,7 +226,17 @@ class CallbackLog {
   // Entries are never dropped, not even on Close: the callbacks a close()
   // drives (a delivery report from its flush, a commit callback from its final
   // drain, on_partitions_lost) are exactly the ones a test wants to read
-  // afterwards. The server's lifetime is one test session.
+  // afterwards. The server's lifetime is one test session. This matches
+  // grpc_server.py / grpc_server_async.py, whose service-level CallbackLog is
+  // likewise never popped on Close.
+  //
+  // Post-close reads are *eventually* consistent on this backend, though: an
+  // FFI callback is enqueued on the client's dispatcher thread and appended
+  // when that job runs, and neither `..._close` nor `..._destroy` joins the
+  // dispatcher. The Python servers append synchronously in-process and so have
+  // no such window. Callers that assert on entry counts must therefore poll
+  // (`wait_for_kind` / `wait_for_kind_settled` / `poll_until_kind` on the Rust
+  // side) rather than read once.
   void fill(uint64_t client_id, CallbackLogResponse* resp) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = entries_.find(client_id);
@@ -255,9 +265,22 @@ class CallbackLog {
 //     and then leak on the validation-failure path where the callback is
 //     documented not to fire.
 //
-// The state is deleted in Close, after `..._destroy(client)` returns: destroying
-// the client drops the listener / commit adapters, so no callback can still
-// reference it.
+// The state is **never freed before the service is destroyed** — it is
+// session-lifetime, held by `log_states_` as a `unique_ptr` that `Close` does
+// not erase.
+//
+// It used to be `delete`d in Close right after `..._destroy(client)` returned,
+// on the premise that destroying the client drops the listener / commit
+// adapters so no callback could still reference it. That premise is false:
+// neither destroy *joins* the dispatcher thread that actually runs the C
+// callback, both deliberately detach it (`src/ffi/producer.rs`,
+// `src/ffi/consumer.rs`), and the Rust-side callback only *enqueues* the C
+// callback as a dispatcher job. A queued `log_delivery(..., state)` could
+// therefore still dereference `state->log` after the `delete` — a
+// use-after-free. Keeping the state alive for the whole session also removes
+// the `log_state_for()`-returns-nullptr-after-Close race in Send / CommitAsync
+// and the leak for a client that is never Closed (neither service impl has a
+// destructor).
 struct LogState {
   CallbackLog* log;
   uint64_t client_id;
@@ -409,8 +432,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
       std::lock_guard<std::mutex> lock(mu_);
       producers_[id] = producer;
       // One stable LogState per producer — see the struct's comment for why the
-      // delivery callback's user_data cannot be per-send.
-      log_states_[id] = new LogState{&callback_log_, id};
+      // delivery callback's user_data cannot be per-send, and why it lives for
+      // the whole session rather than being freed at Close.
+      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
     }
     resp->set_producer_id(id);
     std::cerr << "c server: created producer " << id << std::endl;
@@ -542,7 +566,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
   grpc::Status Close(grpc::ServerContext*, const CloseRequest* req,
                      StatusResponse* resp) override {
     kafka_producer_Producer_t* producer = nullptr;
-    LogState* state = nullptr;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = producers_.find(req->producer_id());
@@ -550,28 +573,29 @@ class ProducerServiceImpl final : public ProducerService::Service {
         producer = it->second;
         producers_.erase(it);
       }
-      auto st = log_states_.find(req->producer_id());
-      if (st != log_states_.end()) {
-        state = st->second;
-        log_states_.erase(st);
-      }
+      // log_states_ is deliberately NOT erased — see LogState's comment: a
+      // dispatcher job queued by a callback that already fired may still hold
+      // the pointer, because destroy detaches the dispatcher instead of
+      // joining it.
     }
     if (producer == nullptr) {
       // Idempotent close — silent success on unknown id.
-      delete state;
       return grpc::Status::OK;
     }
     kafka_common_KafkaError_t* err = nullptr;
-    // close() flushes, so any outstanding delivery callback fires (and appends
-    // to the log) before this returns.
+    // close() flushes, so the *Rust* side of every outstanding delivery
+    // callback has run by the time this returns — i.e. its C callback has been
+    // enqueued on the dispatcher. It does not guarantee the dispatcher has run
+    // that job, so a GetCallbackLog issued immediately after Close may still be
+    // one entry behind; see CallbackLog's comment.
     kafka_producer_Producer_close(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
     kafka_producer_Producer_destroy(producer);
-    // Only now can no further callback reference the state. The log entries
-    // themselves stay in callback_log_ so GetCallbackLog still works post-close.
-    delete state;
+    // The log entries stay in callback_log_ and the LogState stays in
+    // log_states_, so GetCallbackLog still works post-close and a late
+    // dispatcher job still has valid user_data.
     return grpc::Status::OK;
   }
 
@@ -602,7 +626,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
   LogState* log_state_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = log_states_.find(id);
-    return it == log_states_.end() ? nullptr : it->second;
+    return it == log_states_.end() ? nullptr : it->second.get();
   }
 
   // Best-effort variant inference from a C error message. The C FFI
@@ -632,8 +656,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_producer_Producer_t*> producers_;
-  // user_data for the delivery callbacks; owned here, one per producer.
-  std::unordered_map<uint64_t, LogState*> log_states_;
+  // user_data for the delivery callbacks; owned here, one per producer, for the
+  // whole session (never erased by Close — see LogState).
+  std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
   // Has its own mutex; see CallbackLog.
   CallbackLog callback_log_;
   std::atomic<uint64_t> next_id_{1};
@@ -764,8 +789,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       std::lock_guard<std::mutex> lock(mu_);
       consumers_[id] = consumer;
       // One stable LogState per consumer, shared by the rebalance listener and
-      // every commit callback — see the struct's comment.
-      log_states_[id] = new LogState{&callback_log_, id};
+      // every commit callback — see the struct's comment (session-lifetime; not
+      // freed at Close).
+      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
     }
     resp->set_consumer_id(id);
     std::cerr << "c server: created consumer " << id << std::endl;
@@ -1190,7 +1216,6 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   grpc::Status Close(grpc::ServerContext*, const ConsumerCloseRequest* req,
                      StatusResponse* resp) override {
     kafka_consumer_Consumer_t* consumer = nullptr;
-    LogState* state = nullptr;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = consumers_.find(req->consumer_id());
@@ -1198,25 +1223,24 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
         consumer = it->second;
         consumers_.erase(it);
       }
-      auto st = log_states_.find(req->consumer_id());
-      if (st != log_states_.end()) {
-        state = st->second;
-        log_states_.erase(st);
-      }
+      // log_states_ is deliberately NOT erased — see LogState's comment.
+      // `Consumer_destroy` step 1 is `runtime.shutdown_background()`, which
+      // cancels the task awaiting a `dispatch_and_wait` job while leaving the
+      // already-queued job to run later.
     }
     if (consumer == nullptr) {
-      delete state;
       return grpc::Status::OK;  // idempotent
     }
     // close() drains pending commit callbacks and fires on_partitions_lost, so
-    // those entries are appended before this returns.
+    // the Rust side of those callbacks has run by the time this returns — i.e.
+    // their C callbacks have been enqueued on the dispatcher. It does not
+    // guarantee the dispatcher has run them; see CallbackLog's comment.
     kafka_common_KafkaError_t* err = kafka_consumer_Consumer_close(consumer);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
-    // Destroying the consumer drops the listener + commit adapters, so only now
-    // is it certain no callback can still reference the state. The log entries
-    // stay in callback_log_ so GetCallbackLog still works post-close.
+    // The log entries stay in callback_log_ and the LogState stays in
+    // log_states_, so GetCallbackLog still works post-close and a late
+    // dispatcher job still has valid user_data.
     kafka_consumer_Consumer_destroy(consumer);
-    delete state;
     return grpc::Status::OK;
   }
 
@@ -1236,7 +1260,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   LogState* log_state_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = log_states_.find(id);
-    return it == log_states_.end() ? nullptr : it->second;
+    return it == log_states_.end() ? nullptr : it->second.get();
   }
 
   grpc::Status unknown(StatusResponse* resp, uint64_t id) {
@@ -1327,8 +1351,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_consumer_Consumer_t*> consumers_;
   // user_data for the rebalance-listener and commit callbacks; owned here, one
-  // per consumer.
-  std::unordered_map<uint64_t, LogState*> log_states_;
+  // per consumer, for the whole session (never erased by Close — see LogState).
+  std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
   // Has its own mutex; see CallbackLog.
   CallbackLog callback_log_;
   std::atomic<uint64_t> next_id_{1};
