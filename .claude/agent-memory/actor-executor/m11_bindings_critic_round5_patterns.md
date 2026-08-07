@@ -64,9 +64,16 @@ after restoring a `cp`-based backup.)
 **4. When a suggested test does not fail as predicted, check whether the premise
 is wrong before "fixing" the code.** The round-5 suggestion was an async
 call-failure test; written against `describe_configs` it did not raise. That is
-correct — `describe_configs` is multi-key, so the mock fails each resource's
-future individually and the timeout lands as a per-resource error, matching
-Java's per-key futures. The call-failure arm needs an RPC whose futures all fail
-together (`describe_cluster`). Multi-key RPC → per-key error; single-future RPC
-(describeCluster / listConfigResources / listClientMetricsResources) → call
-failure.
+correct behaviour, not a bug — but the *reason* I first gave was wrong, and the
+Critic corrected it in round 6. Both mocks fail **every** future they own on the
+seeded-timeout branch (`MockAdminClient.java:822-831` for describeConfigs,
+`:346-351` for describeCluster), so "individually vs all together" is not the
+discriminator.
+
+The real discriminator is the **shape of the binding's return**, which follows
+from `admin-client.md` §5. A multi-key RPC has a per-key slot a `KafkaError` can
+occupy, so the failure becomes data. A single-future RPC collapses into one
+object (or list) with nowhere to put an error, so it must raise — and Java
+agrees: `describeCluster().nodes().get()` throws. So: **per-key futures → the
+failure lands in the dict; one future for the whole call → it raises.** Decide
+by reading the Java `*Result`'s future shape, not by counting keys.
