@@ -1662,10 +1662,22 @@ impl Admin for MockAdminClient {
             }
         }
 
+        // Java uses `options.renewers().get(0)` as the owner
+        // (MockAdminClient.java:652), which throws `IndexOutOfBoundsException`
+        // when no renewer was supplied. That is a catchable `RuntimeException`
+        // in Java, but an index panic in Rust — and every FFI path runs this
+        // inline on the calling thread, so it would unwind across an
+        // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
+        // future is completed exceptionally instead.
+        let Some(owner) = options.get_renewers().first().cloned() else {
+            handle.complete_exceptionally(KafkaError::illegal_argument(
+                "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner",
+            ));
+            return CreateDelegationTokenResult::new(handle.future());
+        };
+
         let token_id = Uuid::random_uuid().to_string();
-        // Java uses `options.renewers().get(0)` as the owner; the delegation
-        // token's HMAC is the UTF-8 bytes of the token id.
-        let owner = options.get_renewers()[0].clone();
+        // The delegation token's HMAC is the UTF-8 bytes of the token id.
         let token_info = TokenInformation::new(
             token_id.clone(),
             owner,
@@ -2450,6 +2462,38 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.error(), Errors::InvalidPrincipalType);
         assert_eq!(err.message(), "");
+    }
+
+    /// New test, no Java original: with no renewer at all the future completes
+    /// exceptionally rather than panicking. Java's
+    /// `options.renewers().get(0)` (MockAdminClient.java:652) throws a catchable
+    /// `IndexOutOfBoundsException` here; an index panic in Rust would unwind
+    /// across the C FFI boundary and abort the process, so the mock reports it
+    /// as an error instead. `CreateDelegationTokenOptions::new()` defaults the
+    /// renewer list to empty, so this is the *default* call.
+    #[tokio::test]
+    async fn create_delegation_token_without_a_renewer_reports_an_error() {
+        let client = admin();
+        let err = client
+            .create_delegation_token(CreateDelegationTokenOptions::new())
+            .delegation_token()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner"
+        );
+        // Nothing was stored, so a describe still finds no tokens.
+        assert!(
+            client
+                .describe_delegation_token(DescribeDelegationTokenOptions::new())
+                .delegation_tokens()
+                .get()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// New test, no Java original: a created token is owned by the first

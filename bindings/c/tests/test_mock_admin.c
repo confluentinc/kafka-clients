@@ -5035,17 +5035,28 @@ static void test_mock_admin_alter_user_scram_credentials_rejects_bad_rows(void) 
                              kafka_common_KafkaError_message(error));
     kafka_common_KafkaError_destroy(error);
 
-    /* An upsertion with no password is not a legal credential. A deletion in
-     * the same position is fine, which is what the flag buys. */
+    /* An upsertion with an empty password is NOT rejected here: Java records
+     * "Password must not be empty" against that user only
+     * (KafkaAdminClient.java:4414-4416) and still sends every other user's
+     * alteration, so failing the whole call would drop them. The row reaches
+     * the mock, which refuses every user with "Not implemented yet". */
     const char *users[1] = {"alice"};
     const bool upsertion[1] = {false};
-    error = kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result);
-    TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_EQUAL_STRING("scram alteration at index 0 is an upsertion with no password",
-                             kafka_common_KafkaError_message(error));
-    kafka_common_KafkaError_destroy(error);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterUserScramCredentialsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("alice",
+                             kafka_admin_AlterUserScramCredentialsResult_get_user(result, 0));
+    TEST_ASSERT_EQUAL_STRING(
+        "Not implemented yet",
+        kafka_common_KafkaError_message(
+            kafka_admin_AlterUserScramCredentialsResult_get_error(result, 0)));
+    kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+    result = NULL;
 
+    /* A deletion in the same position needs no password at all, which is what
+     * the explicit flag buys. */
     const bool deletion[1] = {true};
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
         admin, users, deletion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
@@ -5304,6 +5315,23 @@ static void test_mock_admin_create_delegation_token_rejects_bad_input(void) {
     error = kafka_admin_AdminClient_create_delegation_token(admin, group_types, group_names, 1, NULL,
                                                             NULL, -1, -1, &result);
     TEST_ASSERT_NOT_NULL(error);
+    kafka_common_KafkaError_destroy(error);
+
+    /* No renewer at all: MockAdminClient makes `options.renewers().get(0)` the
+     * owner (MockAdminClient.java:652), so Java throws a catchable
+     * IndexOutOfBoundsException here. In Rust an index panic would unwind out of
+     * this extern "C" call and abort the process, so the mock completes the
+     * future exceptionally instead. This is the *documented default* -- an empty
+     * renewer list is legal against a real broker -- which is why it needs a
+     * test of its own. */
+    result = NULL;
+    error = kafka_admin_AdminClient_create_delegation_token(admin, NULL, NULL, 0, NULL, NULL, -1, -1,
+                                                            &result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("createDelegationToken requires at least one renewer: MockAdminClient "
+                             "makes the first renewer the owner",
+                             kafka_common_KafkaError_message(error));
     kafka_common_KafkaError_destroy(error);
 
     kafka_admin_AdminClient_destroy(admin);
