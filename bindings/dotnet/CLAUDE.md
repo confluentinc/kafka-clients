@@ -240,8 +240,6 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     // (non-blocking, or sync for Python parity → stays sync)
 }
 
-// A sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is the **deferred** twin — a later milestone.
-
 public sealed class AsyncKafkaConsumer : IAsyncConsumer {   // Java `KafkaConsumer` (KIP-848 group protocol)
     public AsyncKafkaConsumer(IReadOnlyDictionary<string, string> config);
 }
@@ -249,6 +247,40 @@ public sealed class AsyncKafkaConsumer : IAsyncConsumer {   // Java `KafkaConsum
 public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsumer`
     public AsyncMockConsumer();
     public void AddRecord(ConsumerRecord record); // mock-only helpers are inherent, not on IAsyncConsumer
+}
+
+// The sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is **shipped** (M5/P8a) — the most
+// Java-faithful surface (Java's `Consumer` is synchronous), a sibling of the async trio over the
+// SAME native consumer (not a wrapper). Bytes-only, no `CancellationToken` (interruption is
+// `Wakeup()` only), with both `Close()` and `Close(TimeSpan)`. Each sync method calls the sync C
+// ABI directly (block_on inside the Rust core's runtime — NOT sync-over-async, §4). The P8a core
+// loop is below; the query family (`Committed` / `OffsetsForTimes` / `BeginningOffsets` /
+// `EndOffsets` / `PartitionsFor` / `ListTopics`) lands additively in M5/P8b.
+public interface IConsumer : IConsumerCommon, IDisposable {   // Java `Consumer` (synchronous)
+    ConsumerRecords Poll(TimeSpan timeout);                    // blocks; Wakeup() interrupts (one-shot)
+    void Subscribe(IReadOnlyCollection<string> topics);
+    void Unsubscribe();
+    void Assign(IReadOnlyCollection<TopicPartition> partitions);
+    void Pause(IReadOnlyCollection<TopicPartition> partitions);
+    void Resume(IReadOnlyCollection<TopicPartition> partitions);
+    void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions);
+    void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions);
+    long Position(TopicPartition partition);
+    void Commit();                                             // Java commitSync (confirming)
+    void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
+    void Close();                                              // Java close()
+    void Close(TimeSpan timeout);                              // Java close(Duration); negative → ArgumentOutOfRange, Zero valid
+    // Wakeup() / Assignment() / Subscription() / Paused() / GroupMetadata() / EnforceRebalance() /
+    // CommitAsync() / Seek(tp,long) / Seek(tp,OffsetAndMetadata) / CurrentLag() come from IConsumerCommon.
+}
+
+public sealed class KafkaConsumer : IConsumer {               // Java `KafkaConsumer` (KIP-848), synchronous
+    public KafkaConsumer(IReadOnlyDictionary<string, string> config);
+}
+
+public sealed class MockConsumer : IConsumer {                // Java `MockConsumer`, synchronous
+    public MockConsumer(string? autoOffsetReset = null);
+    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // mock-only helpers inherent
 }
 ```
 
@@ -312,7 +344,7 @@ comment).
 | **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
 | **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
-| **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer` (the deferred sync mirror would be `IProducer` / `IConsumer`) — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the `Async` on the interface is what carries the async distinction (methods mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
+| **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
 | **Serializers** | ABI is bytes-only both ways; add .NET-side `ISerializer<T>` (`T → byte[]`) and `IDeserializer<T>` (`ReadOnlySpan<byte> → T`, zero-copy over the batch — ffi §B4) — makes `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` generic later. No per-record callback through the ABI (`CLAUDE.md §11`). | porting (de)serialization |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
