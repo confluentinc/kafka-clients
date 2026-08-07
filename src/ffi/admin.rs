@@ -98,11 +98,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry,
-    ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions,
-    LogDirDescription, MockAdminClient, NewPartitions, NewTopic, OpType, RecordsToDelete, ReplicaLogDirInfo,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions,
+    AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions,
+    DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
+    ElectLeadersOptions, ListConfigResourcesOptions, ListOffsetsOptions, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete, ReplicaLogDirInfo,
     TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 // `listClientMetricsResources` is deprecated in Java 4.1 (superseded by
@@ -112,8 +114,13 @@ use crate::admin::{
 use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use crate::common::acl::AclOperation;
 use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::requests::list_offsets_request::{
+    EARLIEST_LOCAL_TIMESTAMP, EARLIEST_PENDING_UPLOAD_TIMESTAMP, EARLIEST_TIMESTAMP, LATEST_TIERED_TIMESTAMP,
+    LATEST_TIMESTAMP, MAX_TIMESTAMP,
+};
 use crate::common::{
-    KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
+    ElectionType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionInfo,
+    TopicPartitionReplica, Uuid,
 };
 
 use super::common::{
@@ -6587,6 +6594,1608 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
 }
 
 // ---------------------------------------------------------------------------
+// Elections / reassignments / offsets value types
+// ---------------------------------------------------------------------------
+
+/// The broker id reported for an out-of-range replica index. Real broker ids are
+/// never negative.
+const UNKNOWN_BROKER_ID: i32 = -1;
+
+/// Opaque handle to a `PartitionReassignment` (Java's
+/// `org.apache.kafka.clients.admin.PartitionReassignment`).
+///
+/// Borrowed from the owning `listPartitionReassignments` result handle; valid
+/// until that handle is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_PartitionReassignment_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_PartitionReassignment_t`].
+///
+/// Java's three accessors are `List<Integer>`, i.e. broker ids rather than
+/// `Node`s, so they cross as plain `int32_t` count/index pairs (no
+/// `kafka_common_Node_t` involved).
+struct PartitionReassignmentInner {
+    replicas: Vec<i32>,
+    adding_replicas: Vec<i32>,
+    removing_replicas: Vec<i32>,
+}
+
+impl PartitionReassignmentInner {
+    fn new(reassignment: &PartitionReassignment) -> Self {
+        Self {
+            replicas: reassignment.replicas().to_vec(),
+            adding_replicas: reassignment.adding_replicas().to_vec(),
+            removing_replicas: reassignment.removing_replicas().to_vec(),
+        }
+    }
+}
+
+/// Returns `ids[index]`, or -1 when `index` is out of range.
+fn broker_id_at(ids: &[i32], index: i32) -> i32 {
+    if index < 0 {
+        return UNKNOWN_BROKER_ID;
+    }
+    ids.get(index as usize).copied().unwrap_or(UNKNOWN_BROKER_ID)
+}
+
+/// Casts a `*const kafka_admin_PartitionReassignment_t` to a reference.
+///
+/// # Safety
+///
+/// `reassignment` must be a non-null borrowed pointer from a
+/// `list_partition_reassignments` result handle.
+unsafe fn partition_reassignment_ref(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+) -> &'static PartitionReassignmentInner {
+    unsafe { &*(reassignment as *const PartitionReassignmentInner) }
+}
+
+/// Returns the number of current replicas (Java's `replicas()`).
+///
+/// # Safety
+///
+/// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica_count(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+) -> i32 {
+    unsafe { partition_reassignment_ref(reassignment) }.replicas.len() as i32
+}
+
+/// Returns the current replica broker id at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+    index: i32,
+) -> i32 {
+    broker_id_at(&unsafe { partition_reassignment_ref(reassignment) }.replicas, index)
+}
+
+/// Returns the number of replicas being added (Java's `addingReplicas()`).
+///
+/// # Safety
+///
+/// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica_count(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+) -> i32 {
+    unsafe { partition_reassignment_ref(reassignment) }.adding_replicas.len() as i32
+}
+
+/// Returns the broker id of the added replica at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+    index: i32,
+) -> i32 {
+    broker_id_at(&unsafe { partition_reassignment_ref(reassignment) }.adding_replicas, index)
+}
+
+/// Returns the number of replicas being removed (Java's `removingReplicas()`).
+///
+/// # Safety
+///
+/// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica_count(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+) -> i32 {
+    unsafe { partition_reassignment_ref(reassignment) }.removing_replicas.len() as i32
+}
+
+/// Returns the broker id of the removed replica at `index`, or -1 if out of
+/// range.
+///
+/// # Safety
+///
+/// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica(
+    reassignment: *const kafka_admin_PartitionReassignment_t,
+    index: i32,
+) -> i32 {
+    broker_id_at(&unsafe { partition_reassignment_ref(reassignment) }.removing_replicas, index)
+}
+
+/// Opaque handle to a `ListOffsetsResultInfo` (Java's
+/// `ListOffsetsResult.ListOffsetsResultInfo`).
+///
+/// Borrowed from the owning `listOffsets` result handle; valid until that handle
+/// is destroyed. Do not free it.
+#[repr(C)]
+pub struct kafka_admin_ListOffsetsResultInfo_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListOffsetsResultInfo_t`].
+///
+/// Java's `leaderEpoch()` is an `Optional<Integer>`, so it crosses through the
+/// crate's usual out-param-plus-bool shape rather than a sentinel (precedent:
+/// `kafka_consumer_OffsetAndMetadata_leader_epoch`).
+struct ListOffsetsResultInfoInner {
+    info: ListOffsetsResultInfo,
+}
+
+/// Casts a `*const kafka_admin_ListOffsetsResultInfo_t` to a reference.
+///
+/// # Safety
+///
+/// `info` must be a non-null borrowed pointer from a `list_offsets` result
+/// handle.
+unsafe fn list_offsets_info_ref(
+    info: *const kafka_admin_ListOffsetsResultInfo_t,
+) -> &'static ListOffsetsResultInfoInner {
+    unsafe { &*(info as *const ListOffsetsResultInfoInner) }
+}
+
+/// Returns the offset (Java's `offset()`).
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed list-offsets info pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
+    info: *const kafka_admin_ListOffsetsResultInfo_t,
+) -> i64 {
+    unsafe { list_offsets_info_ref(info) }.info.offset()
+}
+
+/// Returns the timestamp associated with the offset (Java's `timestamp()`).
+/// `-1` means the broker reported no timestamp, which is what every non-
+/// `forTimestamp` query returns.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed list-offsets info pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
+    info: *const kafka_admin_ListOffsetsResultInfo_t,
+) -> i64 {
+    unsafe { list_offsets_info_ref(info) }.info.timestamp()
+}
+
+/// Writes the leader epoch to `*out_epoch` and returns `true`, or returns
+/// `false` when Java's `leaderEpoch()` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed list-offsets info pointer; `out_epoch` must
+/// be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
+    info: *const kafka_admin_ListOffsetsResultInfo_t,
+    out_epoch: *mut i32,
+) -> bool {
+    match unsafe { list_offsets_info_ref(info) }.info.leader_epoch() {
+        Some(epoch) => {
+            if !out_epoch.is_null() {
+                unsafe { *out_epoch = epoch };
+            }
+            true
+        },
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Elections / reassignments / offsets input marshaling
+//
+// Every RPC in this group is keyed by `TopicPartition`, which crosses as two
+// parallel arrays (`topics[i]`, `partitions[i]`) exactly as in `deleteRecords`
+// and in the consumer FFI's `read_topic_partitions`. Where Java carries an
+// `Optional`, C gets an explicit boolean discriminant beside the payload rather
+// than an overloaded NULL or sentinel, so "absent" and "present but empty" stay
+// distinguishable.
+// ---------------------------------------------------------------------------
+
+/// Reads `count` `(topic, partition)` pairs into [`TopicPartition`]s, skipping
+/// entries whose topic is NULL so the two arrays cannot drift out of step.
+///
+/// # Safety
+///
+/// `topics` and `partitions` must be null or have `count` readable entries each,
+/// every topic NULL or a valid C string.
+unsafe fn read_topic_partitions(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+) -> Vec<TopicPartition> {
+    let n = count.max(0) as usize;
+    if topics.is_null() || partitions.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let name_ptr = unsafe { *topics.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        out.push(TopicPartition::new(name, unsafe { *partitions.add(i) }));
+    }
+    out
+}
+
+/// Reads the optional partition set that `electLeaders` and
+/// `listPartitionReassignments` take.
+///
+/// `all_partitions` is the explicit discriminant for Java's absent set
+/// (`electLeaders`' null `Set`, `listPartitionReassignments`' `Optional.empty()`),
+/// which means "every partition". When it is true the arrays are not read at
+/// all, so "all partitions" can never be confused with an empty selection.
+///
+/// # Safety
+///
+/// `topics` and `partitions` must be null or have `count` readable entries each,
+/// every topic NULL or a valid C string.
+unsafe fn read_optional_partition_set(
+    all_partitions: bool,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+) -> Option<HashSet<TopicPartition>> {
+    if all_partitions {
+        return None;
+    }
+    Some(
+        unsafe { read_topic_partitions(topics, partitions, count) }
+            .into_iter()
+            .collect(),
+    )
+}
+
+/// Builds the owned `Map<TopicPartition, Optional<NewPartitionReassignment>>`
+/// for an `alterPartitionReassignments` call.
+///
+/// `cancel[i]` is the explicit discriminant for Java's `Optional.empty()`, which
+/// **reverts** the reassignment of that partition (`Admin.java:1142-1143`). When
+/// it is false, `target_replicas[i]` / `target_replica_counts[i]` supply the new
+/// `NewPartitionReassignment`. Keeping the two apart means an empty replica list
+/// stays an error rather than silently becoming a cancellation.
+///
+/// An entry with a NULL topic is skipped.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if a non-cancelling entry supplies no
+/// replicas — Java's `NewPartitionReassignment(List<Integer>)` throws
+/// `IllegalArgumentException` there, before the RPC is issued.
+///
+/// # Safety
+///
+/// `topics`, `partitions`, `cancel`, `target_replicas` and
+/// `target_replica_counts` must be null or have `count` readable entries each;
+/// every topic NULL or a valid C string; every non-cancelled `target_replicas`
+/// entry must have `target_replica_counts[i]` readable `int32_t`s.
+unsafe fn read_reassignments(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    cancel: *const bool,
+    target_replicas: *const *const i32,
+    target_replica_counts: *const i32,
+    count: i32,
+) -> Result<HashMap<TopicPartition, Option<NewPartitionReassignment>>, KafkaError> {
+    let mut out = HashMap::new();
+    if topics.is_null() || partitions.is_null() || cancel.is_null() {
+        return Ok(out);
+    }
+    for i in 0..count.max(0) as usize {
+        let name_ptr = unsafe { *topics.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
+        if unsafe { *cancel.add(i) } {
+            out.insert(tp, None);
+            continue;
+        }
+        let replicas = if target_replicas.is_null() || target_replica_counts.is_null() {
+            Vec::new()
+        } else {
+            unsafe { read_i32s(*target_replicas.add(i), *target_replica_counts.add(i)) }
+        };
+        let reassignment = NewPartitionReassignment::new(replicas).map_err(|e| {
+            KafkaError::illegal_argument(format!("reassignment for {tp} at index {i}: {}", e.message()))
+        })?;
+        out.insert(tp, Some(reassignment));
+    }
+    Ok(out)
+}
+
+/// Builds the owned `Map<TopicPartition, OffsetSpec>` for a `listOffsets` call.
+///
+/// `is_timestamp[i]` is the explicit discriminant between Java's
+/// `OffsetSpec.forTimestamp(t)` and the six no-argument factories. When it is
+/// true, `spec_timestamps[i]` is the epoch-millisecond timestamp, whatever its
+/// value. When it is false, `spec_timestamps[i]` selects a factory through the
+/// `ListOffsets` wire sentinel Java's `KafkaAdminClient.getOffsetFromSpec`
+/// (`KafkaAdminClient.java:5142-5156`) emits for it:
+///
+/// | `spec_timestamps[i]` | `OffsetSpec` factory        |
+/// |----------------------|-----------------------------|
+/// | -1                   | `latest()`                  |
+/// | -2                   | `earliest()`                |
+/// | -3                   | `maxTimestamp()`            |
+/// | -4                   | `earliestLocal()`           |
+/// | -5                   | `latestTiered()`            |
+/// | -6                   | `earliestPendingUpload()`   |
+///
+/// The discriminant exists because `getOffsetFromSpec` is not injective:
+/// `forTimestamp(-2)` and `earliest()` both project to `-2`. Java keeps them
+/// apart until that point (and `MockAdminClient` distinguishes them), so C must
+/// too.
+///
+/// An entry with a NULL topic is skipped.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if a non-timestamp entry carries a
+/// value that is not one of the six sentinels.
+///
+/// # Safety
+///
+/// `topics`, `partitions`, `is_timestamp` and `spec_timestamps` must be null or
+/// have `count` readable entries each, every topic NULL or a valid C string.
+unsafe fn read_offset_specs(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    is_timestamp: *const bool,
+    spec_timestamps: *const i64,
+    count: i32,
+) -> Result<HashMap<TopicPartition, OffsetSpec>, KafkaError> {
+    let mut out = HashMap::new();
+    if topics.is_null() || partitions.is_null() || is_timestamp.is_null() || spec_timestamps.is_null() {
+        return Ok(out);
+    }
+    for i in 0..count.max(0) as usize {
+        let name_ptr = unsafe { *topics.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
+        let value = unsafe { *spec_timestamps.add(i) };
+        let spec = if unsafe { *is_timestamp.add(i) } {
+            OffsetSpec::for_timestamp(value)
+        } else {
+            offset_spec_for_sentinel(value).ok_or_else(|| {
+                KafkaError::illegal_argument(format!(
+                    "offset spec for {tp} at index {i}: {value} is not a ListOffsets timestamp sentinel; \
+                     pass is_timestamp=true to request OffsetSpec.forTimestamp({value})"
+                ))
+            })?
+        };
+        out.insert(tp, spec);
+    }
+    Ok(out)
+}
+
+/// Inverts `KafkaAdminClient.getOffsetFromSpec` for the six no-argument
+/// `OffsetSpec` factories, or `None` for a value that is not a sentinel.
+fn offset_spec_for_sentinel(value: i64) -> Option<OffsetSpec> {
+    match value {
+        LATEST_TIMESTAMP => Some(OffsetSpec::latest()),
+        EARLIEST_TIMESTAMP => Some(OffsetSpec::earliest()),
+        MAX_TIMESTAMP => Some(OffsetSpec::max_timestamp()),
+        EARLIEST_LOCAL_TIMESTAMP => Some(OffsetSpec::earliest_local()),
+        LATEST_TIERED_TIMESTAMP => Some(OffsetSpec::latest_tiered()),
+        EARLIEST_PENDING_UPLOAD_TIMESTAMP => Some(OffsetSpec::earliest_pending_upload()),
+        _ => None,
+    }
+}
+
+/// Builds the `ElectLeadersOptions` for an `electLeaders` call.
+fn elect_leaders_options(timeout_ms: i32) -> ElectLeadersOptions {
+    ElectLeadersOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds the `AlterPartitionReassignmentsOptions` for an
+/// `alterPartitionReassignments` call.
+fn alter_partition_reassignments_options(
+    timeout_ms: i32,
+    allow_replication_factor_change: bool,
+) -> AlterPartitionReassignmentsOptions {
+    AlterPartitionReassignmentsOptions::new()
+        .timeout_ms(option_timeout(timeout_ms))
+        .allow_replication_factor_change(allow_replication_factor_change)
+}
+
+/// Builds the `ListPartitionReassignmentsOptions` for a
+/// `listPartitionReassignments` call.
+fn list_partition_reassignments_options(timeout_ms: i32) -> ListPartitionReassignmentsOptions {
+    ListPartitionReassignmentsOptions::new().timeout_ms(option_timeout(timeout_ms))
+}
+
+/// Builds the `ListOffsetsOptions` for a `listOffsets` call.
+///
+/// `isolation_level` carries Java's `IsolationLevel.id()` (0 =
+/// `READ_UNCOMMITTED`, 1 = `READ_COMMITTED`). Any other value is rejected, as
+/// Java's `IsolationLevel.forId` throws `IllegalArgumentException`.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] for an unknown isolation-level id.
+fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOffsetsOptions, KafkaError> {
+    let level = u8::try_from(isolation_level)
+        .map_err(|_| KafkaError::illegal_argument(format!("Unknown isolation level {isolation_level}")))
+        .and_then(IsolationLevel::for_id)?;
+    Ok(ListOffsetsOptions::with_isolation_level(level).timeout_ms(option_timeout(timeout_ms)))
+}
+
+// ---------------------------------------------------------------------------
+// Elections / reassignments / offsets result handles
+// ---------------------------------------------------------------------------
+
+/// Sorts a `TopicPartition`-keyed outcome map into a deterministic,
+/// index-addressable order.
+///
+/// `TopicPartition` is not `Ord` (matching Java, whose result maps are
+/// unordered), so this sorts by `(topic, partition)` the way
+/// [`box_delete_records_result`] already does.
+fn sorted_partition_entries<V>(map: HashMap<TopicPartition, V>) -> Vec<(TopicPartition, V)> {
+    let mut entries: Vec<(TopicPartition, V)> = map.into_iter().collect();
+    entries.sort_by(|a, b| a.0.topic().cmp(b.0.topic()).then(a.0.partition().cmp(&b.0.partition())));
+    entries
+}
+
+/// Opaque handle to a flattened `ElectLeadersResult`, keyed by topic partition.
+#[repr(C)]
+pub struct kafka_admin_ElectLeadersResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ElectLeadersResult_t`].
+///
+/// Java's `ElectLeadersResult.partitions()` resolves to
+/// `Map<TopicPartition, Optional<Throwable>>` — a per-partition *error* with no
+/// per-partition value, so this handle has `_get_error(i)` and no `_get_value`.
+struct ElectLeadersResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `electLeaders` outcomes into the C handle.
+fn box_elect_leaders_result(
+    outcomes: HashMap<TopicPartition, Option<KafkaError>>,
+) -> *mut kafka_admin_ElectLeadersResult_t {
+    let entries = sorted_partition_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (tp, outcome) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        errors.push(outcome.map(error_inner));
+    }
+    Box::into_raw(Box::new(ElectLeadersResultInner { topics, partitions, errors }))
+        as *mut kafka_admin_ElectLeadersResult_t
+}
+
+/// Casts a `*const kafka_admin_ElectLeadersResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `elect_leaders` call.
+unsafe fn elect_leaders_result_ref(
+    result: *const kafka_admin_ElectLeadersResult_t,
+) -> &'static ElectLeadersResultInner {
+    unsafe { &*(result as *const ElectLeadersResultInner) }
+}
+
+/// Returns the number of partitions an election was attempted for.
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_count(result: *const kafka_admin_ElectLeadersResult_t) -> i32 {
+    unsafe { elect_leaders_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_topic(
+    result: *const kafka_admin_ElectLeadersResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { elect_leaders_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
+    result: *const kafka_admin_ElectLeadersResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { elect_leaders_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if the
+/// election succeeded for that partition or `index` is out of range. Do not
+/// destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
+    result: *const kafka_admin_ElectLeadersResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { elect_leaders_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys an `elect_leaders` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `elect_leaders` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_destroy(result: *mut kafka_admin_ElectLeadersResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ElectLeadersResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `AlterPartitionReassignmentsResult`, keyed by
+/// topic partition.
+#[repr(C)]
+pub struct kafka_admin_AlterPartitionReassignmentsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_AlterPartitionReassignmentsResult_t`].
+///
+/// Java's per-partition future is `KafkaFuture<Void>`, so there is no per-key
+/// value: a null `_get_error(i)` is the success signal.
+struct AlterPartitionReassignmentsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `alterPartitionReassignments` outcomes into the C
+/// handle.
+fn box_alter_partition_reassignments_result(
+    outcomes: HashMap<TopicPartition, Result<(), KafkaError>>,
+) -> *mut kafka_admin_AlterPartitionReassignmentsResult_t {
+    let entries = sorted_partition_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (tp, outcome) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        errors.push(outcome.err().map(error_inner));
+    }
+    Box::into_raw(Box::new(AlterPartitionReassignmentsResultInner { topics, partitions, errors }))
+        as *mut kafka_admin_AlterPartitionReassignmentsResult_t
+}
+
+/// Casts a `*const kafka_admin_AlterPartitionReassignmentsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `alter_partition_reassignments`
+/// call.
+unsafe fn alter_partition_reassignments_result_ref(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+) -> &'static AlterPartitionReassignmentsResultInner {
+    unsafe { &*(result as *const AlterPartitionReassignmentsResultInner) }
+}
+
+/// Returns the number of requested partitions.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_count(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+) -> i32 {
+    unsafe { alter_partition_reassignments_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_topic(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { alter_partition_reassignments_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_partition(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { alter_partition_reassignments_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if that
+/// partition succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { alter_partition_reassignments_result_ref(result) }
+        .errors
+        .get(index as usize)
+    {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys an `alter_partition_reassignments` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `alter_partition_reassignments` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
+    result: *mut kafka_admin_AlterPartitionReassignmentsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut AlterPartitionReassignmentsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `ListPartitionReassignmentsResult`, keyed by
+/// topic partition.
+#[repr(C)]
+pub struct kafka_admin_ListPartitionReassignmentsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListPartitionReassignmentsResult_t`].
+///
+/// Java's `reassignments()` is a *single* `KafkaFuture<Map<TopicPartition,
+/// PartitionReassignment>>`, not one future per key, so there is no per-key
+/// error to report: a failure fails the whole call. Hence `_get_value(i)` and no
+/// `_get_error(i)` (same shape as `listTopics`).
+struct ListPartitionReassignmentsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    values: Vec<PartitionReassignmentInner>,
+}
+
+/// Flattens the `listPartitionReassignments` map into the C handle.
+fn box_list_partition_reassignments_result(
+    reassignments: HashMap<TopicPartition, PartitionReassignment>,
+) -> *mut kafka_admin_ListPartitionReassignmentsResult_t {
+    let entries = sorted_partition_entries(reassignments);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    for (tp, reassignment) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        values.push(PartitionReassignmentInner::new(&reassignment));
+    }
+    Box::into_raw(Box::new(ListPartitionReassignmentsResultInner { topics, partitions, values }))
+        as *mut kafka_admin_ListPartitionReassignmentsResult_t
+}
+
+/// Casts a `*const kafka_admin_ListPartitionReassignmentsResult_t` to a
+/// reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_partition_reassignments`
+/// call.
+unsafe fn list_partition_reassignments_result_ref(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+) -> &'static ListPartitionReassignmentsResultInner {
+    unsafe { &*(result as *const ListPartitionReassignmentsResultInner) }
+}
+
+/// Returns the number of partitions with an ongoing reassignment.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_count(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+) -> i32 {
+    unsafe { list_partition_reassignments_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_topic(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { list_partition_reassignments_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partition(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { list_partition_reassignments_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the reassignment of the entry at `index` (borrowed; valid until
+/// `result` is destroyed), or null if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_partition_reassignments` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+    index: i32,
+) -> *const kafka_admin_PartitionReassignment_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_partition_reassignments_result_ref(result) }
+        .values
+        .get(index as usize)
+    {
+        Some(value) => value as *const PartitionReassignmentInner as *const kafka_admin_PartitionReassignment_t,
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `list_partition_reassignments` result handle. Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_partition_reassignments` result
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
+    result: *mut kafka_admin_ListPartitionReassignmentsResult_t,
+) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListPartitionReassignmentsResultInner)) };
+    }
+}
+
+/// Opaque handle to a flattened `ListOffsetsResult`, keyed by topic partition.
+#[repr(C)]
+pub struct kafka_admin_ListOffsetsResult_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_ListOffsetsResult_t`].
+///
+/// Java holds one `KafkaFuture<ListOffsetsResultInfo>` per partition, so this is
+/// the full D2 shape: a per-key value *and* a per-key error, exactly one of
+/// which is present for each entry.
+struct ListOffsetsResultInner {
+    topics: Vec<CString>,
+    partitions: Vec<i32>,
+    values: Vec<Option<ListOffsetsResultInfoInner>>,
+    errors: Vec<Option<KafkaErrorInner>>,
+}
+
+/// Flattens the per-partition `listOffsets` outcomes into the C handle.
+fn box_list_offsets_result(
+    outcomes: HashMap<TopicPartition, Result<ListOffsetsResultInfo, KafkaError>>,
+) -> *mut kafka_admin_ListOffsetsResult_t {
+    let entries = sorted_partition_entries(outcomes);
+    let mut topics = Vec::with_capacity(entries.len());
+    let mut partitions = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    let mut errors = Vec::with_capacity(entries.len());
+    for (tp, outcome) in entries {
+        topics.push(to_cstring(tp.topic()));
+        partitions.push(tp.partition());
+        match outcome {
+            Ok(info) => {
+                values.push(Some(ListOffsetsResultInfoInner { info }));
+                errors.push(None);
+            },
+            Err(e) => {
+                values.push(None);
+                errors.push(Some(error_inner(e)));
+            },
+        }
+    }
+    Box::into_raw(Box::new(ListOffsetsResultInner { topics, partitions, values, errors }))
+        as *mut kafka_admin_ListOffsetsResult_t
+}
+
+/// Casts a `*const kafka_admin_ListOffsetsResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `list_offsets` call.
+unsafe fn list_offsets_result_ref(result: *const kafka_admin_ListOffsetsResult_t) -> &'static ListOffsetsResultInner {
+    unsafe { &*(result as *const ListOffsetsResultInner) }
+}
+
+/// Returns the number of requested partitions.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_count(result: *const kafka_admin_ListOffsetsResult_t) -> i32 {
+    unsafe { list_offsets_result_ref(result) }.topics.len() as i32
+}
+
+/// Returns the topic name of the entry at `index` (borrowed), or null if out of
+/// range. Entries are sorted by topic name then partition id.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_topic(
+    result: *const kafka_admin_ListOffsetsResult_t,
+    index: i32,
+) -> *const c_char {
+    cstring_at(&unsafe { list_offsets_result_ref(result) }.topics, index)
+}
+
+/// Returns the partition id of the entry at `index`, or -1 if out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
+    result: *const kafka_admin_ListOffsetsResult_t,
+    index: i32,
+) -> i32 {
+    if index < 0 {
+        return -1;
+    }
+    unsafe { list_offsets_result_ref(result) }
+        .partitions
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+/// Returns the offset information for the entry at `index` (borrowed; valid
+/// until `result` is destroyed), or null if that partition failed (see
+/// [`kafka_admin_ListOffsetsResult_get_error`]) or `index` is out of range.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
+    result: *const kafka_admin_ListOffsetsResult_t,
+    index: i32,
+) -> *const kafka_admin_ListOffsetsResultInfo_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_offsets_result_ref(result) }.values.get(index as usize) {
+        Some(Some(value)) => value as *const ListOffsetsResultInfoInner as *const kafka_admin_ListOffsetsResultInfo_t,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Returns the error for the entry at `index` (borrowed), or null if that
+/// partition succeeded or `index` is out of range. Do not destroy it.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
+    result: *const kafka_admin_ListOffsetsResult_t,
+    index: i32,
+) -> *const kafka_common_KafkaError_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { list_offsets_result_ref(result) }.errors.get(index as usize) {
+        Some(slot) => error_ptr(slot.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `list_offsets` result handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `result` must be null or a valid `list_offsets` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(result: *mut kafka_admin_ListOffsetsResult_t) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result as *mut ListOffsetsResultInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Elections / reassignments / offsets submission helpers
+// ---------------------------------------------------------------------------
+
+/// Per-partition outcomes of `electLeaders`. Java's
+/// `Map<TopicPartition, Optional<Throwable>>` maps to `Option<KafkaError>`.
+type ElectLeadersOutcomes = HashMap<TopicPartition, Option<KafkaError>>;
+/// Per-partition outcomes of `alterPartitionReassignments`.
+type AlterPartitionReassignmentsOutcomes = HashMap<TopicPartition, Result<(), KafkaError>>;
+/// The single `listPartitionReassignments` map.
+type ListPartitionReassignmentsOutcomes = HashMap<TopicPartition, PartitionReassignment>;
+/// Per-partition outcomes of `listOffsets`.
+type ListOffsetsOutcomes = HashMap<TopicPartition, Result<ListOffsetsResultInfo, KafkaError>>;
+
+/// Submits `electLeaders` and returns its single `partitions()` future.
+///
+/// Java exposes one future for the whole election, whose value already carries
+/// the per-partition `Optional<Throwable>`, so there is nothing to join here.
+fn submit_elect_leaders(
+    admin: &dyn Admin,
+    election_type: ElectionType,
+    partitions: Option<HashSet<TopicPartition>>,
+    options: ElectLeadersOptions,
+) -> KafkaFuture<ElectLeadersOutcomes> {
+    admin.elect_leaders(election_type, partitions, options).partitions()
+}
+
+/// Submits `alterPartitionReassignments` and returns the collect-all future over
+/// its per-partition futures.
+fn submit_alter_partition_reassignments(
+    admin: &dyn Admin,
+    reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+    options: AlterPartitionReassignmentsOptions,
+) -> KafkaFuture<AlterPartitionReassignmentsOutcomes> {
+    let result = admin.alter_partition_reassignments(reassignments, options);
+    let entries: Vec<(TopicPartition, KafkaFuture<()>)> =
+        result.values().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect();
+    KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `listPartitionReassignments` and returns its single `reassignments()`
+/// future.
+fn submit_list_partition_reassignments(
+    admin: &dyn Admin,
+    partitions: Option<HashSet<TopicPartition>>,
+    options: ListPartitionReassignmentsOptions,
+) -> KafkaFuture<ListPartitionReassignmentsOutcomes> {
+    admin.list_partition_reassignments(partitions, options).reassignments()
+}
+
+/// Submits `listOffsets` and returns the collect-all future over its
+/// per-partition futures.
+///
+/// `ListOffsetsResult` exposes its futures through `partitionResult(tp)` rather
+/// than as a map, so the requested keys drive the join. Both the production
+/// client and the mock seed one future per requested partition, so no key is
+/// missing; a `partition_result` error is nevertheless propagated rather than
+/// dropped.
+fn submit_list_offsets(
+    admin: &dyn Admin,
+    topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+    options: ListOffsetsOptions,
+) -> Result<KafkaFuture<ListOffsetsOutcomes>, KafkaError> {
+    let result = admin.list_offsets(topic_partition_offsets, options);
+    let mut entries: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)> =
+        Vec::with_capacity(topic_partition_offsets.len());
+    for tp in topic_partition_offsets.keys() {
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(KafkaFuture::join_map_results(entries))
+}
+
+// ---------------------------------------------------------------------------
+// electLeaders
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_elect_leaders_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ElectLeadersResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_elect_leaders_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ElectLeadersResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Elects a leader for the given partitions, blocking until the election future
+/// has resolved (synchronous).
+///
+/// This is `electLeaders(ElectionType, Set<TopicPartition>, ElectLeadersOptions)`.
+///
+/// On success writes a [`kafka_admin_ElectLeadersResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_ElectLeadersResult_destroy`]) and returns null.
+/// **A per-partition failure is not a call failure**: it is reported by
+/// [`kafka_admin_ElectLeadersResult_get_error`]. A non-null return means the
+/// election could not be run at all, and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `election_type`: Java's `ElectionType` byte value — `0` = `PREFERRED`,
+///   `1` = `UNCLEAN`. Any other value is rejected
+///   (`ElectionType.valueOf(byte)` throws `IllegalArgumentException`).
+/// - `all_partitions`: pass `true` for Java's **null** partition set, i.e.
+///   "conduct an election for every partition in the cluster"
+///   (`Admin.java:1096-1097`). The `topics` / `partitions` / `count` arguments
+///   are then ignored. Pass `false` to elect leaders only for the listed
+///   partitions — an explicit flag, so "all partitions" and "an empty
+///   selection" stay distinguishable.
+/// - `topics` / `partitions`: parallel arrays of `count` entries; entry `i` is
+///   `(topics[i], partitions[i])`. An entry with a NULL topic is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///   `ElectLeadersOptions` has no other field in Java.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
+/// `partitions` must have `count` valid entries each; `out_result` must be null
+/// or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
+    admin: *const kafka_admin_AdminClient_t,
+    election_type: i32,
+    all_partitions: bool,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ElectLeadersResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
+    let options = elect_leaders_options(timeout_ms);
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            let election_type = read_election_type(election_type)?;
+            Ok(submit_elect_leaders(a, election_type, selection, options))
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_elect_leaders_result) }
+}
+
+/// Elects leaders asynchronously. See [`kafka_admin_AdminClient_elect_leaders`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or an `election_type` that is
+/// neither 0 nor 1). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when the result
+/// arrives. Destroying the handle does not cause that — an outstanding operation
+/// holds its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
+/// `partitions` must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders_async(
+    admin: *const kafka_admin_AdminClient_t,
+    election_type: i32,
+    all_partitions: bool,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_elect_leaders_callback_t,
+    user_data: *mut c_void,
+) {
+    let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
+    let options = elect_leaders_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| {
+                let election_type = read_election_type(election_type)?;
+                Ok(submit_elect_leaders(a, election_type, selection, options))
+            },
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_elect_leaders_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+/// Converts the C `election_type` code into an [`ElectionType`].
+///
+/// The code is Java's `ElectionType` byte `value` (0 = `PREFERRED`,
+/// 1 = `UNCLEAN`), so the mapping is Java's `ElectionType.valueOf(byte)`.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] for any other value, mirroring Java's
+/// `IllegalArgumentException`.
+fn read_election_type(election_type: i32) -> Result<ElectionType, KafkaError> {
+    i8::try_from(election_type)
+        .map_err(|_| KafkaError::illegal_argument(format!("Value {election_type} must be one of [PREFERRED, UNCLEAN]")))
+        .and_then(ElectionType::value_of)
+}
+
+// ---------------------------------------------------------------------------
+// alterPartitionReassignments
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_alter_partition_reassignments_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_AlterPartitionReassignmentsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. A per-partition failure
+/// arrives inside `result`, not as `error`.
+pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_AlterPartitionReassignmentsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Changes the reassignments of one or more partitions, blocking until every
+/// per-partition future has resolved (synchronous).
+///
+/// This is `alterPartitionReassignments(Map<TopicPartition,
+/// Optional<NewPartitionReassignment>>, AlterPartitionReassignmentsOptions)`.
+/// Java's map becomes parallel arrays: entry `i` is `(topics[i],
+/// partitions[i])`.
+///
+/// On success writes a [`kafka_admin_AlterPartitionReassignmentsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_AlterPartitionReassignmentsResult_destroy`]) and returns null.
+/// **A per-partition failure is not a call failure**: it is reported by
+/// [`kafka_admin_AlterPartitionReassignmentsResult_get_error`]. A non-null
+/// return means the request could not be submitted at all, and `*out_result` is
+/// left untouched.
+///
+/// # Parameters
+///
+/// - `topics` / `partitions`: parallel arrays of `count` entries. An entry with
+///   a NULL topic is skipped.
+/// - `cancel`: `count` flags. `cancel[i] != false` **reverts** the reassignment
+///   of that partition — Java's empty `Optional`
+///   (`Admin.java:1142-1143`) — and `target_replicas[i]` /
+///   `target_replica_counts[i]` are then not read. A separate flag rather than a
+///   NULL replica pointer, so cancelling stays distinct from "present but
+///   empty", which Java rejects.
+/// - `target_replicas` / `target_replica_counts`: for each non-cancelled entry,
+///   `target_replicas[i]` points at `target_replica_counts[i]` broker ids
+///   forming Java's `NewPartitionReassignment(List<Integer>)`. An empty list is
+///   an error, exactly as in Java.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `allow_replication_factor_change`: Java's
+///   `AlterPartitionReassignmentsOptions.allowReplicationFactorChange(boolean)`,
+///   which defaults to `true`.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics`, `partitions`, `cancel`,
+/// `target_replicas` and `target_replica_counts` must have `count` valid entries
+/// each; every non-cancelled `target_replicas[i]` must point at
+/// `target_replica_counts[i]` readable ids; `out_result` must be null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    cancel: *const bool,
+    target_replicas: *const *const i32,
+    target_replica_counts: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    allow_replication_factor_change: bool,
+    out_result: *mut *mut kafka_admin_AlterPartitionReassignmentsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let reassignments =
+        unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
+    let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            Ok(submit_alter_partition_reassignments(a, &reassignments?, options))
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_alter_partition_reassignments_result) }
+}
+
+/// Changes partition reassignments asynchronously. See
+/// [`kafka_admin_AdminClient_alter_partition_reassignments`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or a non-cancelled entry with no
+/// target replicas). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when the result
+/// arrives. Destroying the handle does not cause that — an outstanding operation
+/// holds its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics`, `partitions`, `cancel`,
+/// `target_replicas` and `target_replica_counts` must have `count` valid entries
+/// each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    cancel: *const bool,
+    target_replicas: *const *const i32,
+    target_replica_counts: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    allow_replication_factor_change: bool,
+    callback: kafka_admin_AdminClient_alter_partition_reassignments_callback_t,
+    user_data: *mut c_void,
+) {
+    let reassignments =
+        unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
+    let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_alter_partition_reassignments(a, &reassignments?, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_alter_partition_reassignments_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// listPartitionReassignments
+// ---------------------------------------------------------------------------
+
+/// Completion callback for
+/// [`kafka_admin_AdminClient_list_partition_reassignments_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ListPartitionReassignmentsResult_destroy`] or
+/// `error` with `kafka_common_KafkaError_destroy`. Java exposes one future for
+/// the whole listing, so *any* failure arrives as `error`.
+pub type kafka_admin_AdminClient_list_partition_reassignments_callback_t = unsafe extern "C" fn(
+    *mut kafka_admin_ListPartitionReassignmentsResult_t,
+    *mut kafka_common_KafkaError_t,
+    *mut c_void,
+);
+
+/// Lists the ongoing partition reassignments, blocking until the listing future
+/// has resolved (synchronous).
+///
+/// This is `listPartitionReassignments(Optional<Set<TopicPartition>>,
+/// ListPartitionReassignmentsOptions)`.
+///
+/// On success writes a [`kafka_admin_ListPartitionReassignmentsResult_t`] to
+/// `*out_result` (free it with
+/// [`kafka_admin_ListPartitionReassignmentsResult_destroy`]) and returns null.
+/// Java holds a **single** future here rather than one per partition, so unlike
+/// the per-key RPCs there is no `_get_error(i)`: any failure is a call failure
+/// and is returned, leaving `*out_result` untouched.
+///
+/// Only partitions with an ongoing reassignment appear in the result, so it can
+/// be shorter than the request.
+///
+/// # Parameters
+///
+/// - `all_partitions`: pass `true` for Java's `Optional.empty()`, i.e. "list
+///   every ongoing reassignment in the cluster" (`Admin.java:1246-1247`). The
+///   `topics` / `partitions` / `count` arguments are then ignored. Pass `false`
+///   to restrict the listing to the given partitions — an explicit flag, so
+///   "all partitions" and "an empty selection" stay distinguishable.
+/// - `topics` / `partitions`: parallel arrays of `count` entries. An entry with
+///   a NULL topic is skipped.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+///   `ListPartitionReassignmentsOptions` has no other field in Java.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
+/// `partitions` must have `count` valid entries each; `out_result` must be null
+/// or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
+    admin: *const kafka_admin_AdminClient_t,
+    all_partitions: bool,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    out_result: *mut *mut kafka_admin_ListPartitionReassignmentsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
+    let options = list_partition_reassignments_options(timeout_ms);
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_list_partition_reassignments(a, selection, options))) };
+    unsafe { finish_sync(outcome, out_result, box_list_partition_reassignments_result) }
+}
+
+/// Lists partition reassignments asynchronously. See
+/// [`kafka_admin_AdminClient_list_partition_reassignments`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached when
+/// the result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
+/// panic inside an earlier callback. So callbacks are not guaranteed to be
+/// serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
+/// `partitions` must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_async(
+    admin: *const kafka_admin_AdminClient_t,
+    all_partitions: bool,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    timeout_ms: i32,
+    callback: kafka_admin_AdminClient_list_partition_reassignments_callback_t,
+    user_data: *mut c_void,
+) {
+    let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
+    let options = list_partition_reassignments_options(timeout_ms);
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| Ok(submit_list_partition_reassignments(a, selection, options)),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(reassignments) => (box_list_partition_reassignments_result(reassignments), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
+// listOffsets
+// ---------------------------------------------------------------------------
+
+/// Completion callback for [`kafka_admin_AdminClient_list_offsets_async`].
+///
+/// Exactly one of `result` / `error` is non-null and the callback owns it: free
+/// `result` with [`kafka_admin_ListOffsetsResult_destroy`] or `error` with
+/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `result`, not as `error`.
+pub type kafka_admin_AdminClient_list_offsets_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListOffsetsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+
+/// Lists the offsets of the given partitions, blocking until every
+/// per-partition future has resolved (synchronous).
+///
+/// This is `listOffsets(Map<TopicPartition, OffsetSpec>, ListOffsetsOptions)`.
+/// Java's map becomes parallel arrays: entry `i` is `(topics[i], partitions[i])`
+/// with the `OffsetSpec` described below.
+///
+/// On success writes a [`kafka_admin_ListOffsetsResult_t`] to `*out_result`
+/// (free it with [`kafka_admin_ListOffsetsResult_destroy`]) and returns null.
+/// **A per-partition failure is not a call failure**: it is reported by
+/// [`kafka_admin_ListOffsetsResult_get_error`]. A non-null return means the
+/// request could not be submitted at all, and `*out_result` is left untouched.
+///
+/// # Parameters
+///
+/// - `topics` / `partitions`: parallel arrays of `count` entries. An entry with
+///   a NULL topic is skipped.
+/// - `is_timestamp` / `spec_timestamps`: the `OffsetSpec` for entry `i`. When
+///   `is_timestamp[i]` is true the spec is
+///   `OffsetSpec.forTimestamp(spec_timestamps[i])` for any value at all;
+///   otherwise `spec_timestamps[i]` selects one of the six no-argument
+///   factories through the `ListOffsets` wire sentinel Java's
+///   `KafkaAdminClient.getOffsetFromSpec` emits for it: `-1` = `latest()`,
+///   `-2` = `earliest()`, `-3` = `maxTimestamp()`, `-4` = `earliestLocal()`,
+///   `-5` = `latestTiered()`, `-6` = `earliestPendingUpload()`. Any other value
+///   with `is_timestamp[i]` false is rejected. The flag is needed because that
+///   projection is not injective — `forTimestamp(-2)` and `earliest()` both
+///   yield `-2`, yet Java treats them differently up to that point.
+/// - `timeout_ms`: per-request timeout, or negative for the client default.
+/// - `isolation_level`: Java's `IsolationLevel.id()` — `0` =
+///   `READ_UNCOMMITTED` (Java's `ListOffsetsOptions` default), `1` =
+///   `READ_COMMITTED`. Any other value is rejected.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics`, `partitions`, `is_timestamp` and
+/// `spec_timestamps` must have `count` valid entries each; `out_result` must be
+/// null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    is_timestamp: *const bool,
+    spec_timestamps: *const i64,
+    count: i32,
+    timeout_ms: i32,
+    isolation_level: i32,
+    out_result: *mut *mut kafka_admin_ListOffsetsResult_t,
+) -> *mut kafka_common_KafkaError_t {
+    let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
+    let outcome = unsafe {
+        admin_sync_value_op(admin, move |a| {
+            submit_list_offsets(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?)
+        })
+    };
+    unsafe { finish_sync(outcome, out_result, box_list_offsets_result) }
+}
+
+/// Lists offsets asynchronously. See [`kafka_admin_AdminClient_list_offsets`].
+///
+/// The callback fires exactly once, but not always on the same thread. It
+/// normally runs on the handle's dispatcher thread. It runs **synchronously on
+/// the calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, an unknown `isolation_level`, or a
+/// `spec_timestamps` entry that is neither flagged as a timestamp nor a
+/// recognised sentinel). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when the result
+/// arrives. Destroying the handle does not cause that — an outstanding operation
+/// holds its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks are not guaranteed to be serialised on one thread.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle; `topics`, `partitions`, `is_timestamp` and
+/// `spec_timestamps` must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    is_timestamp: *const bool,
+    spec_timestamps: *const i64,
+    count: i32,
+    timeout_ms: i32,
+    isolation_level: i32,
+    callback: kafka_admin_AdminClient_list_offsets_callback_t,
+    user_data: *mut c_void,
+) {
+    let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
+    unsafe {
+        admin_async_value_op(
+            admin,
+            user_data,
+            move |a| submit_list_offsets(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?),
+            move |outcome, ud| {
+                let (result, error) = match outcome {
+                    Ok(outcomes) => (box_list_offsets_result(outcomes), std::ptr::null_mut()),
+                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+                };
+                callback(result, error, ud);
+            },
+        )
+    };
+}
+
+// ---------------------------------------------------------------------------
 // MockAdminClient drivers
 //
 // Mock-only configuration methods (inherent on `MockAdminClient`, not part of
@@ -6645,6 +8254,104 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
         },
         Err(e) => box_error(e),
     }
+}
+
+/// Seeds the beginning offsets the mock's `listOffsets` reports for
+/// `OffsetSpec.earliest()`.
+///
+/// Mirrors `MockAdminClient.updateBeginningOffsets(Map<TopicPartition, Long>)`,
+/// which merges into (rather than replaces) the existing map. Entry `i` is
+/// `(topics[i], partitions[i]) -> offsets[i]`; an entry with a NULL topic is
+/// skipped.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle if `admin` does not wrap a mock
+/// (free it with `kafka_common_KafkaError_destroy`).
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    count: i32,
+) -> *mut kafka_common_KafkaError_t {
+    match unsafe { mock_ref(admin) } {
+        Ok(mock) => {
+            mock.update_beginning_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
+    }
+}
+
+/// Seeds the end offsets the mock's `listOffsets` reports for every
+/// `OffsetSpec` other than `earliest()` and `forTimestamp(...)`.
+///
+/// Mirrors `MockAdminClient.updateEndOffsets(Map<TopicPartition, Long>)`, which
+/// merges into (rather than replaces) the existing map. Entry `i` is
+/// `(topics[i], partitions[i]) -> offsets[i]`; an entry with a NULL topic is
+/// skipped.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle if `admin` does not wrap a mock
+/// (free it with `kafka_common_KafkaError_destroy`).
+///
+/// # Safety
+///
+/// `admin` must be null or a valid handle from an admin-client constructor;
+/// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
+    admin: *const kafka_admin_AdminClient_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    count: i32,
+) -> *mut kafka_common_KafkaError_t {
+    match unsafe { mock_ref(admin) } {
+        Ok(mock) => {
+            mock.update_end_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
+    }
+}
+
+/// Reads `count` `(topic, partition) -> offset` triples, skipping entries whose
+/// topic is NULL.
+///
+/// # Safety
+///
+/// `topics`, `partitions` and `offsets` must be null or have `count` readable
+/// entries each, every topic NULL or a valid C string.
+unsafe fn read_partition_offsets(
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    count: i32,
+) -> HashMap<TopicPartition, i64> {
+    let mut out = HashMap::new();
+    if topics.is_null() || partitions.is_null() || offsets.is_null() {
+        return out;
+    }
+    for i in 0..count.max(0) as usize {
+        let name_ptr = unsafe { *topics.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        out.insert(TopicPartition::new(name, unsafe { *partitions.add(i) }), unsafe {
+            *offsets.add(i)
+        });
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -6993,5 +8700,388 @@ mod tests {
         assert_eq!(opt_text(&flat.future_log_dir_c), None);
         assert_eq!(flat.current_offset_lag, -1);
         assert_eq!(flat.future_offset_lag, -1);
+    }
+
+    // -- B3: elections / reassignments / offsets ----------------------------
+    //
+    // The mock ignores every `*Options` argument, so as above each option
+    // builder is called twice with *asymmetric* values; a transposition cannot
+    // satisfy both cases. The input readers get their own tests because they
+    // carry the three `Optional` discriminants (all-partitions, cancel,
+    // is-timestamp) that no end-to-end test through the mock can distinguish.
+
+    #[test]
+    fn elect_leaders_options_maps_the_timeout() {
+        assert_eq!(elect_leaders_options(1_500).timeout(), Some(1_500));
+        assert_eq!(elect_leaders_options(-1).timeout(), None);
+    }
+
+    #[test]
+    fn alter_partition_reassignments_options_maps_each_flag_to_its_own_field() {
+        let options = alter_partition_reassignments_options(2_500, false);
+        assert_eq!(options.timeout(), Some(2_500));
+        assert!(!options.should_allow_replication_factor_change());
+
+        // Reversed, so a transposition cannot satisfy both cases.
+        let options = alter_partition_reassignments_options(-1, true);
+        assert_eq!(options.timeout(), None);
+        assert!(options.should_allow_replication_factor_change());
+    }
+
+    #[test]
+    fn list_partition_reassignments_options_maps_the_timeout() {
+        assert_eq!(list_partition_reassignments_options(3_500).timeout(), Some(3_500));
+        assert_eq!(list_partition_reassignments_options(-7).timeout(), None);
+    }
+
+    #[test]
+    fn list_offsets_options_maps_each_field_to_its_own_slot() {
+        let options = list_offsets_options(4_500, 1).unwrap();
+        assert_eq!(options.timeout(), Some(4_500));
+        assert_eq!(options.isolation_level(), IsolationLevel::ReadCommitted);
+
+        // Reversed, so wiring the timeout into the isolation level (or vice
+        // versa) cannot satisfy both cases.
+        let options = list_offsets_options(-1, 0).unwrap();
+        assert_eq!(options.timeout(), None);
+        assert_eq!(options.isolation_level(), IsolationLevel::ReadUncommitted);
+    }
+
+    #[test]
+    fn list_offsets_options_rejects_an_unknown_isolation_level() {
+        // Mirrors Java's `IsolationLevel.forId` IllegalArgumentException.
+        assert_eq!(list_offsets_options(0, 2).unwrap_err().message(), "Unknown isolation level 2");
+        // Out of u8 range, so `for_id` is never reached; same wording.
+        assert_eq!(list_offsets_options(0, -1).unwrap_err().message(), "Unknown isolation level -1");
+        assert_eq!(
+            list_offsets_options(0, 300).unwrap_err().message(),
+            "Unknown isolation level 300"
+        );
+    }
+
+    #[test]
+    fn read_election_type_maps_javas_byte_values() {
+        assert_eq!(read_election_type(0).unwrap(), ElectionType::Preferred);
+        assert_eq!(read_election_type(1).unwrap(), ElectionType::Unclean);
+        // Mirrors Java's `ElectionType.valueOf(byte)` IllegalArgumentException,
+        // both inside and outside the i8 range.
+        assert_eq!(
+            read_election_type(2).unwrap_err().message(),
+            "Value 2 must be one of [PREFERRED, UNCLEAN]"
+        );
+        assert_eq!(
+            read_election_type(1_000).unwrap_err().message(),
+            "Value 1000 must be one of [PREFERRED, UNCLEAN]"
+        );
+    }
+
+    #[test]
+    fn offset_spec_for_sentinel_inverts_get_offset_from_spec() {
+        // Every value here is the `ListOffsets` sentinel Java's
+        // `KafkaAdminClient.getOffsetFromSpec` emits for that factory, so a
+        // transposed pair would make one of these fail.
+        assert_eq!(offset_spec_for_sentinel(-1), Some(OffsetSpec::Latest));
+        assert_eq!(offset_spec_for_sentinel(-2), Some(OffsetSpec::Earliest));
+        assert_eq!(offset_spec_for_sentinel(-3), Some(OffsetSpec::MaxTimestamp));
+        assert_eq!(offset_spec_for_sentinel(-4), Some(OffsetSpec::EarliestLocal));
+        assert_eq!(offset_spec_for_sentinel(-5), Some(OffsetSpec::LatestTiered));
+        assert_eq!(offset_spec_for_sentinel(-6), Some(OffsetSpec::EarliestPendingUpload));
+        assert_eq!(offset_spec_for_sentinel(-7), None);
+        assert_eq!(offset_spec_for_sentinel(0), None);
+        assert_eq!(offset_spec_for_sentinel(1_700_000_000_000), None);
+    }
+
+    /// Builds the `*const *const c_char` array a C caller would pass, keeping
+    /// the `CString`s alive for the duration of the call.
+    fn topic_array(names: &[&str]) -> (Vec<CString>, Vec<*const c_char>) {
+        let owned: Vec<CString> = names.iter().map(|n| CString::new(*n).unwrap()).collect();
+        let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+        (owned, ptrs)
+    }
+
+    #[test]
+    fn read_optional_partition_set_distinguishes_all_from_empty() {
+        let (_owned, ptrs) = topic_array(&["t"]);
+        let partitions = [3i32];
+
+        // all_partitions = true is Java's absent Set / Optional.empty(): the
+        // arrays are not read at all.
+        let all = unsafe { read_optional_partition_set(true, ptrs.as_ptr(), partitions.as_ptr(), 1) };
+        assert_eq!(all, None);
+
+        let selected = unsafe { read_optional_partition_set(false, ptrs.as_ptr(), partitions.as_ptr(), 1) };
+        assert_eq!(selected, Some(HashSet::from([TopicPartition::new("t".to_string(), 3)])));
+
+        // An empty selection is Some(empty), not None — the distinction the
+        // flag exists for.
+        let empty = unsafe { read_optional_partition_set(false, ptrs.as_ptr(), partitions.as_ptr(), 0) };
+        assert_eq!(empty, Some(HashSet::new()));
+    }
+
+    #[test]
+    fn read_reassignments_maps_cancel_to_an_empty_optional() {
+        let (_owned, ptrs) = topic_array(&["t", "t"]);
+        let partitions = [0i32, 1];
+        let cancel = [false, true];
+        let replicas = [2i32, 3];
+        // The cancelled entry deliberately supplies a non-empty replica list;
+        // the flag must win, and the list must not be read.
+        let replica_ptrs = [replicas.as_ptr(), replicas.as_ptr()];
+        let replica_counts = [2i32, 2];
+
+        let out = unsafe {
+            read_reassignments(
+                ptrs.as_ptr(),
+                partitions.as_ptr(),
+                cancel.as_ptr(),
+                replica_ptrs.as_ptr(),
+                replica_counts.as_ptr(),
+                2,
+            )
+        }
+        .unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[&TopicPartition::new("t".to_string(), 0)]
+                .as_ref()
+                .unwrap()
+                .target_replicas(),
+            &[2, 3]
+        );
+        assert!(out[&TopicPartition::new("t".to_string(), 1)].is_none());
+    }
+
+    #[test]
+    fn read_reassignments_rejects_an_empty_non_cancelled_replica_list() {
+        let (_owned, ptrs) = topic_array(&["t"]);
+        let partitions = [0i32];
+        let cancel = [false];
+        let replicas = [0i32];
+        let replica_ptrs = [replicas.as_ptr()];
+        let replica_counts = [0i32];
+
+        // Java's `NewPartitionReassignment(List<Integer>)` throws here, so an
+        // empty list must stay an error rather than becoming a cancellation.
+        let error = unsafe {
+            read_reassignments(
+                ptrs.as_ptr(),
+                partitions.as_ptr(),
+                cancel.as_ptr(),
+                replica_ptrs.as_ptr(),
+                replica_counts.as_ptr(),
+                1,
+            )
+        }
+        .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "reassignment for t-0 at index 0: Cannot create a new partition reassignment without any replicas"
+        );
+    }
+
+    #[test]
+    fn read_offset_specs_distinguishes_a_timestamp_from_a_sentinel() {
+        let (_owned, ptrs) = topic_array(&["t", "t", "t"]);
+        let partitions = [0i32, 1, 2];
+        let is_timestamp = [false, true, true];
+        // Entry 0 and entry 1 carry the same value: without the flag they would
+        // be indistinguishable, which is the whole reason it exists.
+        let values = [EARLIEST_TIMESTAMP, EARLIEST_TIMESTAMP, 1_700_000_000_000];
+
+        let out =
+            unsafe { read_offset_specs(ptrs.as_ptr(), partitions.as_ptr(), is_timestamp.as_ptr(), values.as_ptr(), 3) }
+                .unwrap();
+
+        assert_eq!(out[&TopicPartition::new("t".to_string(), 0)], OffsetSpec::Earliest);
+        assert_eq!(
+            out[&TopicPartition::new("t".to_string(), 1)],
+            OffsetSpec::Timestamp(EARLIEST_TIMESTAMP)
+        );
+        assert_eq!(
+            out[&TopicPartition::new("t".to_string(), 2)],
+            OffsetSpec::Timestamp(1_700_000_000_000)
+        );
+    }
+
+    #[test]
+    fn read_offset_specs_rejects_a_non_sentinel_without_the_flag() {
+        let (_owned, ptrs) = topic_array(&["t"]);
+        let partitions = [4i32];
+        let is_timestamp = [false];
+        let values = [42i64];
+
+        let error =
+            unsafe { read_offset_specs(ptrs.as_ptr(), partitions.as_ptr(), is_timestamp.as_ptr(), values.as_ptr(), 1) }
+                .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "offset spec for t-4 at index 0: 42 is not a ListOffsets timestamp sentinel; \
+             pass is_timestamp=true to request OffsetSpec.forTimestamp(42)"
+        );
+    }
+
+    // -- Result flatteners --------------------------------------------------
+    //
+    // Driven through the public getters, i.e. exactly as a C caller sees them,
+    // so index addressing and the borrowed-pointer contract are covered too.
+
+    #[test]
+    fn elect_leaders_result_reports_per_partition_errors_in_sorted_order() {
+        let outcomes = HashMap::from([
+            (TopicPartition::new("b".to_string(), 0), None),
+            (
+                TopicPartition::new("a".to_string(), 10),
+                Some(KafkaError::new(Errors::LeaderNotAvailable)),
+            ),
+            (TopicPartition::new("a".to_string(), 2), None),
+        ]);
+        let result = box_elect_leaders_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_ElectLeadersResult_count(result), 3);
+            // Sorted by topic then *numeric* partition: 2 before 10.
+            let keys: Vec<(String, i32)> = (0..3)
+                .map(|i| {
+                    (
+                        CStr::from_ptr(kafka_admin_ElectLeadersResult_get_topic(result, i))
+                            .to_string_lossy()
+                            .to_string(),
+                        kafka_admin_ElectLeadersResult_get_partition(result, i),
+                    )
+                })
+                .collect();
+            assert_eq!(keys, [("a".to_string(), 2), ("a".to_string(), 10), ("b".to_string(), 0)]);
+
+            assert!(kafka_admin_ElectLeadersResult_get_error(result, 0).is_null());
+            let failed = kafka_admin_ElectLeadersResult_get_error(result, 1);
+            assert!(!failed.is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(failed),
+                Errors::LeaderNotAvailable.code() as i32
+            );
+            assert!(kafka_admin_ElectLeadersResult_get_error(result, 2).is_null());
+
+            // Out-of-range indices are null / -1, never a crash.
+            assert!(kafka_admin_ElectLeadersResult_get_topic(result, 3).is_null());
+            assert!(kafka_admin_ElectLeadersResult_get_topic(result, -1).is_null());
+            assert_eq!(kafka_admin_ElectLeadersResult_get_partition(result, -1), -1);
+            assert!(kafka_admin_ElectLeadersResult_get_error(result, 3).is_null());
+            kafka_admin_ElectLeadersResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn alter_partition_reassignments_result_reports_per_partition_errors() {
+        let outcomes = HashMap::from([
+            (TopicPartition::new("t".to_string(), 0), Ok(())),
+            (
+                TopicPartition::new("t".to_string(), 1),
+                Err(KafkaError::new(Errors::UnknownTopicOrPartition)),
+            ),
+        ]);
+        let result = box_alter_partition_reassignments_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_count(result), 2);
+            assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, 0), 0);
+            assert!(kafka_admin_AlterPartitionReassignmentsResult_get_error(result, 0).is_null());
+            let failed = kafka_admin_AlterPartitionReassignmentsResult_get_error(result, 1);
+            assert!(!failed.is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(failed),
+                Errors::UnknownTopicOrPartition.code() as i32
+            );
+            kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn list_partition_reassignments_result_carries_all_three_replica_lists() {
+        let reassignments = HashMap::from([(
+            TopicPartition::new("t".to_string(), 0),
+            PartitionReassignment::new(vec![0, 1, 2], vec![3], vec![0, 2]),
+        )]);
+        let result = box_list_partition_reassignments_result(reassignments);
+        unsafe {
+            assert_eq!(kafka_admin_ListPartitionReassignmentsResult_count(result), 1);
+            let value = kafka_admin_ListPartitionReassignmentsResult_get_value(result, 0);
+            assert!(!value.is_null());
+
+            // Asserting all three lists with distinct contents catches a
+            // transposition between them.
+            assert_eq!(kafka_admin_PartitionReassignment_replica_count(value), 3);
+            let replicas: Vec<i32> = (0..3).map(|i| kafka_admin_PartitionReassignment_replica(value, i)).collect();
+            assert_eq!(replicas, [0, 1, 2]);
+
+            assert_eq!(kafka_admin_PartitionReassignment_adding_replica_count(value), 1);
+            assert_eq!(kafka_admin_PartitionReassignment_adding_replica(value, 0), 3);
+
+            assert_eq!(kafka_admin_PartitionReassignment_removing_replica_count(value), 2);
+            let removing: Vec<i32> = (0..2)
+                .map(|i| kafka_admin_PartitionReassignment_removing_replica(value, i))
+                .collect();
+            assert_eq!(removing, [0, 2]);
+
+            // Out-of-range broker indices are -1, never a crash.
+            assert_eq!(kafka_admin_PartitionReassignment_replica(value, 3), -1);
+            assert_eq!(kafka_admin_PartitionReassignment_adding_replica(value, -1), -1);
+            assert_eq!(kafka_admin_PartitionReassignment_removing_replica(value, 9), -1);
+            assert!(kafka_admin_ListPartitionReassignmentsResult_get_value(result, 1).is_null());
+            kafka_admin_ListPartitionReassignmentsResult_destroy(result);
+        }
+    }
+
+    #[test]
+    fn list_offsets_result_carries_value_and_error_per_partition() {
+        let outcomes = HashMap::from([
+            (
+                TopicPartition::new("t".to_string(), 0),
+                Ok(ListOffsetsResultInfo::new(42, 1_700_000_000_000, Some(7))),
+            ),
+            (
+                TopicPartition::new("t".to_string(), 1),
+                Ok(ListOffsetsResultInfo::new(5, -1, None)),
+            ),
+            (
+                TopicPartition::new("t".to_string(), 2),
+                Err(KafkaError::new(Errors::UnknownTopicOrPartition)),
+            ),
+        ]);
+        let result = box_list_offsets_result(outcomes);
+        unsafe {
+            assert_eq!(kafka_admin_ListOffsetsResult_count(result), 3);
+
+            // Distinct offset and timestamp catch a transposition between them.
+            let info = kafka_admin_ListOffsetsResult_get_value(result, 0);
+            assert!(!info.is_null());
+            assert_eq!(kafka_admin_ListOffsetsResultInfo_offset(info), 42);
+            assert_eq!(kafka_admin_ListOffsetsResultInfo_timestamp(info), 1_700_000_000_000);
+            let mut epoch = -99i32;
+            assert!(kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &mut epoch));
+            assert_eq!(epoch, 7);
+            assert!(kafka_admin_ListOffsetsResult_get_error(result, 0).is_null());
+
+            // Java's `Optional.empty()` leader epoch: false, out-param untouched.
+            let info = kafka_admin_ListOffsetsResult_get_value(result, 1);
+            assert_eq!(kafka_admin_ListOffsetsResultInfo_offset(info), 5);
+            assert_eq!(kafka_admin_ListOffsetsResultInfo_timestamp(info), -1);
+            let mut epoch = -99i32;
+            assert!(!kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &mut epoch));
+            assert_eq!(epoch, -99);
+            // A null out-param is tolerated.
+            assert!(!kafka_admin_ListOffsetsResultInfo_leader_epoch(info, std::ptr::null_mut()));
+
+            // The failed partition has an error and *no* value.
+            assert!(kafka_admin_ListOffsetsResult_get_value(result, 2).is_null());
+            let failed = kafka_admin_ListOffsetsResult_get_error(result, 2);
+            assert!(!failed.is_null());
+            assert_eq!(
+                common::kafka_common_KafkaError_code(failed),
+                Errors::UnknownTopicOrPartition.code() as i32
+            );
+
+            assert!(kafka_admin_ListOffsetsResult_get_value(result, 3).is_null());
+            assert!(kafka_admin_ListOffsetsResult_get_error(result, -1).is_null());
+            kafka_admin_ListOffsetsResult_destroy(result);
+        }
     }
 }
