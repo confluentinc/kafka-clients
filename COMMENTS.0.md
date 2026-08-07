@@ -5,93 +5,10 @@ introduced. 5 issues found (2 Bug / Behavior Mismatch worth fixing, 3 lower
 severity). The verification list of everything that checked out clean is at the
 bottom.
 
----
-
-## Issue 4: `af60796` invalidated the rationale of the Phase-41b regression guard it did not update — two comments and a test docstring now assert behavior the code no longer has, and one assertion is vacuous
-
-- **File**: `src/consumer/async_kafka_consumer.rs:3339-3348` (comment), `:7089-7097` (test docstring), `:7159-7169` (the two guard assertions); also `src/consumer/internals/consumer_network_thread.rs:1108-1109`
-- **Severity**: Design Flaw (documentation accuracy + test strength)
-- **Description**:
-  `af60796` correctly went around rewriting the comments its change falsified
-  — but missed the three that matter most, because they are the ones justifying
-  the guard for the original Phase-41b bug.
-
-  `:3339-3348` still reads:
-
-  > It must be the application-event `Notify` and NOT
-  > `network_thread_close.wakeup()`: **the latter fires the `WakeupTrigger`**,
-  > which is the *user-facing* `Consumer::wakeup()` cancellation token. […]
-  > Both `Notify`s wake the bg loop's network poll (`run_once` `select!` has an
-  > arm for each)
-
-  After `af60796`, `network_thread_close.wakeup()` fires the *same*
-  `event_notify` (`build_network_thread_close_fns`), not the trigger, and there
-  is only one `Notify` — the other `select!` arm is `token.cancelled()`. Both
-  sentences are now false.
-
-  `process_background_events_ack_pokes_bg_wakeup` (`:7089-7097`) repeats the
-  same claim in its docstring, and its last assertion
-
-  ```rust
-  assert!(consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(), ...)   // :7166
-  ```
-
-  is now **vacuous for the mutation the docstring describes**: substituting
-  `network_thread_close.wakeup()` for `wake_background_task()` no longer
-  cancels the token, so this assertion passes under the mutation. The test still
-  holds the line, but only through the preceding
-  `!handles.bg_wakeup_called.load(...)` assertion (`:7160-7164`), which works
-  because the fixture wraps the production closure with an observability flag.
-  Worth stating explicitly so the next Actor does not "simplify" the
-  `bg_wakeup_called` assertion away as redundant with the (now toothless) one
-  below it.
-
-  `consumer_network_thread.rs:1108-1109` has the same residue: "so
-  `signal_close()` followed by `wakeup.wakeup()` exits immediately" names the
-  field `af60796` removed.
-- **Expected**: rewrite `:3339-3348` and the `:7089-7097` docstring to the
-  post-`af60796` mechanism (both wakes go through the one `event_notify`; the
-  reason to call `wake_background_task()` rather than
-  `NetworkThreadCloseHandle::wakeup()` here is now layering/clarity, not the
-  trigger); either drop `:7166` or replace it with an assertion that still
-  discriminates; fix the `consumer_network_thread.rs:1108` comment to name the
-  `Notify`.
-- **Actual**: three comments describe the pre-`af60796` primitive, and the
-  documented mutation no longer trips the assertion written for it.
-
----
-
-## Issue 5: `af60796`'s rewrite of `AsyncKafkaConsumer::wakeup`'s comment (Critic-3 Issue 3) still overstates why the second statement is needed
-
-- **File**: `src/consumer/async_kafka_consumer.rs:2714-2731`
-- **Severity**: Design Flaw (minor — comment accuracy on a redundant call)
-- **Description**:
-  Critic-3 Issue 3 was "a no-op second call carrying a comment that describes
-  behavior the code does not have", and the resolution was "kept the second
-  call and made it true". The call is now a real bg poke, but the *necessity*
-  claim in the new comment is still wrong:
-
-  > Without it a `wakeup()` arriving while the bg loop is in its network poll is
-  > only acted on up to `MAX_POLL_TIMEOUT_MS` later.
-
-  `self.wakeup_trigger.wakeup()` on the line above cancels the token the bg task
-  observes (`WakeupTrigger::wakeup` → `sender.borrow().cancel()`,
-  `wakeup_trigger.rs:113-121`), and `run_once`'s poll `select!` has a
-  `token.cancelled()` arm that fires `network_wakeup.notify_one()`
-  (`consumer_network_thread.rs:727-731`). So the in-flight poll is already
-  returned at a safe boundary by the first statement whenever the trigger is
-  enabled. The second statement is genuinely load-bearing only after
-  `close_internal` step 1 has called `wakeup_trigger.disable()` (so the token is
-  never cancelled) — e.g. a `ConsumerHandle::wakeup()` racing a `close()` — and
-  is otherwise a redundant stored `Notify` permit that causes one spurious early
-  poll return.
-- **Expected**: say what is actually true — the token arm already covers the
-  enabled case; the poke is the fallback for the disabled-trigger window (and
-  keeps `ConsumerHandle::wakeup` uniform). Or drop the call and note the
-  disabled-trigger case. Either way the current justification should not survive
-  a third round.
-- **Actual**: the comment asserts a `MAX_POLL_TIMEOUT_MS` delay that the
-  `token.cancelled()` arm prevents.
+**All 5 issues are resolved** — each original comment plus its resolution is in
+`COMMENTS.DONE.0.md`. Fix commits: `f7e5eff` (issue 1) and `b53c941` (issue 2),
+both `fixup! 7b913ea`; `62ea49e` (issue 3), `fixup! 3002047`; and the
+`fixup! af60796` commit for issues 4-5.
 
 ---
 
