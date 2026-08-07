@@ -28,8 +28,11 @@ from admin import (
     AlterConfigOp, ClientMetricsResourceListing, ClusterDescription, Config,
     ConfigEntry, ConfigResource, ConfigResourceType, OpType, ReplicaLogDirInfo,
     TopicPartitionReplica,
+    ElectionType, IsolationLevel, ListOffsetsResultInfo, NewPartitionReassignment,
+    OffsetSpec, PartitionReassignment,
     _to_describe_log_dirs, _to_describe_replica_log_dirs,
-    _to_full_config_entry, _to_log_dir_description,
+    _to_elect_leaders, _to_full_config_entry, _to_list_offsets,
+    _to_list_partition_reassignments, _to_log_dir_description,
 )
 from producer import KafkaError
 
@@ -1075,3 +1078,279 @@ def test_sigint_while_waiting_drains_callback_then_reraises():
 
         # The client is still usable afterwards.
         assert "before-sigint" in admin.list_topics(list_internal=True)
+
+
+# -- B3: elections, reassignments, offsets -----------------------------------
+
+def test_elect_leaders_call_failure_raises():
+    """`MockAdminClient.electLeaders` throws UnsupportedOperationException
+    ("Not implemented yet", MockAdminClient.java:792-798). Java exposes one
+    future for the whole election, so that is a *call* failure and it raises,
+    rather than landing as a per-partition error."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "el-topic", num_partitions=2)
+        with pytest.raises(KafkaError) as exc:
+            admin.elect_leaders(ElectionType.PREFERRED, [("el-topic", 0), ("el-topic", 1)])
+        assert exc.value.code == UNSUPPORTED_VERSION
+        assert str(exc.value) == "Not implemented yet"
+
+        # `partitions=None` is Java's null Set: every partition in the cluster.
+        with pytest.raises(KafkaError):
+            admin.elect_leaders(ElectionType.UNCLEAN)
+
+
+def test_elect_leaders_rejects_bad_election_type():
+    """Mirrors Java's `ElectionType.valueOf(byte)` IllegalArgumentException,
+    raised before the RPC is submitted."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.elect_leaders(7)
+        assert str(exc.value) == "Value 7 must be one of [PREFERRED, UNCLEAN]"
+
+
+def test_alter_partition_reassignments_partial_failure():
+    """The mock reassigns against its in-memory map
+    (MockAdminClient.java:1141-1167). A partition it does not know fails with
+    UNKNOWN_TOPIC_OR_PARTITION per partition, so the call itself succeeds."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "ra-topic", num_partitions=1, replication_factor=3)
+
+        result = admin.alter_partition_reassignments({
+            ("ra-topic", 0): NewPartitionReassignment([1, 2]),
+            ("ra-missing", 0): NewPartitionReassignment([1, 2]),
+        })
+        assert result[("ra-topic", 0)] is None
+        assert result[("ra-missing", 0)].code == UNKNOWN_TOPIC_OR_PARTITION
+
+
+def test_list_partition_reassignments_round_trip():
+    """Reassigning to {1, 2} on a 3-broker mock, whose partitions are seeded
+    with every broker as a replica (MockAdminClient.java:412-420), removes
+    broker 0 and adds nothing. Asserting all three lists with distinct contents
+    is what catches a transposition between them."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "lr-topic", num_partitions=1, replication_factor=3)
+        assert admin.alter_partition_reassignments({
+            ("lr-topic", 0): NewPartitionReassignment([1, 2])}) == {("lr-topic", 0): None}
+
+        # `partitions=None` is Java's Optional.empty(): list everything.
+        listed = admin.list_partition_reassignments()
+        assert set(listed) == {("lr-topic", 0)}
+        reassignment = listed[("lr-topic", 0)]
+        assert isinstance(reassignment, PartitionReassignment)
+        assert reassignment.replicas == [0, 1, 2]
+        assert reassignment.adding_replicas == []
+        assert reassignment.removing_replicas == [0]
+
+        # Restricting to a partition with no reassignment yields nothing, so
+        # the result is smaller than the request.
+        assert admin.list_partition_reassignments([("lr-other", 0)]) == {}
+
+        # A None value is Java's empty Optional, which reverts the
+        # reassignment (Admin.java:1142-1143).
+        assert admin.alter_partition_reassignments({("lr-topic", 0): None}) == {
+            ("lr-topic", 0): None}
+        assert admin.list_partition_reassignments() == {}
+
+
+def test_alter_partition_reassignments_rejects_empty_replicas():
+    """An empty target-replica list is Java's
+    `NewPartitionReassignment(List<Integer>)` IllegalArgumentException, not a
+    cancellation — the None value is the only way to cancel."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "ra-empty", num_partitions=1, replication_factor=3)
+        with pytest.raises(KafkaError) as exc:
+            admin.alter_partition_reassignments({
+                ("ra-empty", 0): NewPartitionReassignment([])})
+        assert str(exc.value) == (
+            "reassignment for ra-empty-0 at index 0: Cannot create a new partition "
+            "reassignment without any replicas")
+        # Nothing was submitted.
+        assert admin.list_partition_reassignments() == {}
+
+
+def test_list_offsets_earliest_and_latest():
+    """The mock answers earliest() from `beginningOffsets` and everything else
+    from `endOffsets` (MockAdminClient.java:1220-1240). Asking for different
+    specs on two partitions with different seeded offsets catches a transposed
+    spec list. An unseeded partition reports -1 rather than Java's NPE on
+    unboxing a null Long, a divergence documented in the Rust mock."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "lo-topic", num_partitions=2)
+        admin.update_beginning_offsets({("lo-topic", 0): 5, ("lo-topic", 1): 7})
+        admin.update_end_offsets({("lo-topic", 0): 105, ("lo-topic", 1): 107})
+
+        result = admin.list_offsets({
+            ("lo-topic", 0): OffsetSpec.earliest(),
+            ("lo-topic", 1): OffsetSpec.latest(),
+            ("lo-unseeded", 0): OffsetSpec.max_timestamp(),
+        })
+        info = result[("lo-topic", 0)]
+        assert isinstance(info, ListOffsetsResultInfo)
+        assert info.offset == 5
+        # The mock reports no timestamp and no leader epoch.
+        assert info.timestamp == -1
+        assert info.leader_epoch is None
+
+        assert result[("lo-topic", 1)].offset == 107
+        assert result[("lo-unseeded", 0)].offset == -1
+
+
+def test_list_offsets_timestamp_flag_is_load_bearing():
+    """`for_timestamp(-2)` and `earliest()` are the same wire value once Java's
+    `getOffsetFromSpec` has run, so the two are only distinguishable because
+    OffsetSpec carries an explicit flag. The mock proves they are not
+    interchangeable: a TimestampSpec fails that partition with
+    UnsupportedOperationException (MockAdminClient.java:1230), while earliest()
+    returns the seeded offset. This is a *per-partition* error, because Java's
+    ListOffsetsResult holds one future per partition."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "lo-ts", num_partitions=2)
+        admin.update_beginning_offsets({("lo-ts", 0): 11})
+
+        result = admin.list_offsets({
+            ("lo-ts", 0): OffsetSpec.earliest(),
+            ("lo-ts", 1): OffsetSpec.for_timestamp(OffsetSpec._EARLIEST),
+        }, isolation_level=IsolationLevel.READ_COMMITTED)
+        assert result[("lo-ts", 0)].offset == 11
+        assert result[("lo-ts", 1)].code == UNSUPPORTED_VERSION
+
+
+def test_list_offsets_rejects_bad_isolation_level():
+    """Mirrors Java's `IsolationLevel.forId` IllegalArgumentException."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "lo-bad")
+        with pytest.raises(KafkaError) as exc:
+            admin.list_offsets({("lo-bad", 0): OffsetSpec.latest()}, isolation_level=9)
+        assert str(exc.value) == "Unknown isolation level 9"
+
+
+def test_b3_empty_batches():
+    """Empty batches resolve without a round trip, as in B1/B2."""
+    with MockAdminClient(1) as admin:
+        assert admin.alter_partition_reassignments({}) == {}
+        assert admin.list_offsets({}) == {}
+        assert admin.list_partition_reassignments([]) == {}
+
+
+def test_mock_offset_drivers_are_mock_only():
+    """`update_beginning_offsets` / `update_end_offsets` live on
+    `_MockAdminClientMixin` alongside `timeout_next_request`, so they are not
+    part of the production surface at all. (The FFI *does* also reject a
+    production handle at runtime; that arm is covered by the C test
+    `test_mock_admin_offset_drivers_reject_non_mock`, which can reach it
+    because C has one handle type for both clients.)"""
+    admin = AdminClient({"bootstrap.servers": "localhost:9092"})
+    try:
+        assert not hasattr(admin, "update_beginning_offsets")
+        assert not hasattr(admin, "update_end_offsets")
+        assert not hasattr(admin, "timeout_next_request")
+    finally:
+        admin.close(timeout=1.0)
+
+    with MockAdminClient(1) as mock:
+        assert hasattr(mock, "update_beginning_offsets")
+        assert hasattr(mock, "update_end_offsets")
+
+
+async def test_async_b3_round_trip():
+    admin = AsyncMockAdminClient(3)
+    try:
+        await admin.create_topics([NewTopic("async-b3", 1, 3)])
+        assert await admin.alter_partition_reassignments({
+            ("async-b3", 0): NewPartitionReassignment([1, 2])}) == {("async-b3", 0): None}
+
+        listed = await admin.list_partition_reassignments()
+        assert listed[("async-b3", 0)].removing_replicas == [0]
+
+        # The mock drivers are plain sync methods, even on the async client:
+        # they only mutate in-memory state, exactly as `timeout_next_request` does.
+        admin.update_end_offsets({("async-b3", 0): 77})
+        offsets = await admin.list_offsets({("async-b3", 0): OffsetSpec.latest()})
+        assert offsets[("async-b3", 0)].offset == 77
+    finally:
+        await admin.close()
+
+
+async def test_async_elect_leaders_call_failure_raises():
+    """The async mirror of the sync call-failure arm: a single-future RPC
+    raises rather than reporting per-key."""
+    admin = AsyncMockAdminClient(1)
+    try:
+        await admin.create_topics([NewTopic("async-el", 1, 1)])
+        with pytest.raises(KafkaError) as exc:
+            await admin.elect_leaders(ElectionType.PREFERRED, [("async-el", 0)])
+        assert exc.value.code == UNSUPPORTED_VERSION
+    finally:
+        await admin.close()
+
+
+def test_b3_handles_survive_gc_of_intermediate_objects():
+    """Drained B3 results own no borrowed pointers, so they stay valid after the
+    result handle is destroyed and a GC pass runs."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "gc-b3", num_partitions=1, replication_factor=3)
+        admin.alter_partition_reassignments({
+            ("gc-b3", 0): NewPartitionReassignment([1, 2])})
+        admin.update_end_offsets({("gc-b3", 0): 3})
+
+        listed = admin.list_partition_reassignments()
+        offsets = admin.list_offsets({("gc-b3", 0): OffsetSpec.latest()})
+        gc.collect()
+        assert listed[("gc-b3", 0)].replicas == [0, 1, 2]
+        assert offsets[("gc-b3", 0)].offset == 3
+
+
+# -- direct converter coverage (unreachable through the mock) -----------------
+
+def test_to_list_offsets_maps_both_arms():
+    """The mock never reports a timestamp or a leader epoch, so the populated
+    arm is only reachable here. Distinct offset/timestamp/epoch values catch a
+    transposed tuple field."""
+    converted = _to_list_offsets({
+        ("t", 0): (None, (42, 1_700_000_000_000, 7)),
+        ("t", 1): (None, (5, -1, None)),
+        ("t", 2): ((3, "boom", False, False), None),
+    })
+    assert converted[("t", 0)].offset == 42
+    assert converted[("t", 0)].timestamp == 1_700_000_000_000
+    assert converted[("t", 0)].leader_epoch == 7
+    assert converted[("t", 1)].leader_epoch is None
+    error = converted[("t", 2)]
+    assert isinstance(error, KafkaError)
+    assert error.code == 3
+    assert str(error) == "boom"
+
+
+def test_to_list_partition_reassignments_keeps_the_three_lists_apart():
+    """Three distinct lists, so a transposed tuple field fails."""
+    converted = _to_list_partition_reassignments({("t", 0): ([0, 1, 2], [3], [0, 2])})
+    reassignment = converted[("t", 0)]
+    assert reassignment.replicas == [0, 1, 2]
+    assert reassignment.adding_replicas == [3]
+    assert reassignment.removing_replicas == [0, 2]
+
+
+def test_to_elect_leaders_maps_none_to_success():
+    """Java's per-partition value is an Optional<Throwable>, so None is success
+    rather than a missing value."""
+    converted = _to_elect_leaders({("t", 0): None, ("t", 1): (9, "nope", True, False)})
+    assert converted[("t", 0)] is None
+    assert converted[("t", 1)].code == 9
+    assert converted[("t", 1)].is_retriable is True
+
+
+def test_offset_spec_factories_use_javas_sentinels():
+    """Each factory's sentinel is the value Java's
+    `KafkaAdminClient.getOffsetFromSpec` emits for it, so a transposed pair
+    fails here."""
+    assert (OffsetSpec.latest().is_timestamp, OffsetSpec.latest().value) == (False, -1)
+    assert (OffsetSpec.earliest().is_timestamp, OffsetSpec.earliest().value) == (False, -2)
+    assert OffsetSpec.max_timestamp().value == -3
+    assert OffsetSpec.earliest_local().value == -4
+    assert OffsetSpec.latest_tiered().value == -5
+    assert OffsetSpec.earliest_pending_upload().value == -6
+    stamped = OffsetSpec.for_timestamp(-2)
+    assert (stamped.is_timestamp, stamped.value) == (True, -2)
+    # Same value, different spec: the flag is the only thing separating them.
+    assert stamped != OffsetSpec.earliest()
