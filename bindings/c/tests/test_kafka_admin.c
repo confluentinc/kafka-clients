@@ -737,6 +737,88 @@ static void test_kafka_admin_b5b_empty_password_is_a_per_user_error(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* B6 argument validation and the empty batches, all before any network I/O.
+ * `abortTransaction` and `forceTerminateTransaction` have no result handle at
+ * all -- Java's AbortTransactionResult exposes only all() and
+ * TerminateTransactionResult only result() -- so their marshaling failures are
+ * the plain error return. */
+static void test_kafka_admin_b6_rejects_bad_arguments(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_common_KafkaError_t *err =
+        kafka_admin_AdminClient_abort_transaction(admin, NULL, 0, 1, 1, 1, RPC_TIMEOUT_MS);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("abort transaction topic must not be null",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* 65537 truncates to 1 under a bare cast, which is a legal epoch. */
+    err = kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 0, 1, 65537, 1,
+                                                    RPC_TIMEOUT_MS);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("producer epoch 65537 does not fit in a 16-bit epoch",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    err = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, RPC_TIMEOUT_MS);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("transactional id must not be null",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* With no keys requested there is nothing to send, so these return promptly
+ * against an unreachable broker. `listTransactions` is not here: it always has
+ * to discover the broker list, so it has no empty request. */
+static void test_kafka_admin_b6_empty_batches_need_no_broker(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_DescribeProducersResult_t *producers = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_producers(admin, NULL, NULL, 0, false, 0,
+                                                                RPC_TIMEOUT_MS, &producers));
+    TEST_ASSERT_NOT_NULL(producers);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeProducersResult_count(producers));
+    kafka_admin_DescribeProducersResult_destroy(producers);
+
+    kafka_admin_DescribeTransactionsResult_t *transactions = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_transactions(admin, NULL, 0, RPC_TIMEOUT_MS,
+                                                                   &transactions));
+    TEST_ASSERT_NOT_NULL(transactions);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeTransactionsResult_count(transactions));
+    kafka_admin_DescribeTransactionsResult_destroy(transactions);
+
+    kafka_admin_FenceProducersResult_t *fenced = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_fence_producers(admin, NULL, 0, RPC_TIMEOUT_MS, &fenced));
+    TEST_ASSERT_NOT_NULL(fenced);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_FenceProducersResult_count(fenced));
+    kafka_admin_FenceProducersResult_destroy(fenced);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* `listTransactions` against an unreachable broker: it must return rather than
+ * hang, and either outcome (a timeout error, or a real listing if something is
+ * listening on localhost:9092) is accepted and freed. */
+static void test_kafka_admin_list_transactions_returns_without_hanging(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_ListTransactionsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_transactions(
+        admin, NULL, 0, NULL, 0, -1, NULL, RPC_TIMEOUT_MS, &result);
+    if (err != NULL) {
+        TEST_ASSERT_NULL(result);
+        kafka_common_KafkaError_destroy(err);
+    } else {
+        TEST_ASSERT_NOT_NULL(result);
+        kafka_admin_ListTransactionsResult_destroy(result);
+    }
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_admin_new_succeeds);
@@ -762,5 +844,8 @@ int main(void) {
     RUN_TEST(test_kafka_admin_b5b_rejects_bad_arguments);
     RUN_TEST(test_kafka_admin_b5b_empty_batches_need_no_broker);
     RUN_TEST(test_kafka_admin_b5b_empty_password_is_a_per_user_error);
+    RUN_TEST(test_kafka_admin_b6_rejects_bad_arguments);
+    RUN_TEST(test_kafka_admin_b6_empty_batches_need_no_broker);
+    RUN_TEST(test_kafka_admin_list_transactions_returns_without_hanging);
     return UNITY_END();
 }
