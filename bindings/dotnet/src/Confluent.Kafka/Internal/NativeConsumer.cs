@@ -1765,6 +1765,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
+        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
+        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
+        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
         try
         {
             NativeMethods.ConsumerCloseAsync(
@@ -1804,6 +1814,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
+        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
+        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
+        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
         try
         {
             context.RegisterCancellation(cancellationToken, Wakeup);
@@ -1871,6 +1891,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
+        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
+        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
+        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
         try
         {
             context.RegisterCancellation(cancellationToken, Wakeup);
@@ -1912,6 +1942,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
+        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
+        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
+        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
         try
         {
             context.RegisterCancellation(cancellationToken, Wakeup);
@@ -1952,6 +1992,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
+        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
+        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
+        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
         try
         {
             context.RegisterCancellation(cancellationToken, Wakeup);
