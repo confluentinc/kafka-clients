@@ -628,6 +628,85 @@ static void test_kafka_admin_b4_empty_batches_need_no_broker(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* B5b argument validation, all of it before any network I/O. `updateFeatures`
+ * is the one admin RPC whose *client-side* validation can fail before the
+ * request is enqueued (KafkaAdminClient.updateFeatures throws
+ * IllegalArgumentException for an empty map), so that arm is only reachable
+ * through a production handle -- Java's MockAdminClient does not check. */
+static void test_kafka_admin_b5b_rejects_bad_arguments(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    /* A NULL renewer name: Java's KafkaPrincipal constructor rejects it. */
+    const char *types[1] = {"User"};
+    const char *names[1] = {NULL};
+    kafka_admin_CreateDelegationTokenResult_t *created = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_create_delegation_token(
+        admin, types, names, 1, NULL, NULL, -1, RPC_TIMEOUT_MS, &created);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(created);
+    TEST_ASSERT_EQUAL_STRING("renewer principal name at index 0 must not be null",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* An upsertion with no password is not a legal credential. */
+    const char *users[1] = {"alice"};
+    const bool upsertion[1] = {false};
+    const int32_t mechanisms[1] = {1};
+    kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
+    err = kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, RPC_TIMEOUT_MS,
+        &altered);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(altered);
+    TEST_ASSERT_EQUAL_STRING("scram alteration at index 0 is an upsertion with no password",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* An empty update map: the production client throws where the mock does
+     * not, so this arm has no coverage in test_mock_admin.c. */
+    kafka_admin_UpdateFeaturesResult_t *updated = NULL;
+    err = kafka_admin_AdminClient_update_features(admin, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, false,
+                                                  &updated);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(updated);
+    TEST_ASSERT_EQUAL_STRING("Feature updates can not be null or empty.",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* A repeated feature name: Java takes a Map, where the second update would
+     * silently replace the first. */
+    const char *duplicated[2] = {"metadata.version", "metadata.version"};
+    const int16_t levels[2] = {17, 18};
+    const int32_t upgrade[2] = {1, 1};
+    updated = NULL;
+    err = kafka_admin_AdminClient_update_features(admin, duplicated, levels, upgrade, 2,
+                                                  RPC_TIMEOUT_MS, false, &updated);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(updated);
+    TEST_ASSERT_EQUAL_STRING("feature update at index 1 repeats feature `metadata.version`",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* An empty SCRAM batch resolves without a broker, as every other empty batch
+ * does. The remaining six B5b RPCs always talk to the broker -- there is no
+ * empty request for `createDelegationToken` or `describeFeatures` -- so they
+ * are not listed here. */
+static void test_kafka_admin_b5b_empty_batches_need_no_broker(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, &altered));
+    TEST_ASSERT_NOT_NULL(altered);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterUserScramCredentialsResult_count(altered));
+    kafka_admin_AlterUserScramCredentialsResult_destroy(altered);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_admin_new_succeeds);
@@ -650,5 +729,7 @@ int main(void) {
     RUN_TEST(test_kafka_admin_b3_rejects_bad_arguments);
     RUN_TEST(test_kafka_admin_b4_rejects_bad_arguments);
     RUN_TEST(test_kafka_admin_b4_empty_batches_need_no_broker);
+    RUN_TEST(test_kafka_admin_b5b_rejects_bad_arguments);
+    RUN_TEST(test_kafka_admin_b5b_empty_batches_need_no_broker);
     return UNITY_END();
 }
