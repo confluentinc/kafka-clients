@@ -1763,9 +1763,22 @@ class _AdminBase:
                 self._resolve_value(drain, _to_list_topics),
                 self._free_value(drain))
 
+    @staticmethod
+    def _create_partitions_rows(new_partitions):
+        """``{topic: NewPartitions}`` -> the ``(topic, total_count,
+        assignments)`` rows the C extension unpacks.
+
+        ``assignments is None`` selects Java's ``increaseTo(int)`` and a list
+        selects ``increaseTo(int, List<List<Integer>>)`` — two different broker
+        requests. Java's ``MockAdminClient.createPartitions`` throws
+        (`MockAdminClient.java:626-628`) before either can be echoed back, so
+        this builder is the only place the distinction is observable.
+        """
+        return [np._to_spec(topic) for topic, np in new_partitions.items()]
+
     def _create_partitions_spec(self, new_partitions, timeout, validate_only,
                                 retry_on_quota_violation):
-        spec = [np._to_spec(topic) for topic, np in new_partitions.items()]
+        spec = self._create_partitions_rows(new_partitions)
         ms = _ms(timeout)
         drain = _lib.CreatePartitionsResult_drain
         return (lambda cb: _lib.Admin_create_partitions_async(
@@ -1774,9 +1787,20 @@ class _AdminBase:
                 self._resolve_value(drain, _to_create_partitions),
                 self._free_value(drain))
 
-    def _delete_records_spec(self, records_to_delete, timeout):
-        spec = [(str(topic), int(partition), int(rtd.before_offset))
+    @staticmethod
+    def _delete_records_rows(records_to_delete):
+        """``{(topic, partition): RecordsToDelete}`` -> the
+        ``(topic, partition, before_offset)`` rows the C extension unpacks.
+
+        Java's ``MockAdminClient.deleteRecords`` throws for any non-empty
+        request (`MockAdminClient.java:631-638`), so the column order is not
+        observable end to end.
+        """
+        return [(str(topic), int(partition), int(rtd.before_offset))
                 for (topic, partition), rtd in records_to_delete.items()]
+
+    def _delete_records_spec(self, records_to_delete, timeout):
+        spec = self._delete_records_rows(records_to_delete)
         ms = _ms(timeout)
         drain = _lib.DeleteRecordsResult_drain
         return (lambda cb: _lib.Admin_delete_records_async(self._h, spec, ms, cb),
@@ -1859,12 +1883,23 @@ class _AdminBase:
                 self._resolve_value(drain, _to_describe_replica_log_dirs),
                 self._free_value(drain))
 
-    def _elect_leaders_spec(self, election_type, partitions, timeout):
-        # `partitions is None` is Java's null Set: elect for every partition.
-        # It crosses as an explicit flag so it cannot be confused with an empty
-        # selection (`Admin.java:1096-1097`).
+    @staticmethod
+    def _elect_leaders_rows(partitions):
+        """Partition selection -> ``(all_partitions, rows)``.
+
+        ``partitions is None`` is Java's null Set: elect for every partition.
+        It crosses as an explicit flag so it cannot be confused with an empty
+        selection (`Admin.java:1096-1097`) — a cluster-wide election versus a
+        no-op. Java's ``MockAdminClient.electLeaders`` throws
+        (`MockAdminClient.java:797`), so neither the flag nor the column order
+        has an end-to-end observable.
+        """
         all_partitions = partitions is None
-        spec = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
+        rows = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
+        return (all_partitions, rows)
+
+    def _elect_leaders_spec(self, election_type, partitions, timeout):
+        all_partitions, spec = self._elect_leaders_rows(partitions)
         ms = _ms(timeout)
         drain = _lib.ElectLeadersResult_drain
         return (lambda cb: _lib.Admin_elect_leaders_async(
@@ -1983,14 +2018,29 @@ class _AdminBase:
                 self._resolve_value(drain, _to_list_consumer_group_offsets),
                 self._free_value(drain))
 
-    def _alter_consumer_group_offsets_spec(self, group_id, offsets, timeout):
-        # `leader_epoch is None` is Java's empty Optional; it crosses as a
-        # separate flag so epoch 0 stays distinguishable from an absent epoch.
-        spec = [(str(topic), int(partition), int(o.offset),
+    @staticmethod
+    def _alter_consumer_group_offsets_rows(offsets):
+        """``{(topic, partition): OffsetAndMetadata}`` -> the 6-tuples the C
+        extension unpacks.
+
+        Two nulls are load-bearing and neither survives a round trip — Java's
+        ``MockAdminClient.alterConsumerGroupOffsets`` throws
+        (`MockAdminClient.java:1213`):
+
+          - ``leader_epoch is None`` is Java's empty Optional and crosses as a
+            separate present-flag, so epoch 0 stays distinguishable from an
+            absent epoch;
+          - ``metadata is None`` stays ``None`` (a NULL pointer), distinct from
+            the empty string Java's ``OffsetAndMetadata`` defaults to.
+        """
+        return [(str(topic), int(partition), int(o.offset),
                  None if o.metadata is None else str(o.metadata),
                  o.leader_epoch is not None,
                  0 if o.leader_epoch is None else int(o.leader_epoch))
                 for (topic, partition), o in offsets.items()]
+
+    def _alter_consumer_group_offsets_spec(self, group_id, offsets, timeout):
+        spec = self._alter_consumer_group_offsets_rows(offsets)
         ms = _ms(timeout)
         drain = _lib.AlterConsumerGroupOffsetsResult_drain
         return (lambda cb: _lib.Admin_alter_consumer_group_offsets_async(
@@ -1998,8 +2048,19 @@ class _AdminBase:
                 self._resolve_value(drain, _to_keyed_errors),
                 self._free_value(drain))
 
+    @staticmethod
+    def _delete_consumer_group_offsets_rows(partitions):
+        """``{(topic, partition)}`` -> the ``(topic, partition)`` rows the C
+        extension unpacks.
+
+        Java's ``MockAdminClient.deleteConsumerGroupOffsets`` throws
+        (`MockAdminClient.java:783`), so the column order is not observable end
+        to end.
+        """
+        return [(str(t), int(p)) for t, p in partitions]
+
     def _delete_consumer_group_offsets_spec(self, group_id, partitions, timeout):
-        spec = [(str(t), int(p)) for t, p in partitions]
+        spec = self._delete_consumer_group_offsets_rows(partitions)
         ms = _ms(timeout)
         drain = _lib.DeleteConsumerGroupOffsetsResult_drain
         return (lambda cb: _lib.Admin_delete_consumer_group_offsets_async(
@@ -2015,13 +2076,25 @@ class _AdminBase:
                 self._resolve_value(drain, _to_keyed_errors),
                 self._free_value(drain))
 
-    def _remove_members_from_consumer_group_spec(self, group_id, members, reason, timeout):
-        # `members is None` selects Java's no-argument options constructor
-        # ("remove every member"). An empty *list* is not the same thing: Java's
-        # Collection constructor rejects it, so it must not silently become the
-        # destructive form.
+    @staticmethod
+    def _remove_members_rows(members):
+        """Member selection -> ``(remove_all, group_instance_ids)``.
+
+        ``members is None`` selects Java's no-argument options constructor
+        ("remove every member"). An empty *list* is not the same thing: Java's
+        Collection constructor rejects it, so it must not silently become the
+        destructive form. Java's
+        ``MockAdminClient.removeMembersFromConsumerGroup`` throws
+        (`MockAdminClient.java:801-803`), so the flag has no end-to-end
+        observable.
+        """
         remove_all = members is None
-        ids = [] if remove_all else [str(getattr(m, "group_instance_id", m)) for m in members]
+        ids = ([] if remove_all
+               else [str(getattr(m, "group_instance_id", m)) for m in members])
+        return (remove_all, ids)
+
+    def _remove_members_from_consumer_group_spec(self, group_id, members, reason, timeout):
+        remove_all, ids = self._remove_members_rows(members)
         ms = _ms(timeout)
         drain = _lib.RemoveMembersFromConsumerGroupResult_drain
         return (lambda cb: _lib.Admin_remove_members_from_consumer_group_async(
@@ -2084,10 +2157,26 @@ class _AdminBase:
                 self._resolve_value(drain, _to_delete_acls),
                 self._free_value(drain))
 
+    @staticmethod
+    def _quota_filter_rows(quota_filter):
+        """``ClientQuotaFilter`` -> the ``(entity_type, match_type, match_name)``
+        rows the C extension unpacks.
+
+        The match type is a real wire constant, not an invented code
+        (`DescribeClientQuotasRequest.MATCH_TYPE_*`), and it has to be explicit:
+        ``ofDefaultEntity`` and ``ofEntityType`` both carry no name, so a null
+        name alone cannot separate them. The name stays ``None`` where absent —
+        the C reader ignores it for the two nameless match types, which is
+        exactly why a transposition here would otherwise be silent. Java's
+        ``MockAdminClient.describeClientQuotas`` throws
+        (`MockAdminClient.java:1243`), so nothing else pins these three columns.
+        """
+        return [(str(c.entity_type), int(c.match_type),
+                 None if c.match_name is None else str(c.match_name))
+                for c in quota_filter.components]
+
     def _describe_client_quotas_spec(self, quota_filter, timeout):
-        components = [(str(c.entity_type), int(c.match_type),
-                       None if c.match_name is None else str(c.match_name))
-                      for c in quota_filter.components]
+        components = self._quota_filter_rows(quota_filter)
         strict = bool(quota_filter.strict)
         ms = _ms(timeout)
         drain = _lib.DescribeClientQuotasResult_drain
@@ -2554,8 +2643,10 @@ class Admin(_AdminBase):
         Returns ``{ClientQuotaEntity: None | KafkaError}``.
 
         An op whose ``value`` is ``None`` removes that quota. Two alterations
-        of the same entity raise, because Java keys the result by entity and
-        the second could only silently replace the first.
+        of the same entity raise. Java accepts them -- it sends both and only
+        the future map collapses -- but the result crosses as a flat array, so
+        the caller could not tell which alteration the surviving outcome
+        describes; see ``read_client_quota_alterations``.
         """
         self._check_closed()
         return self._run_sync(*self._alter_client_quotas_spec(entries, timeout, validate_only))
