@@ -62,5 +62,10 @@ is ignored citing "Issue 8 … structurally unsupported in Rust without a
 listener-side handle" — Phase 41 shipped `ConsumerHandle`, so that reason is
 obsolete and the test should be revisited.
 
+**Correction (Critic-3 round):** the fix recorded above was only half the story
+— the same trigger-vs-notify confusion was still live on the `close()` path,
+where a *disabled* `WakeupTrigger` made the shutdown wake completely inert. See
+[[critic3-wakeup-and-logstate-round]].
+
 See [[ffi-callback-bridging-phase7]], [[integration-test-infra]],
-[[phase41-consumer-handle]].
+[[phase41-consumer-handle]], [[critic3-wakeup-and-logstate-round]].
