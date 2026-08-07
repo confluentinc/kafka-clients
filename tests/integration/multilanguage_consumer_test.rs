@@ -580,7 +580,6 @@ async fn commit_async_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut
     consumer.close().await.expect("close");
 }
 
-
 multilanguage_consumer_test!(test_ml_metrics, metrics_reports_backend_registry);
 multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);
 multilanguage_consumer_test!(test_ml_subscribe_and_consume, subscribe_and_consume);
