@@ -3094,14 +3094,46 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_callback_t 
 /// Release hook for the `user_data` handed to
 /// [`kafka_consumer_ConsumerRebalanceListener_new`].
 ///
-/// Fired exactly once, when the listener registration is released: a subsequent
-/// `subscribe` / `subscribe_with_listener` replaced it, the consumer was
-/// destroyed, the subscribe call failed before it could register, or
-/// [`kafka_consumer_ConsumerRebalanceListener_destroy`] was called on a listener
-/// that was never subscribed. (Note `unsubscribe` / `close` do **not** release it
-/// — they clear the subscription but keep the registered listener, matching
-/// Java's `SubscriptionState.unsubscribe()`.) May run on **any** thread, so it
-/// must be thread-agnostic.
+/// Fired **exactly once**, when the client drops its last reference to the
+/// listener. May run on **any** thread, so it must be thread-agnostic.
+///
+/// # When it fires
+///
+/// Ownership of the listener transfers unconditionally to the subscribe call
+/// (see [`kafka_consumer_Consumer_subscribe_with_listener`]), but the *moment*
+/// of release depends on whether the core got as far as registering it. The
+/// complete list of triggers:
+///
+/// 1. [`kafka_consumer_ConsumerRebalanceListener_destroy`] on a listener that
+///    was never passed to a subscribe call.
+/// 2. The subscribe call was rejected **before the core registered** the
+///    listener — the access guard rejected it (`ConcurrentModification`), the
+///    consumer is already closed, `group.id` is not configured, or a topic in
+///    the list is empty/blank. Released before the call returns its error.
+/// 3. A subscribe with an **empty topic list** on a real consumer. Java treats
+///    that as `unsubscribe()` (`AsyncKafkaConsumer.java:2161-2163`) and never
+///    registers the listener, so it is released even though the call returns
+///    **success**. (A `MockConsumer` has no such short-circuit — Java's
+///    `MockConsumer.subscribe(Collection, Optional)` registers unconditionally —
+///    so there the listener stays registered.)
+/// 4. A later `subscribe` / `subscribe_with_listener` / pattern subscribe
+///    **replaces** the registration, including a listener-less `subscribe`
+///    (Java's `registerRebalanceListener(Optional.empty())`).
+/// 5. The consumer is destroyed.
+///
+/// # When it does NOT fire
+///
+/// - A subscribe that failed **after** the core registered the listener — most
+///   notably a subscription-type conflict (`assign()` then
+///   `subscribe_with_listener()`, "Subscription to topics, partitions and pattern
+///   are mutually exclusive"). Java's `SubscriptionState.subscribe(Set,
+///   Optional)` calls `registerRebalanceListener(listener)` *before*
+///   `setSubscriptionType(...)`, which is what throws
+///   (`SubscriptionState.java:192-196`), so the registration outlives the
+///   failure. The hook then fires only on trigger 4 or 5 above. **Do not treat
+///   a failed subscribe as proof that `user_data` has been released.**
+/// - `unsubscribe` / `close` — they clear the subscription but keep the
+///   registered listener, matching Java's `SubscriptionState.unsubscribe()`.
 ///
 /// [`kafka_consumer_ConsumerRebalanceListener_new`] spells this signature out
 /// inline as `Option<unsafe extern "C" fn(*mut c_void)>` (a nullable function
@@ -3336,12 +3368,31 @@ unsafe fn take_rebalance_listener(
 ///
 /// # Listener lifetime
 ///
-/// `listener` is **consumed unconditionally**, including when this call fails: on
-/// any error path the listener is released right away, firing its
-/// `user_data_destroy` hook. Do not reuse or destroy the handle after this call.
-/// A registered listener is released when a subsequent `subscribe` /
-/// `subscribe_with_listener` replaces it, or when the consumer is destroyed —
-/// `unsubscribe` and `close` keep it, matching Java's `SubscriptionState`.
+/// *Ownership* of `listener` transfers **unconditionally**, including when this
+/// call fails: do not reuse or destroy the handle after this call. The
+/// `user_data_destroy` hook, however, fires when the client drops its last
+/// reference to the listener, which is **not** necessarily before this call
+/// returns:
+///
+/// - Rejected **before** the core registered it (guard rejection, closed
+///   consumer, missing `group.id`, blank topic name): released before this call
+///   returns its error.
+/// - Empty topic list on a real consumer: Java treats it as `unsubscribe()` and
+///   never registers the listener, so it is released — and this call returns
+///   **success**. (A `MockConsumer` registers it instead, matching Java.)
+/// - Rejected **after** the core registered it (e.g. a subscription-type
+///   conflict after `assign()`): the registration survives the error, exactly as
+///   in Java, so the listener is **NOT** released here — it is released later, on
+///   replacement or consumer destroy. Do not treat an error return as proof that
+///   `user_data` is free.
+/// - Accepted: released when a subsequent `subscribe` / `subscribe_with_listener`
+///   / pattern subscribe replaces the registration (a listener-less `subscribe`
+///   counts — it clears it, as Java's `registerRebalanceListener(Optional.empty())`
+///   does), or when the consumer is destroyed. `unsubscribe` and `close` keep it,
+///   matching Java's `SubscriptionState.unsubscribe()`.
+///
+/// See [`kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t`] for the
+/// authoritative trigger list.
 ///
 /// # Safety
 ///

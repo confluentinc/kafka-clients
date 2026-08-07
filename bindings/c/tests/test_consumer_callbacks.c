@@ -1220,12 +1220,28 @@ static void test_listener_user_data_destroy_fires_exactly_once(void) {
 }
 
 // ---------------------------------------------------------------------------
-// A failing subscribe still consumes the listener
+// subscribe_with_listener release-timing matrix
 //
-// `subscribe_with_listener` takes ownership unconditionally, so the destroy hook
-// fires even when the call never registers anything. Driven deterministically by
-// calling it from inside a commit callback, where the app thread still holds the
-// access guard (see `test_consumer_handle_usable_while_op_in_flight`).
+// `subscribe_with_listener` takes *ownership* unconditionally, but the moment the
+// `user_data_destroy` hook fires depends on whether the core got as far as
+// registering the listener. Each arm below pins one row of the contract
+// documented on `kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t`:
+//
+//   1. rejected before the core saw it (guard rejection)  -> released now
+//   2. rejected by the core AFTER registering (subscription-type conflict)
+//                                                         -> NOT released, not
+//                                                            even by unsubscribe;
+//                                                            released at destroy
+//   3. empty topic list on a real consumer (Java: == unsubscribe())
+//                                                         -> released, call OK
+//   4. empty topic list on a MockConsumer (Java: registers unconditionally)
+//                                                         -> NOT released
+//   5. replaced by a listener-less subscribe on a real consumer
+//                                                         -> released
+//
+// Arm 1 is driven deterministically by calling it from inside a commit callback,
+// where the app thread still holds the access guard (see
+// `test_consumer_handle_usable_while_op_in_flight`).
 // ---------------------------------------------------------------------------
 
 typedef struct {
@@ -1276,6 +1292,125 @@ static void test_failing_subscribe_with_listener_still_releases_the_listener(voi
     kafka_consumer_Consumer_destroy(c);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.counter->destroy_calls));
     free(probe.counter);
+}
+
+/* Builds a real (non-mock) consumer. No broker is contacted by the calls below. */
+static kafka_consumer_Consumer_t *make_real_consumer(const char *group) {
+    const char *configs[] = {
+        "bootstrap.servers", "localhost:9092",
+        "group.id",          group,
+        "group.protocol",    "consumer",
+        NULL
+    };
+    kafka_consumer_ConsumerProperties_t *props = kafka_consumer_ConsumerProperties_from_configs(configs);
+    TEST_ASSERT_NOT_NULL(props);
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_consumer_Consumer_t *c = kafka_consumer_KafkaConsumer_new(props, &err);
+    kafka_consumer_ConsumerProperties_destroy(props);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(c);
+    return c;
+}
+
+static kafka_consumer_ConsumerRebalanceListener_t *new_counting_listener(destroy_counter_t *counter) {
+    return kafka_consumer_ConsumerRebalanceListener_new(on_revoked_counting, on_assigned_counting, NULL, counter,
+                                                       on_user_data_destroy);
+}
+
+/* Arm 2: the core registers the listener and THEN fails. Java's
+ * `SubscriptionState.subscribe(Set, Optional)` calls
+ * `registerRebalanceListener(listener)` before `setSubscriptionType(...)`, which
+ * is what throws, so the registration outlives the error and the hook must NOT
+ * fire yet. A binding that treats "subscribe failed" as "my user_data is back"
+ * would use freed memory on the next rebalance. */
+static void test_subscribe_failing_inside_the_core_keeps_the_listener(void) {
+    /* Manually assigned, so a topic subscribe is a subscription-type conflict. */
+    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    destroy_counter_t *counter = new_destroy_counter();
+    const char *topics[1] = {"test"};
+
+    kafka_common_KafkaError_t *err =
+        kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, new_counting_listener(counter));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(err), "mutually exclusive"),
+                                 kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* The core kept the registration: NOT released, despite the error. Give the
+     * consumer a moment so a wrong implementation has time to release. */
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&counter->destroy_calls));
+
+    /* `unsubscribe` clears the subscription but keeps the listener
+     * (`SubscriptionState.unsubscribe()` does not clear `rebalanceListener`). */
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_unsubscribe(c));
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&counter->destroy_calls));
+
+    /* Destroying the consumer is what finally releases it — exactly once. */
+    kafka_consumer_Consumer_destroy(c);
+    TEST_ASSERT_TRUE(wait_for(&counter->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter->destroy_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&counter->callback_calls));
+    free(counter);
+}
+
+/* Arms 3 + 4: an empty topic list. On a real consumer Java routes it to
+ * `unsubscribe()` and never registers the listener, so it is released while the
+ * call reports SUCCESS. `MockConsumer.subscribe(Collection, Optional)` has no
+ * such short-circuit, so there the listener is registered and kept. */
+static void test_subscribe_with_listener_empty_topics_release_asymmetry(void) {
+    /* Arm 3: real consumer -> success AND release. */
+    kafka_consumer_Consumer_t *real = make_real_consumer("empty-topics-group");
+    destroy_counter_t *real_counter = new_destroy_counter();
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(real, NULL, 0,
+                                                                    new_counting_listener(real_counter)));
+    TEST_ASSERT_TRUE(wait_for(&real_counter->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&real_counter->destroy_calls));
+    kafka_consumer_Consumer_destroy(real);
+    /* Still exactly once after destroy: no double free. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&real_counter->destroy_calls));
+    free(real_counter);
+
+    /* Arm 4: MockConsumer -> success and the listener stays registered. */
+    kafka_consumer_Consumer_t *mock = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(mock);
+    destroy_counter_t *mock_counter = new_destroy_counter();
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(mock, NULL, 0,
+                                                                    new_counting_listener(mock_counter)));
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&mock_counter->destroy_calls));
+    kafka_consumer_Consumer_destroy(mock);
+    TEST_ASSERT_TRUE(wait_for(&mock_counter->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&mock_counter->destroy_calls));
+    free(mock_counter);
+}
+
+/* Arm 5: on a REAL consumer a listener-less `subscribe` replaces (clears) the
+ * registration, exactly as Java's `registerRebalanceListener(Optional.empty())`
+ * does — so the hook fires without waiting for consumer destroy. The
+ * `MockConsumer` equivalent is covered by
+ * `test_listener_user_data_destroy_fires_exactly_once` case (2). */
+static void test_listener_less_subscribe_releases_the_listener_on_a_real_consumer(void) {
+    kafka_consumer_Consumer_t *c = make_real_consumer("replace-listener-group");
+    destroy_counter_t *counter = new_destroy_counter();
+    const char *topics[1] = {"replace-topic"};
+
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, new_counting_listener(counter)));
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&counter->destroy_calls));
+
+    const char *other[1] = {"other-topic"};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe(c, other, 1));
+    TEST_ASSERT_TRUE(wait_for(&counter->destroy_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter->destroy_calls));
+
+    kafka_consumer_Consumer_destroy(c);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&counter->destroy_calls));
+    free(counter);
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,6 +1483,9 @@ int main(void) {
     RUN_TEST(test_listener_error_propagates);
     RUN_TEST(test_listener_user_data_destroy_fires_exactly_once);
     RUN_TEST(test_failing_subscribe_with_listener_still_releases_the_listener);
+    RUN_TEST(test_subscribe_failing_inside_the_core_keeps_the_listener);
+    RUN_TEST(test_subscribe_with_listener_empty_topics_release_asymmetry);
+    RUN_TEST(test_listener_less_subscribe_releases_the_listener_on_a_real_consumer);
     RUN_TEST(test_subscribe_with_listener_async);
     return UNITY_END();
 }
