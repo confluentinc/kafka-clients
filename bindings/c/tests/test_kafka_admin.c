@@ -452,6 +452,85 @@ static void test_kafka_admin_b2_empty_batches_need_no_broker(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* B3, on the production client with no broker reachable. Empty batches resolve
+ * with no network round trip; `listPartitionReassignments` with
+ * `all_partitions = true` does need the controller, so it must *time out*
+ * rather than hang, which is the property this suite exists to check. */
+static void test_kafka_admin_b3_empty_batches_need_no_broker(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_AlterPartitionReassignmentsResult_t *altered = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_partition_reassignments(
+        admin, NULL, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, true, &altered));
+    TEST_ASSERT_NOT_NULL(altered);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterPartitionReassignmentsResult_count(altered));
+    kafka_admin_AlterPartitionReassignmentsResult_destroy(altered);
+
+    kafka_admin_ListOffsetsResult_t *offsets = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_offsets(admin, NULL, NULL, NULL, NULL, 0,
+                                                          RPC_TIMEOUT_MS, 0, &offsets));
+    TEST_ASSERT_NOT_NULL(offsets);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListOffsetsResult_count(offsets));
+    kafka_admin_ListOffsetsResult_destroy(offsets);
+
+    /* Needs the controller, so this one really does go to the network and comes
+     * back with an error inside the explicit timeout. */
+    kafka_admin_ListPartitionReassignmentsResult_t *listed = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_partition_reassignments(
+        admin, true, NULL, NULL, 0, RPC_TIMEOUT_MS, &listed);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(listed);
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Argument validation happens before anything is enqueued, so these three
+ * return immediately even with no broker: the error names the offending value
+ * rather than being a timeout. */
+static void test_kafka_admin_b3_rejects_bad_arguments(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_ElectLeadersResult_t *elected = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_elect_leaders(
+        admin, 3, true, NULL, NULL, 0, RPC_TIMEOUT_MS, &elected);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(elected);
+    TEST_ASSERT_EQUAL_STRING("Value 3 must be one of [PREFERRED, UNCLEAN]",
+                             kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    const char *topics[1] = {"t"};
+    const int32_t partitions[1] = {0};
+    const bool cancel[1] = {false};
+    const int32_t replicas[1] = {0};
+    const int32_t *replica_ptrs[1] = {replicas};
+    const int32_t replica_counts[1] = {0};
+    kafka_admin_AlterPartitionReassignmentsResult_t *altered = NULL;
+    err = kafka_admin_AdminClient_alter_partition_reassignments(
+        admin, topics, partitions, cancel, replica_ptrs, replica_counts, 1, RPC_TIMEOUT_MS, true,
+        &altered);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(altered);
+    TEST_ASSERT_EQUAL_STRING(
+        "reassignment for t-0 at index 0: Cannot create a new partition reassignment without any "
+        "replicas",
+        kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    const bool is_timestamp[1] = {false};
+    const int64_t specs[1] = {-1};
+    kafka_admin_ListOffsetsResult_t *offsets = NULL;
+    err = kafka_admin_AdminClient_list_offsets(admin, topics, partitions, is_timestamp, specs, 1,
+                                               RPC_TIMEOUT_MS, 5, &offsets);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(offsets);
+    TEST_ASSERT_EQUAL_STRING("Unknown isolation level 5", kafka_common_KafkaError_message(err));
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_admin_new_succeeds);
@@ -470,5 +549,7 @@ int main(void) {
     RUN_TEST(test_kafka_admin_list_config_resources_returns_without_hanging);
     RUN_TEST(test_kafka_admin_incremental_alter_configs_rejects_bad_op_type);
     RUN_TEST(test_kafka_admin_b2_empty_batches_need_no_broker);
+    RUN_TEST(test_kafka_admin_b3_empty_batches_need_no_broker);
+    RUN_TEST(test_kafka_admin_b3_rejects_bad_arguments);
     return UNITY_END();
 }
