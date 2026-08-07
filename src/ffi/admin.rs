@@ -20346,7 +20346,11 @@ mod tests {
             let mut epoch = -7i64;
             assert!(!kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &mut epoch));
             assert_eq!(epoch, -7);
-            assert!(kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, std::ptr::null_mut()) == false);
+            // A null out-param is legal: the boolean is the whole answer.
+            assert!(!kafka_admin_DescribeFeaturesResult_finalized_features_epoch(
+                result,
+                std::ptr::null_mut()
+            ));
             kafka_admin_DescribeFeaturesResult_destroy(result);
         }
     }
