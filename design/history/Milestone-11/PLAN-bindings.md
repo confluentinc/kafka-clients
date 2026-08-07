@@ -243,17 +243,18 @@ Java as possible."* That resolves D1–D3.
   reduce surface area; consistency with the established convention takes
   priority.) Bare name = sync (`block_on`, joining all per-key futures — the C
   equivalent of Java's `result.all().get()`); `_async` = callback-based.
-- **D2 — Per-key results: flattened result handle, accessors following the
-  Java result type.** One opaque `kafka_admin_*Result_t` per RPC exposing
-  `_count` / `_get_key(i)` / `_destroy`, delivered through one callback, plus
-  whichever of `_get_value(i)` / `_get_error(i)` the corresponding Java result
-  actually carries:
+- **D2 — Results: one flattened result handle per RPC, with accessors mirroring
+  the Java result type.** One opaque `kafka_admin_*Result_t` per RPC, delivered
+  through one callback and freed with `_destroy`. The *rest* of the accessor
+  set follows whatever the Java result actually carries — do not assume a
+  keyed shape:
 
   | Java result shape | C accessors |
   |---|---|
-  | `Map<K, KafkaFuture<V>>` | `_get_value(i)` **and** `_get_error(i)` |
-  | `Map<K, KafkaFuture<Void>>` / `Map<K, Optional<Throwable>>` | `_get_error(i)` only |
-  | one `KafkaFuture<Map<K, V>>` for the whole listing | `_get_value(i)` only; failure is the call's error |
+  | `Map<K, KafkaFuture<V>>` | `_count` / `_get_key(i)` / `_get_value(i)` / `_get_error(i)` |
+  | `Map<K, KafkaFuture<Void>>` / `Map<K, Optional<Throwable>>` | `_count` / `_get_key(i)` / `_get_error(i)` — no value |
+  | one `KafkaFuture<Map<K, V>>` for the whole listing | `_count` / `_get_key(i)` / `_get_value(i)`; failure is the call's error |
+  | one future fanned into a listing **plus an unkeyed error collection** of a different length (`ListGroupsResult.valid()`/`errors()`) | `_valid_count` / `_get_valid(i)` **and** `_error_count` / `_get_error(i)` — no `_count`, no `_get_key`, because the two sequences are not co-indexed |
 
   Per-key *data and errors* are preserved wherever Java expresses them — only
   independent per-key *timing* is lost, which C has no `KafkaFuture` to convey.
