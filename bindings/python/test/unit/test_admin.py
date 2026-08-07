@@ -31,6 +31,11 @@ from admin import (
     ElectionType, IsolationLevel, ListOffsetsResultInfo, NewPartitionReassignment,
     OffsetSpec, PartitionReassignment,
     GroupListing, ListConsumerGroupOffsetsSpec, MemberToRemove, OffsetAndMetadata,
+    AclBinding, AclBindingFilter, AclOperation, AclPermissionType, PatternType, ResourceType,
+    ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent,
+    ClientQuotaOp,
+    _to_acl_binding, _to_acl_binding_filter, _to_alter_client_quotas, _to_create_acls,
+    _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
     _to_describe_log_dirs, _to_describe_replica_log_dirs,
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
@@ -1757,3 +1762,415 @@ def test_to_keyed_errors_maps_none_to_success():
     converted = _to_keyed_errors({("t", 0): None, "g": (69, "nope", False, False)})
     assert converted[("t", 0)] is None
     assert converted["g"].code == 69
+
+
+# ---------------------------------------------------------------------------
+# B5a — ACLs and client quotas
+#
+# Java's MockAdminClient throws for all five RPCs (MockAdminClient.java:806,
+# :811, :816, :1243, :1248), so no populated success path is reachable here
+# either. These tests cover what the Python layer alone decides: the request
+# marshaling, the two null-versus-absent distinctions, which failures raise and
+# which land per key, and the `_to_*` tuple converters, whose field order and
+# arity pin the C builders they consume.
+#
+# Note the two Java strings: the ACL RPCs say "Not implemented yet", the quota
+# RPCs "Not implement yet" (Java's own typo).
+# ---------------------------------------------------------------------------
+
+
+def _acl(name="topic-a", principal="User:alice"):
+    return AclBinding(ResourceType.TOPIC, name, PatternType.LITERAL, principal, "10.0.0.1",
+                      AclOperation.WRITE, AclPermissionType.DENY)
+
+
+def test_create_acls_reports_unsupported_per_binding():
+    with MockAdminClient(1) as admin:
+        acls = [_acl("z-topic", "User:zoe"), _acl("a-topic", "User:alice")]
+        result = admin.create_acls(acls)
+        assert set(result) == set(acls)
+        for value in result.values():
+            assert str(value) == "Not implemented yet"
+
+
+def test_create_acls_round_trips_every_field_through_the_key():
+    """The result key is rebuilt from the seven fields the C layer sent back,
+    so an equal key proves no column was transposed on either leg."""
+    with MockAdminClient(1) as admin:
+        acl = AclBinding(ResourceType.GROUP, "orders-", PatternType.PREFIXED, "User:bob", "*",
+                         AclOperation.DESCRIBE, AclPermissionType.ALLOW)
+        (key,) = admin.create_acls([acl])
+        assert key == acl
+        assert key.resource_type == ResourceType.GROUP
+        assert key.resource_name == "orders-"
+        assert key.pattern_type == PatternType.PREFIXED
+        assert key.principal == "User:bob"
+        assert key.host == "*"
+        assert key.operation == AclOperation.DESCRIBE
+        assert key.permission_type == AclPermissionType.ALLOW
+
+
+@pytest.mark.parametrize("acl,message", [
+    (AclBinding(ResourceType.ANY, "t", PatternType.LITERAL, "User:a", "*",
+                AclOperation.READ, AclPermissionType.ALLOW),
+     "acl at index 0: resourceType must not be ANY"),
+    (AclBinding(ResourceType.TOPIC, "t", PatternType.MATCH, "User:a", "*",
+                AclOperation.READ, AclPermissionType.ALLOW),
+     "acl at index 0: patternType must not be MATCH"),
+    (AclBinding(ResourceType.TOPIC, "t", PatternType.ANY, "User:a", "*",
+                AclOperation.READ, AclPermissionType.ALLOW),
+     "acl at index 0: patternType must not be ANY"),
+    (AclBinding(ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*",
+                AclOperation.ANY, AclPermissionType.ALLOW),
+     "acl at index 0: operation must not be ANY"),
+    (AclBinding(ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*",
+                AclOperation.READ, AclPermissionType.ANY),
+     "acl at index 0: permissionType must not be ANY"),
+])
+def test_create_acls_rejects_what_javas_constructors_reject(acl, message):
+    """A binding is not a filter: ANY and MATCH are exactly the values Java's
+    `ResourcePattern` / `AccessControlEntry` constructors refuse."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.create_acls([acl])
+        assert str(exc.value) == message
+
+
+def test_describe_acls_raises_because_it_has_one_future_for_the_whole_call():
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.describe_acls(AclBindingFilter())
+        assert str(exc.value) == "Not implemented yet"
+
+
+def test_describe_acls_accepts_the_any_and_match_values_create_rejects():
+    """Reaching the mock rather than an IllegalArgument is what shows
+    marshaling accepted them — the same enum values fail `create_acls`."""
+    with MockAdminClient(1) as admin:
+        for acl_filter in [
+            AclBindingFilter(),
+            AclBindingFilter(ResourceType.TOPIC, "prefix", PatternType.MATCH, None, None,
+                             AclOperation.DESCRIBE, AclPermissionType.DENY),
+        ]:
+            with pytest.raises(KafkaError) as exc:
+                admin.describe_acls(acl_filter)
+            assert str(exc.value) == "Not implemented yet"
+
+
+def test_describe_acls_requires_the_filter_argument():
+    """Java's `describeAcls` has no no-argument overload, so neither does this
+    (round-7 lesson: a default argument is a claim about Java)."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(TypeError):
+            admin.describe_acls()
+
+
+def test_acl_binding_filter_defaults_to_match_everything():
+    """The no-argument filter is Java's `AclBindingFilter.ANY`: ANY on all four
+    enums and null on all three strings."""
+    f = AclBindingFilter()
+    assert f.resource_type == ResourceType.ANY
+    assert f.pattern_type == PatternType.ANY
+    assert f.operation == AclOperation.ANY
+    assert f.permission_type == AclPermissionType.ANY
+    assert f.resource_name is None and f.principal is None and f.host is None
+
+
+def test_delete_acls_keeps_a_null_name_distinct_from_an_empty_one():
+    """`None` means match-any; `""` filters on the empty name. Collapsing them
+    would silently widen a filter, and the two must survive the round trip as
+    distinct dict keys."""
+    with MockAdminClient(1) as admin:
+        any_name = AclBindingFilter()
+        empty_name = AclBindingFilter(ResourceType.TOPIC, "", PatternType.LITERAL, "", "",
+                                      AclOperation.READ, AclPermissionType.ALLOW)
+        assert any_name != empty_name
+        result = admin.delete_acls([any_name, empty_name])
+        assert set(result) == {any_name, empty_name}
+        for key, value in result.items():
+            # The mock fails each filter's own future, so each maps to that
+            # error rather than to a list of matched ACLs.
+            assert isinstance(value, KafkaError)
+            assert str(value) == "Not implemented yet"
+        # Read back off the returned keys, not the ones we sent.
+        by_name = {k.resource_name: k for k in result}
+        assert by_name[None].principal is None
+        assert by_name[""].principal == ""
+
+
+def test_describe_client_quotas_raises_and_accepts_every_match_type():
+    with MockAdminClient(1) as admin:
+        filters = [
+            ClientQuotaFilter.all(),
+            ClientQuotaFilter.contains_only([]),
+            ClientQuotaFilter.contains([
+                ClientQuotaFilterComponent.of_entity(ClientQuotaEntity.USER, "alice"),
+                ClientQuotaFilterComponent.of_default_entity(ClientQuotaEntity.CLIENT_ID),
+                ClientQuotaFilterComponent.of_entity_type(ClientQuotaEntity.IP),
+            ]),
+        ]
+        for quota_filter in filters:
+            with pytest.raises(KafkaError) as exc:
+                admin.describe_client_quotas(quota_filter)
+            assert str(exc.value) == "Not implement yet"
+
+
+def test_client_quota_filter_component_keeps_default_and_any_apart():
+    """Both carry no name, so only the match-type discriminant separates them —
+    and they differ in equality and in the wire match-type byte."""
+    default = ClientQuotaFilterComponent.of_default_entity(ClientQuotaEntity.USER)
+    any_named = ClientQuotaFilterComponent.of_entity_type(ClientQuotaEntity.USER)
+    exact = ClientQuotaFilterComponent.of_entity(ClientQuotaEntity.USER, "alice")
+    assert default.match_name is None and any_named.match_name is None
+    assert default != any_named
+    assert default.match_type == ClientQuotaFilterComponent.DEFAULT == 1
+    assert any_named.match_type == ClientQuotaFilterComponent.SPECIFIED == 2
+    assert exact.match_type == ClientQuotaFilterComponent.EXACT == 0
+    assert exact.match_name == "alice"
+
+
+def test_client_quota_filter_all_is_not_contains_only_nothing():
+    """`all()` matches every entity; `containsOnly([])` matches only the entity
+    with no components. Java distinguishes them and so must this."""
+    assert ClientQuotaFilter.all() != ClientQuotaFilter.contains_only([])
+    assert ClientQuotaFilter.all().strict is False
+    assert ClientQuotaFilter.contains_only([]).strict is True
+
+
+def test_alter_client_quotas_reports_unsupported_per_entity():
+    with MockAdminClient(1) as admin:
+        alice = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
+        default_client = ClientQuotaEntity({ClientQuotaEntity.CLIENT_ID: None})
+        result = admin.alter_client_quotas([
+            ClientQuotaAlteration(alice, [ClientQuotaOp("producer_byte_rate", 1024.0)]),
+            ClientQuotaAlteration(default_client, [ClientQuotaOp("consumer_byte_rate", None)]),
+        ])
+        assert set(result) == {alice, default_client}
+        for value in result.values():
+            assert str(value) == "Not implement yet"
+
+
+def test_alter_client_quotas_keeps_the_default_entity_distinct():
+    """A `None` entity name is the built-in default entity, which is neither an
+    absent entry nor the empty name. All three must survive as distinct keys."""
+    with MockAdminClient(1) as admin:
+        default_user = ClientQuotaEntity({ClientQuotaEntity.USER: None})
+        empty_user = ClientQuotaEntity({ClientQuotaEntity.USER: ""})
+        named_user = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
+        assert len({default_user, empty_user, named_user}) == 3
+        result = admin.alter_client_quotas([
+            ClientQuotaAlteration(e, []) for e in (default_user, empty_user, named_user)
+        ])
+        assert set(result) == {default_user, empty_user, named_user}
+        by_name = {k.entries[ClientQuotaEntity.USER]: k for k in result}
+        assert by_name[None].entries == {ClientQuotaEntity.USER: None}
+        assert by_name[""].entries == {ClientQuotaEntity.USER: ""}
+        assert by_name["alice"].entries == {ClientQuotaEntity.USER: "alice"}
+
+
+def test_alter_client_quotas_rejects_a_duplicate_entity():
+    """Java keys the result by entity, so the second alteration of the same
+    entity could only silently replace the first."""
+    with MockAdminClient(1) as admin:
+        entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
+        with pytest.raises(KafkaError) as exc:
+            admin.alter_client_quotas([
+                ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
+                ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
+            ])
+        assert str(exc.value) == (
+            "quota alteration at index 1 repeats an entity already altered by an earlier entry")
+
+
+def test_client_quota_op_none_value_means_remove():
+    assert ClientQuotaOp("producer_byte_rate", None).value is None
+    # Zero is a legal quota value, not a removal: the two must not collapse.
+    assert ClientQuotaOp("producer_byte_rate", 0).value == 0.0
+    assert ClientQuotaOp("producer_byte_rate", 0) != ClientQuotaOp("producer_byte_rate", None)
+
+
+async def test_async_b5a_rpcs():
+    async with AsyncMockAdminClient(1) as admin:
+        acl = _acl()
+        result = await admin.create_acls([acl])
+        assert set(result) == {acl}
+
+        acl_filter = AclBindingFilter()
+        result = await admin.delete_acls([acl_filter])
+        assert set(result) == {acl_filter}
+
+        entity = ClientQuotaEntity({ClientQuotaEntity.USER: "async-user"})
+        result = await admin.alter_client_quotas(
+            [ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)])],
+            validate_only=True)
+        assert set(result) == {entity}
+
+        # The two single-future RPCs raise instead.
+        with pytest.raises(KafkaError):
+            await admin.describe_acls(acl_filter)
+        with pytest.raises(KafkaError):
+            await admin.describe_client_quotas(ClientQuotaFilter.all())
+
+
+# ---- converters ------------------------------------------------------------
+#
+# These pin the tuple field order and arity of the C builders that feed them.
+# The success path of every B5a drain is unreachable end-to-end, so a converter
+# fed a hand-built tuple is the only place the mapping is exercised at all.
+
+
+def test_to_acl_binding_maps_the_seven_fields_in_order():
+    binding = _to_acl_binding((ResourceType.TOPIC, "orders", PatternType.PREFIXED, "User:alice",
+                               "10.0.0.1", AclOperation.WRITE, AclPermissionType.DENY))
+    assert binding.resource_type == ResourceType.TOPIC
+    assert binding.resource_name == "orders"
+    assert binding.pattern_type == PatternType.PREFIXED
+    assert binding.principal == "User:alice"
+    assert binding.host == "10.0.0.1"
+    assert binding.operation == AclOperation.WRITE
+    assert binding.permission_type == AclPermissionType.DENY
+    assert _to_acl_binding(None) is None
+
+
+def test_to_acl_binding_filter_keeps_nulls_null():
+    f = _to_acl_binding_filter((ResourceType.ANY, None, PatternType.MATCH, None, None,
+                                AclOperation.ANY, AclPermissionType.ANY))
+    assert f.resource_name is None and f.principal is None and f.host is None
+    assert f.pattern_type == PatternType.MATCH
+    # A present-but-empty string is not a null.
+    f = _to_acl_binding_filter((ResourceType.TOPIC, "", PatternType.LITERAL, "", "",
+                                AclOperation.READ, AclPermissionType.ALLOW))
+    assert f.resource_name == "" and f.principal == "" and f.host == ""
+
+
+def test_to_delete_acls_separates_a_filter_failure_from_a_per_acl_failure():
+    """Java's FilterResult holds either a binding or an exception; the outer
+    error is the filter's own future failing, which is a different thing."""
+    failed_filter = (ResourceType.ANY, None, PatternType.ANY, None, None,
+                     AclOperation.ANY, AclPermissionType.ANY)
+    ok_filter = (ResourceType.TOPIC, "t", PatternType.LITERAL, None, None,
+                 AclOperation.ANY, AclPermissionType.ANY)
+    deleted = (ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*",
+               AclOperation.READ, AclPermissionType.ALLOW)
+    raw = {
+        failed_filter: ((41, "cluster authorization failed", 0, 0), []),
+        ok_filter: (None, [(None, deleted), ((61, "security disabled", 0, 0), None)]),
+    }
+    out = _to_delete_acls(raw)
+
+    failed = out[_to_acl_binding_filter(failed_filter)]
+    assert isinstance(failed, KafkaError)
+    assert str(failed) == "cluster authorization failed"
+
+    results = out[_to_acl_binding_filter(ok_filter)]
+    assert len(results) == 2
+    assert results[0].binding == _to_acl_binding(deleted)
+    assert results[0].error is None
+    assert results[1].binding is None
+    assert str(results[1].error) == "security disabled"
+
+
+def test_to_describe_client_quotas_rebuilds_the_entity_and_its_quota_map():
+    raw = {
+        (("user", "alice"),): [("producer_byte_rate", 1024.0), ("consumer_byte_rate", 2048.0)],
+        (("client-id", None), ("user", "bob")): [],
+    }
+    out = _to_describe_client_quotas(raw)
+    alice = ClientQuotaEntity({"user": "alice"})
+    pair = ClientQuotaEntity({"client-id": None, "user": "bob"})
+    assert set(out) == {alice, pair}
+    assert out[alice] == {"producer_byte_rate": 1024.0, "consumer_byte_rate": 2048.0}
+    # An entity with no quota values, and a default-entity component preserved
+    # as None rather than dropped or emptied.
+    assert out[pair] == {}
+    assert pair.entries["client-id"] is None
+
+
+def test_to_alter_client_quotas_maps_none_to_success():
+    raw = {
+        (("user", "alice"),): None,
+        (("user", None),): (42, "invalid request", 0, 0),
+    }
+    out = _to_alter_client_quotas(raw)
+    assert out[ClientQuotaEntity({"user": "alice"})] is None
+    assert str(out[ClientQuotaEntity({"user": None})]) == "invalid request"
+
+
+def test_to_create_acls_maps_none_to_success():
+    ok = (ResourceType.TOPIC, "a", PatternType.LITERAL, "User:a", "*",
+          AclOperation.READ, AclPermissionType.ALLOW)
+    bad = (ResourceType.TOPIC, "b", PatternType.LITERAL, "User:b", "*",
+           AclOperation.WRITE, AclPermissionType.DENY)
+    out = _to_create_acls({ok: None, bad: (61, "security disabled", 0, 0)})
+    assert out[_to_acl_binding(ok)] is None
+    assert str(out[_to_acl_binding(bad)]) == "security disabled"
+
+
+def test_to_describe_acls_is_a_list_not_a_dict():
+    """`describeAcls` has one future for the whole call, so there is no key to
+    map from — a dict would have to invent one."""
+    rows = [
+        (ResourceType.TOPIC, "z", PatternType.LITERAL, "User:z", "*",
+         AclOperation.READ, AclPermissionType.ALLOW),
+        (ResourceType.TOPIC, "a", PatternType.LITERAL, "User:a", "*",
+         AclOperation.READ, AclPermissionType.ALLOW),
+    ]
+    out = _to_describe_acls(rows)
+    assert isinstance(out, list)
+    # Broker order is preserved, not sorted.
+    assert [b.resource_name for b in out] == ["z", "a"]
+
+
+# ---- request row builders ---------------------------------------------------
+#
+# These are the outbound half, and the mock discards enough of it that most of
+# it has no end-to-end observable: `alterClientQuotas` never echoes its ops
+# back, so nothing else in this file can tell "remove this quota" from "set it
+# to 0.0". Testing the pure row builders directly is the only coverage that
+# half of the marshaling gets.
+
+
+def test_acl_binding_rows_keep_each_field_in_its_own_column():
+    rows = MockAdminClient._acl_binding_rows([
+        AclBinding(ResourceType.TOPIC, "orders", PatternType.PREFIXED, "User:alice", "10.0.0.1",
+                   AclOperation.WRITE, AclPermissionType.DENY),
+    ])
+    # Every value is distinct, so transposing any two columns changes the row.
+    assert rows == [(ResourceType.TOPIC, "orders", PatternType.PREFIXED, "User:alice", "10.0.0.1",
+                     AclOperation.WRITE, AclPermissionType.DENY)]
+
+
+def test_acl_filter_rows_keep_none_as_none():
+    """`None` is Java's match-any and must not become `""` or `"None"` on the
+    way out; the C layer distinguishes a NULL pointer from a pointer to ""."""
+    rows = MockAdminClient._acl_filter_rows([
+        AclBindingFilter(),
+        AclBindingFilter(ResourceType.TOPIC, "", PatternType.LITERAL, "", "",
+                         AclOperation.READ, AclPermissionType.ALLOW),
+    ])
+    assert rows[0] == (ResourceType.ANY, None, PatternType.ANY, None, None,
+                       AclOperation.ANY, AclPermissionType.ANY)
+    assert rows[1] == (ResourceType.TOPIC, "", PatternType.LITERAL, "", "",
+                       AclOperation.READ, AclPermissionType.ALLOW)
+
+
+def test_quota_alteration_rows_keep_both_nulls():
+    """A `None` entity name is the default entity and a `None` op value is a
+    removal. Neither survives a round trip through the mock, so this is the
+    only place either mapping is pinned."""
+    rows = MockAdminClient._quota_alteration_rows([
+        ClientQuotaAlteration(
+            ClientQuotaEntity({ClientQuotaEntity.USER: "alice"}),
+            [ClientQuotaOp("producer_byte_rate", 1024.0),
+             ClientQuotaOp("consumer_byte_rate", None)]),
+        ClientQuotaAlteration(
+            ClientQuotaEntity({ClientQuotaEntity.CLIENT_ID: None}),
+            [ClientQuotaOp("request_percentage", 0.0)]),
+    ])
+    assert rows[0][0] == [("user", "alice")]
+    assert rows[0][1] == [("producer_byte_rate", 1024.0), ("consumer_byte_rate", None)]
+    # The default entity keeps its None name.
+    assert rows[1][0] == [("client-id", None)]
+    # Zero is a value, not a removal: the two must not collapse into each other.
+    assert rows[1][1] == [("request_percentage", 0.0)]
+    assert rows[1][1][0][1] is not None
