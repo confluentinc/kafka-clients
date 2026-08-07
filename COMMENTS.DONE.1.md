@@ -1945,3 +1945,176 @@ batch/administrative with no per-record path. **DoD #11 does not apply** to the
 Admin trait, but its spirit holds: every per-RPC entry point is a plain
 `extern "C" fn`, no `#[async_trait]` reaches the `Call`/driver types. No TODO
 or FIXME. Scope was tasks 1–4; **B6 was not started.**
+
+# Actor 1 — round 10 resolutions (Critic 1 round 10, range `9a8f6e58..3b72da2b`)
+
+All five reported items resolved, plus the two adjudication follow-ups
+(LOW 2's cross-reference, the `read_feature_levels` Rust test) and the two
+non-code tasks (D2 qualifiers, the `--features ffi` gate). Commit: `a2e42570`.
+
+## Issue 1 (Behavior Mismatch) — the empty-password guard defeated the core
+
+**Resolved.** The `password.is_empty()` rejection is gone from
+`read_scram_alterations`. Java records
+`UnacceptableCredentialException("Password must not be empty")` in
+`userIllegalAlterationExceptions` keyed by user
+(`KafkaAdminClient.java:4414-4416`) and still builds and sends every other
+alteration; the empty password now passes through to the core, which already
+translated that faithfully. The comment at the site cites the Java lines and
+points at the unrecognised-mechanism branch two above it as the precedent.
+
+Three rustdoc corrections: `read_scram_alterations`' `# Errors` no longer
+attributes the rule to `UserScramCredentialUpsertion`'s constructor (which only
+requires non-null); the sync entry point's `passwords` parameter now says the
+error arrives per user through `_get_error`; and the `_async` inline-callback
+clause list no longer names "an upsertion with no password" as a submit-time
+trigger.
+
+**Four** tests locked the deviation in, not three. The fourth was
+`test_mock_admin.c`'s `test_mock_admin_alter_user_scram_credentials_rejects_bad_rows`,
+which the round-10 list did not name and which is what actually turned the C
+suite red after the fix (153 tests, 1 failure). All four now assert the
+pass-through:
+
+  - `read_scram_alterations_rejects_a_null_user_but_passes_an_empty_password_through`
+    (renamed) submits alice with an empty password *and* bob with `pw2`, and
+    asserts bob's upsertion survives — the property the old test broke.
+  - `test_alter_user_scram_credentials_passes_an_empty_password_through`
+    (Python) asserts the key set is `["alice", "bob"]`.
+  - `test_mock_admin_..._rejects_bad_rows` now asserts the row reaches the mock
+    and comes back as `"Not implemented yet"` for alice.
+  - `test_kafka_admin_b5b_rejects_bad_arguments` lost the block (it is no longer
+    a rejection) and gained
+    `test_kafka_admin_b5b_empty_password_is_a_per_user_error`, which submits
+    both users through a **production** handle and asserts both key rows come
+    back. It asserts only the key set, deliberately: which error each row
+    carries depends on whether anything is listening on localhost:9092, and the
+    per-user error is only applied in `handleResponse` (Java the same), so with
+    no broker both rows carry the timeout. A whole-call rejection still fails
+    the test outright, which is the regression being pinned.
+
+The core had no test for the branch either, as reported. Added
+`test_alter_user_scram_credentials_empty_password_fails_only_that_user`: user0's
+password is empty, user1's is not, only user1 is in the prepared response, and
+the assertion is `"Password must not be empty"` on user0 plus success on user1.
+That is the test that would have made the FFI shadowing visible.
+
+## Issue 2 (Bug) — the mock's `get(0)` index panic aborted the process
+
+**Resolved.** `MockAdminClient::create_delegation_token` now does
+`options.get_renewers().first().cloned()` and, on `None`, completes the future
+with `illegal_argument("createDelegationToken requires at least one renewer:
+MockAdminClient makes the first renewer the owner")`. The comment cites
+`MockAdminClient.java:652`, records that Java's `IndexOutOfBoundsException` is
+catchable while a Rust index panic unwinds across `extern "C"` (every FFI path
+runs `submit` inline on the calling thread) and aborts, and names CLAUDE.md
+§10.1.
+
+Three tests, one per suite, all previously absent:
+
+  - Rust: `create_delegation_token_without_a_renewer_reports_an_error` also
+    asserts nothing was stored, so a later describe still finds no tokens.
+  - C: appended to `test_mock_admin_create_delegation_token_rejects_bad_input`,
+    asserting the exact message. Before the fix this aborted the ctest binary.
+  - Python: `test_create_delegation_token_without_a_renewer_raises` calls
+    `admin.create_delegation_token()` with no arguments — the documented
+    default — and asserts the interpreter survives by using the client again.
+
+Both docs that advertised the aborting call are corrected: the FFI `renewers`
+parameter and `admin.py`'s `create_delegation_token` docstring now say an empty
+list is legal against a real broker but not against the mock, and why.
+
+## Issue 3 (LOW) — stale `UNKNOWN_ENUM_CODE` enumeration
+
+**Resolved.** Restated as a property first — "every Kafka enum crossing this
+module that has an `UNKNOWN` member codes it `0`" — with the list following as
+"the current set of sites rather than the reason the value is 0", and
+`ScramMechanism` added as the sixth.
+
+## Issue 4 (LOW) — Python `TokenInformation` positional order
+
+**Resolved.** `__init__` and `__slots__` are now Java's order
+(`issue, max, expiry`, `TokenInformation.java:39-45`). `_to_delegation_token` is
+the only caller and now maps explicitly from the C tuple's `issue, expiry, max`,
+with a comment saying the two orders differ. The C tuple is unchanged. Verified
+the Python suite still reports the same timestamps (245 passed).
+
+## Issue 5 (LOW) — `set_feature_levels` doc over-claim
+
+**Resolved.** The claim is narrowed to `updateFeatures`
+(`getOrDefault(feature, (short) 0)`, `MockAdminClient.java:1294-1295`) and now
+also records that `describeFeatures` does a bare `get(...)` into
+`new SupportedVersionRange(short, short)` (`:1275-1276`) and would NPE on a
+missing key, which the shared key set makes unreachable here.
+
+## LOW 2 follow-up — the two answers to one map collapse, cross-referenced
+
+**Resolved as documentation, no behaviour change**, which is the Critic's own
+recommendation. `alterUserScramCredentials`' rustdoc gains a `# Duplicate users`
+section stating the pass-through mirrors Java (`KafkaAdminClient.java:4381-4383`
+keys one future per user, so two rows for one user collapse to one outcome) and
+why it differs from `alterClientQuotas`; `alter_client_quotas`' rustdoc gains
+the mirror-image paragraph. The discriminator is stated once, in both places:
+whether the caller can re-derive the key. A quota entity is a compound key this
+layer assembles from the request columns; a SCRAM user is a plain string the
+caller already holds.
+
+## `read_feature_levels` — the cheap Rust test
+
+**Done.** `read_feature_levels_keeps_the_three_columns_apart` uses nine distinct
+numbers across three features (one with a NULL name, to pin the skip) and then
+re-runs with two NULL level arrays to pin the `0` fallback. The C coverage was
+genuinely sufficient, as adjudicated; this removes the cross-language dependency
+for the `cargo test --features ffi` developer loop.
+
+## D2 fifth rule — the two required qualifiers, and a third precedent
+
+**Done**, in `design/history/Milestone-11/PLAN-bindings.md` §7 D2.
+
+  - Clarification #2 now reads "one collection **whose element is
+    scalar-only**", with an explicit note that the qualifier is load-bearing:
+    without it the clarification contradicts the main rule on
+    `TopicDescription`, which is exactly "scalars plus one collection keyed
+    directly by the result" and correctly did *not* flatten because a
+    `TopicPartitionInfo` element contains three more collections.
+    `describeTransactions` is unaffected — `TopicPartition` is two scalars.
+  - The two-index budget is now stated as **per handle, not per RPC**, with the
+    mechanical form spelled out ("flatten while the remaining depth is ≤ 2 from
+    the current handle; mint when it would exceed that") and `describeLogDirs`
+    named as the RPC that legitimately spans three levels across three handles.
+  - `describeTopics` added as the third worked precedent, the one that shows the
+    rule applying recursively.
+
+Also folded the round-10 generalisations into the plan's bindings DoD, so B6 and
+any later slice inherit them rather than the blanket round-9 wording: per-key
+mock throws still echo the key set (only **payload** columns are dead) versus a
+whole-call failure echoing nothing; "mock implemented" does not mean "request
+observable" (`createDelegationToken` ignores `options.owner()`); seed the mock
+rather than accept a dead drain; and a literal Java `get(0)` translation becomes
+a completed-exceptionally future, never an index panic.
+
+## The `--features ffi` gate hole
+
+**Closed, and measured first.** Both halves as recommended:
+
+  - `xtask lint` gains `cargo clippy --features ffi --all-targets -- -D
+    warnings` as a second root-package arm (and the matching arm in
+    `lint_fix`). The comment records why it is a separate invocation: `ffi` is a
+    root-package feature the other workspace members do not declare.
+  - `make test-rust` gains `cargo test --features ffi` after the existing
+    `--workspace` line, and `test-rust` joins both `verify` and
+    `verify-sandbox`.
+
+No feature matrix: `ffi` is one cfg-gated module plus two build-dependencies, so
+`default` and `default + ffi` is the whole space.
+
+**Ran clippy over the newly covered ~25k lines before wiring it in**, as asked.
+It found **4** findings, all `clippy::byte_char_slices` on B5b's own test byte
+arrays in `src/ffi/admin.rs` (`[b'p', b'w', b'1']` → `*b"pw1"`), now fixed.
+Producer and consumer FFI came back clean, so `verify` is green rather than
+newly red. Caveat for the record: `cargo clippy` is not installed for the
+pinned 1.95.0 toolchain in this environment (there is no `rustup`), so the run
+used the nix 1.97.1 clippy/cargo/rustc triple in a separate target dir.
+`byte_char_slices` has been stable since 1.85, so the four findings are real
+under the pinned toolchain too; a 1.95-only lint that 1.97 dropped would not be
+visible here.
