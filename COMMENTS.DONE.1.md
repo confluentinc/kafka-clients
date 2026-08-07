@@ -1638,3 +1638,137 @@ No core `src/admin/` bug was found, so no scope escalation. DoD #10 (hot-path
 allocation audit) is N/A for Admin per `admin-client.md` §10 — admin calls are
 batch/administrative with no per-record path; #11 does not apply. Scope was
 tasks 1 and 2 only; B5b was not started.
+
+---
+
+## Round 9 — MED 1 and MED 2: the request-direction sweep, extended
+
+**MED 1** (`_describe_client_quotas_spec` was B5a's fourth outbound builder and
+was not extracted) and **MED 2** (the same generalisation was owed in six
+earlier places) are resolved together, because they are one rule applied to
+seven sites.
+
+Seven inline request comprehensions are now pure static row builders on
+`_AdminBase`, each with its own direct test in
+`bindings/python/test/unit/test_admin.py`:
+
+| builder | discriminant it carries | Java mock throws at |
+|---|---|---|
+| `_quota_filter_rows` | the EXACT / DEFAULT / SPECIFIED match type | `MockAdminClient.java:1243` |
+| `_alter_consumer_group_offsets_rows` | leader-epoch present-flag, `metadata` null-vs-`""` | `:1213` |
+| `_remove_members_rows` | remove-all vs. an empty member list | `:801-803` |
+| `_elect_leaders_rows` | all-partitions vs. an empty selection | `:797` |
+| `_create_partitions_rows` | `increaseTo(int)` vs. `increaseTo(int, assignments)` | `:626-628` |
+| `_delete_records_rows` | column order only | `:631-638` |
+| `_delete_consumer_group_offsets_rows` | column order only | `:783` |
+
+`_alter_partition_reassignments_spec` and `_list_consumer_group_offsets_spec`
+were deliberately left inline, for the reason the review gives: their mocks are
+implemented, so their flags are observable end to end.
+
+### Teeth — seven call-site mutations, each run against the whole suite
+
+Each mutation is a silent one that compiles and runs (an argument transposition
+or an inverted discriminant), not a deletion.
+
+| mutation | tests that failed |
+|---|---|
+| `_quota_filter_rows`: swap the `entity_type` and `match_name` columns | 2 — its own, plus `test_describe_client_quotas_raises_and_accepts_every_match_type` |
+| `_create_partitions_rows`: swap the `for topic, np` loop variables | 4 |
+| `_delete_records_rows`: swap the partition and before-offset columns | 3 |
+| `_elect_leaders_rows`: `partitions is None` -> `is not None` | 3 |
+| `_alter_consumer_group_offsets_rows`: `leader_epoch is not None` -> `is None` | **1 — only its own test** |
+| `_delete_consumer_group_offsets_rows`: swap the `for t, p` unpack | 3 |
+| `_remove_members_rows`: `members is None` -> `is not None` | 5 |
+
+The `_alter_consumer_group_offsets_rows` row is the one that justifies the
+sweep: inverting the leader-epoch present-flag — "epoch 0" versus "no epoch",
+two different broker requests — was caught by **nothing at all** before this
+commit. All seven mutations were reverted; `git status --porcelain` clean.
+
+Where a mutation also failed pre-existing tests, that is not redundancy: those
+tests catch it only because a marshaling error changes the *error message* the
+mock's throw is compared against, which is incidental. None of them pins a
+column.
+
+## Round 9 — LOW 1: one narrowing rule for every `int32_t` enum code
+
+`src/ffi/admin.rs` had three answers to `i32 -> i8`: `i8::try_from` with a
+reject (quota match types), a bare `as i8` (four ACL enum codes, two
+`ConfigResourceType` sites and `OpType::for_id`). Bare `as i8` *truncates*:
+259 becomes 3, a valid code in most of these enums, so an out-of-range value
+was read as a different legitimate member.
+
+One rule now, stated on `narrow_enum_code`: **never `as i8`**. What a miss
+means is decided by the enum, and there are exactly two cases —
+
+  - the enum has an `UNKNOWN` member (all four ACL enums and
+    `ConfigResourceType`, code `0` in every one): fall through to it via
+    `enum_code_or_unknown`, which extends `from_code`'s own
+    `getOrDefault(code, UNKNOWN)` to the wider C input type;
+  - it has none (`MATCH_TYPE_*` are bare wire constants; `OpType::for_id`
+    returns an `Option`): return an `IllegalArgument` naming the value.
+
+Nine call sites converted; `grep "as i8" src/ffi/admin.rs` now matches only the
+rule's own doc comment.
+
+## Round 9 — LOW 2: the `alterClientQuotas` duplicate-entity rationale was wrong about Java
+
+Confirmed against the submodule: `KafkaAdminClient.java:4301-4313` puts each
+alteration's future into a `Map` keyed by entity (so the *earlier future* is
+dropped) but passes the `Collection` verbatim to
+`new AlterClientQuotasRequest.Builder(entries, ...)`, so **both alterations are
+sent**. "Two alterations of the same entity cannot both be represented" was
+therefore a false statement of the Java contract.
+
+Reconsidered whether to stop rejecting, and kept the rejection, now labelled
+**Deviation from Java, deliberate** with the real reason: the C result is a
+flat, index-addressed array built from that collapsed map, so a duplicate
+yields fewer rows than the request had and the caller — who passed parallel
+arrays, not a map — cannot learn which of its two rows the surviving outcome
+describes. A Java caller holds the map and can see it shrink. The cost is
+stated too: a C caller cannot express "send two alterations for one entity".
+Corrected in four places (the FFI rustdoc, the Rust unit test, the C test and
+the `admin.py` docstring); the `listConsumerGroupOffsets` duplicate-key comments
+were left alone, because Java really does take a `Map` there.
+
+## Round 9 — LOW 3: `check-bindings` now scans `PyObject_CallFunction`
+
+Added as a fourth `Kind` (format index 1, 2 fixed arguments, `Py_BuildValue`
+grammar). All 8 sites in `_confluentkafka.c` are clean, matching the review's
+hand-check; the summary line now reads `46 Py_BuildValue, 8
+PyObject_CallFunction and 160 PyArg_Parse* call site(s) inspected`. Three new
+scanner tests: a matching and a short call, that the build grammar (not the
+parse grammar) is used, and that `PyObject_CallFunctionObjArgs` — a strict
+prefix match with no format argument at all — is not scanned. 21 -> 24 scanner
+tests.
+
+The module doc's "what it does not check" list was expanded from one line to
+five, naming argument order, argument *types*, `N`-versus-`O` reference
+stealing, `PyArg_ParseTupleAndKeywords` kwlist length and `PyErr_Format`, so
+the gate cannot be cited as broader than it is.
+
+## Round 9 — LOW 4: D2 gains a fifth rule, for a collection-valued `V`
+
+`PLAN-bindings.md` §7 D2 now states it, and B5b applies it.
+
+> Flatten to a second index when the collection's **element** is scalar-only;
+> mint a value handle as soon as that element **itself contains a collection**,
+> because the handle gives the inner collection an index space starting at 0
+> whereas flattening would need a third index. **Two index levels is the
+> limit.**
+
+I did not adopt the review's proposed discriminator ("mint when the value is a
+named Java type users hold, flatten when it is an anonymous list wrapper"):
+`DeleteAclsResult.FilterResults` and `LogDirDescription` are both named, public,
+user-visible Java classes, so that test does not separate the two precedents.
+Index depth does, and it is the property that actually decides whether the C
+surface stays usable. Both shipped shapes fall out of the rule unchanged —
+`describeLogDirs` would have needed `_get_replica_topic(i, j, k)`, `deleteAcls`
+stops at `(i, j)`.
+
+Two clarifications are recorded with it so B6 does not over-apply the rule: a
+`V` that is a single record of scalars keeps flattening onto index `i`
+(`fenceProducers`), and a record with scalars *and* one collection also
+flattens, scalars at `i` and the collection at `(i, j)`
+(`describeTransactions`).
