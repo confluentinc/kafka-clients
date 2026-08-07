@@ -2667,4 +2667,70 @@ mod tests {
             "Internal MockAdminClient logic error: found reassignment for rt-0, but no TopicMetadata"
         );
     }
+
+    /// Regression for `findPartitionReassignment`'s *second* guard
+    /// (`MockAdminClient.java:1190-1192`): the topic exists again, but the
+    /// stale reassignment names a partition index the recreated topic no longer
+    /// has.
+    ///
+    /// This branch is dead in Java — `metadata.partitions` is an `ArrayList`,
+    /// so `get(i)` on an out-of-range index throws `IndexOutOfBoundsException`
+    /// and can never return null — but it is live in Rust, where
+    /// `Vec::get(i)` returns `None`. Rust therefore reports Java's intended
+    /// message instead of Java's `IndexOutOfBoundsException`, and above all
+    /// does not panic across the FFI boundary.
+    #[tokio::test]
+    async fn list_partition_reassignments_after_topic_shrink_fails_the_future() {
+        let client = admin();
+        let wide = NewTopic::new("rt2", 2, 3);
+        client
+            .create_topics(std::slice::from_ref(&wide), CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        // Reassign the *second* partition, so the index survives the topic's
+        // removal but not its recreation.
+        let tp = TopicPartition::new("rt2".to_string(), 1);
+        let target = NewPartitionReassignment::new(vec![1, 2]).unwrap();
+        client
+            .alter_partition_reassignments(
+                &HashMap::from([(tp.clone(), Some(target))]),
+                AlterPartitionReassignmentsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        client
+            .delete_topics(
+                TopicCollection::of_topic_names(vec!["rt2".to_string()]),
+                DeleteTopicsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let narrow = NewTopic::new("rt2", 1, 3);
+        client
+            .create_topics(std::slice::from_ref(&narrow), CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let error = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Internal MockAdminClient logic error: found reassignment for rt2-1, but no TopicPartitionInfo"
+        );
+    }
 }
