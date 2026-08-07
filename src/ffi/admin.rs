@@ -6822,6 +6822,17 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
 /// Reads `count` `(topic, partition)` pairs into [`TopicPartition`]s, skipping
 /// entries whose topic is NULL so the two arrays cannot drift out of step.
 ///
+/// This shares its name and shape with the consumer FFI's private
+/// `read_topic_partitions` (`src/ffi/consumer.rs`), but **deliberately differs
+/// in its NULL handling**: this one returns empty for a NULL array and skips a
+/// NULL topic entry, where the consumer's does neither and would dereference a
+/// NULL topic. Do not "unify" the two. Every admin entry point built on this
+/// helper documents "an entry with a NULL topic is skipped" in its rustdoc, and
+/// cbindgen ships that sentence into the public C header — delegating to the
+/// consumer helper would make four shipped doc comments false. The two are
+/// private to their own modules, so there is no conflict; if they are ever
+/// merged, the merged helper must keep *these* guards.
+///
 /// # Safety
 ///
 /// `topics` and `partitions` must be null or have `count` readable entries each,

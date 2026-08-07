@@ -1094,8 +1094,18 @@ def test_elect_leaders_call_failure_raises():
         assert exc.value.code == UNSUPPORTED_VERSION
         assert str(exc.value) == "Not implemented yet"
 
-        # `partitions=None` is Java's null Set: every partition in the cluster.
+        # An explicit `None` is Java's null Set: every partition in the cluster.
         with pytest.raises(KafkaError):
+            admin.elect_leaders(ElectionType.UNCLEAN, None)
+
+
+def test_elect_leaders_requires_partitions_explicitly():
+    """Java has no no-argument `electLeaders` overload — both take the `Set`
+    (`Admin.java:1092` and the three-argument form). Omitting it must not
+    default to a cluster-wide election, which for UNCLEAN would be
+    destructive."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(TypeError):
             admin.elect_leaders(ElectionType.UNCLEAN)
 
 
@@ -1104,7 +1114,7 @@ def test_elect_leaders_rejects_bad_election_type():
     raised before the RPC is submitted."""
     with MockAdminClient(1) as admin:
         with pytest.raises(KafkaError) as exc:
-            admin.elect_leaders(7)
+            admin.elect_leaders(7, None)
         assert str(exc.value) == "Value 7 must be one of [PREFERRED, UNCLEAN]"
 
 
