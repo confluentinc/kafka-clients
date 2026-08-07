@@ -7,6 +7,80 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 7 — "Consumer sync seek + current-lag": DONE (2026-08-07).**
+  Two Python-aligned **synchronous** members added to `IConsumerCommon` (the shared
+  non-blocking base), a **breaking** async→sync + interface relocation. **Mode A (no Rust
+  authored):** all three ABI fns (`Consumer_seek` / `_seek_with_metadata` / `_current_lag`)
+  verified present in the header; `cargo build --features ffi` shows **no header delta**
+  (diffed before/after). Delivered:
+  - **`void Seek(TopicPartition, long)` on `IConsumerCommon`** (Java `seek(tp, long)`) —
+    **breaking:** the shipped `Task Seek(TopicPartition, long, CancellationToken)` on
+    `IAsyncConsumer` is **removed** (async→sync, and moves down onto `IConsumerCommon`).
+    Calls the sync ABI `Consumer_seek` **directly** (not the async bridge).
+  - **`void Seek(TopicPartition, OffsetAndMetadata)` on `IConsumerCommon`** — **NEW** overload
+    (Java `seek(tp, OffsetAndMetadata)`); calls the sync ABI `Consumer_seek_with_metadata`.
+    `leaderEpoch = LeaderEpoch ?? -1` (the ABI's "no epoch" sentinel); `Metadata` is never-null
+    (ctor-coerced to `""`), always pinned + passed (Python's `offset.metadata or ""`).
+  - **`long? CurrentLag(TopicPartition)` on `IConsumerCommon`** (Java `currentLag(tp)` →
+    `OptionalLong`) — a genuine non-blocking local read; the ABI returns `bool` + `out int64`,
+    and **`false` → `null`** (unknown lag OR concurrent-guard-rejection, **both**; Python
+    parity — **no** `InvalidOperationException` concurrent-read split, unlike the sync state
+    reads).
+  - **Q1 = KEEP** the Java-fidelity negative-offset guard on `Seek(tp, long)`:
+    `ArgumentOutOfRangeException` with the exact message `"seek offset must not be a negative
+    number"`, thrown **before** the P/Invoke even when the consumer is closed (the argument
+    check precedes `ThrowIfClosed`). The one place .NET is deliberately stricter than Python
+    (whose sync seek does no offset validation). `Seek(tp, OffsetAndMetadata)` needs no offset
+    guard — the `OffsetAndMetadata` ctor already rejects negative offset (`"Invalid negative
+    offset"`).
+  - **Q2 = REMOVE** the now-dead `NativeConsumer.SeekWithCallback` and the `ConsumerSeekAsync`
+    `[DllImport]`. The Rust `Consumer_seek_async` symbol stays in the header (Rust-owned;
+    Mode A = no Rust change); C# simply stops declaring it.
+  - **`NativeConsumer`**: new sync `Seek(topic, partition, offset)` /
+    `SeekWithMetadata(topic, partition, OffsetAndMetadata)` / `CurrentLag(topic, partition)`,
+    each following the shipped `EnforceRebalance` / `CommitAsync` / `UpdateOffset` sync-op
+    discipline (preconditions → `ThrowIfClosed()` → call-scoped `Utf8Marshal.Pin` → P/Invoke →
+    `KafkaException.FromHandle` throw-iff-non-null; no `GCHandle`, no bridge, no
+    `CancellationToken`). **`NativeMethods`**: `ConsumerSeek` / `ConsumerSeekWithMetadata`
+    (both return `IntPtr` = `KafkaError*`) + `ConsumerCurrentLag` (`[return: MarshalAs(I1)]
+    bool`, `out long`). Both client classes forward all three; `IAsyncConsumer` drops the async
+    `Seek`.
+  - **§4 divergence (documented — CLAUDE.md §8 / PLAN §8):** `seek` **blocks** in Java, so §4
+    would map it to a `Task`; shipped **sync** anyway because (a) Python exposes `seek`
+    synchronously, (b) `seek_with_metadata` has no `_async` ABI variant, and (c) a sync method
+    calling the sync ABI **directly** (no `Task.Run`) is legitimate — not the sync-over-async
+    footgun. The caller parks in the core's `block_on` (deadlock-free, ffi §B1), exactly as the
+    shipped `EnforceRebalance` / `CommitAsync` sync-op paths.
+  - **Tests:** migrated every async `.Seek(...)` / `SeekWithCallback(...)` caller to the sync
+    form (public + interop; the interop `MockReadyToPoll` helpers keep their awaiting callers
+    via `Task.FromResult`); the seek-unassigned case re-expressed as a **synchronous**
+    `KafkaException` (the void bridge stays proven by subscribe/unsubscribe SUCCESS + the
+    error-path mechanism by poll/position); removed the Seek pre-canceled-token interop test
+    (sync Seek has no `CancellationToken`; the path stays covered by the surviving Subscribe
+    one). **New `PublicConsumerSeekLagTests.cs`**: `Seek(tp,long)` offset round-trip via
+    `Position`; `Seek(tp,OffsetAndMetadata)` offset round-trip + metadata/leader-epoch
+    **marshalling** coverage (epoch 7 / null→-1, non-ASCII, empty `""`) — **the mock's
+    `seek_with_metadata` discards metadata + leader_epoch** (`src/consumer/mock_consumer.rs:746-755`),
+    so their values are **not observable broker-free**; the test asserts the offset + that
+    marshalling succeeds (the M5/P4 `Committed` value read-back precedent); `CurrentLag` real
+    value 90 (`Assign → UpdateEndOffset(100) → Seek(10)`) + assigned-no-end 0 + unassigned
+    `null`; all preconditions + exact messages + post-dispose; unassigned seek → synchronous
+    `KafkaException` (both overloads); `IConsumerCommon`-reference reachability; a per-op
+    allocation budget. **261 → 282** tests, green on net10.0, stable across 10 runs.
+  - **Doc-sync (DoD §1):** CLAUDE.md §1 status (`current_lag`/`seek_with_metadata` now
+    **shipped sync**, only `close_with_timeout` remains a gap); §3 sketch (both `Seek` overloads
+    + `CurrentLag` moved into the `IConsumerCommon` block, dropped from `IAsyncConsumer`,
+    "Already wired" prose updated); §4 idiom-map row (`seek`/`currentLag` removed from the
+    blocking-async trigger); §4 "Stays sync — exactly these" (both `Seek` + `CurrentLag` added)
+    + a new **§4 divergence** note.
+  - **DoD:** `cargo build --features ffi` (no header delta, diffed) → `dotnet build` 0/0 across
+    all library (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests green
+    (net8.0 *run* needs the .NET 8 runtime not installed locally + net462 are CI/Windows-only;
+    all three *build* legs pass locally) → `dotnet format --verify-no-changes` clean. No
+    TODO/FIXME; Apache-2.0 header on the new test file.
+  - Approved plan: `design/history/M5/P7-consumer-sync-seek-lag/PLAN.md`. Commits on
+    `prashah_dev_public_consumer_remaining` (the M5 branch), as a new PR for M5/P7. N=16.
+
 - **Milestone 5 / Phase 6 — "Consumer commit" (Category D): DONE (2026-08-06).**
   The commit family — the three public members plus one public constructor. **Mode A (no
   Rust authored):** all three ABI fns (`commit_sync_async` / `commit_sync_offsets_async` /
